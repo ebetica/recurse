@@ -1,0 +1,38 @@
+{
+  "comment": "Settings files written into the data dir's config/ before the http_settings corpus starts. custom-x is a synthetic custom endpoint; its key env var is never set. auth is an added synthetic Meta isolation credential; expected_files are current initial absences, not recorded outputs.",
+  "settings": {
+    "model-providers.json": {
+      "providers": {
+        "custom-x": {
+          "base_url": "https://api.example.test/v1",
+          "env_key": "CUSTOM_X_KEY",
+          "wire_api": "responses",
+          "models": [
+            {
+              "id": "reasoner-1",
+              "label": "Example Reasoner",
+              "context_window": 128000,
+              "effort": "high"
+            }
+          ]
+        }
+      }
+    }
+  },
+  "auth": {
+    "meta": {
+      "type": "api_key",
+      "key": "sk-test-meta-isolation"
+    }
+  },
+  "expected_files": {
+    "data/config/maximum-context-window.json": null,
+    "data/config/default-efforts.json": null,
+    "data/config/effort-levels.json": null,
+    "pi-agent/oauth_pending.json": null,
+    "pi-agent/codex_oauth_pending.json": null,
+    "pi-agent/muse_oauth_pending.json": null,
+    "claude/.credentials.json": null,
+    "codex/auth.json": null
+  }
+}

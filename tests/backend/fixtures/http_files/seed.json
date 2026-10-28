@@ -1,0 +1,49 @@
+{
+  "png": "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c6360000002000100e221bc330000000049454e44ae426082",
+  "conversations": [
+    "owner-a",
+    "owner-b"
+  ],
+  "artifacts": [
+    {
+      "owner": "owner-a",
+      "title": "Report",
+      "ref": "art_a",
+      "versions": [
+        {
+          "ref": "v0",
+          "files": {
+            "index.html": "<h1>hi</h1><script>1</script>"
+          }
+        },
+        {
+          "ref": "v1",
+          "files": {
+            "pic.svg": "<svg xmlns='http://www.w3.org/2000/svg'/>",
+            "notes.md": "# first",
+            "data.bin": "\u0000\u0001binary"
+          }
+        },
+        {
+          "ref": "v2",
+          "files": {
+            "notes.md": "# second"
+          }
+        }
+      ]
+    },
+    {
+      "owner": "owner-b",
+      "title": "Other",
+      "ref": "art_b",
+      "versions": [
+        {
+          "ref": "vb",
+          "files": {
+            "notes.md": "b"
+          }
+        }
+      ]
+    }
+  ]
+}

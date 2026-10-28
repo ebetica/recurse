@@ -1,0 +1,9 @@
+{
+  "items": [
+    {
+      "id": 19,
+      "mode": "steer",
+      "content": "[recurse-origin: agent]\n[recurse-from: def456def456]\n[recurse-from-name: Reporting child]\n(turn started by your message)\nCHILD_REPORT: the requested checks passed."
+    }
+  ]
+}

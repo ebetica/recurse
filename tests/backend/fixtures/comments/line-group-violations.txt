@@ -1,0 +1,23 @@
+// Header.
+// Two.
+// Three.
+// Four.
+// Five.
+
+export {};
+// Function doc.
+// Two.
+// Three.
+// Four.
+// Five.
+function work() {
+  // Spec: keep the result stable.
+  // Two.
+  // Three.
+  // Four.
+  // Five.
+  return 1;
+}
+// Value doc.
+// Two.
+const value = 1;

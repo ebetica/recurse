@@ -1,0 +1,71 @@
+/*
+ * Header
+ * exceeds
+ * four
+ * lines.
+ */
+const undocumented = 1;
+/* Two-line
+ * value doc. */
+let multiple = 2;
+// Detached doc.
+
+var detached = 3;
+class Undocumented {
+  field = 1;
+}
+interface UndocumentedShape {
+  size: number;
+}
+type UndocumentedLiteral = { value: string };
+/**
+ * Function
+ * doc
+ * too
+ * long.
+ */
+function work(parameter: number) {
+  // ordinary body comment
+  const local = parameter; // trailing comment
+  // const removed = 1;
+  /* Invariant:
+   * first
+   * second
+   * third
+   * fourth */
+  return local;
+}
+// Invariant: not inside a body.
+export {};
+// Spec: not inside a body either.
+// This comment line is deliberately longer than the repository's default eighty-column print width.
+/** Cache padding. */
+const padding = 2048; // Duplicate doc.
+class DuplicateItem {
+  /** Initial value. */
+  field = 1; // Duplicate doc.
+}
+interface DuplicateShape {
+  /** Shape size. */
+  size: number; // Duplicate doc.
+}
+type DuplicateLiteral = {
+  /** Stored value. */
+  value: string; // Duplicate doc.
+};
+enum DuplicateMode {
+  /** Ready to run. */
+  Ready, // Duplicate doc.
+}
+function nested() {
+  class Local {
+    field = 1; // Not a declaration doc inside a function.
+  }
+  const local = 1; // Not a module declaration.
+}
+const callback = () => ({
+  field: 1, // Not a declaration doc inside an expression body.
+});
+const block = 1; /* Trailing block comments are not docs. */
+function trailingFunction() {} // Not a data declaration.
+const wide = 1; // This trailing declaration doc exceeds the repository's default eighty-column print width.

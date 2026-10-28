@@ -1,0 +1,25 @@
+diff --git a/tests/mobile_browser/test_header.ts b/tests/mobile_browser/test_header.ts
+index 61ca06c5d..51e90bc25 100644
+--- a/tests/mobile_browser/test_header.ts
++++ b/tests/mobile_browser/test_header.ts
+@@ -129,7 +129,19 @@ export const tests: BrowserTest[] = [
+       await page.locator("#up-top").click();
+       await page.locator("#takeover-btn.on").waitFor({ state: "hidden" });
+       await page.locator('#pane-rail [data-pane="report"]').waitFor();
+-      expect(childTop - (await first.boundingBox())!.y).toBe(44);
++      // Regression: parent navigation can replace rail buttons during box reads.
++      const parentBox = await page.waitForFunction(() => {
++        const button = (globalThis as any).document.querySelector(
++          "#pane-rail [data-pane]",
++        );
++        if (!button) return false;
++        const box = button.getBoundingClientRect();
++        return box.width > 0 && box.height > 0 ? { y: box.y } : false;
++      });
++      const parentGeometry = await parentBox.jsonValue();
++      await parentBox.dispose();
++      if (!parentGeometry) throw new Error("Parent rail button is not visible");
++      expect(childTop - parentGeometry.y).toBe(44);
+       expect(await page.locator("#pane-rail #trash-btn").isVisible()).toBe(
+         true,
+       );

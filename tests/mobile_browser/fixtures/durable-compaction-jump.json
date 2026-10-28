@@ -1,0 +1,28 @@
+[
+  {
+    "id": 13192,
+    "kind": "pi.user",
+    "timestamp": 1791839472229,
+    "text": "Kept message"
+  },
+  {
+    "id": 13423,
+    "kind": "pi.user",
+    "timestamp": 1791840026507,
+    "text": "Operator input"
+  },
+  {
+    "id": 13432,
+    "kind": "pi.compaction",
+    "timestamp": 1791840028941,
+    "head": 13192,
+    "text": "Summary"
+  },
+  {
+    "id": 13438,
+    "kind": "pi.assistant",
+    "timestamp": 1791840044541,
+    "stopReason": "stop",
+    "text": "Measured response"
+  }
+]

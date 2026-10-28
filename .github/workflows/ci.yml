@@ -1,0 +1,51 @@
+name: CI
+
+# Runs after a merge is pushed to main, entirely on GitHub-hosted runners with
+# no secrets. Once dependencies are installed the tests are hermetic: they set a
+# temp CHAT_DATA_DIR and stub the `claude` subprocess, so test execution itself
+# needs no network or credentials. Every suite step is a `tests/check.sh` stage,
+# which is what an agent runs locally; checkout, toolchain setup and dependency
+# installation stay here.
+on:
+  push:
+    branches: [main]
+
+jobs:
+  # The frontend is TypeScript + lit, bundled by bun.
+  # This job is the type-check, build, and test gate for the TypeScript tree.
+  frontend:
+    # Public release commits copy trees already tested in ebetica/recurse-dev,
+    # so this does nothing in the public ebetica/recurse.
+    if: github.repository != 'ebetica/recurse'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          # remote-sidebar starts an older Recurse from `git archive` of a past commit.
+          fetch-depth: 0
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: Frontend tests, type-check and build
+        run: tests/check.sh web
+
+      - name: Install the pinned deployment SDK for lifecycle integration tests
+        run: python3 -m pip install modal==1.5.1
+
+      - name: Backend TypeScript tests and type-check
+        run: tests/check.sh ts
+
+      - name: Install RTK for commit-hook output regression coverage
+        run: |
+          curl -fsSL https://github.com/rtk-ai/rtk/releases/download/v0.43.0/rtk-x86_64-unknown-linux-musl.tar.gz -o "$RUNNER_TEMP/rtk.tar.gz"
+          echo "ff8a1e7766496e175291a85aeca1dc97c9ff6df33e51e5893d1fbc78fea2a609  $RUNNER_TEMP/rtk.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/rtk-bin"
+          tar -xzf "$RUNNER_TEMP/rtk.tar.gz" -C "$RUNNER_TEMP/rtk-bin" rtk
+          echo "$RUNNER_TEMP/rtk-bin" >> "$GITHUB_PATH"
+
+      - name: Mobile boot and upgrade in Chromium
+        run: tests/check.sh browser

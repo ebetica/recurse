@@ -1,0 +1,72 @@
+[
+  {
+    "id": 71474,
+    "conversationId": 1,
+    "kind": "pi.user",
+    "model": [
+      {
+        "role": "user",
+        "content": [{ "type": "text", "text": "Captured request" }]
+      }
+    ]
+  },
+  {
+    "id": 71475,
+    "conversationId": 1,
+    "kind": "pi.assistant",
+    "model": [
+      {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "Captured pre-compaction thinking"
+          },
+          {
+            "type": "toolCall",
+            "id": "captured-call",
+            "name": "bash",
+            "arguments": { "command": "echo captured" }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 71477,
+    "conversationId": 1,
+    "kind": "pi.tool-result",
+    "model": [
+      {
+        "role": "toolResult",
+        "toolCallId": "captured-call",
+        "toolName": "bash",
+        "content": [{ "type": "text", "text": "Captured output" }]
+      }
+    ]
+  },
+  {
+    "id": 71480,
+    "conversationId": 1,
+    "kind": "pi.assistant",
+    "model": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "First kept reply" }]
+      }
+    ]
+  },
+  {
+    "id": 71709,
+    "conversationId": 1,
+    "kind": "pi.compaction",
+    "head": 71475,
+    "model": [
+      {
+        "role": "user",
+        "content": [{ "type": "text", "text": "Captured compaction summary" }]
+      }
+    ],
+    "data": { "reason": "threshold" }
+  }
+]

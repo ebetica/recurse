@@ -1,0 +1,17 @@
+#!/usr/bin/env bun
+/* SPDX-License-Identifier: MIT
+ * Copyright Example contributors. This very long license line is deliberately exempt from the width limit.
+ */
+/// <reference path="./types.d.ts" />
+// @ts-nocheck
+// @ts-ignore explanatory text
+// @ts-expect-error deliberately missing name
+// prettier-ignore
+/* oxlint-disable */
+// oxlint-disable-next-line no-unused-vars
+// oxlint-disable-line no-unused-vars
+/* eslint-disable no-unused-vars */
+// eslint-disable-next-line no-unused-vars
+// eslint-disable-line no-unused-vars
+export {};
+export const ink = "#ef4444"; // color-check: allow ink is image content

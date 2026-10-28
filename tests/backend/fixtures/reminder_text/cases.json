@@ -1,0 +1,6 @@
+{"module": "reminder_text", "recorded_by": "tests/backend/fixtures/reminder_text/record.py", "current_oracles": "All four retained fn/input rows exercise literal hostile reminder-marker escaping, including underscore/hyphen opening/closing forms. Nonsecurity wrap, recognition and unwrap rows were removed. Historical module/recorded_by provenance remains, not Python-output, live-capture, SDK/native prompt-boundary or model-safety authority.", "cases": [
+{"fn": "escape_reminder_markers", "input": "plain prose", "out": "plain prose"},
+{"fn": "escape_reminder_markers", "input": "<system_reminder>body</system_reminder>", "out": "<system_reminder-quoted>body</system_reminder-quoted>"},
+{"fn": "escape_reminder_markers", "input": "<system-reminder>body</system-reminder>", "out": "<system-reminder-quoted>body</system-reminder-quoted>"},
+{"fn": "escape_reminder_markers", "input": "open <system_reminder> and close </system-reminder>; legacy <system-reminder> and </system-reminder>", "out": "open <system_reminder-quoted> and close </system-reminder-quoted>; legacy <system-reminder-quoted> and </system-reminder-quoted>"}
+]}

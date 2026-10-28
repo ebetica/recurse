@@ -1,0 +1,6 @@
+const tests: BrowserTest[] = [];
+// Regression: #2535 read-like shell paths must not publish labeled credentials.
+// test-check-allow: T9 Security boundary probes require synthetic credential-shaped inputs.
+test("public read summaries suppress compound-labeled values", () => {
+  expect(1).toBe(1);
+});

@@ -1,0 +1,48 @@
+"""Immutable Modal image and single-supervisor runtime; use ./recurse deploy.
+
+The CLI validates named resources and resolves an exact source commit before
+loading this module. Required secrets and the Volume must already exist.
+Image builds never mutate persisted state. The CLI replaces old/new
+supervisors using the platform recreate strategy; keepalive protects background
+work without HTTP. Legacy status/selftest entrypoints remain available. Optional
+RECURSE_MODAL_WEB_EXTRA_SECRETS is a JSON list of existing names attached only to
+web; the migration preserves the live binding without granting it to new apps.
+The CLI supplies saved agent-repository/display settings separately from source
+and resource identity; absent display settings retain the Recurse default.
+"""
+
+def _pending_intents(agents: Path) -> str | None:
+    """Any open row in any per-agent store's intents table.
+
+    One SQLite file per agent (DATA_DIR/agents/{cid}.sqlite); an intent row
+    is inserted when work is admitted and deleted when it is retired, so a
+    row means uncompleted work. Unreadable files and non-store files are
+    skipped. Crash-orphaned rows decay through the app's own restart
+    recovery, which resumes or retires them when the woken container boots.
+    """
+    try:
+        dbs = list(islice(agents.glob("*.sqlite"), _MAX_AGENT_DBS + 1))
+        if len(dbs) > _MAX_AGENT_DBS:
+            return "agent scan capacity exceeded"
+    except OSError:
+        return None
+    for db in dbs:
+        if db.name.startswith("."):
+            continue
+        try:
+            conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+        except Exception:
+            continue  # unreadable or locked; not provable work
+        try:
+            try:
+                row = conn.execute("SELECT 1 FROM intents LIMIT 1").fetchone()
+            except Exception:
+                continue  # not an agent store (or mid-write); skip
+            if row is not None:
+                return f"pending intent ({db.stem})"
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    return None

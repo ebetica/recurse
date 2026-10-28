@@ -1,0 +1,76 @@
+[
+  {
+    "id": "00000000-0000-4000-8000-000000000011",
+    "kind": "text",
+    "role": "assistant",
+    "text": "",
+    "thinking_title": "Planning the sample task",
+    "model_time_ms": 5518
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000011#call_fixture_1|fc_fixture_1",
+    "kind": "tool_call",
+    "role": "tool",
+    "name": "wait",
+    "stat": { "kind": "other" }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000012",
+    "kind": "text",
+    "role": "assistant",
+    "text": "",
+    "model_time_ms": 6487
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000012#call_fixture_2|fc_fixture_2",
+    "kind": "tool_call",
+    "role": "tool",
+    "name": "wait",
+    "stat": { "kind": "other" }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000013",
+    "kind": "text",
+    "role": "assistant",
+    "text": "",
+    "model_time_ms": 7077
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000013#call_fixture_3|fc_fixture_3",
+    "kind": "tool_call",
+    "role": "tool",
+    "name": "read",
+    "input": "sample.ts",
+    "stat": { "kind": "read", "lines": 0, "from": 1, "to": 1 }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000014",
+    "kind": "text",
+    "role": "assistant",
+    "text": "",
+    "thinking_title": "Checking the sample output",
+    "model_time_ms": 7405
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000014#call_fixture_4|fc_fixture_4",
+    "kind": "tool_call",
+    "role": "tool",
+    "name": "grep",
+    "input": "sample-output",
+    "stat": { "kind": "search" }
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000015",
+    "kind": "text",
+    "role": "assistant",
+    "text": "",
+    "model_time_ms": 10488
+  },
+  {
+    "id": "00000000-0000-4000-8000-000000000015#call_fixture_5|fc_fixture_5",
+    "kind": "tool_call",
+    "role": "tool",
+    "name": "edit",
+    "stat": { "kind": "edit", "added": 6, "removed": 4 }
+  }
+]

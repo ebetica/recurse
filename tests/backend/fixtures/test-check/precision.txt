@@ -1,0 +1,5 @@
+expect(promptTokens((await host.contextUsage("c1")).usage)).toBe(348357);
+expect(Math.max(size.width, size.height)).toBeLessThanOrEqual(2000);
+expect(helpOutput).toEqual("Usage: tool");
+expect(elapsedMs).toBeLessThan(20);
+expect(p99).toBeLessThanOrEqual(10);

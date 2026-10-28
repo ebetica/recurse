@@ -1,0 +1,26 @@
+name: Feature request
+description: Ask for a change in what Recurse does.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: version
+    attributes:
+      label: recurse --version
+      description: The exact output of `recurse --version`.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The task, what you do today, and where Recurse gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like Recurse to do
+      description: The behaviour you expect, as exactly as you can describe it.
+    validations:
+      required: true

@@ -1,0 +1,80 @@
+[
+  {
+    "id": 65695,
+    "conversationId": 1,
+    "kind": "pi.user",
+    "model": [
+      {
+        "role": "user",
+        "content": "[recurse-origin: agent]\nEarlier agent activity"
+      }
+    ]
+  },
+  {
+    "id": 65699,
+    "conversationId": 1,
+    "kind": "pi.assistant",
+    "model": [
+      {
+        "role": "assistant",
+        "content": [
+          { "type": "thinking", "thinking": "Earlier compacted thinking" },
+          {
+            "type": "toolCall",
+            "id": "captured-call",
+            "name": "bash",
+            "arguments": { "command": "echo captured" }
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "id": 65702,
+    "conversationId": 1,
+    "kind": "pi.tool-result",
+    "model": [
+      {
+        "role": "toolResult",
+        "toolCallId": "captured-call",
+        "toolName": "bash",
+        "content": [{ "type": "text", "text": "Captured output" }]
+      }
+    ]
+  },
+  {
+    "id": 65733,
+    "conversationId": 1,
+    "kind": "pi.user",
+    "model": [
+      {
+        "role": "user",
+        "content": "[recurse-origin: agent]\nFirst kept agent message"
+      }
+    ]
+  },
+  {
+    "id": 65843,
+    "conversationId": 1,
+    "kind": "pi.assistant",
+    "model": [
+      {
+        "role": "assistant",
+        "content": [{ "type": "text", "text": "Captured reply" }]
+      }
+    ]
+  },
+  {
+    "id": 65997,
+    "conversationId": 1,
+    "kind": "pi.compaction",
+    "head": 65733,
+    "model": [
+      {
+        "role": "user",
+        "content": [{ "type": "text", "text": "Captured compaction summary" }]
+      }
+    ],
+    "data": { "reason": "threshold" }
+  }
+]

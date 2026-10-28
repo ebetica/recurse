@@ -1,0 +1,11 @@
+/* Test header. */
+
+/** Function documentation. */
+function testCase() {
+  // Invariant: still forbidden in tests.
+  // Spec: also forbidden.
+  return 1; // trailing
+}
+/** Value documentation. */
+const value = 1;
+export {};

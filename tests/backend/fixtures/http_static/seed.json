@@ -1,0 +1,18 @@
+{
+  "comment": "Seed for the http_static corpus: a checkout root with index.html and web/dist. Each file is a body spec (tests/backend/fixtures/http_corpus.py). links are symlinks relative to the root. readiness is the scripted supervisor readiness snapshot.",
+  "files": {
+    "index.html": {"text": "<!doctype html><title>__APP__</title><script type=\"module\" src=\"/static/app.js?v=__VERSION__\"></script>"},
+    "web/dist/app.js": {"text": "console.log(\"app\");\n"},
+    "web/dist/app.css": {"text": "body{color:#123}\n"},
+    "web/dist/chunk-a1B2c3D4.js": {"text": "export const chunk = 1;\n"},
+    "web/dist/helper.js": {"text": "export const helper = 1;\n"},
+    "web/dist/icon.svg": {"text": "<svg xmlns=\"http://www.w3.org/2000/svg\"/>"},
+    "web/dist/fonts/face.woff2": {"random": 1000, "seed": "font"},
+    "web/dist/notes.txt": {"text": "plain notes\n"},
+    "outside.js": {"text": "secret();\n"}
+  },
+  "links": {
+    "web/dist/escape.js": "../../outside.js",
+    "web/dist/alias.svg": "icon.svg"
+  }
+}

@@ -1,0 +1,91 @@
+diff --git a/dist/api/anthropic-messages.js b/dist/api/anthropic-messages.js
+index befb18b..8a20341 100644
+--- a/dist/api/anthropic-messages.js
++++ b/dist/api/anthropic-messages.js
+@@ -1054,7 +1054,13 @@ convertToolDefinitions) {
+     // update placed before a user message in the transcript lands after it on the wire.
+     const pendingSystemMessages = [];
+     const flushPendingSystemMessages = () => {
+-        params.push(...pendingSystemMessages);
++        // Recurse Pi patch: rerun tests/backend/pi_anthropic_system_order.test.ts on upgrade.
++        // Text-bearing system messages must precede an emitted assistant or end the array.
++        if (pendingSystemMessages.length > 0)
++            params.push({
++                role: "system",
++                content: pendingSystemMessages.flatMap((message) => message.content),
++            });
+         pendingSystemMessages.length = 0;
+     };
+     for (let i = 0; i < transformedMessages.length; i++) {
+@@ -1121,7 +1127,6 @@ convertToolDefinitions) {
+             }
+         }
+         else if (msg.role === "assistant") {
+-            flushPendingSystemMessages();
+             const blocks = [];
+             for (const block of msg.content) {
+                 if (block.type === "text") {
+@@ -1179,6 +1184,7 @@ convertToolDefinitions) {
+             }
+             if (blocks.length === 0)
+                 continue;
++            flushPendingSystemMessages();
+             const messageIndex = params.length;
+             params.push({
+                 role: "assistant",
+diff --git a/dist/api/transform-messages.js b/dist/api/transform-messages.js
+index 6a364cb..9569e7c 100644
+--- a/dist/api/transform-messages.js
++++ b/dist/api/transform-messages.js
+@@ -87,7 +87,37 @@ export function transformMessages(messages, model, normalizeToolCallId) {
+             const isSameModel = assistantMsg.provider === model.provider &&
+                 assistantMsg.api === model.api &&
+                 assistantMsg.model === model.id;
+-            const transformedContent = assistantMsg.content.flatMap((block) => {
++            // Recurse Pi patch: rerun tests/backend/pi_interrupt_patch.test.ts on upgrade.
++            // Interrupted output is context, not an aborted/error attempt. Never replay
++            // unfinished calls. Only Anthropic and Responses can replay signed thinking;
++            // Responses requires a following text item. Unsigned summaries become text.
++            const interrupted = assistantMsg.stopReason === "interrupted";
++            const anthropic = isSameModel && model.api === "anthropic-messages";
++            const responses = isSameModel && (model.api === "openai-responses" || model.api === "openai-codex-responses");
++            const transformedContent = assistantMsg.content.flatMap((block, index) => {
++                if (interrupted) {
++                    if (block.type === "toolCall")
++                        return [];
++                    if (block.type === "thinking") {
++                        if (!anthropic && !responses)
++                            return [];
++                        const followed = assistantMsg.content.slice(index + 1).some((next) => next.type === "text" && next.text.length > 0);
++                        let signed = !!block.thinkingSignature;
++                        // output_item.done can precede encrypted_content (Azure fills
++                        // it at response.completed). Such reasoning is not replayable.
++                        if (responses && signed) {
++                            try {
++                                signed = !!JSON.parse(block.thinkingSignature).encrypted_content;
++                            }
++                            catch {
++                                signed = false;
++                            }
++                        }
++                        if ((anthropic || followed) && signed)
++                            return block;
++                        return !block.redacted && block.thinking ? [{ type: "text", text: block.thinking }] : [];
++                    }
++                }
+                 if (block.type === "thinking") {
+                     // Thinking from another model is dropped. Signatures and encrypted reasoning are
+                     // only valid for the model that produced them, and sending readable thinking as
+diff --git a/dist/types.d.ts b/dist/types.d.ts
+index 022faa1..a66d1ca 100644
+--- a/dist/types.d.ts
++++ b/dist/types.d.ts
+@@ -298,7 +298,7 @@ export interface Usage {
+         total: number;
+     };
+ }
+-export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "deferred";
++export type StopReason = "pending" | "stop" | "length" | "toolUse" | "error" | "aborted" | "interrupted" | "deferred";
+ export type JsonValue = null | boolean | number | string | readonly JsonValue[] | JsonObject;
+ export type JsonObject = {
+     [key: string]: JsonValue;

@@ -1,0 +1,3 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Recurse">
+  <rect width="64" height="64" fill="#2F855A"/><g transform="translate(9.6 9.6) scale(0.7)"><path d="M12 6 H52 A8 8 0 0 1 60 14 V50 A8 8 0 0 1 52 58 H12 A8 8 0 0 1 4 50 V14 A8 8 0 0 1 12 6 Z M12 16 H52 A4 4 0 0 1 56 20 V50 A4 4 0 0 1 52 54 H12 A4 4 0 0 1 8 50 V20 A4 4 0 0 1 12 16 Z" fill="#FFFFFF" fill-rule="evenodd"/><path d="M25.7 21.4 H47.5 A4.5 4.5 0 0 1 52 25.9 V45.5 A4.5 4.5 0 0 1 47.5 50 H25.7 A4.5 4.5 0 0 1 21.2 45.5 V25.9 A4.5 4.5 0 0 1 25.7 21.4 Z M25.7 27.8 H47.5 A1.7 1.7 0 0 1 49.2 29.5 V45.5 A1.7 1.7 0 0 1 47.5 47.2 H25.7 A1.7 1.7 0 0 1 24 45.5 V29.5 A1.7 1.7 0 0 1 25.7 27.8 Z" fill="#A7E8C5" fill-rule="evenodd"/></g>
+</svg>

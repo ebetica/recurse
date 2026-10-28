@@ -1,0 +1,81 @@
+#!/usr/bin/env bash
+# ./recurse [TARGET] — set up (idempotently) then launch recurse locally.
+#
+#   ./recurse ~/code/proj      # put agents on your repo (a path or a git URL)
+#   ./recurse                  # no argument: develop recurse itself
+#   ./recurse --once           # single process, no self-deploy supervisor
+#   ./recurse --version        # print the release and commit, then exit
+#   ./recurse update           # update this checkout on its install channel
+#   ./recurse update --check   # print the installed and available versions
+#
+# A thin wrapper over `bun src/local.ts`: it requires the user's Bun, records the
+# RTK status, ensures the built frontend exists (running ./scripts/setup.sh once when
+# the frontend is missing), then hands every argument straight through to
+# src/local.ts. See src/local.ts / the README for options. The environment passes
+# through unchanged.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+if [ -n "${RECURSE_CODE_HOME+x}" ]; then
+  echo "RECURSE_CODE_HOME is no longer used; tools build under <checkout>/.recurse" >&2
+  unset RECURSE_CODE_HOME
+fi
+
+# Require the user's Bun before any setup work.
+MIN_BUN_VERSION=1.4.0
+require_bun() {
+  local version major minor patch
+  command -v bun >/dev/null 2>&1 || {
+    echo "[recurse] error: Bun >= $MIN_BUN_VERSION is required; install it with: curl -fsSL https://bun.sh/install | bash" >&2
+    return 127
+  }
+  version="$(bun --version 2>/dev/null || true)"
+  if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "[recurse] error: Bun >= $MIN_BUN_VERSION is required; found ${version:-unknown}. Install it with: curl -fsSL https://bun.sh/install | bash" >&2
+    return 2
+  fi
+  IFS=. read -r major minor patch <<< "$version"
+  if (( major < 1 || (major == 1 && (minor < 4 || (minor == 4 && patch < 0))) )); then
+    echo "[recurse] error: Bun >= $MIN_BUN_VERSION is required; found $version. Install it with: curl -fsSL https://bun.sh/install | bash" >&2
+    return 2
+  fi
+}
+require_bun || exit $?
+
+# Update before any setup work: install.sh --update moves this checkout in
+# place, and a running supervisor rebuilds and restarts into it.
+if [ "${1:-}" = update ]; then
+  case "$#:${2:-}" in
+    1:) exec bash ./install.sh --update ;;
+    2:--check) exec bash ./install.sh --check ;;
+    *)
+      echo "usage: recurse update [--check]" >&2
+      exit 2 ;;
+  esac
+fi
+
+# Report the release before any setup work, so it works on a fresh checkout.
+for arg in "$@"; do
+  case "$arg" in
+    --) break ;;
+    --version) exec bun src/release.ts ;;
+  esac
+done
+
+# Record whether a supported RTK is installed. RTK is optional: its
+# unavailable warning is emitted once and startup continues.
+./scripts/ensure-rtk.sh
+
+# First run needs the built frontend (web/dist, served at /static). ./scripts/setup.sh
+# builds it idempotently; skip it once it is present.
+if [ ! -f web/dist/app.js ]; then
+  RECURSE_SETUP_QUIET=1 ./scripts/setup.sh
+else
+  bun src/launcher/dependencies.ts --managed-only
+fi
+
+# src/local.ts may need to finish a mismatched generation's frontend build. This
+# flag records that ./scripts/ensure-rtk.sh completed successfully in this launcher.
+export RECURSE_MANAGED_BUILD_READY=1
+exec bun src/local.ts "$@"

@@ -1,0 +1,22 @@
+#!/usr/bin/env bun
+/**
+ * Example tool usage and model-facing instructions.
+ * Keep this help content as the extractor observes it.
+ * Command: bun $RECURSE_SRC/tools/example.ts --argument value --another-argument value
+ * Security: request operator approval before modifying shared settings.
+ * More instructions that exceed the ordinary declaration-doc limit.
+ */
+import { toolHelp } from "./_help.ts";
+
+export const help = toolHelp(import.meta.url);
+
+/**
+ * This is an ordinary function doc.
+ * It does not become help just because the file has help.
+ * It is too long under the four-line policy.
+ */
+export function ordinary() {}
+
+function body() {
+  // This body comment must not bypass policy.
+}

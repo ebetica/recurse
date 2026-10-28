@@ -1,0 +1,37 @@
+{
+  "model": [
+    {
+      "role": "assistant",
+      "api": "anthropic-messages",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "usage": {
+        "input": 4,
+        "output": 4,
+        "cacheRead": 13335,
+        "cacheWrite": 152,
+        "totalTokens": 13495,
+        "cost": {
+          "input": 0.000016,
+          "output": 0.00008,
+          "cacheRead": 0.002667,
+          "cacheWrite": 0.00076,
+          "total": 0.003523
+        },
+        "cacheWrite1h": 0
+      },
+      "timestamp": 1791839881686,
+      "content": [
+        {
+          "type": "text",
+          "text": "1. Trees give us oxygen.\n2. Oak trees can live for hundreds of years.\n3. Pine trees keep their needles all winter.\n4. Maple trees turn red in autumn.\n5. Birch bark peels in thin layers.\n6. Willows often grow near water.\n7. Redwoods are among the tallest trees on Earth.\n8."
+        }
+      ],
+      "stopReason": "interrupted"
+    }
+  ],
+  "kind": "pi.assistant",
+  "id": 38,
+  "conversationId": 1,
+  "byTaskId": 36
+}

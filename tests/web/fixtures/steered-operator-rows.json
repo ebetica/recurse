@@ -1,0 +1,230 @@
+[
+  {
+    "kind": "text",
+    "role": "user",
+    "offset": 13244,
+    "origin": "operator",
+    "live": false,
+    "id": "recorded-0",
+    "text": "Operator input."
+  },
+  {
+    "kind": "text",
+    "role": "assistant",
+    "offset": 13247,
+    "origin": "assistant",
+    "stop_reason": "toolUse",
+    "live": false,
+    "usage": {
+      "input": 4,
+      "output": 216,
+      "cacheRead": 317020,
+      "cacheWrite": 476,
+      "selectors": ["anthropic/claude-opus-5-5"],
+      "selectorPartial": false,
+      "cost": 0.07012000000000002
+    },
+    "has_thinking": true,
+    "id": "recorded-1",
+    "text": ""
+  },
+  {
+    "kind": "tool_call",
+    "role": "tool",
+    "offset": 13247,
+    "origin": "user",
+    "live": false,
+    "stat": {
+      "kind": "shell"
+    },
+    "name": "bash",
+    "id": "recorded-2",
+    "text": ""
+  },
+  {
+    "kind": "text",
+    "role": "user",
+    "offset": 13251,
+    "origin": "agent",
+    "live": false,
+    "id": "recorded-3",
+    "text": "Agent report.",
+    "sender": "child",
+    "sender_name": "Agent"
+  },
+  {
+    "kind": "text",
+    "role": "assistant",
+    "offset": 13253,
+    "origin": "assistant",
+    "stop_reason": "toolUse",
+    "live": false,
+    "usage": {
+      "input": 4,
+      "output": 113,
+      "cacheRead": 317496,
+      "cacheWrite": 585,
+      "selectors": ["anthropic/claude-opus-5-5"],
+      "selectorPartial": false,
+      "cost": 0.0687002
+    },
+    "id": "recorded-4",
+    "text": ""
+  },
+  {
+    "kind": "tool_call",
+    "role": "tool",
+    "offset": 13253,
+    "origin": "user",
+    "live": false,
+    "stat": {
+      "kind": "read",
+      "lines": 0,
+      "from": 1,
+      "to": 1
+    },
+    "name": "read",
+    "id": "recorded-5",
+    "text": ""
+  },
+  {
+    "kind": "text",
+    "role": "assistant",
+    "offset": 13257,
+    "origin": "assistant",
+    "stop_reason": "stop",
+    "live": false,
+    "usage": {
+      "input": 2,
+      "output": 290,
+      "cacheRead": 318081,
+      "cacheWrite": 645,
+      "selectors": ["anthropic/claude-opus-5-5"],
+      "selectorPartial": false,
+      "cost": 0.07264920000000002
+    },
+    "has_thinking": true,
+    "id": "recorded-6",
+    "text": "Final operator reply."
+  },
+  {
+    "kind": "text",
+    "role": "user",
+    "offset": 13258,
+    "origin": "agent",
+    "live": false,
+    "id": "recorded-7",
+    "text": "Agent report.",
+    "sender": "child",
+    "sender_name": "Agent"
+  },
+  {
+    "kind": "text",
+    "role": "assistant",
+    "offset": 13261,
+    "origin": "assistant",
+    "stop_reason": "toolUse",
+    "live": false,
+    "usage": {
+      "input": 4,
+      "output": 329,
+      "cacheRead": 318726,
+      "cacheWrite": 495,
+      "selectors": ["anthropic/claude-opus-5-5"],
+      "selectorPartial": false,
+      "cost": 0.07281620000000001
+    },
+    "id": "recorded-8",
+    "text": ""
+  },
+  {
+    "kind": "tool_call",
+    "role": "tool",
+    "offset": 13261,
+    "origin": "user",
+    "live": false,
+    "stat": {
+      "kind": "shell",
+      "action": "pr_merge"
+    },
+    "name": "bash",
+    "id": "recorded-9",
+    "text": ""
+  },
+  {
+    "kind": "text",
+    "role": "user",
+    "offset": 13266,
+    "origin": "agent",
+    "live": false,
+    "id": "recorded-10",
+    "text": "Agent report.",
+    "sender": "child",
+    "sender_name": "Agent"
+  },
+  {
+    "kind": "text",
+    "role": "assistant",
+    "offset": 13268,
+    "origin": "assistant",
+    "stop_reason": "toolUse",
+    "live": false,
+    "usage": {
+      "input": 4,
+      "output": 146,
+      "cacheRead": 319221,
+      "cacheWrite": 816,
+      "selectors": ["anthropic/claude-opus-5-5"],
+      "selectorPartial": false,
+      "cost": 0.0708602
+    },
+    "id": "recorded-11",
+    "text": ""
+  },
+  {
+    "kind": "tool_call",
+    "role": "tool",
+    "offset": 13268,
+    "origin": "user",
+    "live": false,
+    "stat": {
+      "kind": "shell",
+      "action": "subagent_send"
+    },
+    "name": "bash",
+    "id": "recorded-12",
+    "text": ""
+  },
+  {
+    "kind": "text",
+    "role": "assistant",
+    "offset": 13272,
+    "origin": "assistant",
+    "stop_reason": "toolUse",
+    "live": false,
+    "usage": {
+      "input": 2,
+      "output": 25,
+      "cacheRead": 320037,
+      "cacheWrite": 223,
+      "selectors": ["anthropic/claude-opus-5-5"],
+      "selectorPartial": false,
+      "cost": 0.0656304
+    },
+    "id": "recorded-13",
+    "text": ""
+  },
+  {
+    "kind": "tool_call",
+    "role": "tool",
+    "offset": 13272,
+    "origin": "user",
+    "live": false,
+    "stat": {
+      "kind": "other"
+    },
+    "name": "wait",
+    "id": "recorded-14",
+    "text": ""
+  }
+]

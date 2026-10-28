@@ -1,0 +1,6 @@
+diff --git a/tests/backend/fixtures/provider_replay/models.ts b/tests/backend/fixtures/provider_replay/models.ts
+--- a/tests/backend/fixtures/provider_replay/models.ts
++++ b/tests/backend/fixtures/provider_replay/models.ts
+@@ -1 +1 @@
+-/** Real built-in Pi transports pointed at sanitized loopback recordings. */
++/** Recorded Pi provider transport check. */

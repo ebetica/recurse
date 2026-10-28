@@ -1,0 +1,79 @@
+{
+  "tools": [
+    {
+      "id": "00000000-0000-4000-8000-000000000001",
+      "kind": "text",
+      "role": "assistant",
+      "text": ""
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000001#toolu_fixture_1",
+      "kind": "tool_call",
+      "role": "tool",
+      "name": "bash",
+      "stat": { "kind": "shell" }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002",
+      "kind": "text",
+      "role": "assistant",
+      "text": ""
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000002#toolu_fixture_2",
+      "kind": "tool_call",
+      "role": "tool",
+      "name": "bash",
+      "args": "bun $RECURSE_SRC/tools/artifact.ts publish example-artifact",
+      "stat": { "kind": "shell" }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003",
+      "kind": "text",
+      "role": "assistant",
+      "text": ""
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000003#toolu_fixture_3",
+      "kind": "tool_call",
+      "role": "tool",
+      "name": "wait",
+      "stat": { "kind": "other" }
+    }
+  ],
+  "running": [
+    {
+      "id": "00000000-0000-4000-8000-000000000004",
+      "kind": "text",
+      "role": "user",
+      "origin": "operator",
+      "text": "Please check the sample feature."
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005",
+      "kind": "text",
+      "role": "assistant",
+      "text": ""
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000005#toolu_fixture_4",
+      "kind": "tool_call",
+      "role": "tool",
+      "name": "bash",
+      "stat": { "kind": "shell" }
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006",
+      "kind": "text",
+      "role": "assistant",
+      "text": ""
+    },
+    {
+      "id": "00000000-0000-4000-8000-000000000006#toolu_fixture_5",
+      "kind": "tool_call",
+      "role": "tool",
+      "name": "bash",
+      "stat": { "kind": "shell" }
+    }
+  ]
+}

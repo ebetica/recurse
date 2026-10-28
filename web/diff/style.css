@@ -1,0 +1,286 @@
+/* The "Changes" pane — all styling for web/diff.js. Injected by that module on
+   import (a <link> to /static/diff.css), so the pane is fully self-contained:
+   deleting the pane is deleting web/diff.ts + web/diff/ and its
+   one import line. Word-diff marks arrive from the library as
+   [data-diff-highlight] spans tinted by the two --diff-*-content-highlight--
+   variables below; syntax tokens use standard hljs-* classes. */
+.diff-file-toggle:focus-visible,
+.diff-add-comment:focus-visible,
+.diff-toggle-btn:focus-visible,
+.diff-expand-all:focus-visible,
+.diff-gap-btn:focus-visible,
+.diff-base-btn:focus-visible,
+.diff-retry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.diff-untracked-note { color: var(--muted); font-size: 0.71875rem; padding: 1px var(--space-2); }
+.diff-error { color: var(--warn); font-size: 0.78125rem; line-height: 1.35;
+  padding: var(--space-3); margin-bottom: var(--space-3); border: 1px solid var(--warn);
+  border-radius: 8px; }
+.diff-retry { margin-left: var(--space-3); border-color: var(--warn); color: var(--warn); }
+.btn.diff-retry:hover:not(:disabled) { background: var(--warn); color: var(--text-on-accent); }
+.diff-loading { color: var(--muted); font-size: 0.78125rem; padding: var(--space-3) var(--space-4); }
+
+.diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3);
+  margin-bottom: var(--space-3); }
+.diff-cwd { color: var(--text); font-size: 0.78125rem; font-weight: 600;
+  font-family: var(--font-mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.diff-base { color: var(--muted); font-size: 0.78125rem; }
+/* The editable base box: a `vs {base}` button that opens an inline form.
+   The root stretches when open so the input takes the row; everything keeps
+   min-width: 0 so the head never overflows the card at 390px. */
+.diff-base-edit { display: inline-flex; min-width: 0; max-width: 100%;
+  position: relative; }
+.diff-base-edit.open { display: flex; flex: 1 1 220px; }
+button.diff-base-btn { display: inline-flex; align-items: center; gap: var(--space-2);
+  min-width: 0; max-width: 100%; background: none; border: 1px solid var(--border);
+  border-radius: 999px; color: var(--muted); cursor: pointer; font: inherit;
+  font-size: 0.78125rem; padding: var(--space-1) var(--space-3); }
+.diff-base-label { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+button.diff-base-btn::after { content: ""; flex: none; width: 5px; height: 5px;
+  border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
+  transform: rotate(45deg) translateY(-1px); }
+button.diff-base-btn:hover,
+button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--text); }
+@media (pointer: coarse) {
+  button.diff-base-btn { min-height: 32px; }
+}
+.diff-base-form { flex: 1 1 auto; min-width: 0; }
+.diff-base-row { display: flex; gap: var(--space-2); min-width: 0; }
+.diff-base-input { flex: 1 1 auto; min-width: 0;
+  font-family: var(--font-mono); }
+.diff-base-apply, .diff-base-cancel { flex: none; }
+.diff-base-error { color: var(--warn); font-size: 0.78125rem; line-height: 1.35;
+  padding-top: var(--space-2); overflow-wrap: anywhere; }
+/* In the powerbar the finder spans the pane under the bar, not just the
+   narrow input, so pull request titles have room. */
+.pane-powerbar .diff-base-edit { position: static; }
+.pane-powerbar .diff-base-finder { left: 8px; right: 8px; }
+.diff-base-finder { position: absolute; z-index: var(--z-menu); left: 0; right: 0; top: 100%;
+  margin: var(--space-2) 0 0; list-style: none; max-height: 280px; overflow-y: auto; min-width: 0; }
+.diff-base-repo { color: var(--muted); font-size: 0.71875rem;
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  overflow-wrap: anywhere; }
+.diff-base-item { gap: var(--space-3); min-width: 0; }
+.diff-base-kind:empty { display: none; }
+.diff-base-kind { flex: none; font-size: 0.65625rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--muted); width: 44px; }
+.diff-base-label-text { flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); }
+.diff-pr { color: var(--accent); text-decoration: none; }
+.diff-pr-summary { margin-bottom: var(--space-4); min-width: 0; }
+.diff-pr-title { margin: 0 0 var(--space-2); font-size: 0.9375rem; line-height: 1.35; }
+.diff-pr-title a { display: flex; align-items: flex-start; gap: var(--space-3);
+  min-height: 44px; color: var(--text); overflow-wrap: anywhere; }
+.diff-pr-title a:hover { color: var(--accent); }
+.diff-pr-title svg { flex: none; width: 16px; height: 16px; margin-top: var(--space-1); }
+.diff-pr-body { font-size: 0.84375rem; line-height: 1.5; overflow-wrap: anywhere; }
+.diff-pr-body.clamped { position: relative; display: -webkit-box;
+  -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
+.diff-pr-body.clamped.overflowing::after { content: ""; position: absolute; left: 0; right: 0;
+  bottom: 0; height: 1.5em; pointer-events: none;
+  background: linear-gradient(transparent, var(--edge-bg, var(--panel))); }
+.diff-pr-body > :first-child { margin-top: 0; }
+.diff-pr-body .table-scroll { overflow-x: auto; }
+.btn.diff-pr-more { min-height: 44px; padding-left: 0; }
+.diff-pr-more svg { flex: none; width: 16px; height: 16px; transform: rotate(90deg); }
+.diff-pr-more[aria-expanded="true"] svg { transform: rotate(-90deg); }
+
+.diff-toggle { display: inline-flex; gap: 0; margin-bottom: var(--space-3);
+  border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.diff-toggle-btn { background: none; border: 0; cursor: pointer; font: inherit;
+  font-size: 0.78125rem; color: var(--muted); padding: var(--space-2) var(--space-4); }
+.diff-toggle-btn.on { background: var(--panel-2); color: var(--text);
+  font-weight: 600; }
+/* Pane toolbar: the layout toggle plus the pane-wide Expand all / Collapse
+   all. The toggle keeps its own border; the toolbar only lays them out. */
+.diff-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3);
+  margin-bottom: var(--space-3); }
+.diff-toolbar .diff-toggle { margin-bottom: 0; }
+.diff-expand-all { background: none; border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer; font: inherit; font-size: 0.78125rem;
+  color: var(--muted); padding: var(--space-2) var(--space-4); }
+.diff-expand-all:hover { color: var(--text); }
+.diff-expand-all[aria-pressed="true"] { background: var(--panel-2);
+  color: var(--text); font-weight: 600; }
+
+.diff-stat { margin-bottom: var(--space-3); font-size: 0.78125rem; color: var(--muted); }
+.diff-stat summary { cursor: pointer; }
+.diff-stat summary:hover { color: var(--text); }
+.diff-stat pre { margin: var(--space-2) 0 0; padding: var(--space-3) var(--space-4); overflow-x: auto;
+  font-size: 0.71875rem; line-height: 1.5;
+  font-family: var(--font-mono);
+  background: var(--code-bg); border-radius: 8px; white-space: pre; }
+
+.diff-more { color: var(--muted); font-size: 0.78125rem; padding: var(--space-3) var(--space-1); }
+
+.diff-group { margin-bottom: var(--space-4); }
+.diff-group-head { display: flex; align-items: center; gap: var(--space-3);
+  margin-bottom: var(--space-2); }
+.diff-group-label { font-size: 0.78125rem; font-weight: 600; letter-spacing: .02em;
+  text-transform: uppercase; color: var(--muted); }
+
+.diff-file { border-bottom: 1px solid var(--border); }
+.diff-file-head { display: flex; align-items: center; gap: var(--space-2); width: 100%; }
+.diff-file-toggle { display: flex; align-items: center; gap: var(--space-3); flex: 1;
+  min-width: 0; text-align: left; background: none; border: 0; cursor: pointer;
+  color: var(--text); font: inherit; font-size: 0.84375rem; padding: var(--space-2) var(--space-1); }
+.diff-file-toggle:hover { color: var(--accent); }
+.diff-mark { flex: none; width: 14px; text-align: center; font-weight: 700; }
+.diff-mark.add { color: var(--running); }
+.diff-mark.del { color: var(--danger); }
+.diff-mark.mod { color: var(--warn); }
+.diff-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--font-mono); }
+.diff-counts { flex: none; display: inline-flex; gap: var(--space-2); font-size: 0.71875rem;
+  font-family: var(--font-mono); }
+.diff-counts .add { color: var(--running); }
+.diff-counts .del { color: var(--danger); }
+
+.diff-file-body { padding: var(--space-1) 0 var(--space-3); }
+.diff-patch-content { min-width: 100%; width: max-content; }
+.diff-patch { container-type: inline-size; margin: 0; overflow-x: auto; font-size: 0.78125rem; line-height: 1.5;
+  font-family: var(--font-mono);
+  background: var(--code-bg); border-radius: 8px; padding: var(--space-3) 0;
+  tab-size: 4; -moz-tab-size: 4; --diff-num: 48px; --diff-gutter: 18px;
+  --diff-add-content-highlight--: color-mix(in srgb, var(--running) 28%, transparent);
+  --diff-del-content-highlight--: color-mix(in srgb, var(--danger) 28%, transparent); }
+/* one source line: a line-number cell, a hover "+" gutter, then the code cell.
+   Horizontal padding lives on the row (not .diff-patch) so add/del row tints
+   run edge to edge. */
+.diff-row { display: flex; align-items: flex-start; padding: 0 var(--space-4);
+  width: 100%; box-sizing: border-box; }
+.diff-row.add { background: color-mix(in srgb, var(--running) 9%, transparent); }
+.diff-row.del { background: color-mix(in srgb, var(--danger) 9%, transparent); }
+.diff-num { flex: none; width: var(--diff-num); padding-right: var(--space-4); text-align: right;
+  color: var(--muted); opacity: .55; user-select: none; white-space: pre; }
+.diff-row.add .diff-num { color: var(--running); opacity: .7; }
+.diff-row.del .diff-num { color: var(--danger); opacity: .7; }
+.diff-gutter, .diff-add-comment { flex: none; width: var(--diff-gutter);
+  font-size: 0.78125rem; line-height: 1.5; }
+.diff-add-comment { min-width: 24px; min-height: 24px; padding: 0;
+  margin-top: -3px; /* space-check: allow centres the 24px button on the line */
+  background: none; border: 0; cursor: pointer;
+  color: var(--accent); font-weight: 700; text-align: center; border-radius: 6px;
+  opacity: 0; }
+.diff-row:hover .diff-add-comment, .diff-row.commenting .diff-add-comment,
+.diff-cell:hover .diff-add-comment, .diff-cell.commenting .diff-add-comment,
+.diff-row:focus-within .diff-add-comment,
+.diff-cell:focus-within .diff-add-comment,
+.diff-add-comment:focus-visible { opacity: 1; }
+/* Commentable lines invite clicks on their number (single) and
+   shift-click/drag (range) on desktop; touch taps instead. */
+.commentable > .diff-num { cursor: pointer; }
+.commentable > .diff-num:hover { text-decoration: underline; }
+.diff-row.in-range, .diff-cell.in-range { background: color-mix(in srgb, var(--info) 18%, transparent); }
+.diff-row.in-range > .diff-num, .diff-cell.in-range > .diff-num {
+  color: var(--accent); opacity: 1; }
+.diff-add-comment:hover { background: var(--accent); color: var(--text-on-accent); }
+/* Touch screens have no hover: the per-line "+" stays hidden (the
+   line-number cell taps instead, wired in commentable()), so context
+   lines never carry a visible sign at any width. */
+.diff-line { white-space: pre; flex: 1 0 auto; }
+.diff-sign { display: inline-block; width: 1ch; user-select: none; }
+.diff-row.add .diff-sign { color: var(--running); }
+.diff-row.del .diff-sign { color: var(--danger); }
+.diff-hunk { color: var(--muted); opacity: .85; white-space: pre;
+  padding: var(--space-2) var(--space-4) var(--space-1); font-size: 0.71875rem; }
+/* Collapsible-gap bars (Expand up / Expand all / Expand down): slim rows
+   sitting above their hunk header (or past the last line for the trailing
+   gap), GitHub-style. Buttons stay text-sized so a bar never dominates. */
+.diff-gap { display: flex; flex-wrap: wrap; align-items: center;
+  justify-content: center; gap: var(--space-1); padding: var(--space-1) var(--space-4); }
+.diff-gap-btn { background: none; border: 0; cursor: pointer; font: inherit;
+  font-size: 0.71875rem; color: var(--accent); padding: var(--space-1) var(--space-4);
+  border-radius: 6px; white-space: nowrap; display: inline-flex;
+  align-items: center; gap: var(--space-2); }
+.diff-gap-btn svg { width: 12px; height: 12px; }
+.diff-gap-btn:hover { background: var(--panel-2); color: var(--text); }
+/* Honest notes: over-cap contents, failed loads. */
+.diff-expand-note { color: var(--muted); font-size: 0.78125rem; font-style: italic;
+  padding: var(--space-2) var(--space-4) var(--space-1); }
+.diff-empty { color: var(--muted); font-size: 0.78125rem; padding: var(--space-2) var(--space-4); }
+.diff-trunc { color: var(--warn); font-size: 0.78125rem;
+  padding: var(--space-3) var(--space-4) var(--space-1); }
+
+/* split view: two code columns in one scrollable frame; each side keeps its
+   own number gutter, and a missing side renders as a blank placeholder. */
+.diff-patch.split { padding: var(--space-3); }
+.diff-patch.split > .diff-patch-content { display: grid; grid-template-columns: minmax(272px, max-content) minmax(272px, max-content);
+  column-gap: var(--space-3); }
+.diff-split-row { display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; }
+.diff-patch.split > .diff-patch-content > :not(.diff-split-row) { grid-column: 1 / -1; }
+.diff-cell { display: flex; align-items: flex-start; min-width: 0;
+  border-radius: 6px; padding: 0 var(--space-3); }
+.diff-cell .diff-num { width: 36px; padding-right: var(--space-3); }
+.diff-cell.add { background: color-mix(in srgb, var(--running) 9%, transparent); }
+.diff-cell.del { background: color-mix(in srgb, var(--danger) 9%, transparent); }
+.diff-cell.add .diff-num { color: var(--running); opacity: .7; }
+.diff-cell.del .diff-num { color: var(--danger); opacity: .7; }
+.diff-cell.empty { background: var(--panel-2); opacity: .45; }
+
+/* Syntax-highlight theme (highlight.js token classes, as emitted by the diff
+   library), tuned to the app's dark palette. Scoped to .diff-patch so it
+   can't leak into other code blocks. */
+.diff-patch .hljs-comment, .diff-patch .hljs-quote { color: var(--syntax-comment); font-style: italic; }
+.diff-patch .hljs-keyword, .diff-patch .hljs-selector-tag,
+.diff-patch .hljs-literal, .diff-patch .hljs-section { color: var(--syntax-keyword); }
+.diff-patch .hljs-string, .diff-patch .hljs-regexp, .diff-patch .hljs-symbol,
+.diff-patch .hljs-meta .hljs-string, .diff-patch .hljs-addition { color: var(--syntax-string); }
+.diff-patch .hljs-number, .diff-patch .hljs-bullet { color: var(--syntax-number); }
+.diff-patch .hljs-title, .diff-patch .hljs-title.function_,
+.diff-patch .hljs-name, .diff-patch .hljs-attr,
+.diff-patch .hljs-attribute { color: var(--syntax-name); }
+.diff-patch .hljs-built_in, .diff-patch .hljs-type,
+.diff-patch .hljs-title.class_ { color: var(--syntax-type); }
+.diff-patch .hljs-variable, .diff-patch .hljs-template-variable,
+.diff-patch .hljs-property, .diff-patch .hljs-params { color: var(--text); }
+.diff-patch .hljs-tag, .diff-patch .hljs-doctag, .diff-patch .hljs-selector-id,
+.diff-patch .hljs-selector-class, .diff-patch .hljs-selector-pseudo { color: var(--syntax-tag); }
+.diff-patch .hljs-meta, .diff-patch .hljs-meta .hljs-keyword { color: var(--muted); }
+.diff-patch .hljs-deletion { color: var(--danger); }
+.diff-patch .hljs-emphasis { font-style: italic; }
+.diff-patch .hljs-strong { font-weight: 600; }
+.diff-patch .hljs-link { text-decoration: underline; }
+
+/* the per-line comment editor, anchored under its line (indented past the
+   line-number + comment gutter so it lines up with the code column) */
+.diff-line-comment { padding: var(--space-3) var(--space-4) var(--space-3)
+    calc(var(--space-4) + var(--diff-num) + var(--diff-gutter));
+  box-sizing: border-box;
+  width: 100cqw; position: sticky; left: 0; }
+.diff-line-input { width: 100%; resize: vertical; min-height: 40px; }
+/* Notes inside the code take the visible width, not the code's, so they
+   wrap on a phone instead of widening the scroller. */
+.diff-patch-content > :is(.diff-expand-note, .diff-empty, .diff-trunc) {
+  width: 100cqw; box-sizing: border-box; position: sticky; left: 0; }
+
+/* Reserve a footer row; only the diff scrolls, never underneath comments. */
+.pane-body[data-pane="diff"] { display: flex; flex-direction: column;
+  min-height: 0; overflow: hidden; padding-bottom: 0; }
+.diff-list { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--space-5); }
+/* Keyboard entry scrolls the diff without outlining the whole view. */
+.diff-list:focus { outline: none; }
+.diff-sendbar { display: none; flex-shrink: 0; gap: var(--space-3);
+  align-items: center; margin: var(--space-3) calc(-1 * var(--space-5)) 0;
+  padding: var(--space-4) var(--space-5);
+  position: relative; background: var(--panel); }
+.diff-sendbar.on { display: flex; }
+.diff-sendbar-label { font-size: 0.78125rem; color: var(--muted); }
+.diff-sendbar-spacer { flex: 1; }
+
+@media (max-width: 700px) {
+  .pane-powerbar .diff-base-btn { border: 0; }
+  #panes.overlay .pane-body[data-pane="diff"] { overflow: visible; }
+  #panes.overlay .diff-list { flex: 1 0 auto; overflow: visible; }
+  #panes.overlay .diff-sendbar { position: sticky; bottom: 0; }
+  .diff-base-btn, .diff-expand-all, .diff-toggle button { min-height: 44px; }
+  .diff-patch { --diff-num: 34px; }
+  .diff-num { padding-right: var(--space-3); }
+  .diff-row { padding: 0 var(--space-3); }
+  .diff-line-comment { padding-left: calc(var(--space-3) + var(--diff-num) + var(--diff-gutter)); }
+  /* Split keeps both columns side by side in the pane's horizontal scroll
+     rather than crushing them; the numbers stay readable at 390px. */
+  .diff-split-row { min-width: 520px; }
+}

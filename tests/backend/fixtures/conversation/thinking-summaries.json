@@ -1,0 +1,41 @@
+{
+  "recorded_sessions": {
+    "headings": "recorded-headings.jsonl",
+    "empty": "recorded-empty.jsonl"
+  },
+  "headings_entry": {
+    "type": "message",
+    "id": "real-headings",
+    "parentId": "real-parent",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "**Planning the task**\n\n**Checking the sample**"
+        },
+        {
+          "type": "toolCall",
+          "id": "real-call",
+          "name": "read",
+          "arguments": { "path": "sample.ts" }
+        }
+      ]
+    }
+  },
+  "empty_entry": {
+    "type": "message",
+    "id": "real-empty",
+    "parentId": "real-parent",
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "",
+          "thinkingSignature": "provider-encrypted-signature"
+        }
+      ]
+    }
+  }
+}

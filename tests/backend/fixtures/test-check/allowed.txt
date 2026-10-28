@@ -1,0 +1,22 @@
+import { LIMIT } from "../../../src/limits";
+import { readFileSync } from "node:fs";
+readFileSync(new URL("./input.txt", import.meta.url), "utf8");
+readFileSync(resolve(root, "web", "dist", "app.css"));
+expect(response.status).toBe(200);
+expect(LIMIT > 0).toBe(true);
+expect(error.message).toContain("usage");
+// test-check-allow: T1 The checker consumes source text as its input.
+readFileSync("src/input.ts", "utf8");
+mock.module("./module", () => ({})); // test-check-allow: T3 Exercise detection.
+// test-check-allow: T3 Exercise fake DOM detection.
+const document = {} as unknown as Document;
+test("recorded Durable response", () => {});
+await page.waitForSelector("button");
+expect(items.length).toBeLessThan(20);
+const model = settings.model;
+// Regression: #123 real-path bug
+ test("survives restart", () => {});
+// test-check-allow: T10 Forwards production's own sync call.
+childProcess.spawnSync(command, args);
+const options: SpawnSyncOptions = {};
+await Bun.spawn(["git", "init"]).exited;

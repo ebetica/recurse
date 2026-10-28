@@ -1,0 +1,37 @@
+{
+  "comment": "Seed for the http_auth corpus. All secrets are synthetic test values. token_file names are relative to the data directory; routes are the stub table served beside the real login routes.",
+  "password": "corpus-test-password",
+  "salt": "33333333333333333333333333333333",
+  "loopback_port": 8787,
+  "tokens": {
+    "alpha-token": "alpha-secret",
+    "beta-token": "beta-secret"
+  },
+  "principals": {
+    "alpha": {
+      "token_file": "alpha-token",
+      "scopes": ["conversation.create", "conversation.send", "conversation.read"]
+    },
+    "beta": {
+      "token_file": "beta-token",
+      "scopes": ["conversation.send"]
+    }
+  },
+  "owned": [
+    ["alpha", "owned-cid"],
+    ["beta", "beta-cid"]
+  ],
+  "routes": [
+    [["GET"], "/"],
+    [["GET"], "/api/tree"],
+    [["GET"], "/api/version"],
+    [["POST"], "/api/conversations"],
+    [["DELETE"], "/api/conversations/{cid}"],
+    [["PUT"], "/api/settings/{name}"],
+    [["POST"], "/api/service/conversations"],
+    [["POST"], "/api/service/conversations/{cid}/messages"],
+    [["GET"], "/api/service/conversations/{cid}/replies"],
+    [["POST"], "/upload"],
+    [["GET"], "/static/{path:path}"]
+  ]
+}

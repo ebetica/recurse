@@ -1,0 +1,13 @@
+{"module": "agents.fs_utils", "recorded_by": "tests/backend/fixtures/fs_utils/record.py", "cases": [
+{"op": "read_json", "kind": "quoted_tokens", "max_bytes": null, "data_hex": "7b2274657874223a224e614e20496e66696e697479202d496e66696e697479222c226e756d626572223a4e614e7d"},
+{"op": "read_json", "kind": "link", "max_bytes": null},
+{"op": "read_json", "kind": "directory", "max_bytes": null},
+{"op": "open_pinned_lock_file", "kind": "file", "data_hex": "7b22616e73776572223a34322c22736e6f77223a22e29883227d"},
+{"op": "open_pinned_lock_file", "kind": "missing"},
+{"op": "open_pinned_lock_file", "kind": "link"},
+{"op": "open_pinned_lock_file", "kind": "directory"},
+{"op": "open_pinned_regular_file", "kind": "link"},
+{"op": "open_pinned_regular_file", "kind": "directory"},
+{"op": "open_pinned_directory", "kind": "directory"},
+{"op": "open_pinned_directory", "kind": "link"}
+]}

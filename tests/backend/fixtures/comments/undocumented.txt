@@ -1,0 +1,12 @@
+export const value = 1;
+function work() {}
+class Item {
+  field = 1;
+}
+interface Shape {
+  size: number;
+  render(): void;
+}
+type Literal = {
+  value: string;
+};

@@ -1,0 +1,21 @@
+import { LIMIT, OTHER as SECOND } from "../../../src/limits";
+import { readFileSync } from "node:fs";
+readFileSync(join(root, "src", "example.ts"));
+readFileSync(new URL("../../../src/example.ts", import.meta.url), "utf8");
+expect(LIMIT).toBe(20);
+expect(LIMIT).toEqual(SECOND);
+expect(helpOutput).toEqual("Usage: tool");
+mock.module("./module", () => ({}));
+spyOn(service, "call");
+const document = {} as unknown as Document;
+test("Python rendering", () => {});
+expect(elapsedMs).toBeLessThan(20);
+expect(p99).toBeLessThanOrEqual(10);
+page.waitForTimeout(200);
+await sleep(20);
+expect(result).toBe(true);
+const model = "anthropic/current";
+// Regression: missing-number
+Bun.spawnSync(["git", "init"]);
+childProcess.execFileSync("git", ["status"]);
+execSync("make");

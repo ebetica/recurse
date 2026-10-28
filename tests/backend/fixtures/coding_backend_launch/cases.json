@@ -1,0 +1,7 @@
+{"module": "coding_backend", "recorded_by": "tests/backend/fixtures/coding_backend_launch/record.py", "cases": [
+{"input": {"files": {}, "options": {}}},
+{"input": {"files": {"work/space/.keep": ""}, "options": {"cid": "abc123", "safety_off": true, "model": "anthropic/claude-opus-5-5", "maximum_context_window": 64000, "agent_tmpdir": "<ROOT>/agent tmp", "workspace_root": "<ROOT>/work/space", "worktrees_root": "<ROOT>/missing", "turn_context_key": "<TURN-KEY>", "run_id": "run-1", "workdir": "<ROOT>/work"}}},
+{"input": {"files": {"work/file": ""}, "options": {"cid": "", "model": "openai-codex/gpt-6-sol", "turn_context_key": "", "workspace_root": "<ROOT>/work/file"}}},
+{"input": {"files": {}, "options": {"workspace_root": "<ROOT>/work/file", "maximum_context_window": 5}}},
+{"input": {"files": {}, "options": {"maximum_context_window": true}}}
+]}

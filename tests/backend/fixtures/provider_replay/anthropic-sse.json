@@ -1,0 +1,376 @@
+{
+  "provenance": {
+    "date": "2026-10-14",
+    "model": "claude-haiku-5-5",
+    "pi": "1.1.0",
+    "scenario": "plain public reply"
+  },
+  "model": {
+    "id": "claude-haiku-5-5",
+    "name": "Claude Haiku 5.5",
+    "api": "anthropic-messages",
+    "provider": "anthropic",
+    "baseUrl": "https://api.anthropic.com",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0.1,
+      "output": 0.5,
+      "cacheRead": 0.01,
+      "cacheWrite": 0.125,
+      "tiers": [
+        {
+          "inputTokensAbove": 100000,
+          "input": 0.5,
+          "output": 2.5,
+          "cacheRead": 0.05,
+          "cacheWrite": 0.625
+        }
+      ]
+    },
+    "contextWindow": 1000000,
+    "maxTokens": 128000,
+    "thinkingLevelMap": {
+      "off": null,
+      "minimal": null,
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "xhigh",
+      "max": "max"
+    },
+    "compat": {
+      "supportsMidConvoEffort": true,
+      "supportsMidConvoSystemMessages": true,
+      "supportsMidConvoToolChanges": true,
+      "forceAdaptiveThinking": true,
+      "supportsTemperature": false,
+      "supportsStrictTools": true
+    },
+    "promptCache": {
+      "short": 300,
+      "long": 3600
+    },
+    "inputLimits": {
+      "maxRequestBytes": 33554432,
+      "images": {
+        "maxPerRequest": 600,
+        "resize": {
+          "maxWidth": 2000,
+          "maxHeight": 2000,
+          "maxBytes": 4718592,
+          "jpegQuality": 80
+        }
+      }
+    },
+    "type": "chat"
+  },
+  "exchanges": [
+    {
+      "transport": "sse",
+      "path": "/v1/messages?beta=true",
+      "request": {
+        "model": "claude-haiku-5-5",
+        "stream": true,
+        "thinking": {
+          "type": "adaptive",
+          "display": "summarized",
+          "block_binding": {
+            "prefix_mismatch_behavior": "drop_block"
+          }
+        },
+        "max_tokens": 128000,
+        "output_config": {
+          "effort": "high"
+        },
+        "tools": [
+          {
+            "name": "Read",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "offset": {
+                  "type": "number"
+                },
+                "limit": {
+                  "type": "number"
+                }
+              },
+              "required": [
+                "path"
+              ]
+            }
+          },
+          {
+            "name": "Write",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "content": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ]
+            }
+          },
+          {
+            "name": "Edit",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "edits": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": [
+                      "oldText",
+                      "newText"
+                    ],
+                    "properties": {
+                      "oldText": {
+                        "type": "string"
+                      },
+                      "newText": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              },
+              "required": [
+                "path",
+                "edits"
+              ]
+            }
+          },
+          {
+            "name": "compact",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          },
+          {
+            "name": "Bash",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "command": {
+                  "type": "string"
+                },
+                "monitor": {
+                  "type": "boolean"
+                },
+                "background": {
+                  "type": "boolean"
+                },
+                "inactivityReminderSeconds": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 86400
+                },
+                "limit": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 2000
+                }
+              },
+              "required": [
+                "command"
+              ]
+            }
+          },
+          {
+            "name": "wait",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            }
+          },
+          {
+            "name": "chdir",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "directory": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "directory"
+              ]
+            }
+          },
+          {
+            "name": "Grep",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "pattern": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "exclude": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "caseSensitive": {
+                  "type": "boolean"
+                },
+                "context": {
+                  "type": "number"
+                },
+                "limit": {
+                  "type": "number"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pattern"
+              ]
+            }
+          },
+          {
+            "name": "find",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "pattern": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "exclude": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    }
+                  ]
+                },
+                "limit": {
+                  "type": "number"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "pattern"
+              ]
+            }
+          },
+          {
+            "name": "multi_grep",
+            "eager_input_streaming": true,
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "patterns": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "constraints": {
+                  "type": "string"
+                },
+                "context": {
+                  "type": "number"
+                },
+                "limit": {
+                  "type": "number"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "patterns"
+              ]
+            }
+          },
+          {
+            "name": "__pi_deferred_placeholder__",
+            "input_schema": {
+              "type": "object",
+              "properties": {},
+              "required": []
+            },
+            "defer_loading": true
+          }
+        ],
+        "messages": "nonempty array",
+        "system": "nonempty array"
+      },
+      "requestHeaders": {
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,mid-conversation-output-config-2026-07-01,thinking-binding-controls-2026-08-01,inline-tools-2026-09-15"
+      },
+      "status": 200,
+      "headers": {
+        "content-type": "text/event-stream; charset=utf-8"
+      },
+      "chunks": [
+        {
+          "ms": 890,
+          "data": "ZXZlbnQ6IG1lc3NhZ2Vfc3RhcnQKZGF0YTogeyJ0eXBlIjoibWVzc2FnZV9zdGFydCIsIm1lc3NhZ2UiOnsibW9kZWwiOiJjbGF1ZGUtaGFpa3UtNS01IiwiaWQiOiJtc2dfMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIiwidHlwZSI6Im1lc3NhZ2UiLCJyb2xlIjoiYXNzaXN0YW50IiwiY29udGVudCI6W10sImNvbnRhaW5lciI6bnVsbCwic3RvcF9yZWFzb24iOm51bGwsInN0b3Bfc2VxdWVuY2UiOm51bGwsInN0b3BfZGV0YWlscyI6bnVsbCwidXNhZ2UiOnsiaW5wdXRfdG9rZW5zIjo0LCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjcwNzIsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjowLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjo3MDcyLCJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjowfSwib3V0cHV0X3Rva2VucyI6OCwic2VydmljZV90aWVyIjoic3RhbmRhcmQiLCJpbmZlcmVuY2VfZ2VvIjoiZ2xvYmFsIn0sImlucHV0X3RyYW5zZm9ybWF0aW9ucyI6W10sImRpYWdub3N0aWNzIjpudWxsfSAgICAgICAgICAgICAgIH0KCmV2ZW50OiBjb250ZW50X2Jsb2NrX3N0YXJ0CmRhdGE6IHsidHlwZSI6ImNvbnRlbnRfYmxvY2tfc3RhcnQiLCJpbmRleCI6MCwiY29udGVudF9ibG9jayI6eyJ0eXBlIjoidGV4dCIsInRleHQiOiIifSB9CgpldmVudDogcGluZwpkYXRhOiB7InR5cGUiOiAicGluZyJ9CgpldmVudDogY29udGVudF9ibG9ja19kZWx0YQpkYXRhOiB7InR5cGUiOiJjb250ZW50X2Jsb2NrX2RlbHRhIiwiaW5kZXgiOjAsImRlbHRhIjp7InR5cGUiOiJ0ZXh0X2RlbHRhIiwidGV4dCI6IlJFQ09SREVEX1BSTyJ9ICB9Cgo="
+        },
+        {
+          "ms": 975,
+          "data": "ZXZlbnQ6IGNvbnRlbnRfYmxvY2tfZGVsdGEKZGF0YTogeyJ0eXBlIjoiY29udGVudF9ibG9ja19kZWx0YSIsImluZGV4IjowLCJkZWx0YSI6eyJ0eXBlIjoidGV4dF9kZWx0YSIsInRleHQiOiJWSURFUl9PSyJ9ICAgICAgICAgICAgICAgfQoKZXZlbnQ6IGNvbnRlbnRfYmxvY2tfc3RvcApkYXRhOiB7InR5cGUiOiJjb250ZW50X2Jsb2NrX3N0b3AiLCJpbmRleCI6MCAgICAgIH0KCg=="
+        },
+        {
+          "ms": 983,
+          "data": "ZXZlbnQ6IG1lc3NhZ2VfZGVsdGEKZGF0YTogeyJ0eXBlIjoibWVzc2FnZV9kZWx0YSIsImRlbHRhIjp7InN0b3BfcmVhc29uIjoiZW5kX3R1cm4iLCJzdG9wX3NlcXVlbmNlIjpudWxsLCJzdG9wX2RldGFpbHMiOm51bGwsImNvbnRhaW5lciI6bnVsbH0sInVzYWdlIjp7ImlucHV0X3Rva2VucyI6NCwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjo3MDcyLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MCwib3V0cHV0X3Rva2VucyI6MTcsIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJ0aGlua2luZ190b2tlbnMiOjB9fSAgfQoKZXZlbnQ6IG1lc3NhZ2Vfc3RvcApkYXRhOiB7InR5cGUiOiJtZXNzYWdlX3N0b3AiICAgICB9Cgo="
+        }
+      ]
+    }
+  ]
+}

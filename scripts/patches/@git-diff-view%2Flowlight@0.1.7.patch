@@ -1,0 +1,19 @@
+diff --git a/dist/esm/index.mjs b/dist/esm/index.mjs
+index 125874c1ea4235cc0dffb76c8d70a08add79f041..d83aa149adeb7e4817fd8d782352cc5492efee79 100644
+--- a/dist/esm/index.mjs
++++ b/dist/esm/index.mjs
+@@ -1,4 +1,4 @@
+-import { createLowlight, all } from 'lowlight';
++import { createLowlight, common } from 'lowlight';
+ 
+ /******************************************************************************
+ Copyright (c) Microsoft Corporation.
+@@ -123,7 +123,7 @@ function _getAST(_raw, _fileName, _lang, _theme) {
+     return {};
+ }
+ 
+-const lowlight = createLowlight(all);
++const lowlight = createLowlight(common);
+ // !SEE https://github.com/highlightjs/highlightjs-vue
+ lowlight.register("vue", function hljsDefineVue(hljs) {
+     return {

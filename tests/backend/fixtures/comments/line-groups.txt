@@ -1,0 +1,32 @@
+// A header.
+// Second header line.
+// Third header line.
+// Fourth header line.
+
+export {};
+// Function doc.
+// Second doc line.
+function work() {
+  // Invariant: keep the result stable.
+  // Second invariant line.
+  // Third invariant line.
+  // Fourth invariant line.
+  return 1;
+}
+// Class doc.
+// Second doc line.
+// Third doc line.
+class Item {
+  // Constructor doc.
+  // Second doc line.
+  // Third doc line.
+  // Fourth doc line.
+  constructor() {}
+  // Method doc.
+  // Second doc line.
+  method() {
+    // Spec: do not mutate state.
+    // Second specification line.
+    // Third specification line.
+  }
+}

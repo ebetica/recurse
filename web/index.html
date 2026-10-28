@@ -1,0 +1,1999 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<!-- Fonts and fetches stay on this origin: the drawing editor's CDN font
+     fallback (esm.sh) is unreachable. -->
+<meta http-equiv="Content-Security-Policy" content="font-src 'self' data:; connect-src 'self' data: blob:">
+<title>__APP__</title>
+<link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
+<link rel="icon" href="/static/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/static/brand/favicon.svg" type="image/svg+xml" sizes="any">
+<link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png" sizes="180x180">
+<style>
+  :root {
+    --mobile-shell-height: 97px;
+    /* Spec: operator 2026-10-15 requests 90% desktop text; phones stay unchanged. */
+    font-size: 90%;
+  }
+  * { box-sizing: border-box; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0;
+    margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0);
+    white-space: nowrap; border: 0; }
+  html, body { width: 100%; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
+  @supports (height: 100dvh) {
+    html, body { height: 100dvh; }
+  }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 0.9375rem/1.6 var(--font-sans);
+    display: flex; overscroll-behavior: none;
+  }
+
+  /* ---------- sidebar: agent forest ---------- */
+  #sidebar {
+    width: 400px; flex: none; background: var(--panel);
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; position: relative;
+  }
+  #brand { display: flex; align-items: center; gap: var(--space-3);
+    padding: var(--space-5) var(--space-5) var(--space-3); }
+  #brand, .backend-heading strong { font-weight: 600; font-size: 0.84375rem; color: var(--text); }
+  .backend-heading strong { color: color-mix(in srgb, var(--text) 70%, var(--muted)); }
+  #brand img { width: 24px; height: 24px; flex: none; }
+
+  #agent-list { flex: 1; min-width: 0; min-height: 0; max-width: 100%;
+    overflow-x: hidden; overflow-y: scroll; overscroll-behavior-y: contain;
+    overflow-anchor: none; padding: 0 var(--space-3) var(--space-4);
+    /* Reserve a themed track without widening the sidebar. Disabling scroll
+       anchoring makes keyed status/title/count polls preserve the operator's
+       exact position even when metadata above the viewport wraps differently. */
+    scrollbar-gutter: stable; scrollbar-width: thin;
+    scrollbar-color: var(--muted) transparent; }
+  .backend-section hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-2) 0 0; }
+  .backend-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); padding: var(--space-3); color: var(--muted); }
+  .backend-status { font-size: 0.65625rem; }
+  .backend-section-header { display: flex; align-items: center; }
+  .backend-section-header .backend-heading { flex: 1; min-width: 0; }
+  .backend-new-agent { position: relative; z-index: var(--z-raised); margin-block: calc(-1 * var(--space-3)); }
+  .backend-new-agent:disabled { cursor: default; opacity: .45; }
+  .backend-heading a, .backend-settings { color: var(--accent); }
+  .backend-settings { background: none; border: 0; font: inherit; cursor: pointer; text-align: start; }
+  .remote-read-only :is(#safety-row, #model-row, #trash-btn, #takeover-btn) {
+    opacity: .45; cursor: not-allowed; }
+  #agent-list::-webkit-scrollbar { width: 10px; }
+  #agent-list::-webkit-scrollbar-track { background: transparent; }
+  #agent-list::-webkit-scrollbar-thumb { background: var(--muted);
+    border-radius: 6px; border: 2px solid var(--panel); }
+  #agent-list::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
+  .agent { padding: var(--space-2) var(--space-3); margin: 1px 0; border-radius: 8px; cursor: pointer;
+    border: 1px solid transparent;
+    /* keep vertical list scrolling native, but hand horizontal swipes to JS
+       (swipe-to-dismiss) so preventDefault there doesn't fight the scroll */
+    touch-action: pan-y;
+    /* a row is a tap/long-press/swipe target, never text: stop Android from
+       firing its text-selection + callout menu on the long-press-to-rename hold */
+    -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+  /* the inline rename field is real editable text — let it select/caret again */
+  .agent .rename-input { -webkit-user-select: text; user-select: text; }
+  /* mid-swipe: the row follows the finger with no transition lag */
+  .agent.swiping { transition: none; will-change: transform, opacity; }
+  /* swiped far enough that releasing will dismiss it — flag it red, like .armed */
+  .agent.dismiss-armed { background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: var(--danger); }
+  .agent.dismiss-armed .title { color: var(--danger); }
+  .agent:hover { background: var(--panel-2); }
+  .agent.selected { background: var(--panel-2); border-color: var(--border-strong); }
+  .agent.cursor { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* Spec: compact sidebar overrides apply only on phones. */
+  @media (max-width: 700px) {
+  :root { font-size: 100%; }
+  #agent-list .agent { min-height: 32px; padding: var(--space-1) var(--space-3);
+    display: flex; flex-direction: column; justify-content: center; }
+  #agent-list .agent .title { font-size: 0.9375rem; line-height: 24px; }
+  #agent-list .agent.selected:not(.dismiss-armed, .armed, .drop-ok, .drop-bad, .drag-source) { border-color: transparent;
+    background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+  #agent-list .agent.cursor:not(.dismiss-armed, .armed, .drop-ok, .drop-bad, .drag-source) { border-color: transparent;
+    outline-width: 1px; outline-offset: -1px; }
+  #sidebar #brand { padding: var(--space-3) var(--space-5); gap: var(--space-3); }
+  #brand, .backend-heading strong { font-size: 0.9375rem; }
+  #agent-list .agent .agent-state { width: 12px; min-width: 12px; height: 12px; }
+  #agent-list .agent .kids { padding-block: 0; }
+  }
+  /* Re-parent drag: the source is dashed, legal destinations are outlined, and
+     an invalid drop target is flagged red. */
+  .agent.drag-source { opacity: .6; border-style: dashed;
+    border-color: var(--accent-dim); }
+  .agent.drop-ok { border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .agent.drop-bad { border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 12%, transparent); cursor: no-drop; }
+  .agent .row1 { display: flex; align-items: center; gap: var(--space-2); min-width: 0;
+    flex-wrap: wrap; }
+  /* A compact colored, shaped marker for each state — no spelled-out word, so
+     it stays small on a phone. The shape (filled dot, hollow ring, square,
+     diamond) carries the state alongside color, so it never relies on color
+     alone; the full state name lives in the row's tooltip and assistive label.
+     Fixed size keeps titles from jumping sideways as polls change state. */
+  .agent .agent-state { width: 14px; min-width: 14px; height: 14px; flex: none;
+    display: inline-flex; align-items: center; justify-content: center;
+    color: var(--muted); }
+  .agent .state-mark { width: 10px; height: 10px; flex: none; border-radius: 50%;
+    border: 1px solid currentColor; background: currentColor; }
+  .agent .agent-state.running, .agent .agent-state.working {
+    color: var(--running-strong); }
+  .agent .agent-state.running .state-mark, .agent .agent-state.working .state-mark {
+    animation: pulse 1.2s infinite; }
+  .agent .agent-state.working .state-mark { background: transparent; border-width: 2px; }
+  /* Waiting: the agent's own turn settled but background work continues —
+     a hollow green ring with a centered dot, deliberately static while the
+     live-turn states pulse, so a parked branch never reads as active. */
+  .agent .agent-state.waiting { color: var(--running-strong); }
+  .agent .agent-state.waiting .state-mark { background:
+    radial-gradient(circle, currentColor 1.5px, transparent 1.7px);
+    border-width: 1.5px; }
+  .agent .agent-state.idle .state-mark { width: 8px; height: 8px;
+    border-width: 1.5px; background: transparent; }
+  /* Taken over: the operator holds this agent. A yellow open ring; dashed
+     so it never reads as the solid yellow interrupted ring, and slightly
+     larger so the dashes resolve at a glance. */
+  .agent .agent-state.taken-over { color: var(--warn); }
+  .agent .agent-state.taken-over .state-mark { background: transparent;
+    border-width: 2px; border-style: dashed; width: 10px; height: 10px; }
+  .agent .agent-state.stopping { color: var(--warn); }
+  .agent .agent-state.stopping .state-mark { border-radius: 1px; } /* radius-check: allow a status mark */
+  .agent .agent-state.interrupted { color: var(--warn); }
+  .agent .agent-state.interrupted .state-mark { background: transparent; border-width: 2px; }
+  .agent .agent-state.error { color: var(--danger); }
+  .agent .agent-state.error .state-mark { border-radius: 1px; transform: rotate(45deg); } /* radius-check: allow a status mark */
+  .agent .agent-state.unknown .state-mark { background: transparent; border-style: dotted; }
+  .agent .agent-state.draft .state-mark { background: transparent; border-style: dashed; }
+  @keyframes pulse { 50% { opacity: .6; } }
+  @media (prefers-reduced-motion: reduce) {
+    .agent .agent-state.running .state-mark,
+    .agent .agent-state.working .state-mark { animation: none; }
+  }
+  @media (forced-colors: active) {
+    .agent .agent-state.running .state-mark,
+    .agent .agent-state.working .state-mark { animation: none; }
+    /* Gradients flatten in forced colors: keep the waiting dot painted so
+       waiting never collapses into working. */
+    .agent .agent-state.waiting .state-mark { forced-color-adjust: none; }
+  }
+  .agent .title { flex: 1; min-width: 32px; font-size: 0.84375rem; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* inline rename: the title turns into this field in place (F2 or long-press) */
+  .agent .rename-input { flex: 1; min-width: 0; font-family: inherit;
+    font-size: 0.84375rem; font-weight: 600; color: var(--text);
+    background: var(--panel); border: 1px solid var(--accent);
+    border-radius: 6px; padding: 1px var(--space-2);
+    margin: calc(-1 * var(--space-1)) 0; outline: none; }
+  .agent .kids, .agent .queue-badge { max-width: 100%; overflow: hidden; }
+  .agent .agent-model { flex: none; max-width: 45%; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; font-size: 0.65625rem;
+    color: var(--muted); }
+  /* the person glyph marking a subagent count ("3 👤") */
+  .pico { width: 9px; height: 9px; flex: none; }
+  .message-icon { width: 10px; height: 10px; flex: none; }
+  .agent .time { flex: none; font-size: 0.65625rem; color: var(--text-faint); }
+  .agent .takeover-tag { flex: none; display: inline-flex; align-items: center;
+    color: var(--warn); }
+  .agent .safety-off-tag { flex: none; display: inline-flex; align-items: center;
+    color: var(--danger); }
+  @media (prefers-reduced-motion: reduce) {
+    .agent .status.running { animation: none; }
+  }
+  /* armed for delete: modifier-X pressed once, awaiting the confirming second */
+  .agent.armed, .agent.armed:hover { background: color-mix(in srgb, var(--danger) 14%, transparent);
+    border-color: var(--danger); }
+  .agent.armed .title { color: var(--danger); }
+  #conv-title.armed, #conv-title.stop-armed { color: var(--danger); }
+
+  /* Rolling/cached asset compatibility only: an older sidebar bundle may still
+     append this removed hover-summary node. Keep it inert, including its .on state. */
+  #agent-tip, #agent-tip.on { display: none !important; }
+
+  #sidebar-foot { padding: var(--space-3) var(--space-5) var(--space-4); border-top: 1px solid var(--border);
+    font-size: 0.65625rem; color: var(--muted); }
+  #shortcut-pane > summary { cursor: pointer; color: var(--text); font-size: 0.71875rem;
+    font-weight: 600; list-style-position: inside; }
+  #shortcut-pane[open] > summary { margin-bottom: var(--space-3); }
+  #sidebar-foot .shortcut-group + .shortcut-group { margin-top: var(--space-3); }
+  #sidebar-foot .shortcut-title { color: var(--text); font-size: 0.65625rem;
+    font-weight: 600; text-transform: uppercase; letter-spacing: .06em; margin-bottom: var(--space-1); }
+  #sidebar-foot .keys { display: flex; flex-wrap: wrap;
+    gap: var(--space-2) var(--space-4); }
+  #sidebar-foot .k { display: inline-flex; align-items: center; gap: var(--space-2);
+    white-space: nowrap; }
+  #sidebar-foot kbd { font-family: inherit; font-size: 0.65625rem; color: var(--text);
+    background: var(--panel-2); border: 1px solid var(--border);
+    border-bottom-color: var(--kbd-edge); border-radius: 6px; padding: 1px var(--space-2);
+    line-height: 1.4; }
+  #sidebar-foot .note { margin-top: var(--space-3); padding-top: var(--space-3);
+    border-top: 1px solid var(--border); line-height: 1.6; }
+  #settings-btn { display: flex; align-items: center; gap: var(--space-3); width: 100%;
+    background: none; border: 0; border-top: 1px solid var(--border);
+    color: var(--muted); font-family: inherit; font-size: 0.78125rem; cursor: pointer;
+    padding: var(--space-4) var(--space-5); text-align: left; }
+  #settings-btn:hover { color: var(--accent); }
+  #settings-btn svg { flex: none; }
+
+  /* ---------- main pane ---------- */
+  #main { flex: 1; min-width: 0; min-height: 0; height: 100%;
+    display: flex; flex-direction: column; overflow: hidden; }
+  #topbar { height: 48px; flex: none; min-width: 0; display: flex; align-items: center;
+    position: relative; z-index: auto; padding: 0 var(--space-5);
+    font-weight: 600; font-size: 0.84375rem; gap: var(--space-2); background: var(--bg); }
+  #menu-btn { display: inline-flex; min-width: 44px; min-height: 44px; background: none;
+    border: 0; color: var(--text); cursor: pointer; padding: var(--space-2) var(--space-3);
+    margin-left: calc(-1 * var(--space-3)); align-items: center; justify-content: center; }
+  #menu-btn svg { width: 20px; height: 20px; }
+  #menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  /* up-to-parent affordance: shown when the selected agent has a routing parent
+     open, the visible twin of the phone's back button */
+  #up-btn { display: none; background: none; border: 0; color: var(--muted);
+    cursor: pointer; padding: var(--space-2) var(--space-3);
+    margin-left: calc(-1 * var(--space-2)); line-height: 0; }
+  #up-btn.on { display: flex; }
+  #up-btn:hover { color: var(--accent); }
+  #up-top { display: none; flex: none; width: 44px; height: 44px;
+    padding: 0; border: 0; border-radius: 8px; background: none;
+    color: var(--text); align-items: center; justify-content: center; cursor: pointer; }
+  #up-top.on { display: inline-flex; }
+  #up-top:hover { background: var(--panel); }
+  #up-top:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  #topbar .spacer { flex: 1; }
+  #top-actions { flex: none; }
+  /* The title takes the remaining width without moving actions onto a new row. */
+  #conv-titlebar { position: relative; display: flex; flex: 1; align-items: center; gap: var(--space-3); min-width: 0; }
+  #conv-title { flex: 1; min-height: 44px; line-height: 44px; }
+  #sidebar.desktop-hidden { display: none; }
+  #key-mode { display: inline-flex; align-items: center; min-height: 22px;
+    color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+    padding: 1px var(--space-3); font: 600 0.65625rem/1.2 var(--font-mono);
+    white-space: nowrap; transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast); }
+  #key-mode.pending { color: var(--accent); border-color: var(--accent-dim);
+    background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  #key-mode.danger { color: var(--danger); border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  @media (pointer: coarse) { #key-mode { display: none; } }
+  #top-actions { display: flex; align-items: center; gap: var(--space-1); }
+  #top-actions.prefix-on .top-act[data-key-hint]:not(:disabled) { color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, transparent); outline: 1px solid var(--accent-dim); }
+  #top-actions.prefix-on .top-act[data-key-hint]::after { content: attr(data-key-hint);
+    display: inline-flex; color: var(--text); background: var(--panel-2);
+    border: 1px solid var(--accent-dim); border-radius: 6px; padding: 1px var(--space-2);
+    font: 600 0.65625rem/1.2 var(--font-mono); }
+  .top-act { display: inline-flex; align-items: center; gap: var(--space-2);
+    background: none; border: 0; color: var(--muted); cursor: pointer;
+    padding: var(--space-2) var(--space-3); border-radius: 8px;
+    font: 600 0.78125rem/1 var(--font-sans);
+    /* the press-slide gesture must not select text, pop the touch callout, or be
+       stolen by the browser as a scroll when you slide down onto the menu */
+    user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+    touch-action: none; }
+  .top-act:hover { color: var(--accent); background: var(--panel); }
+  .top-act:disabled { color: var(--text-disabled); cursor: default; background: none; }
+  #new-top { min-width: 44px; min-height: 44px; justify-content: center;
+    color: var(--text); }
+  .top-act svg { flex: none; }
+  .top-act .lbl { line-height: 1; white-space: nowrap; }
+
+  /* Conversation actions keep their availability/confirmation classes inside
+     the overflow; app.css supplies the full-width menu-item geometry. */
+  #takeover-btn, #trash-btn { display: none; flex: none;
+    width: 30px; height: 30px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); cursor: pointer;
+    align-items: center; justify-content: center; padding: 0; }
+  #takeover-btn.on { display: inline-flex; }
+  #takeover-btn:disabled.on { cursor: wait; opacity: .65; }
+  #share-link-btn[hidden], #new-top[hidden], .backend-new-agent[hidden] { display: none; }
+#trash-btn:hover { color: var(--danger); border-color: var(--danger); }
+  /* armed: one tap in, awaiting the confirming second tap — red like #conv-title.armed */
+  #trash-btn.armed { color: var(--danger); border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent); }
+  /* Hold-to-confirm tooltip for Stop. One
+     hidden div per button, fixed-positioned so showing it never shifts
+     layout, shown and hidden instantly — no transitions, so nothing animates
+     under prefers-reduced-motion. Visual only (aria-hidden); the buttons'
+     own titles and labels carry the meaning. */
+  .hold-tip { display: none; position: fixed; z-index: var(--z-toast);
+    padding: var(--space-3) var(--space-4);
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); font-size: 0.78125rem;
+    line-height: 1.35; white-space: normal; width: max-content;
+    max-width: min(360px, calc(100vw - 24px));
+    overflow: hidden; pointer-events: none; }
+  .hold-tip.on { display: block; display: -webkit-box; -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical; overflow: hidden; }
+  #conv-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+  /* the title doubles as a "copy this agent's id" control for a real agent */
+  #conv-title.copyable { cursor: pointer; }
+  #conv-title.copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+  #conv-title.copied { color: var(--accent); }
+  /* transient "Copied ID" pill; announced politely for screen readers */
+  #title-copied { display: none; flex: none; font-size: 0.65625rem; font-weight: 600;
+    color: var(--accent); border: 1px solid var(--accent-dim); border-radius: 999px;
+    padding: 1px var(--space-3); white-space: nowrap; pointer-events: none; }
+  #title-copied.on { display: inline-block; }
+  .chip { font-size: 0.65625rem; font-weight: 600; padding: var(--space-1) var(--space-3);
+    border-radius: 999px;
+    display: none; white-space: nowrap; flex: none; }
+  .chip.on { display: inline-block; }
+  /* the working indicator: a green dot before the title, matching the sidebar
+     status dot; only shown while a turn is running */
+  #conv-status { width: 8px; height: 8px; border-radius: 50%; flex: none;
+    background: var(--running); display: none; }
+  #conv-status.running { display: inline-block; animation: pulse 1.2s infinite; }
+  /* subagent count "N 👤" pill, mirroring the sidebar .kids badge */
+  #chip-kids:not(.on), #chip-queued:not(.on), #chip-state:not(.on) { display: none; }
+  #chip-kids.on, #chip-queued.on, #chip-state.on { display: inline-flex; }
+  /* the last-turn state: a round warn badge holding one alert icon */
+  #chip-state { width: 18px; padding: 0; }
+  /* Refresh dots occupy a fixed slot below the title, never a gap between
+     controls. Showing them and pulsing opacity cannot move the header. */
+  #conv-freshness { position: absolute; left: 0; bottom: 2px;
+    display: inline-flex; align-items: center;
+    gap: var(--space-1); height: 4px; visibility: hidden; }
+  #conv-freshness.on { visibility: visible; }
+  #conv-freshness i { width: 4px; height: 4px; border-radius: 50%;
+    background: var(--muted); animation: freshness-dot 1.2s infinite; }
+  #conv-freshness i:nth-of-type(2) { animation-delay: .2s; }
+  #conv-freshness i:nth-of-type(3) { animation-delay: .4s; }
+  @keyframes freshness-dot { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    #conv-freshness i { animation: none; opacity: .6; }
+  }
+  @media (forced-colors: active) { #conv-freshness i { animation: none; } }
+
+  /* Global connection status floats below the topbar, so appearing after a
+     minute never shifts the cached thread, composer, or mobile title controls. */
+  #connection-status { position: fixed; z-index: var(--z-dialog); top: 56px; right: 14px;
+    display: none; align-items: center; gap: var(--space-3); max-width: calc(100vw - 28px);
+    padding: var(--space-2) var(--space-3); border: 1px solid var(--danger);
+    border-left-width: 3px; border-radius: 10px; background: var(--panel-2);
+    color: var(--text); box-shadow: var(--expanded-lift);
+    font-size: 0.71875rem; line-height: 1.2; font-weight: 600; }
+  #connection-status.on { display: flex; }
+  #connection-status[data-state="offline"],
+  #connection-status[data-state="auth-expired"] { border-color: var(--warn); }
+  #connection-status .connection-symbol { color: var(--danger); font-size: 0.84375rem; }
+  #connection-status[data-state="offline"] .connection-symbol,
+  #connection-status[data-state="auth-expired"] .connection-symbol { color: var(--warn); }
+  #connection-status .connection-label { overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  #connection-status button { white-space: nowrap; }
+  #connection-status button:disabled { cursor: wait; }
+
+  /* ---------- settings page ----------
+     A registry of sections renders into #settings-sections (see the JS): every
+     entry inherits this styling, so adding a setting is one settingsSection()
+     call with no new CSS. Full page: category nav on the left, the selected
+     category's sections on the right; auth sections show live login state. */
+  #settings-overlay { display: none; position: fixed; inset: 0; z-index: calc(var(--z-dialog) + 2);
+    background: var(--bg); overflow-y: auto; }
+  #settings-overlay.on { display: block; }
+  #settings-modal { max-width: 860px; margin: 0 auto;
+    padding: 0 var(--space-5) 48px; /* space-check: allow clears the page bottom */
+    min-height: 100dvh; box-sizing: border-box;
+    /* Every human-readable inspector field supports drag selection and mobile
+       long-press. Individual controls opt out through their native behavior. */
+    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+  .settings-head { position: sticky; top: 0; z-index: var(--z-raised); display: flex;
+    align-items: baseline; gap: var(--space-4); padding: var(--space-5) 0 var(--space-4);
+    margin-bottom: var(--space-5);
+    background: var(--bg); --edge-bg: var(--bg); }
+  .settings-head h2 { font-size: 1.25rem; font-weight: 700; margin: 0; }
+  .settings-head .icon-btn { margin-left: auto; align-self: center; }
+  #settings-release { min-width: 0; overflow: hidden; text-overflow: ellipsis;
+    color: var(--muted); font-size: 0.78125rem; white-space: nowrap; }
+  #settings-backend { min-width: 0; max-width: 100%; min-height: 44px; background: none; border-color: transparent; text-align: start; }
+  #settings-backend:hover { background: var(--panel-2); }
+  #settings-backend:focus:not(:focus-visible) { border-color: transparent; box-shadow: none; }
+  .settings-cols { display: flex; gap: var(--space-6); align-items: flex-start; }
+  /* Invariant: top is the 72px head less 4, so the nav sticks just under it. */
+  #settings-nav { flex: none; width: 180px; display: flex; flex-direction: column;
+    gap: var(--space-1); position: sticky; top: 68px; }
+  #settings-nav button { background: none; border: 0; border-radius: 8px;
+    padding: var(--space-3) var(--space-4); font: inherit; font-size: 0.84375rem; color: var(--muted);
+    text-align: left; cursor: pointer; }
+  #settings-nav button:hover { color: var(--text); background: var(--panel); }
+  #settings-nav button.on { color: var(--text); background: var(--panel);
+    font-weight: 600; }
+  @media (max-width: 700px) {
+    .settings-cols { flex-direction: column; align-items: stretch; gap: var(--space-4); }
+    #settings-nav { position: static; flex-direction: row; width: auto; max-width: 100%;
+      overflow-x: auto; padding-bottom: var(--space-2); --fade-start: 0px; --fade-end: 0px;
+      mask-image: linear-gradient(to right, transparent calc(var(--fade-start) / 4),
+        var(--bg) var(--fade-start), var(--bg) calc(100% - var(--fade-end)),
+        transparent calc(100% - var(--fade-end) / 4)); }
+    /* Spec: the tab strip fades out at an end only while more tabs lie past it
+       (settings.ts markNavEdges), fully clear over the last quarter of the fade so
+       no sliver of a cut tab shows at the edge; the mask reads alpha only, so --bg
+       just means opaque. */
+    #settings-nav.more-start { --fade-start: 32px; }
+    #settings-nav.more-end { --fade-end: 32px; }
+    #settings-nav button { flex: none; white-space: nowrap; } }
+  #settings-sections { flex: 1; min-width: 0; }
+  .settings-cat[hidden] { display: none; }
+  .settings-section { border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel); padding: var(--space-5); }
+  .settings-section + .settings-section { margin-top: var(--space-4); }
+  .settings-section .sec-head { display: flex; align-items: center; gap: var(--space-3);
+    margin: 0 0 var(--space-4); }
+  .settings-section .sec-head h3 { font-size: 0.84375rem; font-weight: 600;
+    color: var(--text); margin: 0; }
+  .settings-section .sec-head .state { font-size: 0.78125rem; font-weight: 600; }
+  .settings-section .sec-head .state.ok { color: var(--running); }
+  .settings-section .sec-head .state.off { color: var(--muted); }
+  .settings-section .field { display: flex; flex-direction: column; gap: var(--space-2);
+    margin-bottom: var(--space-4); }
+  .settings-section .hint { font-size: 0.78125rem; color: var(--muted);
+    margin: 0; }
+  .settings-section label { font-size: 0.78125rem; color: var(--muted); }
+  .settings-section input[type="checkbox"], .settings-section input[type="radio"] {
+    accent-color: var(--accent-dim); }
+  .settings-section .row { display: flex; align-items: center;
+    justify-content: space-between; gap: var(--space-3) var(--space-4); margin-top: var(--space-3);
+    flex-wrap: wrap; }
+  .settings-section .row .hint { font-size: 0.78125rem; color: var(--muted); }
+  .settings-section .context-window-controls { display: flex; align-items: center;
+    gap: var(--space-4); margin-bottom: var(--space-4); }
+  .settings-section .context-window-controls input { box-sizing: border-box;
+    height: 36px; min-width: 0; }
+  .settings-section .context-window-controls input[type="range"] {
+    flex: 1; width: 0; padding: 0; border: 0; accent-color: var(--accent); }
+  .settings-section .context-window-controls input[type="number"] {
+    flex: 0 0 112px; width: 112px; }
+  /* checkbox preferences are left-aligned; extras may add a description */
+  .settings-section .row.check { justify-content: flex-start; gap: var(--space-3);
+    cursor: pointer; margin-top: var(--space-3); min-height: 44px; }
+  .settings-section .row.check input { width: auto; margin: 0; flex: none; }
+  .settings-section .row.check > span:first-of-type { color: var(--text);
+    font-size: 0.84375rem; font-weight: 600; }
+  .settings-section .row.effort > span { color: var(--text); font-size: 0.84375rem;
+    font-weight: 600; }
+  .settings-section .row.effort .effort-note { display: block; margin-top: var(--space-1);
+    color: var(--text); font-size: inherit; font-weight: 400; }
+  .settings-section .row.effort select { min-width: 150px; }
+  /* Settings model box: a search field with its result list inline below it
+     (never floating, so a phone keyboard cannot cover the list). */
+  .settings-section .row.effort { align-items: flex-start; }
+  .settings-section .row.effort > span { padding-top: var(--space-3); min-width: 56px; }
+  .settings-section .model-box { flex: 1 1 260px; min-width: 0;
+    display: flex; flex-direction: column; gap: var(--space-2); }
+  .settings-section .model-box-input { width: 100%; box-sizing: border-box; }
+  .settings-section .model-box-list { max-height: 400px; overflow-y: auto;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel-2); }
+  .settings-section .model-box-list[hidden] { display: none; }
+  .settings-section .model-box-option { display: grid;
+    grid-template-columns: minmax(0, 1fr) auto; gap: 1px var(--space-3);
+    padding: var(--space-3) var(--space-4); cursor: pointer; }
+  .settings-section .model-box-option.active {
+    background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .settings-section .model-box-name { color: var(--text); font-size: 0.84375rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-section .model-box-route, .settings-section .model-box-context {
+    color: var(--muted); font-size: 0.71875rem; justify-self: end;
+    white-space: nowrap; }
+  .settings-section .model-box-id { color: var(--muted); min-width: 0;
+    font: 0.71875rem var(--font-mono);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .settings-section .model-box-note { padding: var(--space-3) var(--space-4); font-size: 0.78125rem;
+    color: var(--muted); }
+  @media (max-width: 700px) {
+    .settings-section .row.effort { flex-direction: column;
+      align-items: stretch; gap: var(--space-2); }
+    .settings-section .row.effort > span { padding-top: 0; }
+    .settings-section .model-box { flex: none; }
+    /* About five rows: the list stays inline, above the phone keyboard. */
+    .settings-section .model-box-list { max-height: 300px; }
+    .settings-section .model-box-option { min-height: 44px;
+      align-content: center; } }
+  .settings-section .row.extra .hint { flex: 1; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  /* Shape and tones come from the shared button rules in app.css. */
+  .settings-section button.ghost:hover { border-color: var(--danger);
+    color: var(--danger); }
+  .settings-section .msg { font-size: 0.78125rem; min-height: 1.1em; margin: var(--space-3) 0 0; }
+  .settings-section .msg.ok { color: var(--running); }
+  .settings-section .mcp-settings .hint { color: var(--text); }
+  .remotes-settings { color: var(--text); font-size: 0.8125rem; }
+  .remotes-description { margin: 0 0 var(--space-3); }
+  .remote-incoming { margin-top: var(--space-5); }
+  .remote-incoming h4 { margin: 0 0 var(--space-3); font-size: inherit; }
+  .settings-section .remotes-settings button:is(.primary, .ghost, .secondary),
+  .settings-section .remotes-settings input { min-height: 44px; min-width: 44px; }
+  .remote-entry { padding: var(--space-3) 0; margin-bottom: var(--space-3);
+    border-bottom: 1px solid var(--border); }
+  .remote-entry .row { margin-top: 0; flex-wrap: nowrap; align-items: flex-start; }
+  .remote-info { min-width: 0; overflow-wrap: anywhere; }
+  .remote-info > div { margin-top: var(--space-2); }
+  .remote-entry .row > button { flex: none; }
+  .remote-sign-in { display: flex; align-items: flex-end; gap: var(--space-3);
+    margin-top: var(--space-3); }
+  .remote-sign-in .field { flex: 1; min-width: 0; margin: 0; }
+  .remote-sign-in input { width: 100%; min-width: 0; }
+  .remote-sign-in button { flex: none; }
+  .remote-add { margin-top: var(--space-4); }
+  .remote-add .row { justify-content: flex-end; }
+  .remotes-settings label, .remotes-settings input::placeholder { color: var(--text); opacity: 1; }
+  .remote-entry > div:last-child:not(.row) { margin-top: var(--space-3); }
+  .mcp-status { color: var(--text); font-size: 0.8125rem; }
+  .mcp-server { display: flex; align-items: center; justify-content: space-between;
+    gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
+  .mcp-server > div { min-width: 0; overflow-wrap: anywhere; }
+  .mcp-server button { flex: none; }
+ .mcp-paste .hint { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
+ .mcp-paste input { flex: 1; min-width: 0; }
+  .mcp-state { display: inline-flex; align-items: center; gap: var(--space-2);
+    margin-left: var(--space-3); }
+  .mcp-state::before { content: ""; width: 0.5em; height: 0.5em;
+    border-radius: 50%; background: currentColor; }
+  .mcp-state[data-state="connected"]::before { background: var(--running); }
+  .mcp-state[data-state="failed"]::before { background: var(--danger); }
+  .mcp-detail { margin-top: var(--space-2); }
+  .settings-section .msg.err { color: var(--danger); }
+  .settings-section a.link { color: var(--accent); font-size: 0.78125rem;
+    text-decoration: none; }
+  .settings-section a.link:hover { text-decoration: underline; }
+  .settings-section .authbtns { display: flex; gap: var(--space-3); flex-wrap: wrap;
+    justify-content: flex-end; }
+  .settings-section .authbtns button { white-space: nowrap; }
+  .settings-section textarea { width: 100%; resize: vertical;
+    font: 0.78125rem/1.5 var(--font-mono); }
+  .settings-section pre.cmd, .settings-section pre.cmdpy { background: var(--code-bg);
+    border: 1px solid var(--border); border-radius: 10px; padding: var(--space-4);
+    color: var(--text); font: 0.78125rem/1.5 var(--font-mono);
+    white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-3);
+    user-select: all; }
+  .settings-section [hidden] { display: none; }
+
+  /* ---------- message inspector ("no hidden prompts") ----------
+     Reveals delivered user input or an assistant response with its tool activity.
+     Reuses the settings-modal overlay pattern; wider, since prompts are long. */
+  #prompt-overlay { display: none; position: fixed; inset: 0; z-index: calc(var(--z-dialog) + 3);
+    background: color-mix(in srgb, var(--scrim) 62%, transparent); align-items: flex-start; justify-content: center; }
+  #prompt-overlay.on { display: flex; }
+  #prompt-modal { width: 680px; max-width: calc(100vw - 32px);
+    max-height: 84vh; overflow-y: auto; margin-top: 8vh;
+    padding: var(--space-5) var(--space-6) var(--space-6);
+    /* Every human-readable inspector field supports drag selection and mobile
+       long-press. Individual controls opt out through their native behavior. */
+    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
+  .prompt-modal-head { display: flex; align-items: center; justify-content: space-between;
+    gap: var(--space-4); margin: calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) 0 0; }
+  .prompt-modal-head h2 { min-width: 0; margin: 0; color: var(--text);
+    font-size: 1.0625rem; line-height: 1.3; font-weight: 700; }
+  .prompt-msg { font-size: 0.84375rem; color: var(--muted); margin: var(--space-4) var(--space-1); }
+  .prompt-note { font-size: 0.78125rem; color: var(--muted); margin: var(--space-3) var(--space-1) 0;
+    line-height: 1.5; }
+  .turn-usage { margin-top: var(--space-4); }
+  /* says what the numbers below cover — one answer, or every request a whole turn
+     made — so the two are never mistaken for each other */
+  .turn-usage-caption { margin: 0 0 var(--space-4); color: var(--text); font-size: 0.78125rem;
+    line-height: 1.5; }
+  .model-response-row { display: flex; flex-wrap: wrap; align-items: baseline;
+    gap: 0 var(--space-3); margin: var(--space-1) 0; color: var(--text);
+    font-size: 0.78125rem; line-height: 1.5; overflow-wrap: anywhere; }
+  .model-response-row time, .model-response-tokens { font-variant-numeric: tabular-nums; }
+  .model-response-warning { color: var(--warn); font-weight: 600; }
+  .turn-usage-selector { margin: 0 0 var(--space-3); color: var(--text); font-size: 0.78125rem;
+    font-weight: 600; overflow-wrap: anywhere; }
+  .turn-usage-bar-line { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-4); min-width: 0; }
+  .turn-usage-bar { display: flex; flex: 1; min-width: 100px; height: 9px;
+    overflow: hidden; border-radius: 999px; background: var(--panel-2); }
+  .turn-usage-segment { display: block; flex: none; height: 100%; }
+  .turn-usage-input { background: var(--accent); }
+  .turn-usage-write { background: var(--warn); }
+  .turn-usage-read { background: var(--running); }
+  .turn-usage-system { background: var(--context-system); }
+  .turn-usage-prompt { background: var(--context-prompt); }
+  .turn-usage-message { background: var(--context-message); }
+  .turn-usage-call { background: var(--context-call); }
+  .turn-usage-output { background: var(--context-output); }
+  .turn-usage-legend { display: flex; flex: none; flex-wrap: wrap; gap: var(--space-2) var(--space-3);
+    color: var(--muted); font-size: 0.65625rem; line-height: 1.3; }
+  .turn-usage-legend span { display: inline-flex; align-items: center; gap: var(--space-2); }
+  .turn-usage-dot { width: 7px; height: 7px; border-radius: 2px; flex: none; } /* radius-check: allow a legend dot */
+  .turn-usage-totals { margin: var(--space-3) 0 0; color: var(--text); font-size: 0.78125rem; }
+  .turn-usage-cost, .turn-usage-partial { margin: var(--space-2) 0 0; color: var(--muted);
+    font-size: 0.78125rem; line-height: 1.4; }
+  .prompt-block { border-top: 1px solid var(--border); margin-top: var(--space-4);
+    padding-top: var(--space-4); }
+  .prompt-block-head { display: flex; align-items: center; gap: var(--space-3);
+    font-size: 0.78125rem; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; margin: 0 0 var(--space-3); }
+  .prompt-copy { margin-left: auto; background: none; border: 1px solid var(--border);
+    border-radius: 8px; padding: var(--space-1) var(--space-4); color: var(--muted); cursor: pointer;
+    font: 600 0.71875rem/1.4 var(--font-sans); }
+  .prompt-copy:hover { color: var(--text); border-color: var(--text); }
+  .prompt-copy.copied { color: var(--accent); border-color: var(--accent-dim); }
+  .prompt-block pre { background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: var(--space-4) var(--space-5); margin: 0; max-height: 46vh;
+    overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 0.78125rem/1.55 var(--font-mono); color: var(--text); }
+  /* Compact tool rows disclose owner-scoped full payloads on demand. */
+  .tool-calls { list-style: none; margin: 0; padding: 0; max-height: min(65vh, 720px);
+    overflow: auto; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--code-bg); min-width: 0; }
+  .tool-call { display: block; min-width: 0; padding: 0;
+    border-top: 1px solid var(--border);
+    font: 0.78125rem/1.5 var(--font-mono); }
+  .tool-call:first-child { border-top: 0; }
+  /* Every part shares one font and line height, so aligning tops keeps the
+     name and command on the same line even though the command clips. */
+  .tc-call-head { box-sizing: border-box; display: flex; width: 100%; min-width: 0;
+    gap: var(--space-3); align-items: flex-start; padding: var(--space-3) var(--space-4); margin: 0;
+    border: 0; background: transparent; color: inherit; text-align: left;
+    font: inherit; -webkit-user-select: text; user-select: text;
+    -webkit-touch-callout: default; }
+  .tc-call-head[role="button"] { cursor: pointer; }
+  .tc-call-head[role="button"]:hover, .tc-call-head[role="button"]:focus-visible {
+    background: var(--panel-2); outline-color: var(--accent-dim); }
+  .tc-caret { flex: none; width: 9px; color: var(--muted); }
+  .tc-name { flex: none; color: var(--accent); font-weight: 600; }
+  .tool-detail-timing { min-width: 0; margin: var(--space-3) 1px 0; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    font: 0.65625rem/1.4 var(--font-sans); }
+  /* One line, clipped: a long command must not reflow the row or the phone. */
+  .tc-input { flex: 1; min-width: 0; color: var(--text); white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  /* A codemode script's nested calls sit open inside the expanded row, so
+     their arguments wrap instead of clipping at the right edge. */
+  .codemode-calls { margin-top: var(--space-3); }
+  /* On a narrow screen the status moves to its own line rather than
+     squeezing the arguments into a one-character column. */
+  .codemode-calls .tc-call-head { flex-wrap: wrap; row-gap: var(--space-1); }
+  .codemode-calls .tc-input { flex: 1 1 14ch; white-space: pre-wrap;
+    overflow-wrap: anywhere; }
+  .codemode-calls .turn-tool-stat { margin-left: auto; }
+  .tc-call-note { margin: calc(-1 * var(--space-2)) var(--space-4) var(--space-3); color: var(--muted);
+    overflow-wrap: anywhere; font: 0.71875rem/1.45 var(--font-sans); }
+  /* A call pi-safety blocked: amber, like the thread's safety notices. */
+  .tool-call.blocked .turn-tool-stat, .tool-call.blocked .tc-call-note {
+    color: var(--notice); }
+  .tool-unavailable { margin: -1px var(--space-4) var(--space-3); color: var(--muted);
+    font: 0.65625rem/1.45 var(--font-sans); }
+  .tool-detail-body { min-width: 0; padding: var(--space-2) var(--space-4) var(--space-4);
+    border-top: 1px solid var(--border); background: var(--panel-2);
+    font: 0.78125rem/1.5 var(--font-sans); }
+  .tool-payload { position: relative; min-width: 0; margin-top: var(--space-3); }
+  .tool-copy { position: absolute; z-index: var(--z-raised); top: 6px; right: 6px;
+    display: inline-flex; width: 27px; height: 27px; align-items: center;
+    justify-content: center; padding: var(--space-2); border: 1px solid var(--border);
+    border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: pointer;
+    opacity: 0; transition: opacity var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast); }
+  .tool-copy svg { width: 16px; height: 16px; }
+  .tool-payload:hover .tool-copy, .tool-payload:focus-within .tool-copy,
+  .tool-copy:focus-visible, .tool-copy.copied, .tool-copy.copy-error { opacity: 1; }
+  .tool-copy:hover, .tool-copy:focus-visible { color: var(--text); border-color: var(--text); }
+  .tool-copy.copied { color: var(--accent); border-color: var(--accent-dim); }
+  .tool-copy.copy-error { color: var(--danger); border-color: var(--danger); }
+  .tool-payload pre, .prompt-block .tool-payload pre { box-sizing: border-box;
+    width: 100%; max-width: 100%; max-height: min(42vh, 420px); margin: 0;
+    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default;
+    padding: var(--space-3) 40px var(--space-3) var(--space-4); /* space-check: allow copy-button room */
+    overflow: auto; white-space: pre-wrap;
+    overflow-wrap: anywhere; word-break: break-word; tab-size: 2;
+    border: 1px solid var(--border); border-radius: 8px; background: var(--code-bg);
+    color: var(--text); font: 0.71875rem/1.5 var(--font-mono); }
+  @media (hover: none), (pointer: coarse) { .tool-copy { opacity: 1; } }
+  .tool-limit { margin: var(--space-2) 1px 0; color: var(--warn); font-size: 0.65625rem; }
+  .tool-download { display: inline-block; margin-top: var(--space-3); color: var(--accent);
+    font-size: 0.71875rem; overflow-wrap: anywhere; }
+  .tool-detail-error { color: var(--danger); }
+
+  /* where the context was summarized or the conversation was reset: a centered
+     separator line that stays in the thread. `.pending` is the same line for an
+     action that hasn't taken effect yet. */
+  .thread-marker { align-self: stretch; max-width: 100%; display: flex;
+    align-items: center; gap: var(--space-3); margin: var(--space-1) 0; color: var(--muted);
+    font-size: 0.78125rem; }
+  .thread-marker::before, .thread-marker::after { content: ""; flex: 1;
+    height: 1px; background: var(--border); }
+  .thread-marker span { flex: 0 1 auto; min-width: 0; text-align: center; }
+  .compaction-jump-link { padding: 0; border: 0; background: none; color: inherit;
+    font: inherit; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+  .compaction-jump-link:hover, .compaction-jump-link:focus-visible {
+    color: var(--text); text-decoration: underline; text-underline-offset: 2px; }
+  .compaction-jump-link:focus-visible { outline: 2px solid var(--accent);
+    outline-offset: 1px; border-radius: 2px; } /* radius-check: allow a focus outline */
+  .thread-marker.pending { font-style: italic; opacity: .75; }
+
+  /* Per-turn replies stay outside independently controlled activity groups. */
+  .turn { align-self: stretch; max-width: 100%; display: flex;
+    flex-direction: column; gap: var(--space-3); }
+  .activity-body, .activity-boundary { position: relative; }
+  .activity-body { align-self: stretch; max-width: 100%; display: flex; flex-direction: column;
+    gap: var(--space-3); }
+  .activity-group { display: flex; flex-direction: column; gap: var(--space-3); }
+  .activity-group-summary { display: flex; align-items: center; gap: var(--space-3); }
+  .activity-group-toggle { flex: 1; min-width: 0; align-self: stretch; display: flex; align-items: center; padding: 0; border: 0; background: none; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+  .activity-group-toggle .turn-summary { min-width: 0; align-self: center; }
+  .activity-group-toggle:focus { outline: none; }
+  .activity-group-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* A visible reply inside an opened row stays untinted at its closed width. */
+  .activity-group-body.split { padding: 0; background: none; box-shadow: none; }
+  .activity-group-part { position: relative; display: flex; flex-direction: column;
+    gap: var(--space-3); padding: var(--space-4); border-radius: 10px; }
+  .activity-group-body { position: relative; display: flex; flex-direction: column;
+    gap: var(--space-3); padding: var(--space-4); border-radius: 10px; background: var(--panel); }
+  .activity-group-body .agent-message-row .lead, .activity-group-body .agent-message-row .sub { flex: none; }
+  .activity-group-body .agent-message-row, .activity-group-body .turn-series-toggle { min-height: 0; }
+  .activity-group-body .agent-message-row[aria-expanded] { padding: 0; background: transparent; }
+  .activity-group-body .agent-message-row { display: flex; flex-wrap: nowrap; gap: var(--space-2); width: 100%; text-align: left; overflow: hidden; }
+  .activity-group-body .turn-series-toggle { width: 100%; }
+  .activity-group-body .agent-message { align-self: stretch; max-width: 100%; }
+  /* The close tab straddles the border with a centred 44px hit area.
+     A little clearance above keeps it off the preceding block footer. */
+  .activity-group-body:has(> .activity-group-hide), .activity-group-part:has(> .activity-group-hide) {
+    margin-top: var(--space-2); }
+  .activity-group-hide { position: absolute; z-index: var(--z-raised); top: -1px; transform: translateY(-50%); right: 8px; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: var(--space-2); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: pointer; }
+  .activity-group-hide::before { content: ""; position: absolute; width: 44px; height: 44px; left: -11px; top: -11px; }
+  .activity-group-hide svg { width: 16px; height: 16px; display: block; }
+  .activity-group-hide:hover, .activity-group-hide:focus-visible { color: var(--text); border-color: var(--text); }
+  .activity-group-hide:focus { outline: none; }
+  .activity-group-hide:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .agent-message-preview { overflow: hidden; text-overflow: ellipsis; white-space: normal; min-width: 0; color: var(--muted); font-weight: normal; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .activity-group:not(.open) .activity-group-body { display: none; }
+  .turn-summary { align-self: stretch; color: var(--muted); font-size: 0.78125rem; }
+  .turn-summary a { color: inherit; text-decoration: underline; }
+  .turn-note { align-self: stretch; color: var(--muted); font-size: 0.78125rem;
+    font-style: italic; }
+  .turn-foot { align-self: stretch; display: flex; align-items: center; gap: var(--space-3);
+    color: var(--muted); font-size: 0.78125rem; }
+  .turn-foot .turn-summary { flex: 1; min-width: 0; }
+  .turn-outcome { flex: none; font-weight: 600; }
+  .turn-outcome.error { color: var(--danger); }
+  /* Reserve only width, keeping the last word and controls on one normal line.
+     Full-width endings and outcome notices keep the ordinary footer fallback. */
+  :is(.msg.assistant, .activity-body):has(> .turn-foot) { --turn-button-size: 24px; --turn-button-gap: var(--space-3); --turn-foot-width: var(--turn-button-size); }
+  :is(.msg.assistant, .activity-body):has(> .turn-foot .turn-tokens):has(> .turn-foot .turn-expand) { --turn-foot-width: calc(2 * var(--turn-button-size) + var(--turn-button-gap)); }
+  .msg.assistant:has(> .turn-foot) { position: relative; }
+  .msg.assistant:has(> .content + .turn-foot:last-child):not(:has(> .turn-foot .turn-outcome)) > .content > :last-child .turn-tail,
+  .activity-body:has(> .turn-foot):not(:has(> .turn-foot .turn-outcome)) > .activity-group:nth-last-child(2) > .activity-group-summary .turn-tail {
+    display: inline-block; max-width: 100%;
+    padding-right: var(--turn-foot-width); overflow-wrap: anywhere; }
+  .msg.assistant:has(> .content + .turn-foot:last-child) > .content > .reveal-chunk:last-child > p:last-child,
+  .msg.assistant:has(> .content + .turn-foot:last-child) > .content > :last-child :is(p, li, ul, ol):has(.turn-tail) { margin-bottom: 0; }
+  .msg.assistant:has(> .content > :last-child .turn-tail):has(> .content + .turn-foot:last-child):not(:has(> .turn-foot .turn-outcome)) > .turn-foot {
+    position: absolute; right: 0; bottom: calc(1lh - var(--turn-button-size)); font-size: inherit; line-height: inherit; }
+  .activity-body:has(> .activity-group:nth-last-child(2) .turn-tail):not(:has(> .turn-foot .turn-outcome)) > .turn-foot {
+    position: absolute; right: 0; bottom: calc(1lh - var(--turn-button-size)); font-size: 0.78125rem; line-height: inherit; }
+  .activity-boundary:has(> .msg > .working) > .activity-body:has(.turn-foot) { margin-bottom: var(--space-5); }
+  .turn-foot-actions { flex: none; margin-left: auto; display: inline-flex;
+    align-items: center; gap: var(--turn-button-gap); }
+  .turn-expand, .turn-tokens { flex: none; display: inline-flex;
+    align-items: center; justify-content: center; box-sizing: border-box;
+    width: var(--turn-button-size); height: var(--turn-button-size); padding: 0; border-radius: 6px;
+    background: transparent; border: 1px solid transparent; color: var(--muted);
+    cursor: pointer; opacity: 0; transition: opacity var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast); }
+  .turn-expand svg, .turn-tokens svg { width: 14px; height: 14px; display: block; }
+  .turn-foot .turn-expand, .turn-foot .turn-tokens { opacity: 1; }
+  .turn-expand.on { color: var(--accent); border-color: var(--accent); }
+  .turn-tokens:hover, .turn-expand:hover { color: var(--text); border-color: var(--text); }
+  .turn-expand:focus, .turn-tokens:focus { outline: none; }
+  .turn-expand:focus-visible, .turn-tokens:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* one tool row of an expanded turn: what ran, then what it did in counts. Its
+     full input/output is fetched lazily and rendered by .tool-detail-body. */
+  .turn-tool { align-self: stretch; max-width: 100%; font-size: 0.78125rem; }
+  .turn-tool-head { display: flex; align-items: baseline; gap: var(--space-2); min-width: 0; }
+  .turn-tool-head[role="button"] { cursor: pointer; }
+  .turn-tool-head[role="button"]:hover .turn-tool-detail,
+  .turn-tool-head[role="button"]:focus-visible .turn-tool-detail { color: var(--text); }
+  .turn-tool-dot { flex: none; align-self: center; width: 6px; height: 6px;
+    border-radius: 50%; background: var(--accent); }
+  .turn-tool-caret { flex: none; font-size: 0.65625rem; opacity: .75; }
+  .turn-tool-name { flex: none; color: var(--accent); font-weight: 600; }
+  /* the parentheses are decoration, so the row's text stays the exact command
+     for selection, copy, and screen readers. It clips to one line rather than
+     wrapping: hover and aria-label still carry all of it. */
+  .turn-tool-detail { flex: 1; min-width: 0; color: var(--muted);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Tool arguments share one monospace rule: the thread's tool-call rows and
+     the live panel's argument fragment. */
+  .turn-tool-detail, .live-panel-box .live-args {
+    font-family: var(--font-mono); }
+  .turn-tool-detail::before { content: "("; }
+  .turn-tool-detail::after { content: ")"; }
+  .turn-tool-note { margin: var(--space-1) 0 0 var(--space-5); color: var(--muted); font-size: 0.78125rem; }
+  .turn-model-time { margin: var(--space-2) 0 var(--space-1); color: var(--muted); font-size: 0.78125rem; }
+ .turn-thinking { margin: var(--space-2) 0 var(--space-1); color: var(--muted); font-size: 0.78125rem; line-height: 1.4; }
+  .turn-thinking-toggle { display: inline-flex; align-items: baseline; gap: var(--space-3);
+    min-height: 18px; padding: 0; border: 0; background: none; color: var(--muted);
+    font: inherit; text-align: left; cursor: pointer; text-decoration: none; }
+  .turn-thinking-toggle:hover, .turn-thinking-toggle:focus-visible {
+    color: var(--text); text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, currentColor 45%, transparent); }
+  .turn-thinking-line { min-width: 0; }
+  .turn-thinking-body { margin: var(--space-2) 0 var(--space-1);
+    padding: var(--space-3); border-left: 2px solid var(--border); overflow-wrap: anywhere;
+    color: var(--muted); font-size: 0.84375rem; line-height: 1.45; }
+  .turn-thinking-series-title {
+    margin: calc(-1 * var(--space-1)) 0 calc(-1 * var(--space-2)); color: var(--muted);
+    font-size: 0.78125rem; line-height: 1.45; }
+  .turn-thinking-toggle.live-thinking-step .turn-thinking-line,
+  .turn-thinking-toggle.live-thinking-step .live-thinking-elapsed {
+    background: linear-gradient(105deg, var(--muted) 35%, var(--text) 50%, var(--muted) 65%);
+    background-size: 240% 100%; -webkit-background-clip: text; background-clip: text;
+    color: transparent; animation: thinking-shimmer 2.4s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .turn-thinking-toggle.live-thinking-step .turn-thinking-line,
+    .turn-thinking-toggle.live-thinking-step .live-thinking-elapsed {
+      animation: none; color: var(--muted); background: none;
+    }
+  }
+  .turn-thinking-body > :first-child { margin-top: 0; }
+  .turn-thinking-body > :last-child { margin-bottom: 0; }
+  .turn-tool-stat { flex: none; color: var(--muted); font-size: 0.78125rem; white-space: nowrap; }
+  .turn-tool-head:has(.turn-tool-stat) .turn-tool-detail { flex: 0 1 auto; }
+  .turn-tool.stale .turn-tool-dot { background: var(--muted); }
+  .turn-tool.truncated { color: var(--muted); font-style: italic; }
+  /* A segment summary is the second-level disclosure. Opening the response
+     restores these summaries, not every raw call. */
+  .turn-series { align-self: stretch; min-width: 0; display: flex;
+    flex-direction: column; gap: var(--space-3); }
+  .turn-series-toggle { align-self: flex-start; max-width: 100%; display: flex;
+    align-items: baseline; gap: var(--space-3); padding: var(--space-1) 0; border: 0; background: none;
+    color: var(--muted); cursor: pointer; text-align: left; font: inherit;
+    font-size: 0.78125rem; line-height: 1.45; }
+  .turn-series-toggle:hover, .turn-series-toggle:focus-visible { color: var(--text); }
+  .turn-series-summary { align-self: flex-start; padding: var(--space-2) 0;
+    color: var(--muted); font-size: 0.78125rem; line-height: 1.45; }
+  /* Eye-hidden chunk summaries reuse the segment-summary reading, pulled
+     tight to the surrounding replies so text/summary/text reads compactly.
+     A chunk is a button reading exactly like its summary text: the reset
+     below keeps the UA button box identical to the text box, and its hover
+     matches the series toggle. Series toggles share the chunk line's box,
+     so pressing the eye changes no summary line — only disclosed content
+     appears. Response-level gaps are untouched. */
+  .activity-body > .turn-series-summary.hidden-chunk {
+    margin: calc(-1 * var(--space-2)) 0; padding: var(--space-1) 0; }
+  button.turn-series-summary.hidden-chunk { border: 0; background: none;
+    font: inherit; font-size: 0.78125rem; line-height: 1.45;
+    text-align: left; cursor: pointer; }
+  button.turn-series-summary.hidden-chunk:hover,
+  button.turn-series-summary.hidden-chunk:focus-visible { color: var(--text); }
+  .activity-body.open > .turn-series,
+  .activity-body.open > .turn-series-summary { margin: calc(-1 * var(--space-2)) 0; }
+  .activity-body.open > .turn-series-summary { padding: var(--space-1) 0; }
+  .turn-series-body { display: flex; flex-direction: column; gap: var(--space-3); }
+  /* collapsed "System prompt" section inside the full-prompt (per-turn) modal */
+  .prompt-details { border-top: 1px solid var(--border); margin-top: var(--space-4); }
+  .prompt-details > summary { cursor: pointer; font-size: 0.78125rem; font-weight: 600;
+    color: var(--muted); text-transform: uppercase; letter-spacing: .04em;
+    padding: var(--space-4) 0 var(--space-1); list-style: none; }
+  .prompt-details > summary::-webkit-details-marker { display: none; }
+  .prompt-details > summary:hover { color: var(--text); }
+  .prompt-details[open] > summary { margin-bottom: var(--space-1); }
+.prompt-section > summary { text-transform: none; letter-spacing: normal; }
+.prompt-section > summary { display: flex; align-items: center; gap: var(--space-2); }
+  .prompt-details .prompt-block { border-top: 0; margin-top: var(--space-2); padding-top: 0; }
+  @media (hover: none) {
+    .turn-tokens { opacity: 1; }
+  }
+
+  /* top-of-thread "hidden context" banner: the system prompt + injected
+     scaffolding, collapsed by default, revealed inline on click. */
+  .prompt-banner { align-self: stretch; max-width: 100%; }
+  .prompt-banner-row { display: flex; align-items: center; gap: var(--space-3); width: 100%;
+    background: var(--panel-2); border: 1px dashed var(--border); border-radius: 10px;
+    padding: var(--space-3) var(--space-4); color: var(--muted); cursor: pointer; text-align: left;
+    font: inherit; transition: border-color var(--motion-fast), color var(--motion-fast); }
+  .prompt-banner-row:hover { border-color: var(--accent-dim); color: var(--text); }
+  .prompt-banner-row .lead { flex: none; font-size: 0.71875rem; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .03em; }
+  .prompt-banner-row .sub { flex: 1; min-width: 0; font-size: 0.78125rem;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prompt-banner-body { margin-top: var(--space-3); }
+  .prompt-banner-body pre { background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: var(--space-4) var(--space-5); margin: 0; max-height: 320px;
+    overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 0.78125rem/1.55 var(--font-mono); color: var(--text); }
+
+  /* overflow-x:hidden is deliberate: with only overflow-y set, the browser
+     promotes overflow-x to `auto`, so any content even a hair too wide (a long
+     token, or the vertical scrollbar shrinking the client width) paints a stray
+     horizontal scrollbar — a faint full-width line right above the composer. */
+  #scroll { flex: 1 1 auto; min-width: 0; min-height: 0; overflow-x: hidden; overflow-y: auto;
+    overscroll-behavior: contain; }
+  #scroll:focus, #messages:focus { outline: none; }
+  #messages img { -webkit-user-select: none; user-select: none; }
+  #scroll:has(#messages > .activity-boundary:last-child .turn-foot) { padding-bottom: var(--space-5); }
+  #scroll:has(#messages > .activity-boundary:last-child > .activity-body > .turn-foot) { padding-bottom: var(--space-6); }
+  #scroll:has(#messages > .activity-boundary:last-child > .msg .working) { padding-bottom: 0; }
+  /* Spec: keep 12px message padding plus scroll-end room for hanging footer
+     targets; spacing between turns is unchanged. Edge fades reserve no room. */
+  #messages { width: 100%; max-width: 780px; min-width: 0; margin: 0 auto;
+    padding: var(--space-6) var(--space-6) var(--space-4);
+    display: flex; flex-direction: column; gap: var(--space-5); }
+  /* Opening an agent with no thread read yet: the previous agent's messages are
+     left as dimmed context only. `inert` (set alongside this class) is what
+     actually stops clicks, links, and assistive technology from reaching them. */
+  #messages.stale { opacity: .32; }
+  #thread-loading { position: fixed; z-index: calc(var(--z-drawer) + 4); top: 62px; left: 50%;
+    transform: translateX(-50%); display: none; padding: var(--space-2) var(--space-4);
+    border: 1px solid var(--border); border-radius: 999px; background: var(--panel-2);
+    color: var(--muted); font-size: 0.71875rem; font-weight: 600; white-space: nowrap;
+    box-shadow: var(--expanded-lift); }
+  #thread-loading.on { display: block; }
+  .msg.user { align-self: flex-end; max-width: 82%; }
+  .msg.user .bubble { background: var(--user-bubble); border: 1px solid var(--border-strong);
+    padding: var(--space-3) var(--space-5); border-radius: 14px 14px 6px 14px;
+    white-space: pre-wrap; word-wrap: break-word; }
+  .agent-message { align-self: flex-end; max-width: 82%; }
+  .agent-message-row, .agent-message-inline-head { display: flex; align-items: baseline;
+    gap: var(--space-3); padding: 0 var(--space-2); color: var(--muted); font-size: 0.78125rem; }
+  .agent-message-row { width: 100%; border: 0; background: transparent;
+    cursor: pointer; text-align: left; font: inherit; font-size: 0.78125rem; }
+  .agent-message-row[aria-expanded="false"] { padding: var(--space-3);
+    border-radius: 8px; background: var(--panel-2); }
+  .platform-interruption :is(.agent-message-row, .agent-message-inline-head) .lead { color: var(--warn); }
+  .agent-message-row:hover, .agent-message-row:focus-visible { color: var(--text); }
+  .agent-message-row .lead, .agent-message-inline-head .lead {
+    color: var(--text); font-weight: 600; }
+  .agent-message-row .sub, .agent-message-inline-head .sub { min-width: 0;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .agent-message-row.attributed-agent-row { align-items: baseline; flex-wrap: nowrap;
+    line-height: 1.45; gap: var(--space-3); overflow: hidden; }
+  .activity-group-body .agent-message-row.attributed-agent-row { padding: var(--space-1) 0; }
+  .agent-message-row.attributed-agent-row .lead { flex: 0 1 auto; min-width: 0;
+    overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .agent-message-row.attributed-agent-row .sub { flex: none; }
+  .compacted-activity { align-self: stretch; max-width: 100%; }
+  .compaction-point-actions { display: flex; justify-content: flex-end;
+    padding-right: 32px; } /* space-check: allow clears the jump control */
+  /* The seated summary is a disclosure; its completion notice stays quiet. */
+  .compacted-head { display: inline-flex; align-items: center; gap: var(--space-3);
+    min-height: 34px; padding: var(--space-2) var(--space-4); border: 1px solid var(--border);
+    border-radius: 8px; background: var(--panel-2);
+    font: inherit; color: var(--text); cursor: pointer; }
+  .compacted-head:hover { border-color: var(--muted); }
+  .compacted-head:focus { outline: none; }
+  .compacted-head:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .compacted-activity:focus { outline: none; }
+  .compacted-activity.file-jump-target { outline: none; animation: none; }
+  .compacted-activity:focus-visible .thread-marker { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .agent-message-body { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start; gap: var(--space-3); min-width: 0; margin-top: var(--space-3);
+    padding: 0 var(--space-2) 0 var(--space-5);
+    border-left: 3px solid var(--accent-dim); }
+  .agent-message-content { min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+    color: var(--text); font: inherit; line-height: 1.55; }
+  .agent-message-content img { display: block; max-width: 100%; max-height: 280px; }
+  .agent-message-inspect { flex: none; display: inline-flex; align-items: center;
+    justify-content: center; width: 30px; height: 28px; padding: 0;
+    border: 1px solid var(--border); border-radius: 6px; background: transparent;
+    color: var(--muted); cursor: pointer;
+    transition: opacity var(--motion-fast), color var(--motion-fast), border-color var(--motion-fast); }
+  .agent-message-inspect svg { width: 16px; height: 16px; display: block; }
+  .agent-message-inspect:hover, .agent-message-inspect:focus-visible { color: var(--text);
+    border-color: var(--accent-dim); }
+  @media (hover: hover) and (pointer: fine) {
+    .agent-message-inspect { opacity: 0; }
+    .agent-message-body:hover .agent-message-inspect,
+    .agent-message-inspect:focus-visible { opacity: 1; }
+  }
+  .disclosure-body { margin-top: var(--space-3); padding: var(--space-4); border: 1px solid var(--border);
+    border-radius: 10px; background: var(--panel-2); }
+  .disclosure-body-head { display: flex; align-items: center; gap: var(--space-3);
+    margin-bottom: var(--space-3);
+    color: var(--muted); font-size: 0.71875rem; font-weight: 600; }
+  .disclosure-body pre { margin: 0; max-height: 320px; overflow: auto;
+    white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text);
+    font: 0.78125rem/1.55 var(--font-mono); }
+  .compacted-activity .disclosure-body > .content {
+    max-height: min(35vh, 280px); overflow: auto; }
+  .pending.agent { align-self: stretch; }
+  .pending.agent .agent-message { display: grid; grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center; gap: var(--space-2); max-width: 100%; }
+  .pending.agent .agent-message-body { grid-column: 1 / -1; }
+  .pending.agent .agent-message-row:not(.attributed-agent-row) { flex-wrap: wrap; }
+  .pending.agent .agent-message-preview { flex-basis: 100%; }
+  .pending.agent .agent-message-row:not(.attributed-agent-row) .lead,
+  .pending.agent .agent-message-row .sub { flex: none; }
+  /* A queued (not-yet-run) message: dimmed, with an always-visible remove control. */
+  .msg.user.pending { display: flex; flex-direction: row; align-items: center;
+    gap: var(--space-2); }
+  .msg.user.pending .bubble { opacity: .55; }
+  .msg.user.pending .pending-cancel:is(:hover, :focus-visible) { color: var(--danger); }
+  /* A failed send: the bubble on top, one compact footer line below it —
+     small muted-red reason plus Retry/Dismiss text buttons in the
+     small-button language (.prompt-copy). The line wraps inside the
+     bubble column so a 390px thread never overflows. */
+  .msg.user.pending.failed { flex-direction: column; align-items: flex-end; }
+  .pending-failure { display: flex; flex-wrap: wrap; align-items: baseline;
+    justify-content: flex-end; gap: var(--space-1) var(--space-3); max-width: 100%; }
+  .pending-failure-text { flex: 1 1 auto; min-width: 0; color: var(--danger);
+    font-size: 0.78125rem; line-height: 1.45; text-align: right;
+    overflow-wrap: anywhere; }
+  .pending-retry, .pending-dismiss { flex: none; }
+  .msg.assistant { max-width: 100%; min-width: 0; display: flex;
+    flex-direction: column; }
+  .msg .content { min-width: 0; max-width: 100%; word-wrap: break-word; overflow-wrap: anywhere; }
+  /* Streamed-text reveal: each ready paragraph of the live reply enters
+     with a short rise-and-fade; the settling tail uses the fast variant. */
+  .reveal-chunk { animation: reveal-in var(--motion-enter) ease-out both; }
+  .reveal-chunk.fast { animation-duration: var(--motion-fast); }
+  @keyframes reveal-in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+  @media (prefers-reduced-motion: reduce) { .reveal-chunk { animation: none; } }
+  /* Files an agent explicitly attached to this response. These controls are
+     structural message data, never inferred from Markdown or filesystem text. */
+  .agent-attachments { display: grid; grid-template-columns: minmax(0, 520px);
+    align-items: start; gap: var(--space-3); margin-top: var(--space-3); width: 100%;
+    max-width: 720px; }
+  .agent-attachments.images-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-attachments.images-many { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .agent-attachment-item { width: 100%; min-width: 0; }
+  .agent-attachment-item.image { position: relative; overflow: hidden; aspect-ratio: 4 / 3;
+    max-height: 390px; border: 1px solid var(--border); border-radius: 10px;
+    background: var(--panel-2); }
+  .agent-attachment-preview { display: block; width: 100%; height: 100%; padding: 0;
+    border: 0; background: transparent; cursor: zoom-in; }
+  .agent-attachment-preview img { display: block; width: 100%; height: 100%;
+    object-fit: contain; }
+  .agent-attachment-preview:focus-visible { outline: 2px solid var(--accent);
+    outline-offset: -3px; }
+  .agent-attachment-download-icon { position: absolute; z-index: var(--z-raised); top: 8px; right: 8px;
+    display: inline-flex; align-items: center; justify-content: center; width: 36px;
+    height: 36px; padding: 0; border: 1px solid color-mix(in srgb, var(--on-media) 24%, transparent);
+    border-radius: 50%; background: color-mix(in srgb, var(--scrim) 62%, transparent); color: var(--on-media);
+    opacity: 0; transition: opacity var(--motion-fast), background var(--motion-fast); }
+  .agent-attachment-download-icon svg { display: block; width: 20px; height: 20px; }
+  .agent-attachment-item.image:hover .agent-attachment-download-icon,
+  .agent-attachment-download-icon:focus-visible { opacity: 1; }
+  .agent-attachment-download-icon:hover { background: color-mix(in srgb, var(--scrim) 82%, transparent); }
+  .agent-attachment-download-icon:focus-visible { outline: 2px solid var(--accent);
+    outline-offset: 2px; }
+  /* A published file is one compact line: icon, name, size, then download. */
+  .agent-attachment-item.file, .agent-attachment.unavailable { grid-column: 1 / -1;
+    justify-self: start; width: auto; max-width: 100%; box-sizing: border-box; display: inline-flex;
+    align-items: center; min-height: 32px; border: 1px solid var(--border);
+    border-radius: 8px; background: var(--panel-2); font-size: 0.78125rem; }
+  .agent-attachment { min-width: 0; display: inline-flex; align-items: center;
+    gap: var(--space-2); align-self: stretch; padding: 0 var(--space-3); border: 0; border-radius: 8px 0 0 8px;
+    background: transparent; color: var(--text); }
+  button.agent-attachment { font: inherit; text-align: start; cursor: pointer; }
+  .agent-attachment.unavailable { padding: 0 var(--space-4); color: var(--muted); }
+  .agent-attachment svg, .agent-attachment-file-download svg { flex: none; width: 16px;
+    height: 16px; }
+  .agent-attachment svg { color: var(--muted); }
+  .agent-attachment-name { min-width: 0; overflow: hidden; white-space: nowrap;
+    text-overflow: ellipsis; }
+  .agent-attachment-size, .agent-attachment-state { flex: none; color: var(--muted);
+    font-size: 0.71875rem; }
+  .agent-attachment-file-download { flex: none; align-self: stretch; display: grid;
+    place-items: center; width: 32px; border-left: 1px solid var(--border);
+    border-radius: 0 8px 8px 0; color: var(--accent); }
+  button.agent-attachment:hover, button.agent-attachment:focus-visible,
+  .agent-attachment-file-download:hover, .agent-attachment-file-download:focus-visible {
+    background: var(--panel); outline: none; box-shadow: inset 0 0 0 1px var(--accent-dim); }
+  @media (pointer: coarse) {
+    .agent-attachment-item.file, .agent-attachment.unavailable { min-height: 38px; }
+    .agent-attachment-file-download { width: 40px; }
+  }
+  @media (max-width: 600px) {
+    .agent-attachments.images-many { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 360px) {
+    .agent-attachments.images-two, .agent-attachments.images-many {
+      grid-template-columns: minmax(0, 1fr); }
+  }
+  @media (hover: none), (pointer: coarse) {
+    .agent-attachment-download-icon { opacity: 1; }
+  }
+  .msg .meta { font-size: 0.71875rem; color: var(--muted); min-width: 0;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* footer under an assistant message: what the reply itself has to say about its
+     state. No controls live here — the turn keeps all of them in one row at its
+     own end. */
+  .msg-foot { display: flex; align-items: center; gap: var(--space-3); margin-top: var(--space-2);
+    min-height: 22px; }
+  .msg .error-note { color: var(--danger); font-size: 0.78125rem;
+    border: 1px solid color-mix(in srgb, var(--danger) 30%, transparent); background: color-mix(in srgb, var(--danger) 7%, transparent);
+    padding: var(--space-3) var(--space-4); border-radius: 8px; margin-top: var(--space-2); }
+  /* a refused turn, left out of later requests: dimmed, with its note at full
+     contrast and a Resend button */
+  .activity-boundary.refused :is(.msg.user .bubble, .msg.assistant > .content) { opacity: 0.55; }
+  .msg .error-note.refused-note { display: flex; align-items: center; gap: var(--space-3);
+    color: var(--text); border-color: var(--border); background: var(--panel-2); }
+  .refused-note > span { flex: 1; min-width: 0; }
+  .refused-resend { flex: none; }
+  /* a safety/extension notice (e.g. why an action was blocked): amber, distinct
+     from the red error note, and pre-wrapped since reasons can be multi-line */
+  .msg .notice-note { color: var(--notice); font-size: 0.78125rem; white-space: pre-wrap;
+    border: 1px solid color-mix(in srgb, var(--notice) 30%, transparent); background: color-mix(in srgb, var(--notice) 7%, transparent);
+    padding: var(--space-3) var(--space-4); border-radius: 8px; margin-top: var(--space-2); }
+  .history-unavailable { align-self: stretch; color: var(--danger);
+    border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); background: color-mix(in srgb, var(--danger) 9%, transparent);
+    padding: var(--space-4) var(--space-5); border-radius: 10px; font-size: 0.84375rem;
+    line-height: 1.45; }
+  .history-unavailable strong { display: block; margin-bottom: var(--space-1); font-size: 0.84375rem; }
+  /* routine lifecycle state, not an error: the muted twin of the retry alert */
+  .history-unavailable.deleting { color: var(--muted);
+    border-color: var(--border); background: var(--panel-2); }
+  .working { width: 100%; min-width: 0; max-width: 100%; color: var(--muted);
+    font-size: 0.78125rem; }
+  .working-live { display: flex; align-items: center; gap: var(--space-3); width: 100%;
+    min-width: 0; max-width: 100%; white-space: nowrap; }
+  /* CSS clips by rendered space rather than slicing JS strings, preserving
+     Unicode; title/aria-label retain the full bounded backend-redacted text. */
+  .working-live .work-label { flex: 1 1 auto; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  /* Live activity panel: a fixed-size box for the running turn — a pulsing
+     dot plus the tool name in bright text with its arguments muted, or the
+     Thinking / Starting states while no tool runs. One height for every
+     state, so streaming updates never move the thread. */
+  .live-panel-box { display: flex; flex-direction: column; align-items: stretch;
+    gap: 0; width: 100%; min-width: 0; max-width: 100%; height: 34px;
+    padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: 10px;
+    --live-dot: 7px;
+    background: var(--panel-2); overflow: hidden; }
+  .live-panel-head { display: flex; align-items: center; gap: var(--space-3);
+    min-width: 0; width: 100%; height: 32px; white-space: nowrap; }
+  .live-dot { flex: none; width: var(--live-dot); height: var(--live-dot); border-radius: 50%;
+    background: var(--running); animation: pulse 1.6s infinite; }
+  .live-panel-box.is-overlay .live-dot { background: var(--warn); animation: none; }
+  /* Panel words use the body font; only the argument fragment stays monospace
+     (shared with the tool-call rows above). */
+  .live-panel-box .live-label { display: flex; align-items: center; flex: 1 1 auto;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    color: var(--muted); font-size: 0.78125rem; font-family: inherit;
+    border: 0; padding: 0; background: none; text-align: left; }
+  .live-panel-box .live-thinking-head { display: flex; align-items: center;
+    min-width: 0; width: 100%; overflow: hidden; white-space: nowrap; }
+  .live-panel-box .live-thinking-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
+    text-overflow: ellipsis; white-space: nowrap; }
+  .live-panel-box .live-thinking-elapsed { flex: 0 0 8ch; margin-left: auto;
+    text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .live-panel-box .live-name { color: var(--text); font-weight: 600; }
+  .live-panel-box .live-args { color: var(--muted); }
+  .live-panel-box .shell-chip.live, .live-panel-box .agent-chip {
+    flex: none; animation: none; }
+  .live-panel-box .live-title-changing { animation: thinking-cross-fade var(--motion-fast) ease-out; }
+  .live-panel-box:has(.live-tool-body) { height: auto; min-height: 34px;
+    padding-bottom: var(--space-3); background: var(--expanded-bg); }
+  /* Invariant: tool and thinking bodies start under the label, after the
+     live dot and the head's gap. */
+  .live-tool-body { margin: 0 0 0 calc(var(--live-dot) + var(--space-3)); user-select: text; }
+  .live-tool-row + .live-tool-row { margin-top: var(--space-3); }
+  .live-tool-head { display: flex; gap: var(--space-3); align-items: baseline; }
+  .live-tool-head code { flex: 1; min-width: 0; white-space: pre-wrap;
+    overflow-wrap: anywhere; font: 0.71875rem/1.35 var(--font-mono);
+    max-height: calc(1.35em * 3); overflow: auto; }
+  .live-tool-row pre { margin: var(--space-2) 0 0; white-space: pre-wrap;
+    overflow-wrap: anywhere; font: 0.71875rem/1.35 var(--font-mono);
+    max-height: calc(1.35em * 5); overflow: auto; }
+  .live-panel-box:has(.live-thinking-summary) { height: auto; min-height: 34px;
+    padding-bottom: var(--space-3); }
+  .live-panel-box:has(.live-thinking-summary) .live-thinking-summary {
+    display: block; margin: 0; padding-left: calc(var(--live-dot) + var(--space-3));
+    white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35; }
+  .live-panel-box:has(.live-thinking-summary) .live-thinking-copy { cursor: pointer; }
+  .live-panel-box:has(.live-thinking-summary):focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+  /* Inset edges do not change disclosure geometry or scroll anchoring. */
+  .activity-group-body, .activity-group-part, .turn-series-body, .agent-message-body,
+  .disclosure-body, .turn-thinking-body, .tool-detail-body, .prompt-banner-body pre,
+  .live-panel-box:has(.live-thinking-summary) {
+    background: var(--expanded-bg); box-shadow: var(--expanded-shadow); }
+  .disclosure-body, .prompt-banner-body pre,
+  .live-panel-box:has(.live-thinking-summary) {
+    border-color: var(--expanded-border); box-shadow: var(--expanded-lift); }
+  /* Nested disclosures read as an inset, not another raised box. */
+  .activity-group-body :is(.turn-series-body, .agent-message-body, .turn-thinking-body, .tool-detail-body) {
+    background: color-mix(in srgb, var(--expanded-bg) 50%, var(--panel));
+    border-radius: 6px; box-shadow: none; }
+  .turn-series-toggle[aria-expanded="true"],
+  .agent-message-row[aria-expanded="true"],
+  .agent-message-row[aria-expanded="true"] .agent-message-preview,
+  .turn-thinking-toggle[aria-expanded="true"],
+  .prompt-banner-row[aria-expanded="true"] { color: var(--text); }
+  .compacted-head[aria-expanded="true"], .prompt-banner-row[aria-expanded="true"] {
+    border-color: var(--expanded-border); }
+  @keyframes thinking-cross-fade { from { opacity: .2; } to { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) {
+    .live-panel-box .live-dot, .live-panel-box .live-title-changing {
+      animation: none; }
+  }
+  /* The panel owns the response's single pulsing dot; the footer summary
+     slot stays empty while the turn streams or background work continues. */
+  /* The live eye is the same turn-level disclosure as history. Its current
+     segment summary then reveals finished/in-flight calls in .work-activity. */
+  .working .work-eye { flex: none; display: inline-flex; align-items: center;
+    justify-content: center; width: 30px; height: 30px; padding: var(--space-2); border-radius: 8px;
+    background: var(--panel-2); border: 1px solid var(--border); color: var(--muted);
+    cursor: pointer; transition: color var(--motion-fast), border-color var(--motion-fast); }
+  .working .work-eye svg { width: 16px; height: 16px; display: block; }
+  .working .work-eye:hover, .working .work-eye:focus-visible {
+    color: var(--text); border-color: var(--text); }
+  .working .work-eye.on { color: var(--accent); border-color: var(--accent-dim); }
+  /* The current segment summary reveals its in-flight calls. Background shells
+     stay out of the thread until the compact chip is opened. */
+  .work-activity { min-width: 0; max-width: 100%; margin-top: var(--space-3); border: 1px solid var(--border);
+    border-radius: 10px; background: var(--code-bg); overflow: hidden; }
+  .work-activity section { padding: var(--space-4); }
+  .work-activity h3 { margin: 0 0 var(--space-3); color: var(--muted);
+    font-size: 0.71875rem; font-weight: 600; line-height: 1.4; text-transform: uppercase;
+    letter-spacing: .04em; }
+  .work-activity .tool-calls { max-height: min(60vh, 640px); border: 0;
+    border-radius: 0; margin: 0 calc(-1 * var(--space-4)) calc(-1 * var(--space-4)); }
+  .work-activity .tc-empty { color: var(--muted); }
+  /* Status chips are count badges (app.css .badge): green for shells, amber
+     for agents. Both render only inside the panel (above), which owns their
+     shared pulse. */
+  .shell-chip, .agent-chip { max-width: min(38vw, 190px); overflow: visible;
+    cursor: pointer; transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast); }
+  .shell-chip .chip-label, .agent-chip .chip-label {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* The panel is 34 px tall, so its chips keep a height that fits the box at
+     every breakpoint. Coarse-pointer hit areas are transparent pseudo-elements
+     below; they must not stretch the chip or let its label escape the pill. */
+  .shell-chip:focus-visible, .agent-chip:focus-visible {
+    outline: 2px solid var(--text); outline-offset: 2px; }
+  #context-overlay { position: fixed; z-index: calc(var(--z-dialog) + 1); inset: 0; display: none;
+    align-items: center; justify-content: center;
+    padding: 56px var(--space-5) var(--space-6); /* space-check: allow clears the topbar */
+    background: color-mix(in srgb, var(--scrim-deep) 64%, transparent); }
+  #context-overlay.on { display: flex; }
+  #context-surface { width: min(680px, calc(100vw - 2 * var(--space-5))); max-height: min(78dvh, 680px);
+    overflow: hidden; display: flex; flex-direction: column; }
+  .context-surface-head { min-height: 48px; display: flex; align-items: center;
+    justify-content: space-between; gap: var(--space-4);
+    padding: var(--space-3) var(--space-4) 0 var(--space-6); }
+  .context-surface-head h2 { min-width: 0; margin: 0; color: var(--text);
+    font-size: 1.25rem; line-height: 1.25; font-weight: 700; }
+  #context-body { min-height: 0; flex: 1 1 auto; overflow-y: auto;
+    padding: 0 var(--space-6) var(--space-6); }
+  #context-body > .turn-usage-bar-line { margin-top: var(--space-4); }
+  /* five legend items never fit beside the bar on a phone; give them their own
+     row so labels wrap instead of overflowing */
+  #context-body .turn-usage-legend { flex: 1 1 100%; }
+  #context-mini.empty { display: none; }
+  .context-loading, .context-error { margin: 0 var(--space-1);
+    color: var(--muted); font-size: 0.71875rem; line-height: 1.5; }
+  .context-error { color: var(--danger); }
+
+  #shell-overlay { position: fixed; z-index: var(--z-dialog); inset: 48px 0 0; display: flex;
+    align-items: flex-start; justify-content: center; padding: var(--space-5);
+    pointer-events: none; }
+  .shell-surface { pointer-events: auto; width: min(540px, calc(100vw - 2 * var(--space-5)));
+    max-height: min(72dvh, calc(100dvh - 48px - 124px));
+    overflow: hidden; padding: var(--space-5);
+    display: flex; flex-direction: column; }
+  .shell-surface-head { display: flex; align-items: flex-start; gap: var(--space-4);
+    margin-bottom: var(--space-4); }
+  .shell-surface-heading { min-width: 0; flex: 1; }
+  .shell-surface h2 { margin: 0; color: var(--text); font-size: 0.9375rem;
+    font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+  .shell-surface p { margin: var(--space-2) 0 0; color: var(--muted); font-size: 0.71875rem; line-height: 1.4; }
+  .shell-list { list-style: none; min-height: 0; flex: 1 1 auto; margin: 0;
+    padding: 0 var(--space-1) 0 0; display: flex; flex-direction: column; gap: var(--space-3);
+    overflow-y: auto; }
+  .shell-row { min-width: 0; padding: var(--space-3) var(--space-4); background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 8px; }
+  .shell-command { color: var(--text); font: 0.78125rem/1.45 var(--font-mono); overflow-wrap: anywhere; white-space: pre-wrap; }
+  .shell-meta { margin-bottom: var(--space-2); display: flex; align-items: center;
+    flex-wrap: wrap; gap: var(--space-2) var(--space-3); color: var(--muted); font-size: 0.65625rem; }
+  .shell-state { border: 1px solid var(--border); border-radius: 999px;
+    padding: 1px var(--space-3); font-weight: 600; }
+  .shell-state.running { color: var(--running); border-color: color-mix(in srgb, var(--running) 45%, transparent); }
+  .shell-state.stopping { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+  .shell-limit, .shell-empty { margin: var(--space-3) 1px 0; color: var(--muted); font-size: 0.65625rem; }
+  .shell-empty { margin-top: var(--space-1); }
+  .agent-surface { padding: var(--space-3); }
+  .agent-surface .shell-surface-head { align-items: center; gap: var(--space-3);
+    margin-bottom: var(--space-2); padding-left: var(--space-3); }
+  .active-agent-list .agent:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -2px; }
+  .active-agent-list { list-style: none; min-height: 0; flex: 1 1 auto;
+    margin: 0; padding: 0; overflow-y: auto; }
+  button.agent { display: block; width: 100%; background: transparent;
+    color: inherit; font: inherit; text-align: left; }
+  .active-agent-list .agent .time { display: inline; }
+  @media (pointer: coarse) {
+    .active-agent-list .agent { min-height: 44px; } }
+
+  /* new-agent draft: a blank thread shown instantly before the agent exists */
+  .draft-hello { color: var(--muted); text-align: center; margin: 12vh auto 0;
+    max-width: 440px; }
+  .draft-hello .icon { width: 46px; height: 46px; margin: 0 auto var(--space-4);
+    border-radius: 14px; display: flex; align-items: center; justify-content: center;
+    background: linear-gradient(135deg, var(--accent), var(--accent-deep));
+    box-shadow: 0 0 22px color-mix(in srgb, var(--accent) 30%, transparent); color: var(--text-on-accent); }
+  .draft-hello h2 { color: var(--text); font-size: 1.0625rem; margin: 0; }
+  .draft-hello .draft-sub { margin: var(--space-3) 0 0; font-size: 0.78125rem; color: var(--muted); }
+  .draft-model-host { width: min(360px, calc(100vw - 48px)); margin: var(--space-5) auto 0;
+    text-align: left; }
+  .agent.draft-row .title { color: var(--accent); font-style: italic; }
+
+  /* markdown */
+  .content p { margin: 0 0 .8em; }
+  /* Collapse the trailing block's bottom margin so a message ending in a code
+     block (or list/quote) doesn't leave a stray gap before the footer or the
+     "working…" indicator — matching how a trailing paragraph already collapses. */
+  .content > *:last-child, .content > .code-wrap:last-child > pre { margin-bottom: 0; }
+  .content h1, .content h2, .content h3 { margin: 1em 0 .5em; line-height: 1.3; }
+  .content h1 { font-size: 1.25em; } .content h2 { font-size: 1.1em; } .content h3 { font-size: 1.02em; }
+  .content ul, .content ol { margin: .4em 0 .8em; padding-left: 1.4em; }
+  .content li { margin: .2em 0; }
+  .content code { background: var(--code-bg); border: 1px solid var(--border);
+    padding: var(--space-1) var(--space-2); border-radius: 6px;
+    font: 0.78125rem/1.5 var(--font-mono); }
+  .content pre { background: var(--code-bg); border: 1px solid var(--border);
+    border-radius: 10px; padding: var(--space-4) var(--space-5); overflow-x: auto;
+    margin: .6em 0 1em; }
+  .content pre code { background: none; border: 0; padding: 0; }
+  /* An assistant image whose source isn't an allowed same-origin attachment is
+     replaced by this inert marker instead of being rendered. */
+  .content .blocked-image { display: inline-block; margin: var(--space-2) 0 0;
+    padding: var(--space-2) var(--space-3);
+    border: 1px dashed var(--border); border-radius: 8px; color: var(--muted);
+    font-size: 0.78125rem; }
+  .code-wrap { position: relative; }
+  .code-wrap .copy-btn { position: absolute; top: 7px; right: 7px;
+    background: var(--panel-2); opacity: 0; transition: opacity var(--motion-fast); }
+  .code-wrap:hover .copy-btn { opacity: 1; }
+  .code-wrap .copy-btn.copied { color: var(--accent); border-color: var(--accent-dim); opacity: 1; }
+  /* Touch devices have no hover; keep code-block Copy controls tappable. */
+  @media (hover: none) {
+    .code-wrap .copy-btn { opacity: 1; }
+  }
+  .content blockquote { margin: .6em 0; padding: .1em 1em;
+    border-left: 3px solid var(--accent-dim); color: var(--muted); }
+  .content table { border-collapse: collapse; margin: .6em 0 1em; font-size: 0.84375rem; }
+  .content th, .content td { border: 1px solid var(--border);
+    padding: var(--space-2) var(--space-4); }
+  .content th { background: var(--panel-2); }
+  .content a { color: var(--accent); }
+  .content img { display: block; max-width: 100%; max-height: 360px;
+    border-radius: 10px; border: 1px solid var(--border); margin: .5em 0; }
+
+  /* ---------- composer ---------- */
+  #composer-wrap { flex: none; min-width: 0; padding: var(--space-2) var(--space-5) var(--space-4);
+    position: relative; }
+  /* Thread content fades out as it scrolls under the composer or the title bar
+     instead of meeting a hard edge. Each fade shows only while there is content
+     beyond that edge (#scroll.content-below / .content-above), so the thread's
+     first and last items are never covered at rest. Fades never take clicks,
+     taps or selection. */
+  #composer-wrap::before, #topbar::after { content: ""; position: absolute; left: 0; right: 0;
+    height: 32px; pointer-events: none; opacity: 0; transition: opacity var(--motion-fast); }
+  #composer-wrap::before { bottom: 100%; background: linear-gradient(transparent, var(--bg)); }
+  #topbar::after { top: 100%; height: 24px; z-index: var(--z-chrome);
+    background: linear-gradient(var(--bg), transparent); }
+  #scroll.content-below + #composer-wrap::before,
+  #topbar:has(~ #scroll.content-above)::after { opacity: 1; }
+  /* An open phone pane covers the thread: the title bar meets its bar at a
+     hard line, never the thread's fade. */
+  #topbar.pane-overlay::after { display: none; }
+  /* A selection started in the thread must not extend into the title bar or
+     composer chrome when a touch handle is dragged past the thread's edge. */
+  #topbar, #composer-wrap { -webkit-user-select: none; user-select: none; }
+  :is(#topbar, #composer-wrap) :is(input, textarea) { -webkit-user-select: text; user-select: text; }
+
+  /* scroll-to-latest: floats over the messages pane, centered just above the
+     composer, shown only when scrolled far from the bottom (see updateScrollBtn). */
+  #scroll-btn { position: absolute; bottom: 100%; left: 50%; margin-bottom: var(--space-3);
+    transform: translateX(-50%) translateY(6px); width: 36px; height: 36px;
+    border-radius: 50%; border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--muted); cursor: pointer; display: flex; align-items: center;
+    justify-content: center; box-shadow: var(--expanded-lift);
+    opacity: 0; pointer-events: none; transition: opacity var(--motion-fast), transform var(--motion-fast),
+      color var(--motion-fast), border-color var(--motion-fast); }
+  #scroll-btn.visible { opacity: 1; pointer-events: auto;
+    transform: translateX(-50%) translateY(0); }
+  #scroll-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+  #composer-shell { max-width: 780px; margin: 0 auto; position: relative; }
+  #composer, .composer-box { width: 100%; margin: 0; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 14px;
+    padding: var(--space-2);
+    display: flex; align-items: flex-end; gap: var(--space-3); position: relative;
+    transition: border-color var(--motion-fast); }
+  #composer:focus-within, .composer-box:focus-within { border-color: var(--accent-dim); }
+  #composer.dragover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  #input, .composer-input { flex: 1; border: 0; background: none; resize: none; outline: none;
+    color: var(--text); font: inherit; max-height: 180px; padding: var(--space-3) 0; }
+  #input::placeholder, .composer-input::placeholder { color: var(--text-placeholder); }
+  /* Skill autocomplete floats directly above the composer. Typing a slash at a
+     word boundary filters pi's available skills; each row completes the real
+     /skill:name command while keeping the shorter /name discovery UI. */
+  #skill-menu { display: none; position: absolute; z-index: var(--z-menu);
+    left: -1px; right: -1px; bottom: calc(100% + 7px); max-height: 270px;
+    overflow-y: auto; }
+  #skill-menu.on { display: block; }
+  /* One agent finder serves @ insertion and Normal-mode navigation. It shares a
+     single grouped listbox/index; navigate mode adds a dedicated query field so
+     composer text is never touched. The composer sits near the viewport bottom,
+     making the full-width-above placement safe on desktop and mobile. */
+  #agent-finder { display: none; position: absolute; z-index: var(--z-menu);
+    left: -1px; right: -1px; bottom: calc(100% + 7px); max-height: min(390px, 52vh);
+    overflow: hidden; }
+  #agent-finder.on { display: flex; flex-direction: column; }
+  #agent-finder-query { flex: none; width: calc(100% - 2 * var(--space-2));
+    margin: var(--space-2); }
+  #agent-menu { flex: 1; min-height: 0; overflow-y: auto; padding: 0;
+    overscroll-behavior: contain; }
+  #agent-finder [hidden] { display: none; }
+  /* Two-line rows: a name above its description or path. The skill rows also
+     undo the composer's square icon-button size. */
+  #skill-menu .skill-option { width: 100%; height: auto; margin: 0; border-radius: 8px;
+    align-items: stretch; }
+  .menu-item:is(.skill-option, .agent-option) { flex-direction: column; align-items: stretch;
+    justify-content: center; gap: var(--space-1); }
+  .skill-option .skill-name { color: var(--accent);
+    font: 600 0.78125rem/1.35 var(--font-mono); }
+  .skill-option.action .skill-name { color: var(--text); }
+  .skill-option .skill-description { color: var(--muted); font-size: 0.71875rem;
+    line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-option-group + .agent-option-group { border-top: 1px solid var(--border);
+    margin-top: var(--space-2); padding-top: var(--space-2); }
+  .agent-option-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+  .agent-option-name { flex: 1; min-width: 0; font-size: 0.84375rem; font-weight: 600;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agent-option-relation { flex: none; border-radius: 999px;
+    padding: 1px var(--space-3); font-size: 0.65625rem; line-height: 1.4; }
+  .agent-option-relation { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .agent-option-path { color: var(--muted); font: 0.65625rem/1.35 var(--font-mono); white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; }
+  #composer button, .composer-box button { flex: none; width: 28px; height: 28px; margin-bottom: var(--space-2);
+    border: 0; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; justify-content: center; }
+  /* Touch targets extend beyond the visible controls without sizing the row. */
+  @media (pointer: coarse) {
+    #attach, #send { position: relative; }
+    #attach::after, #send::after { content: ""; position: absolute;
+      width: 44px; height: 44px; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+  }
+  #send, .composer-send { background: var(--accent); color: var(--text-on-accent); }
+  #send:hover, .composer-send:hover { background: var(--accent-hover); }
+  #send:disabled, .composer-send:disabled { background: var(--control-disabled); color: var(--text-placeholder); cursor: default; }
+  /* Running turns reuse this control for Stop: resting is red; one tap arms a
+     stronger confirmation state. */
+  #send.stop { border: 1px solid var(--danger); background: transparent;
+    color: var(--danger); user-select: none; -webkit-touch-callout: none;
+    touch-action: manipulation; }
+  #send.stop:hover, #send.stop:focus-visible, #send.stop.stopping {
+    color: var(--danger); border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 8%, transparent); }
+  #send.stop.armed { color: var(--danger); border-color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 18%, transparent); }
+  #send.stop.error { outline: 1px solid var(--danger); }
+  #send.stop:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+  #attach { background: none; color: var(--muted); }
+  #attach:hover { color: var(--accent); background: var(--panel); }
+  /* The model picker stays compact at the inline end. Its context button sits
+     immediately to the left with a reserved numeric label and optional mini bar,
+     so changing totals does not move the picker's baseline. The "Model" label
+     and draft/fixed hint remain available to screen readers. */
+  /* Always-flex is intentional mixed-generation compatibility: old bundles
+     toggle only #model-row, while newer shells wrap it in #model-controls.
+     With both children off this wrapper has zero content and occupies no width. */
+  #model-controls { display: flex; flex: 0 1 auto; align-items: center;
+    justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto;
+    min-width: 0; max-width: 100%; color: var(--muted); font-size: 0.78125rem;
+    line-height: 1.4; }
+  #model-controls.on { flex: 0 1 auto; }
+  #context-indicator { display: none; flex: none; align-items: center; gap: var(--space-2);
+    min-height: 32px; padding: var(--space-2) var(--space-1); border: 0; border-radius: 6px;
+    background: transparent; color: var(--muted); font: inherit; cursor: pointer;
+    white-space: nowrap; transition: color var(--motion-fast), background-color var(--motion-fast); }
+  #context-indicator.on { display: inline-flex; }
+  #context-indicator:hover, #context-indicator:focus-visible {
+    color: var(--text); background: var(--panel); }
+  #context-indicator:focus-visible { outline: 2px solid var(--accent-dim);
+    outline-offset: 1px; }
+  #context-mini { display: flex; width: 48px; height: 5px; overflow: hidden;
+    border-radius: 999px; background: var(--border); }
+  #context-indicator.mini-hidden #context-mini { display: none; }
+  #context-token-label { width: 11ch; flex: none; text-align: right; overflow: hidden;
+    font-size: 0.78125rem; color: var(--muted); font-weight: normal;
+    text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+  #model-row { display: none; min-width: 0; }
+  #model-row.on { display: flex; }
+  #model-trigger { display: inline-flex; align-items: center; gap: var(--space-3);
+    max-width: 240px; min-height: 32px; padding: var(--space-2) var(--space-3); border: 0;
+    border-radius: 8px; background: transparent; color: var(--muted);
+    font: inherit; font-size: 0.78125rem; cursor: pointer; }
+  #model-trigger:hover, #model-trigger:focus-visible { background: var(--panel-2);
+    color: var(--text); }
+  #model-trigger:focus-visible { outline: 2px solid var(--accent-dim); }
+  #model-trigger.pending .model-name { font-weight: 700; color: var(--text); }
+  #model-trigger > svg { flex: none; width: 12px; height: 12px; }
+  #model-trigger .model-name { width: 14ch; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  #model-menu { position: fixed; inset: auto; margin: 0;
+    width: min(300px, calc(100vw - 24px)); max-height: calc(100dvh - 24px);
+    overflow: auto; font-size: 0.78125rem; }
+  #effort-slider { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+  #effort-range { appearance: none; -webkit-appearance: none; flex: 1;
+    min-width: 0; width: auto;
+    height: 26px; background: transparent; cursor: pointer; margin: 0; }
+  #effort-range::-webkit-slider-runnable-track { height: 14px; border-radius: 999px;
+    background:
+      radial-gradient(circle 2.5px at 1%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 25%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 50%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 75%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 99%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      linear-gradient(to right, var(--accent) var(--fill, 0%), var(--panel-2) var(--fill, 0%));
+    box-shadow: inset 0 0 0 1px var(--border); }
+  #effort-range::-webkit-slider-thumb { -webkit-appearance: none; width: 22px;
+    height: 22px; border-radius: 50%; background: var(--text);
+    margin-top: -4px; /* space-check: allow centres the 22px thumb on the 14px track */
+    border: 3px solid var(--accent);
+    box-shadow: 0 1px 4px color-mix(in srgb, var(--shadow) 45%, transparent); } /* shadow-check: allow slider thumb */
+  #effort-range::-moz-range-track { height: 14px; border-radius: 999px;
+    background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--border); }
+  #effort-range::-moz-range-progress { height: 14px; border-radius: 999px;
+    background: var(--accent); }
+  #effort-range::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%;
+    background: var(--text); border: 3px solid var(--accent);
+    box-shadow: 0 1px 4px color-mix(in srgb, var(--shadow) 45%, transparent); } /* shadow-check: allow slider thumb */
+  #effort-range:focus-visible { outline: 2px solid var(--accent-dim);
+    outline-offset: 2px; }
+  #effort-range:disabled { opacity: .55; cursor: default; }
+  #effort-slider.legacy #effort-range::-webkit-slider-runnable-track {
+    background:
+      radial-gradient(circle 2.5px at 1%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 25%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 50%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 75%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      radial-gradient(circle 2.5px at 99%, color-mix(in srgb, var(--on-media) 40%, transparent) 90%, transparent),
+      var(--panel-2); }
+  #effort-slider.legacy #effort-range::-webkit-slider-thumb,
+  #effort-slider.legacy #effort-range::-moz-range-thumb { border-color: var(--muted); }
+  #effort-slider.legacy #effort-range::-moz-range-progress { background: var(--muted); }
+  #effort-value { font-size: 0.65625rem; color: var(--muted); min-width: 44px;
+    text-align: right; }
+  #effort-model { margin: var(--space-3) 0 0; color: var(--text); font-size: 0.84375rem;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #effort-model:empty { display: none; }
+  #effort-current { margin: var(--space-3) 0 0; color: var(--muted); font-size: 0.71875rem; }
+  /* The new-agent page keeps a visible, centred trigger and reveals the
+     slider inline instead of putting it in the top layer. */
+  .draft-model-host #model-row { width: 100%; flex-direction: column;
+    align-items: center; }
+  .draft-model-host #model-menu { display: none; position: static;
+    width: min(300px, 100%); max-height: none; margin: var(--space-3) auto 0; }
+  .draft-model-host #model-menu.draft-open { display: block; }
+  #model-row [hidden] { display: none; }
+  #safety-btn:focus-visible {
+    outline: 2px solid var(--accent-dim); outline-offset: 1px; }
+
+  /* Per-conversation safety toggle: review each action before it runs, or skip.
+     Sits at the inline start of the model row and only shows for a saved chat
+     (not a draft). Off = "Yolo mode", the label turns red. */
+  #safety-row { display: none; justify-content: flex-start; align-items: center;
+    min-width: 0; font-size: 0.78125rem; line-height: 1.4; }
+  #safety-row.on { display: flex; flex: 0 0 auto; }
+  #safety-btn { display: inline-flex; align-items: center; gap: var(--space-2);
+    min-height: 32px; background: none; border: 0; padding: var(--space-2) var(--space-1);
+    color: var(--muted); font: inherit; font-size: 0.78125rem; cursor: pointer;
+    border-radius: 6px; white-space: nowrap; transition: color var(--motion-fast); }
+  #safety-btn:hover:not(:disabled) { color: var(--text); }
+#safety-btn { position: relative; }
+#safety-btn.unavailable .lbl { transform: translateY(-5px); }
+#safety-unavailable { position: absolute; left: 34px; bottom: 2px;
+color: var(--warn); font-size: 0.65625rem; line-height: 1; }
+#safety-unavailable[hidden] { display: none; }
+  #safety-btn:disabled { cursor: default; opacity: .5; }
+  #safety-btn .track { position: relative; width: 26px; height: 15px;
+    border-radius: 999px; background: var(--switch-track);
+    transition: background var(--motion-fast); flex: none; }
+  #safety-btn .knob { position: absolute; top: 2px; left: 2px; width: 11px;
+    height: 11px; border-radius: 50%; background: var(--muted);
+    transition: transform var(--motion-fast), background var(--motion-fast); }
+  /* On (reviewing): green track, knob to the right. */
+  #safety-row:not(.off) #safety-btn .track { background: var(--running); }
+  #safety-row:not(.off) #safety-btn .knob { transform: translateX(11px);
+    background: var(--switch-knob-on); }
+  /* Off (skipping): red track to match the warning. Track/label follow the
+     DESIRED position; a queued change is spelled out in the label ("· next
+     turn") and dimmed slightly so it reads as pending, not yet in force. */
+  #safety-row.off #safety-btn .track { background: var(--danger); }
+  #safety-row.off #safety-btn .lbl { color: var(--danger); }
+  #safety-row.pending #safety-btn .lbl { opacity: .8; font-style: italic; }
+  /* Keep both controls on one vertically centered row whenever their usable
+     hit targets fit. At very narrow widths the model/context pair wraps as one
+     unit, preserving DOM/tab order without overlap. */
+  #downgrade-chip { display: inline-flex; flex: none; align-items: center; gap: var(--space-1);
+  padding: var(--space-2) var(--space-1); min-height: 32px; border: 0; background: none;
+  color: var(--accent); font: inherit; font-size: 0.71875rem; cursor: pointer; white-space: nowrap; }
+#conv-controls:has(#downgrade-chip:not([hidden])) { flex-wrap: nowrap; }
+#conv-controls:has(#downgrade-chip:not([hidden])) #model-trigger { max-width: 100%; }
+#downgrade-chip[hidden] { display: none; }
+#downgrade-chip.seen { color: var(--muted); }
+#downgrade-chip svg { width: 13px; height: 13px; }
+#downgrade-popover { position: fixed; inset: auto; margin: 0; font-size: 0.78125rem; overflow-wrap: anywhere;
+  width: min(300px, calc(100vw - 16px)); }
+#downgrade-popover p { margin: var(--space-2) 0; }
+#conv-controls { display: flex; flex-wrap: wrap; align-items: center;
+    justify-content: space-between; column-gap: var(--space-3); row-gap: 0;
+    max-width: 780px; margin: 0 auto var(--space-1); padding: 0 var(--space-1); }
+
+  /* send resilience: inline status shown under the composer while a send
+     is retrying or has failed (subway / flaky network) */
+  #send-status { width: min(780px, 100%); margin: var(--space-2) auto 0;
+    padding: 0 var(--space-2);
+    border: 0; background: none; text-align: left; font: inherit;
+    font-size: 0.71875rem; line-height: 1.4; color: var(--muted); display: none; }
+  #send-status.show { display: block; }
+  #send-status.pending { color: var(--accent); opacity: 1; }
+  #send-status.command-error { color: var(--error-text); }
+  #send-status.error { color: var(--error-text); cursor: pointer; }
+  #send-status.error:hover { text-decoration: underline; text-underline-offset: 2px; }
+  #update-status { max-width: 780px; margin: var(--space-2) auto 0; padding: 0 var(--space-2);
+    display: none; color: var(--accent); font-size: 0.71875rem; line-height: 1.4; }
+  #update-status.on { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+
+  /* pending attachment thumbnails, shown above the composer before send */
+  #attachments { max-width: 780px; margin: 0 auto; display: flex; flex-wrap: wrap;
+    gap: var(--space-3); padding: 0 0 var(--space-3); }
+  #attachments:empty { display: none; }
+  .attach-chip { position: relative; width: 60px; height: 60px; border-radius: 10px;
+    overflow: hidden; border: 1px solid var(--border); background: var(--panel); }
+  .attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  /* uploaded image chips wrap their thumbnail in a button that opens the preview */
+  .attach-chip .preview { display: block; width: 100%; height: 100%; padding: 0;
+    margin: 0; border: 0; background: none; cursor: zoom-in; }
+  .attach-chip .preview:focus-visible { outline: 2px solid var(--accent);
+    outline-offset: 2px; }
+  .attach-chip.file { width: auto; max-width: 200px; display: flex; align-items: center;
+    padding: 0 var(--space-6) 0 var(--space-4); color: var(--text); }
+  .attach-chip.file .name { font-size: 0.71875rem; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; }
+  .attach-chip.uploading { opacity: .55; }
+  .attach-chip.failed { border-color: var(--danger); }
+  .attach-chip .retry { position: absolute; left: 4px; bottom: 4px; border: 0;
+    border-radius: 6px; padding: var(--space-1) var(--space-2); background: color-mix(in srgb, var(--shadow) 72%, transparent); color: var(--on-media);
+    font-size: 0.65625rem; line-height: 1.4; cursor: pointer; }
+  .attach-chip .rm { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;
+    border: 0; border-radius: 50%; background: color-mix(in srgb, var(--shadow) 60%, transparent); color: var(--on-media);
+    cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
+  .attach-chip .rm svg { width: 12px; height: 12px; }
+  /* Spec: on touch the remove target is 48px. It covers the chip's top band and
+     reaches up into extra row space, so it stays clear of the chip's centre (the
+     preview), the next chip, and the row above; the visible circle stays 18px.
+     The preview clips the thumbnail instead of the chip. */
+  @media (pointer: coarse) {
+    #attachments { padding-top: var(--space-6);
+      row-gap: 28px; } /* space-check: allow the 48px remove target clears the row above */
+    .attach-chip { overflow: visible; }
+    .attach-chip .preview { border-radius: inherit; overflow: hidden; }
+    .attach-chip .rm::before { content: ""; position: absolute; left: -22px; top: -26px;
+      width: 48px; height: 48px; }
+  }
+  .attach-chip .rm:hover { background: var(--danger); }
+
+  /* Drawing editor (image-preview/editor.ts): Excalidraw fills the screen under one slim bar. */
+  .drawing-editor { position: fixed; inset: 0; z-index: calc(var(--z-dialog) + 4); display: flex; flex-direction: column; background: var(--bg); }
+  .drawing-editor-bar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); padding-top: max(var(--space-2), env(safe-area-inset-top)); }
+  .drawing-editor-bar [role="status"] { flex: 1; min-width: 0; color: var(--text); font-size: 0.78125rem; }
+  .drawing-editor-actions { display: flex; gap: var(--space-2); }
+  .drawing-editor-actions[hidden] { display: none; }
+  .drawing-editor-stage { position: relative; flex: 1; min-height: 0; }
+  .drawing-editor .excalidraw .default-sidebar-trigger { display: none; }
+
+  /* ---------- mobile ---------- */
+  #backdrop { display: none; }
+  @media (max-width: 700px) {
+    #sidebar { position: fixed; inset: 0 auto 0 0; z-index: calc(var(--z-drawer) + 3); width: 85vw;
+      max-width: 360px; padding-top: var(--mobile-shell-height);
+      padding-bottom: env(safe-area-inset-bottom);
+      transform: translateX(-102%); transition: transform var(--motion-move); }
+    #sidebar.open { transform: none; }
+    #backdrop.on { display: block; position: fixed; inset: 0; z-index: calc(var(--z-drawer) + 2);
+      background: color-mix(in srgb, var(--shadow) 50%, transparent); }
+    #menu-btn { display: inline-flex; }
+    #sidebar-foot { display: block;
+      padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+    #shortcut-pane:not([open]) { padding: 0; }
+    /* Status, queue, mute/safety, title, and child count outrank relative time
+       when the row is narrow; every actual state remains written out. */
+    .agent .time { display: none; }
+    .agent .row1 { gap: var(--space-2); }
+    /* phone: collapse the topbar actions to icon-only to save the narrow width */
+    .top-act .lbl { display: none; }
+    .top-act { padding: var(--space-2) var(--space-3); }
+    #top-actions { gap: 0; }
+    /* One row, with full-size touch targets; pane chrome still measures this
+       bar and translates it away on scroll rather than resizing the viewport. */
+    #topbar { height: calc(48px + env(safe-area-inset-top));
+      padding: env(safe-area-inset-top) var(--space-3) 0; gap: var(--space-2); z-index: calc(var(--z-drawer) + 4); }
+    #key-mode { display: none; }
+    #conv-titlebar { gap: var(--space-2); }
+    #top-actions.prefix-on .top-act::after { position: absolute; transform: translateY(24px); }
+    .top-act { position: relative; }
+    #conv-title { font-size: 0.9375rem; }
+    #sidebar.desktop-hidden { display: flex; }
+    /* Keep the context measurement attached to the picker on a phone. The pair
+       wraps together rather than squeezing safety or overlapping the composer. */
+    #conv-controls { column-gap: var(--space-2); }
+    #conv-controls #safety-row { margin: 0; padding: 0; min-width: 0; }
+    #conv-controls #model-controls { margin-block: 0; margin-inline-start: auto;
+      margin-inline-end: 0; padding: 0; max-width: 100%; }
+    #conv-controls #model-row { width: 100%; min-width: 0; max-width: none; }
+    #context-mini { display: none; }
+    #model-menu { width: min(300px, calc(100vw - 24px)); }
+    #model-trigger { max-width: min(240px, calc(100vw - 120px)); }
+    #context-overlay { align-items: flex-end; padding: 0; }
+    #context-surface { width: 100%; max-width: none; max-height: calc(100dvh - var(--mobile-shell-height));
+      border-radius: 14px 14px 0 0; border-bottom: 0; }
+    .context-surface-head { padding-left: var(--space-5); }
+    #context-body { padding: 0 var(--space-5) max(var(--space-5), env(safe-area-inset-bottom)); }
+    .context-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    /* Keep response footers to two lines on a phone without changing their
+       disclosure controls or their touch target size. */
+    :is(.msg.assistant, .activity-body):has(> .turn-foot) { --turn-button-size: 22px; --turn-button-gap: var(--space-2); }
+    .turn-foot { gap: var(--space-2); font-size: 0.71875rem; line-height: 1.35; }
+    .turn-foot .turn-summary { display: -webkit-box; overflow: hidden;
+      -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
+    /* A crowded phone panel shrinks the chip font instead of pushing the
+       label out of the pill. */
+    .live-panel-box .shell-chip, .live-panel-box .agent-chip { font-size: 0.65625rem; }
+    .turn-expand svg, .turn-tokens svg { width: 12px; height: 12px; }
+    .tc-call-head { padding-left: var(--space-3); padding-right: var(--space-3); }
+    .tool-detail-body { padding-left: var(--space-3); padding-right: var(--space-3); }
+    .tool-payload pre, .prompt-block .tool-payload pre { max-height: 36vh; }
+    #connection-status { top: var(--mobile-shell-height);
+      right: max(8px, env(safe-area-inset-right)); }
+    /* Clear the measured single-row header. */
+    #thread-loading { top: var(--mobile-shell-height); }
+    #composer-wrap { padding-top: var(--space-2);
+      padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+    #agent-finder { max-height: min(420px, 58vh); }
+    #agent-finder, #skill-menu { position: fixed; top: var(--mobile-shell-height);
+      bottom: auto; left: var(--space-5); right: var(--space-5);
+      max-height: calc(100dvh - var(--mobile-shell-height) - 14px); z-index: var(--z-menu); }
+    #agent-list { padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
+    .table-scroll { max-width: 100%; overflow-x: auto; }
+    .table-scroll table { width: max-content; min-width: 100%; overflow-wrap: normal; }
+    .table-scroll th, .table-scroll td { white-space: nowrap; }
+    #agent-finder-query { min-height: 44px; }
+    #shell-overlay { inset: var(--mobile-shell-height) 0 0; padding: var(--space-3);
+      align-items: flex-start; justify-content: stretch; }
+    .shell-surface { width: 100%; max-width: none;
+      max-height: calc(100dvh - var(--mobile-shell-height) - 112px);
+      padding: var(--space-5); border-radius: 14px; }
+  }
+  @media (pointer: coarse) {
+    /* Panel chips keep their 18 px badge height in the panel. Their
+       transparent pseudo-elements provide 44 px targets without changing the
+       panel layout; each target stays in its chip's horizontal slot, so the
+       adjacent shell and agent targets do not overlap. */
+    .live-panel-box { overflow-x: clip; overflow-y: visible; }
+    .live-panel-box .shell-chip, .live-panel-box .agent-chip {
+      position: relative; z-index: var(--z-raised);
+    }
+    .live-panel-box .shell-chip::before,
+    .live-panel-box .agent-chip::before {
+      content: ""; position: absolute; z-index: 0;
+      top: 50%; left: 50%; width: max(100%, 44px); height: 44px;
+      transform: translate(-50%, -50%);
+    }
+    .agent-message-row, .turn-series-toggle,
+    button.turn-series-summary.hidden-chunk { min-height: 44px; }
+    .activity-group-body .agent-message-row,
+    .activity-group-body .turn-series-toggle { min-height: 0; }
+    .pending-agent-toggle { min-width: 44px; min-height: 44px; }
+    #context-indicator { min-height: 44px; }
+    #menu-btn { min-width: 44px; min-height: 44px; }
+    #agent-list { scrollbar-width: auto; }
+    #agent-list::-webkit-scrollbar { width: 14px; }
+  }
+
+  ::-webkit-scrollbar { width: 9px; }
+  ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 6px;
+    border: 2px solid var(--bg); }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+<!-- frontend styles are served as static assets under /static -->
+<link rel="stylesheet" href="/static/app.css?v=__VERSION__">
+<style id="theme">__THEME__</style>
+<link rel="stylesheet" href="/static/katex.css?v=__VERSION__">
+</head>
+<body data-version="__VERSION__">
+
+<aside id="sidebar" tabindex="-1">
+  <div id="brand"><img src="/static/brand/mark.svg" width="24" height="24" alt="">__APP__</div>
+  <nav id="agent-list" aria-label="Agent tree" role="tree"></nav>
+  <div id="sidebar-foot">
+    <details id="shortcut-pane">
+      <summary>Keyboard shortcuts</summary>
+      <div id="shortcut-groups"></div>
+    </details>
+  </div>
+  <button id="settings-btn" title="Settings">
+    <svg data-icon="SETTINGS_ICON"></svg>
+    <span>Settings</span>
+  </button>
+</aside>
+<div id="backdrop"></div>
+
+<div id="settings-overlay">
+  <div id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <header class="settings-head">
+      <h2 id="settings-title">Settings</h2>
+      <select id="settings-backend" class="text-field sm" aria-label="Recurse these settings change" hidden></select>
+      <span id="settings-release" title="Recurse release and commit" hidden></span>
+      <button class="icon-btn lg" id="settings-close" title="Close"
+        aria-label="Close settings"><svg data-icon="CLOSE_ICON"></svg></button>
+    </header>
+    <div class="settings-cols">
+      <nav id="settings-nav" aria-label="Settings categories"></nav>
+      <div id="settings-sections"></div>
+    </div>
+  </div>
+</div>
+
+<!-- The "no hidden prompts" inspector: the full prompt the model sees for an
+     agent (system prompt + operator digest), opened from a message's eye button
+     or the top-of-thread hidden-context banner. Filled by prompt.ts. -->
+<div id="prompt-overlay">
+  <div id="prompt-modal" class="dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-title">
+    <div class="prompt-modal-head"><h2 id="prompt-title">Message details</h2>
+      <button class="icon-btn lg" id="prompt-close"
+      type="button" title="Close" aria-label="Close message inspector"><svg data-icon="CLOSE_ICON"></svg></button></div>
+    <div id="prompt-body"></div>
+  </div>
+</div>
+
+<!-- Counts-only context detail is fetched for the selected owner only when this
+     dialog opens. It never contains prompt, message, or tool payload text. -->
+<div id="context-overlay" hidden>
+  <section id="context-surface" class="dialog" role="dialog" aria-modal="true"
+    aria-labelledby="context-title">
+    <div class="context-surface-head">
+      <h2 id="context-title">Context window</h2>
+      <button id="context-close" class="icon-btn lg" type="button" title="Close"
+        aria-label="Close context details"><svg data-icon="CLOSE_ICON"></svg></button>
+    </div>
+    <div id="context-body"></div>
+  </section>
+</div>
+
+<!-- Live background-shell details are rendered here only while the selected
+     agent's compact shell chip is open. Keeping this outside the thread avoids
+     pushing the composer or leaving command cards in the closed layout. -->
+<div id="shell-overlay"></div>
+
+<main id="main">
+  <div id="connection-status" data-state="connecting">
+    <span class="connection-symbol" aria-hidden="true">!</span>
+    <span class="connection-label">Disconnected</span>
+    <button class="btn sm" type="button">Retry now</button>
+  </div>
+  <span id="connection-announcement" class="sr-only" role="status"
+    aria-live="polite" aria-atomic="true"></span>
+  <span id="tree-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></span>
+  <div id="topbar">
+    <button id="menu-btn" type="button" title="Open agent list" aria-label="Open agent list"
+      aria-controls="sidebar" aria-expanded="false"><svg data-icon="MENU_ICON"></svg></button>
+    <div id="conv-titlebar">
+      <button id="up-top" title="Up to parent agent" aria-label="Up to parent agent"></button>
+      <span class="status" id="conv-status" title="Working"></span>
+      <!-- Refresh dots have a fixed slot below the title. -->
+      <span id="conv-freshness" role="status" aria-live="polite">
+        <i aria-hidden="true"></i><i aria-hidden="true"></i><i aria-hidden="true"></i>
+        <span class="sr-only"></span>
+      </span>
+      <span id="conv-title">Agents</span>
+      <span id="title-copied" aria-live="polite">Copied ID</span>
+      <span class="chip badge accent" id="chip-kids"></span>
+      <span class="chip badge warn" id="chip-queued" role="img">
+        <span class="queue-count" aria-hidden="true"></span>
+        <svg data-icon="MESSAGE_ICON"></svg>
+      </span>
+      <span class="chip badge warn" id="chip-state" role="img"><svg data-icon="ALERT_ICON"></svg></span>
+    </div>
+    <span id="key-mode" role="status" aria-live="polite">Normal</span>
+    <div id="top-actions" role="group" aria-label="Agent actions">
+      <button class="top-act" id="new-top" title="New top-level agent" data-key-hint="tt">
+        <span class="lbl">New</span>
+      </button>
+      <button id="pane-fab" title="More actions" aria-label="More actions" aria-haspopup="menu"
+        aria-controls="pane-menu" aria-expanded="false">
+      </button>
+    </div>
+  </div>
+  <div id="shared-tree-status" class="menu-note" role="status" hidden></div>
+  <div id="share-link-status" class="menu-note" role="status" hidden></div>
+  <!-- Shown while opening an agent whose thread hasn't been read yet: the
+       previous agent's messages stay on screen, dimmed and inert, purely so the
+       page doesn't blink empty. Fixed, like #connection-status, so appearing
+       never moves the thread. -->
+  <div id="thread-loading" role="status" aria-live="polite"></div>
+  <div id="scroll"><div id="messages"></div></div>
+  <div id="composer-wrap">
+    <button id="scroll-btn" aria-label="Scroll to latest">
+      <svg data-icon="SCROLL_DOWN_ICON"></svg>
+    </button>
+    <!-- Safety and model choice share one aligned row when space permits. On a
+         very narrow screen they wrap in this same accessible reading order. -->
+    <div id="conv-controls">
+      <div id="safety-row">
+        <button id="safety-btn" type="button" role="switch" aria-checked="true"
+          title="Review each action for safety before it runs"
+          aria-label="Safety review, on">
+          <span class="track"><span class="knob"></span></span>
+          <span class="lbl">Safety review</span>
+          <span id="safety-unavailable" role="status" hidden>Unavailable</span>
+        </button>
+      </div>
+      <button id="downgrade-chip" type="button" popovertarget="downgrade-popover" hidden><svg data-icon="DOWNGRADE_ICON"></svg>Downgraded</button>
+      <div id="downgrade-popover" class="menu form" popover="auto" role="dialog" aria-label="Provider model downgrade"></div>
+      <div id="model-controls">
+        <button id="context-indicator" type="button" aria-haspopup="dialog"
+          aria-controls="context-surface" aria-expanded="false" disabled>
+          <span id="context-mini" aria-hidden="true"></span>
+          <span id="context-token-label"></span>
+        </button>
+        <div id="model-row">
+          <button id="model-trigger" type="button" popovertarget="model-menu" aria-keyshortcuts="e Shift+M"
+            aria-expanded="false" title="Choose effort level (e or Shift+M)" aria-label="Choose effort level"><span class="model-name"></span><svg data-icon="CHEVRON_UP_ICON"></svg></button>
+          <div id="model-menu" class="menu form" popover="auto" tabindex="-1" role="dialog" aria-label="Effort level">
+            <div id="effort-slider">
+              <input id="effort-range" type="range" min="1" max="5" step="1" value="3" aria-label="Effort level">
+              <span id="effort-value" aria-hidden="true"></span>
+            </div>
+            <p id="effort-model" role="status" aria-live="polite"></p>
+            <p id="effort-current" hidden></p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div id="attachments"></div>
+    <div id="composer-shell">
+      <div id="agent-finder" class="menu" data-agent-finder role="group" aria-label="Agent finder">
+        <label class="sr-only" for="agent-finder-query">Find an agent</label>
+        <input id="agent-finder-query" class="text-field" type="text" role="combobox" placeholder="Find an agent…"
+          maxlength="96" aria-autocomplete="list" aria-controls="agent-menu"
+          aria-expanded="false" hidden>
+        <div id="agent-menu" role="listbox" aria-label="Agents"></div>
+        <div id="agent-finder-status" class="menu-note" role="status" aria-live="polite" hidden></div>
+      </div>
+      <div id="composer" class="composer-box">
+        <div id="skill-menu" class="menu" role="listbox" aria-label="Commands and skills"></div>
+        <input id="file-input" type="file" multiple hidden>
+        <button id="attach" title="Attach file">
+        <svg data-icon="ATTACH_ICON"></svg>
+      </button>
+        <textarea id="input" rows="1" maxlength="100000" autocomplete="off" placeholder="Message this agent…" class="composer-input"
+          aria-autocomplete="list" aria-haspopup="listbox" aria-expanded="false"></textarea>
+        <button id="send" class="composer-send" title="Send" disabled>
+          <svg data-icon="SEND_ICON"></svg>
+        </button>
+      </div>
+    </div>
+    <button id="send-status" type="button" aria-live="polite" disabled></button>
+    <div id="update-status" aria-live="polite"></div>
+  </div>
+</main>
+
+<!-- side panels: feature views that open to the right of the chat. The rail
+     shows one button per available panel; everything here stays hidden until a
+     panel is registered and offered for the open agent. -->
+<div id="panes"></div>
+<div id="pane-rail"><div id="pane-rail-panels"></div></div>
+<div id="pane-menu" class="menu" role="menu" aria-label="Conversation actions and panels">
+  <button id="share-link-btn" class="menu-item pane-menu-item" role="menuitem" hidden>Share link</button>
+  <button id="trash-btn" class="menu-item pane-menu-item" role="menuitem">
+    <span class="action-label">Delete</span>
+  </button>
+  <button id="takeover-btn" class="menu-item pane-menu-item" role="menuitem" title="Take over" aria-label="Take over" aria-pressed="false">
+    <span>Take control</span>
+  </button>
+  <div id="pane-menu-panels" role="none"></div>
+  <button id="up-btn" class="menu-item pane-menu-item" role="menuitem" title="Up to parent agent">Up to parent agent</button>
+</div>
+<div id="pane-backdrop"></div>
+<div id="pane-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+
+<script type="importmap">{"imports":{"/static/app.js":"/static/app.js?v=__VERSION__"}}</script>
+<script type="module" src="/static/app.js?v=__VERSION__"></script>
+</body>
+</html>

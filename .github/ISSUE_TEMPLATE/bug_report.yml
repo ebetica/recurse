@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in Recurse does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Agents work from these reports, so give exact details: copy commands,
+        output and messages rather than paraphrasing them.
+  - type: textarea
+    id: version
+    attributes:
+      label: recurse --version
+      description: The exact output of `recurse --version`.
+      placeholder: recurse 0.1.0 (abc1234)
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: OS and browser
+      description: Operating system and version, and the browser and version.
+      placeholder: macOS 15.1, Chrome 131
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Exact numbered steps from starting Recurse, including commands and what you typed or clicked.
+      placeholder: |
+        1. Run `recurse ~/code/project`
+        2. Open http://127.0.0.1:8787 and choose New agent
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead, with exact error messages.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Screenshots or logs
+      description: Attach screenshots, or paste terminal or browser console output. Remove secrets first.
+    validations:
+      required: true

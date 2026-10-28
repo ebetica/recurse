@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022"],
+    "types": ["bun"],
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true
+  },
+  "include": [
+    "src/**/*.ts",
+    "tests/extensions/**/*.ts",
+    "tests/backend/**/*.ts",
+    "tests/mobile_browser/*.ts",
+    "tools/*.ts",
+    "scripts/*.ts",
+    "tests/checks/*.ts",
+    "tests/dev/*.ts"
+  ]
+}

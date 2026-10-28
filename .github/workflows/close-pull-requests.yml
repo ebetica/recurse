@@ -1,0 +1,33 @@
+name: Close pull requests
+
+# The public release repository (ebetica/recurse) accepts issues, not pull
+# requests: development happens in ebetica/recurse-dev (see CONTRIBUTING.md).
+# This comments once and closes each opened or reopened pull request. It never
+# checks out or runs pull request code, needs no secrets, and does nothing in
+# any other repository.
+on:
+  pull_request_target:
+    types: [opened, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  close:
+    if: github.repository == 'ebetica/recurse'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Comment and close
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          marker="<!-- recurse-closed-pull-request -->"
+          if ! gh pr view "$NUMBER" --json comments --jq '.comments[].body' | grep -qF "$marker"; then
+            gh pr comment "$NUMBER" --body "$marker
+          Thanks for your interest. This repository publishes Recurse releases and does not accept pull requests, so this one has been closed.
+
+          Please open an issue instead, with the exact \`recurse --version\` output and the steps to reproduce: https://github.com/ebetica/recurse/issues/new/choose"
+          fi
+          gh pr close "$NUMBER"

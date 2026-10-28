@@ -1,0 +1,7 @@
+{"recorded_by": "pi-recurse registerChdirTool/registerEnvironmentTool results and tool schemas, recorded from tests/backend/durable_managed_tools.test.ts at 7e08ec6fd before those Pi tools were deleted; the environment rows left with the Durable environment tool",
+"expected": [
+{"content": [{"type": "text", "text": "Working directory is now <ROOT>/work/target."}], "details": {"cwd": "<ROOT>/work/target"}}
+],
+"tools": [
+{"name": "chdir", "description": "Change the effective working directory immediately for subsequent tools and persist it for later turns.", "parameters": {"type": "object", "required": ["directory"], "properties": {"directory": {"type": "string", "description": "Directory path; relative paths resolve against the current effective cwd"}}}}
+]}

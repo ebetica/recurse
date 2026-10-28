@@ -1,0 +1,10 @@
+[
+  {
+    "type": "tool_execution_start",
+    "args": { "command": "printf '%s\\n' 'https://github.com/ebetica/recurse/pull/2069'" }
+  },
+  {
+    "type": "tool_execution_end",
+    "result": { "content": [{ "text": "https://github.com/ebetica/recurse/pull/2069\n" }] }
+  }
+]

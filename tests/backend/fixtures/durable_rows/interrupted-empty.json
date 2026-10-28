@@ -1,0 +1,38 @@
+{
+  "model": [
+    {
+      "role": "assistant",
+      "api": "anthropic-messages",
+      "provider": "anthropic",
+      "model": "claude-opus-5-5",
+      "usage": {
+        "input": 4,
+        "output": 10,
+        "cacheRead": 3489,
+        "cacheWrite": 5784,
+        "totalTokens": 9287,
+        "cost": {
+          "input": 0.000016,
+          "output": 0.0002,
+          "cacheRead": 0.0006978,
+          "cacheWrite": 0.02892,
+          "total": 0.0298338
+        },
+        "cacheWrite1h": 0
+      },
+      "timestamp": 1791839068235,
+      "content": [
+        {
+          "type": "thinking",
+          "thinking": "",
+          "thinkingSignature": ""
+        }
+      ],
+      "stopReason": "interrupted"
+    }
+  ],
+  "kind": "pi.assistant",
+  "id": 13,
+  "conversationId": 1,
+  "byTaskId": 10
+}

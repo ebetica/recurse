@@ -1,0 +1,63 @@
+[
+  {
+    "id": 13192,
+    "kind": "pi.user",
+    "timestamp": 1791839472229,
+    "text": "Kept message"
+  },
+  {
+    "id": 13423,
+    "kind": "pi.user",
+    "timestamp": 1791840026507,
+    "text": "Operator input"
+  },
+  {
+    "id": 13428,
+    "kind": "pi.assistant",
+    "timestamp": 1791840027770,
+    "stopReason": "toolUse",
+    "text": "Before compaction",
+    "usage": {
+      "input": 4,
+      "output": 1164,
+      "cacheRead": 348171,
+      "cacheWrite": 182,
+      "totalTokens": 349521
+    }
+  },
+  {
+    "id": 13432,
+    "kind": "pi.compaction",
+    "timestamp": 1791840028941,
+    "head": 13192,
+    "text": "Summary"
+  },
+  {
+    "id": 13438,
+    "kind": "pi.assistant",
+    "timestamp": 1791840044541,
+    "stopReason": "stop",
+    "text": "First compacted response",
+    "usage": {
+      "input": 2,
+      "output": 774,
+      "cacheRead": 3372,
+      "cacheWrite": 48602,
+      "totalTokens": 52750
+    }
+  },
+  {
+    "id": 13443,
+    "kind": "pi.assistant",
+    "timestamp": 1791840055552,
+    "stopReason": "toolUse",
+    "text": "Next response",
+    "usage": {
+      "input": 4,
+      "output": 698,
+      "cacheRead": 51974,
+      "cacheWrite": 1870,
+      "totalTokens": 54546
+    }
+  }
+]

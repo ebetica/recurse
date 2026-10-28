@@ -1,0 +1,18 @@
+export const tests: BrowserTest[] = [
+  // Feature: #2296 checker tags attach to named browser tests and protect their deletion.
+  async function test_sidebar_status_rows_desktop(browser, base) {
+    await mkdir(SHOT_DIR, { recursive: true });
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await context.newPage();
+    const errors = await openSidebar(page, base, 1280, false);
+    await assertStatusRows(page);
+    await visibleAndUncovered(page, "#sidebar");
+    await page.locator("#sidebar").screenshot({
+      path: join(SHOT_DIR, "sidebar-status-desktop.png"),
+    });
+    expect(errors).toEqual([]);
+    await context.close();
+  },
+];

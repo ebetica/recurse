@@ -1,0 +1,39 @@
+{
+  "comment": "Seed for the http_conversations corpus. The scripted world behind the routes (record.py World, http_conversations_app.ts ScriptedWorld) starts from these records. <repo> is the seeded Git workdir. Service secrets are synthetic test values.",
+  "conversations": [
+    {"id": "conv-a", "status": "idle", "title": "Alpha", "parent": null, "model": "m1", "backend": "pi", "workdir": "<repo>", "tmp_key": "20260925-conv-a", "session_id": "sess-a", "session_file": "/s/a.jsonl", "session_cwd": "/s"},
+    {"id": "conv-b", "status": "idle", "title": "", "parent": "conv-a", "model": "m2", "backend": "pi", "workdir": "<repo>", "tmp_key": "../bad"},
+    {"id": "conv-run", "status": "running", "title": "Runner", "parent": "conv-a", "model": "m1", "backend": "pi", "workdir": "/nonexistent-workdir", "safety_off": false, "safety_off_active": false},
+    {"id": "conv-gone", "status": "idle", "title": "Gone", "parent": "conv-a", "model": "m1", "backend": "pi"},
+    {"id": "svc-owned", "status": "idle", "title": "Svc", "parent": null, "model": "m1", "backend": "pi"},
+    {"id": "svc-unsafe", "status": "idle", "title": "Unsafe", "parent": null, "model": "m1", "backend": "pi", "safety_off": true},
+    {"id": "svc-other-model", "status": "idle", "title": "Other", "parent": null, "model": "m9", "backend": "pi"},
+    {"id": "svc-winner", "status": "idle", "title": "Winner", "parent": null, "model": "m1", "backend": "pi"}
+  ],
+  "bindings": [
+    ["alpha", "svc-owned"],
+    ["alpha", "svc-unsafe"],
+    ["alpha", "svc-other-model"],
+    ["beta", "svc-winner"]
+  ],
+  "external_keys": [["alpha", "known", "svc-owned"]],
+  "tokens": {"alpha-token": "alpha-secret", "beta-token": "beta-secret"},
+  "principals": {
+    "alpha": {
+      "token_file": "alpha-token",
+      "scopes": ["conversation.create", "conversation.send", "conversation.read"],
+      "allowed_models": ["m1"],
+      "quotas": {"max_owned_conversations": 5}
+    },
+    "beta": {
+      "token_file": "beta-token",
+      "scopes": ["conversation.create", "conversation.send", "conversation.read"],
+      "allowed_models": ["m2"]
+    }
+  },
+  "levels": {"1": ["m1", "low"], "2": ["m1", "high"], "3": ["m2", "medium"]},
+  "git": {
+    "committed": {"README.md": "hello\n", "src/app.txt": "one\ntwo\n"},
+    "changed": {"src/app.txt": "one\ntwo\nthree\n", "new.txt": "fresh\n"}
+  }
+}

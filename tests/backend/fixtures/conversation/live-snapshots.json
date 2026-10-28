@@ -1,0 +1,6 @@
+{
+"split_thinking": [{"type":"message","id":"split-assistant","parentId":null,"message":{"role":"assistant","content":[]},"thinkingIndex":0,"thinkingTitle":"Planning the fix","thinkingTail":"private details **Planning the fix**","thinkingText":"private details **Planning the fix**","thinkingTextTruncated":false,"hasThinking":true,"thinkingStartMs":1791517481432}],
+"recorded_gpt": [{"type":"message","id":"recorded-assistant","parentId":"recorded-user","message":{"role":"assistant","content":[{},{"type":"toolCall","id":"recorded-read","name":"read","arguments":{"path":"sample.ts"}}]},"thinkingIndex":0,"thinkingTitle":"Reviewing the sample","thinkingTail":"**Reviewing the sample**","thinkingText":"**Reviewing the sample**","thinkingTextTruncated":false,"hasThinking":true,"thinkingStartMs":1791517481435}],
+"run_thinking": [{"type":"message","id":"assistant-thinking","parentId":null,"message":{"role":"assistant","content":[{"type":"text","text":""}]},"thinkingIndex":0,"thinkingTitle":"Planning the next step","thinkingTail":"old details\n**Planning the next step**","thinkingText":"old details\n**Planning the next step**","thinkingTextTruncated":false,"hasThinking":true,"thinkingStartMs":1791517481438}],
+"run_settled": [{"type":"message","id":"assistant-thinking","parentId":null,"message":{"role":"assistant","content":[{"type":"text","text":""}]}}]
+}

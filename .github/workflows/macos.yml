@@ -1,0 +1,35 @@
+name: macOS
+
+# Runs `tests/check.sh macos` on an Apple Silicon runner after a merge is pushed to
+# main, or when started by hand from the Actions tab. Cost: GitHub bills macOS
+# runner minutes at 10x Linux minutes on private repositories, so this job runs
+# only that one stage, uses a shallow checkout, cancels a superseded run, and
+# stops after 15 minutes (at most 150 billed minutes per run). The Linux suite
+# lives in ci.yml; this file is separate so a manual run starts only this job.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    # Public release commits copy trees already tested in ebetica/recurse-dev,
+    # so this does nothing in the public ebetica/recurse.
+    if: github.repository != 'ebetica/recurse'
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.4.2"
+
+      - name: macOS port tests
+        run: tests/check.sh macos

@@ -1,0 +1,1 @@
+../goal/wake.ts

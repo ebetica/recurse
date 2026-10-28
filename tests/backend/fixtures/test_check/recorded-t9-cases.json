@@ -1,0 +1,10 @@
+{
+  "source_commit": "21df0f08775b5a0665532d3dd3c5e6852c5f5b03",
+  "recorded_at": "2026-10-14",
+  "provenance": "Selected exact imports and test declarations from the named source files before PURE cleanup; scanner syntax inputs, not retained behavioral coverage.",
+  "sources": {
+    "tests/web/active-agents.test.ts": "import { describe, expect, test } from \"bun:test\";\nimport { activeAgentSummary } from \"../../web/active-agents.js\";\ntest(\"names singular and plural plainly\", () => {\n    expect(activeAgentSummary(1)).toBe(\"1 active agent\");\n    expect(activeAgentSummary(2)).toBe(\"2 active agents\");\n  });\n",
+    "tests/web/fuzzy-match.test.ts": "import { describe, expect, test } from \"bun:test\";\nimport {\n  normalizeSearchText,\n  textRank,\n  titleTokens,\n} from \"../../web/fuzzy-match\";\ntest(\"folds case, accents, and whitespace\", () => {\n    expect(normalizeSearchText(\"  Claudé   OPUS \")).toBe(\"claude opus\");\n  });\n",
+    "tests/web/deep-link.test.ts": "import { describe, expect, test } from \"bun:test\";\nimport {\n  agentLinkUrl,\n  historyDisposition,\n  readAgentLink,\n  readArtifactLink,\n  readHistoryView,\n  resolveBootSelection,\n} from \"../../web/deep-link.js\";\ntest.each([\n  [\"#agent=main&artifact=Report-123\", \"Report-123\"],\n  [\"\", null],\n  [\"#artifact=../x\", null],\n  [\"#artifact=\" + \"x\".repeat(161), null],\n  [\"#artifact=x&pad=\" + \"x\".repeat(512), null],\n])(\"artifact link %s\", (hash, id) => expect(readArtifactLink(hash!)).toBe(id));\n"
+  }
+}

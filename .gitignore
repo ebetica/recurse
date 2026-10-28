@@ -1,0 +1,24 @@
+__pycache__/
+*.pyc
+.DS_Store
+.venv/
+.env
+.recurse/
+.recurse-data*/
+.reports/
+# runtime droppings the coding agent leaves in its working dir (harmless, but
+# keep the canonical clone reading clean so the deploy preflight stays meaningful)
+.claude/
+socket:*
+
+# frontend build
+node_modules
+web/dist/
+
+# Durable extensions run from source; no generated output is tracked.
+src/extensions/dist/
+
+# NFS silly-rename artifacts. Deleting a file another process still holds open
+# renames it to .nfsXXXX instead of unlinking it, so an agent working on a
+# networked data directory can sweep one into a commit with `git add -A`.
+.nfs*

@@ -1,0 +1,25 @@
+"""Check that uploaded Python matches the pinned Bun controller source.
+
+A dirty checkout or unsupported controller protocol blocks all work."""
+
+from pathlib import Path
+import json
+import subprocess
+
+
+def require_consumer(command, snapshot, pin, uploaded):
+    root, uploaded = Path(snapshot), Path(uploaded)
+    try:
+        head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], timeout=10).decode().strip()
+        dirty = subprocess.check_output(["git", "-C", str(root), "status", "--porcelain", "--untracked-files=all"], timeout=10)
+        source = root / "deploy"
+        names = {path.name for path in uploaded.glob("*.py")}
+        if head != pin or dirty or names != {path.name for path in source.glob("*.py")}:
+            raise ValueError("Controller source identity mismatch")
+        if any((uploaded / name).read_bytes() != (source / name).read_bytes() for name in names):
+            raise ValueError("Uploaded Python differs from the pinned consumer commit")
+        report = json.loads(subprocess.check_output([*command, "capability"], input=b"", stderr=subprocess.PIPE, timeout=15))
+        if report != {"protocol": 4}:
+            raise ValueError("Unsupported actual Node controller consumer")
+    except Exception as error:
+        raise RuntimeError("Controller consumer/source gate failed; no work authorized") from error

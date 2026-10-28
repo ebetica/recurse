@@ -1,0 +1,76 @@
+#!/usr/bin/env bun
+/*
+ * A short module header.
+ * Four physical lines are allowed.
+ */
+
+/** A module value. */
+export const value = "// not a comment";
+/** Another module value. */
+let other = /https:\/\//;
+/** A third module value. */
+var third = `/* not a comment */`;
+/**
+ * A function doc.
+ * Four physical lines are allowed.
+ */
+function work(parameter: number) {
+  let local = parameter;
+  /* Invariant: local stays positive.
+   * The input is not changed.
+   * This is a high-level guarantee.
+   */
+  if (local) {
+    // Spec: return the supplied value.
+    return local;
+  }
+}
+/**
+ * A class doc.
+ * Four physical lines are allowed.
+ */
+class Item {
+  /** A field doc. */
+  field = 1;
+  /**
+   * A constructor doc.
+   * Four physical lines are allowed.
+   */
+  constructor() {}
+  /**
+   * A method doc.
+   * Four physical lines are allowed.
+   */
+  method() {}
+}
+interface Shape {
+  /** A property doc. */
+  size: number;
+  /** A method signature doc. */
+  render(): void;
+  /** An index signature doc. */
+  [key: string]: unknown;
+}
+type Literal = {
+  /** A member doc. */
+  value: string;
+};
+const padding = 2048; // Cache padding.
+namespace Settings {
+  export let limit = 10; // Maximum entries.
+}
+class TrailingItem {
+  field = 1; // Initial value.
+}
+interface TrailingShape {
+  size: number; // Shape size.
+  render(): void; // Render the shape.
+  [key: string]: unknown; // Extra values.
+}
+type TrailingLiteral = {
+  value: string; // Stored value.
+};
+enum Mode {
+  Ready, // Ready to run.
+  Done = 2, // Finished running.
+}

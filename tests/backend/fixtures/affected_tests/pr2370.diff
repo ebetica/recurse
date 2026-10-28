@@ -1,0 +1,108 @@
+diff --git a/src/themes.ts b/src/themes.ts
+index 71fbc8b3f..f2cde945a 100644
+--- a/src/themes.ts
++++ b/src/themes.ts
+@@ -89,9 +89,46 @@ export const contrast = (first: string, second: string): number =>
+ /** Smallest panel separation gate; measured after CSS hex rounding. */
+ const MIN_PANEL_LIGHTNESS_STEP = 0.02;
+ 
++/** Accent sources before Pi's own magenta (slot 5): the blue slot, then cyan.
++ * Each is used only when its OKLCH hue lies in ACCENT_HUES (blue through
++ * cyan), since some palettes put purple, orange or green in those slots. */
++const ACCENT_SLOTS = [4, 6];
++const ACCENT_HUES = [180, 275];
++/** An accent must reach this contrast with the page, and on a coloured page
++ * (OKLCH chroma above CHROMATIC_PAGE) sit this many degrees of hue away. */
++const MIN_ACCENT_CONTRAST = 3;
++const MIN_ACCENT_HUE_GAP = 30;
++const CHROMATIC_PAGE = 0.05;
++
++/** Pi's accent rule fed the first slot that is blue or cyan and stays
++ * distinct from the page. */
++function accentColors(palette: ThemePalette, pi: Record<string, string>) {
++  const page = colorToOklch(parseColor(palette.background));
++  for (const slot of ACCENT_SLOTS) {
++    const hue = colorToOklch(parseColor(palette.palette[slot]!)).h;
++    if (hue < ACCENT_HUES[0]! || hue > ACCENT_HUES[1]!) continue;
++    const swapped = [...palette.palette];
++    swapped[5] = palette.palette[slot]!;
++    const { colors } = generatePaletteColors({ ...palette, palette: swapped });
++    const gap =
++      Math.abs(colorToOklch(parseColor(colors.accent!)).h - page.h) % 360;
++    if (
++      contrast(colors.accent!, palette.background) >= MIN_ACCENT_CONTRAST &&
++      (page.c <= CHROMATIC_PAGE ||
++        Math.min(gap, 360 - gap) >= MIN_ACCENT_HUE_GAP)
++    )
++      return { accent: colors.accent!, borderAccent: colors.borderAccent! };
++  }
++  return { accent: pi.accent!, borderAccent: pi.borderAccent! };
++}
++
+ /** Complete web token set; no configuration or browser dependencies. */
+ export function generateTheme(palette: ThemePalette): Record<string, string> {
+-  const { colors: c, appearance } = generatePaletteColors(palette);
++  const { colors, appearance } = generatePaletteColors(palette);
++  const c: Record<string, string> = {
++    ...colors,
++    ...accentColors(palette, colors),
++  };
+   const bg = palette.background,
+     text = c.text!;
+   const background = colorToOklch(parseColor(bg));
+diff --git a/tests/backend/themes.test.ts b/tests/backend/themes.test.ts
+index e84bd2a9e..17d48d6c7 100644
+--- a/tests/backend/themes.test.ts
++++ b/tests/backend/themes.test.ts
+@@ -246,4 +246,51 @@ describe("terminal palette themes", () => {
+     }
+     console.log("Observed WCAG contrast minima:", minima);
+   });
++  test("the accent takes the blue slot's hue unless that blends into the page", () => {
++    const hue = (color: string) => colorToOklch(parseColor(color)).h;
++    const gap = (a: string, b: string) => {
++      const d = Math.abs(hue(a) - hue(b)) % 360;
++      return Math.min(d, 360 - d);
++    };
++    const nearest = (palette: (typeof themePalettes)[number]) => {
++      const accent = generateTheme(palette).accent!;
++      return [4, 6, 5].sort(
++        (a, b) =>
++          gap(accent, palette.palette[a]!) - gap(accent, palette.palette[b]!),
++      )[0];
++    };
++    const blueWherePossible = themePalettes.filter((p) => nearest(p) === 4);
++    for (const palette of themePalettes) {
++      const accent = generateTheme(palette).accent!;
++      expect(
++        contrast(accent, palette.background),
++        palette.name,
++      ).toBeGreaterThanOrEqual(3);
++      if (colorToOklch(parseColor(palette.background)).c > 0.05)
++        expect(
++          gap(accent, palette.background),
++          palette.name,
++        ).toBeGreaterThanOrEqual(30);
++    }
++    const byName = (name: string) =>
++      themePalettes.find((p) => p.name === name)!;
++    for (const name of [
++      "Material Dark",
++      "Solarized Dark",
++      "GitHub Light",
++      "Solarized Light",
++    ])
++      expect(blueWherePossible.map((p) => p.name)).toContain(name);
++    expect(nearest(byName("Ocean"))).toBe(6);
++    for (const name of ["Dracula", "Monokai Pro Light"])
++      expect(nearest(byName(name)), name).toBe(6);
++    const custom = {
++      ...byName("Tokyo Night"),
++      name: "Blue page",
++      background: byName("Tokyo Night").palette[4]!,
++    };
++    const accent = generateTheme(custom).accent!;
++    expect(gap(accent, custom.background)).toBeGreaterThanOrEqual(30);
++    expect(contrast(accent, custom.background)).toBeGreaterThanOrEqual(3);
++  });
+ });

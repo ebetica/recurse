@@ -1,0 +1,21 @@
+{
+  "description": "Hand-built display example using only public PROJECT_ALPHA/PROJECT_BETA toy instructions from tests/live/system_messages.ts, baseline/delta section shape and literal temporary cwd paths. No private transcript is read or copied. The generated-at-test-time SDK/HMAC regression covers real capture.",
+  "messages": [
+    {
+      "role": "system",
+      "content": "",
+      "sections": {
+        "project_context": "PROJECT_ALPHA\nAnswer acceptance questions briefly. Do not create or change files unless explicitly requested.\n",
+        "cwd": "<cwd>\n/tmp/pi-fixture\n</cwd>"
+      }
+    },
+    {
+      "role": "system",
+      "content": "",
+      "sections": {
+        "project_context": "PROJECT_BETA\nAnswer acceptance questions briefly. Do not create or change files unless explicitly requested.\n",
+        "cwd": "<cwd>\n/tmp/pi-fixture\n</cwd>"
+      }
+    }
+  ]
+}

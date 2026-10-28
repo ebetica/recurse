@@ -1,0 +1,25 @@
+{
+  "comment": "Scripted responses for GET /r/{name}; read by record.py and http_transport.test.ts. body is one response body; chunks makes a streamed response.",
+  "responses": {
+    "small-json": {"headers": [["content-type", "application/json"]], "body": {"text": "{\"ok\":true}"}},
+    "text": {"headers": [["content-type", "text/plain; charset=utf-8"]], "body": {"text": "compress me ", "repeat": 800}},
+    "random": {"headers": [["content-type", "application/octet-stream"]], "body": {"random": 20000, "seed": "png"}},
+    "under-min": {"headers": [["content-type", "text/plain; charset=utf-8"]], "body": {"text": "a", "repeat": 1000}},
+    "weak-etag": {"headers": [["content-type", "text/plain; charset=utf-8"], ["etag", "W/\"v1\""]], "body": {"text": "weak etag body ", "repeat": 400}},
+    "strong-etag": {"headers": [["content-type", "text/plain; charset=utf-8"], ["etag", "\"strong\""], ["accept-ranges", "bytes"], ["content-digest", "sha-256=:x:"], ["digest", "sha-256=y"], ["content-md5", "z"], ["repr-digest", "sha-256=:r:"]], "body": {"text": "strong etag body ", "repeat": 400}},
+    "vary-repeat": {"headers": [["content-type", "text/plain; charset=utf-8"], ["vary", "Origin"], ["vary", "Cookie"]], "body": {"text": "vary ", "repeat": 1000}},
+    "vary-star": {"headers": [["content-type", "text/plain; charset=utf-8"], ["vary", "*"]], "body": {"text": "vary ", "repeat": 1000}},
+    "no-transform": {"headers": [["content-type", "text/plain; charset=utf-8"], ["cache-control", "private"], ["cache-control", "no-transform"]], "body": {"text": "keep ", "repeat": 1000}},
+    "preencoded-br": {"headers": [["content-type", "text/plain; charset=utf-8"], ["content-encoding", "br"]], "body": {"text": "brotli-ish ", "repeat": 300}},
+    "preencoded-gzip": {"headers": [["content-type", "text/plain; charset=utf-8"], ["content-encoding", "gzip"]], "body": {"hex": "1f8b0800000000000203cb48cdc9c95728cf2fca49010085114a0d0b000000"}},
+    "partial": {"status": 206, "headers": [["content-type", "text/plain; charset=utf-8"], ["content-range", "bytes 0-4999/100000"]], "body": {"text": "range", "repeat": 1000}},
+    "no-content": {"status": 204, "headers": [], "body": null},
+    "not-modified": {"status": 304, "headers": [["etag", "\"abc\""]], "body": null},
+    "sse": {"headers": [["content-type", "text/event-stream"], ["cache-control", "no-cache"], ["x-accel-buffering", "no"]], "chunks": [{"text": "data: {\"rev\": 1}\n\n"}, {"text": "data: {\"rev\": 2}\n\n"}, {"text": ": keepalive ", "repeat": 200}, {"text": "\n\n"}]},
+    "stream-text": {"headers": [["content-type", "application/x-ndjson"], ["etag", "\"strong\""]], "chunks": [{"text": "streamed line 0\n", "repeat": 40000}, {"text": "streamed line 1\n", "repeat": 40000}, {"text": "streamed line 2\n", "repeat": 40000}]},
+    "stream-random": {"headers": [["content-type", "application/octet-stream"]], "chunks": [{"random": 700000, "seed": "a"}, {"random": 700000, "seed": "b"}]},
+    "stream-small": {"headers": [["content-type", "text/plain; charset=utf-8"]], "chunks": [{"text": "part one ", "repeat": 200}, {"text": "part two ", "repeat": 200}, {"text": "part three ", "repeat": 200}]},
+    "big-mixed": {"headers": [["content-type", "application/octet-stream"]], "body": [{"random": 1200000, "seed": "mixed"}, {"text": "z", "repeat": 20000}]},
+    "big-text": {"headers": [["content-type", "text/plain; charset=utf-8"]], "body": {"text": "large repeated text ", "repeat": 60000}}
+  }
+}

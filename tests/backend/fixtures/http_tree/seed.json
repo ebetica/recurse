@@ -1,0 +1,89 @@
+{
+  "comment": "Seed for the http_tree corpus. The scripted world behind the routes (record.py World, http_tree.test.ts World) starts from these values. live maps a cid to its live Pi (status, run_id); refuse_stop lists cids whose live run will not abort; no_idle_stop lists cids whose idle-process stop is not admitted.",
+  "tree": {
+    "roots": [
+      {
+        "id": "conv-a",
+        "title": "Älpha ✓",
+        "status": "idle",
+        "children": [
+          {
+            "id": "conv-run",
+            "status": "running",
+            "children": []
+          }
+        ]
+      }
+    ],
+    "revision": 7
+  },
+  "cli_index": [
+    {
+      "id": "conv-a",
+      "title": "Älpha ✓",
+      "parent": null
+    },
+    {
+      "id": "conv-run",
+      "title": "Runner",
+      "parent": "conv-a"
+    }
+  ],
+  "node_cids": [
+    "conv-run",
+    "kid-creating"
+  ],
+  "conversations": {
+    "conv-a": {
+      "id": "conv-a",
+      "status": "idle",
+      "session_id": "sess-a",
+      "active_run": null
+    },
+    "conv-run": {
+      "id": "conv-run",
+      "status": "running",
+      "session_id": "sess-run",
+      "active_run": {
+        "run_id": "run-1"
+      }
+    },
+    "conv-stuck": {
+      "id": "conv-stuck",
+      "status": "running",
+      "session_id": "sess-s"
+    },
+    "conv-noidle": {
+      "id": "conv-noidle",
+      "status": "idle"
+    },
+    "conv-run2": {
+      "id": "conv-run2",
+      "status": "running",
+      "session_id": "sess-run2",
+      "active_run": {
+        "run_id": "run-2"
+      }
+    }
+  },
+  "live": {
+    "conv-run": [
+      "running",
+      "run-1"
+    ],
+    "conv-stuck": [
+      "interrupting",
+      "run-9"
+    ],
+    "conv-run2": [
+      "running",
+      "run-2"
+    ]
+  },
+  "refuse_stop": [
+    "conv-stuck"
+  ],
+  "no_idle_stop": [
+    "conv-noidle"
+  ]
+}

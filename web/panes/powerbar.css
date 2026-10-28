@@ -1,0 +1,49 @@
+/* One row for every pane; item pickers can take the static title's space. */
+.pane-col { position: relative; --pane-powerbar-height: 48px; }
+/* A hard line, not a fade, separates every pane's bar from content scrolling
+   under it. Controls share the bar's spacing, so icon buttons sit evenly. */
+.pane-powerbar { position: relative; z-index: var(--z-chrome);
+  box-sizing: border-box; background: var(--panel); min-width: 0; min-height: var(--pane-powerbar-height);
+  border-bottom: 1px solid var(--border); }
+.pane-powerbar .pane-title { flex: none; }
+.pane-powerbar-item .pane-title { position: absolute; width: 1px; height: 1px;
+  padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); }
+.pane-powerbar-controls { flex: 1; min-width: 0; display: flex; align-items: center;
+  gap: var(--space-3); }
+.pane-powerbar .fs, .pane-powerbar .x { flex: none; margin-left: 0; }
+.pane-powerbar .artifact-header, .pane-powerbar .files-detail-head {
+  flex: 1; min-width: 0; margin: 0; padding: 0; border: 0;
+  position: static; display: flex; align-items: center; gap: var(--space-2); }
+.pane-powerbar .artifact-title-select { flex: 1; width: 0; min-width: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-powerbar .artifact-actions, .pane-powerbar .files-actions { flex: none; gap: 0; }
+.pane-powerbar .files-detail-title { display: flex; align-items: center; gap: var(--space-2); }
+.pane-powerbar .files-name { flex: 1; margin: 0; font-size: 0.84375rem; }
+.pane-powerbar .files-jump-status:empty { display: none; }
+.pane-powerbar .diff-base-edit { flex: 1; min-width: 0; }
+.pane-powerbar .diff-base-btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pane-powerbar-overflow { position: relative; flex: none; font-weight: 400; }
+.pane-powerbar-overflow > summary { list-style: none; }
+.pane-powerbar-overflow > summary::-webkit-details-marker { display: none; }
+.pane-powerbar-menu { position: absolute; top: 100%; right: 0; min-width: 240px;
+  max-width: calc(100vw - 24px); }
+.pane-powerbar-menu .diff-head, .pane-powerbar-menu .diff-toolbar { margin: 0; gap: var(--space-2); }
+.pane-powerbar-menu .diff-toolbar { margin-top: var(--space-3); }
+@media (max-width: 700px) {
+  /* Touch-size icon buttons abut, like the app bar's actions. */
+  .pane-col > .pane-powerbar, .pane-col .pane-powerbar-controls { gap: 0; }
+  .pane-col .pane-powerbar .pane-title { margin-inline-end: var(--space-3); }
+  .pane-col > .pane-powerbar { min-height: var(--pane-powerbar-height);
+    padding-inline: max(var(--space-3), env(safe-area-inset-left)); }
+  .pane-col .pane-powerbar button, .pane-col .pane-powerbar a, .pane-col .pane-powerbar select,
+  .pane-col .pane-powerbar-overflow > summary { min-width: 44px; min-height: 44px; }
+  .pane-powerbar .artifact-icon-btn, .pane-powerbar-overflow > summary { width: 44px; }
+  /* While the Changes base finder is open, its input gets the row: the title
+     is only announced, and the options and close buttons step aside until
+     Apply or Cancel. */
+  .pane-powerbar:has(.diff-base-edit.open) .pane-title { position: absolute;
+    width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+    clip-path: inset(50%); }
+  .pane-powerbar:has(.diff-base-edit.open) :is(.pane-powerbar-overflow, .fs, .x) {
+    display: none; }
+}

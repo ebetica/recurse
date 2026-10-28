@@ -1,0 +1,44 @@
+{
+  "pr": {
+    "baseRefName": "main",
+    "number": 2069,
+    "state": "MERGED",
+    "title": "Show live thinking summaries in activity pill",
+    "url": "https://github.com/ebetica/recurse/pull/2069",
+    "body": "## Summary\n- Update the sample activity display.\n\n## Scope and evidence\nSmall-tier web change.\n\n- Targeted checks passed at fixture head `0123456789abcdef0123456789abcdef01234567`.\n- Review approved the sample change.\n"
+  },
+  "summary": {
+    "available": true,
+    "truncated": false,
+    "files": [
+      {
+        "path": "web/tool_activity.ts",
+        "additions": 16,
+        "deletions": 0
+      }
+    ],
+    "moreFiles": 0,
+    "target": {
+      "kind": "pr",
+      "id": "https://github.com/ebetica/recurse/pull/2069",
+      "number": 2069,
+      "url": "https://github.com/ebetica/recurse/pull/2069",
+      "repoIdentity": "ebetica/recurse"
+    },
+    "version": "https://github.com/ebetica/recurse/pull/2069:2c89797006e93d5c916c75e5b0ea4a175282259337f38b846c2721d7e9104aae"
+  },
+  "file": {
+    "available": true,
+    "path": "web/tool_activity.ts",
+    "patch": "diff --git a/web/tool_activity.ts b/web/tool_activity.ts\nindex 8b0a3f78e..09e06f8e3 100644\n--- a/web/tool_activity.ts\n+++ b/web/tool_activity.ts\n@@ -55,6 +55,22 @@ export function thinkingSummaryLabel(value: unknown): string {\n   return clipHead(title, MAX_ACTIVITY_CHARS);\n }\n \n+/**\n+ * Keep the prose for the current thinking step in a compact, newest-first\n+ * preview. The live endpoint is bounded already; this keeps its many streamed\n+ * lines from making the pill taller than its four-line body slot. Layout\n+ * performs the visual clamp and tail anchoring, so this helper never clips the\n+ * provider's prose.\n+ */\n+export function thinkingSummaryTail(value: unknown): string {\n+  if (typeof value !== \"string\") return \"\";\n+  const heading = [...value.matchAll(/\\*\\*(.+?)\\*\\*/gu)].at(-1);\n+  const body = heading\n+    ? value.slice((heading.index ?? 0) + heading[0].length)\n+    : value;\n+  return body.trim();\n+}\n+\n function actionText(call: ToolCall): string {\n   const rawName = safeToolName(call.name).toLowerCase();\n   const name = clipHead(rawName, MAX_ACTIVITY_CHARS - 2);\n",
+    "truncated": false
+  },
+  "working": {
+    "available": false,
+    "reason": "not-a-git-repo"
+  },
+  "quoted": {
+    "path": "odd\\123-\u0007-\u000b-☃.txt",
+    "patch": "diff --git \"a/odd\\\\123-\\a-\\v-\\342\\230\\203.txt\" \"b/odd\\\\123-\\a-\\v-\\342\\230\\203.txt\"\nnew file mode 100644\nindex 0000000..f475e3b\n--- /dev/null\n+++ \"b/odd\\\\123-\\a-\\v-\\342\\230\\203.txt\"\n@@ -0,0 +1 @@\n+captured path\n"
+  }
+}

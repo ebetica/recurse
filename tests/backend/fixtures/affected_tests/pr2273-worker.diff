@@ -1,0 +1,153 @@
+diff --git a/src/pi_auth_worker.mjs b/src/pi_auth_worker.mjs
+index 822958158..30c1ba1d1 100644
+--- a/src/pi_auth_worker.mjs
++++ b/src/pi_auth_worker.mjs
+@@ -1,18 +1,8 @@
+ #!/usr/bin/env bun
+-/** Bounded JSONL adapter for Pi 1.1.0's public auth API.
+- *
+- * Pi 0.84.x removed the synchronous AuthStorage surface (get/set/has/getAll/
+- * drainErrors) from the package entry. Mutations therefore go through the
+- * version-gated FileAuthStorageBackend lock directly, credential validation is
+- * structural, and token resolution uses ModelRuntime.getAuth, which refreshes
+- * and persists OAuth credentials through the normal request-auth path.
+- *
+- * The worker runs on Bun and loads no Pi extensions, so it registers
+- * Recurse's Anthropic OAuth override (src/auth/anthropic_oauth.ts)
+- * on its runtime itself, the same provider registration the host makes.
+- * Refresh therefore posts to api.anthropic.com and a failed refresh never puts
+- * the response body in an error. It applies whether or not PI_RECURSE is on:
+- * Settings-owned credentials always use the Recurse route. */
++// Bounded JSONL Pi-auth adapter uses version-gated auth storage locks.
++// ModelRuntime resolves/refreshes OAuth; no extensions load in this Worker.
++// Register Recurse Anthropic OAuth so Settings refresh uses api.anthropic.com.
++// Failed refresh never leaks response bodies, regardless of PI_RECURSE.
+ 
+ import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs";
+ import { dirname, resolve } from "node:path";
+@@ -23,11 +13,9 @@ const EXPECTED_PI_VERSION = "1.1.0";
+ const ANTHROPIC_OAUTH_MODULE = new URL(
+ 	"./auth/anthropic_oauth.ts", import.meta.url).href;
+ const MAX_INPUT_CHARS = 64 * 1024;
++// Login-owned routes include Muse's minted key; unknown IDs fail closed.
+ const ALLOWED_PROVIDERS = new Set([
+ 	"anthropic", "openai-codex", "openai", "openrouter",
+-	// First-class login-owned ids beyond Pi's native OAuth set: the Muse
+-	// subscription stores its minted Model API key under "muse-code" (see
+-	// auth/muse.py). Unknown ids still fail closed.
+ 	"muse-code",
+ ]);
+ 
+@@ -62,16 +50,12 @@ function storageBackend(root) {
+ function provider(value, extra) {
+ 	if (typeof value !== "string") throw new Error("invalid_input");
+ 	if (ALLOWED_PROVIDERS.has(value)) return value;
+-	// Custom endpoints ride in the request (runner-owned config, validated
+-	// below): the Settings custom-provider login stores under its own id.
++	
+ 	if (extra instanceof Set && extra.has(value)) return value;
+ 	throw new Error("invalid_input");
+ }
+ 
+-// Custom endpoint ids ride in the request (runner-owned config, validated
+-// below): the Settings custom-provider login stores under its own id.
+-// Charset matches the catalog's valid_model_scope_key so any configured
+-// name can log in; the id is only ever a JSON object key, never a path.
++// Custom endpoint IDs are validated JSON keys, never paths.
+ const CUSTOM_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$/;
+ 
+ function extraProviders(request) {
+@@ -89,8 +73,8 @@ function validCredential(credential) {
+ 		|| Array.isArray(credential) || typeof credential.type !== "string") {
+ 		return false;
+ 	}
+-	// Fail closed on unusable selections: a partial credential must error
+-	// rather than resolve, so ambient fallbacks can never override it.
++	// Invariant: Fail closed on unusable selections: a partial credential must
++	// error rather than resolve, so ambient fallbacks can never override it.
+ 	if (credential.type === "oauth") {
+ 		return typeof credential.access === "string" && credential.access.length > 0
+ 			&& typeof credential.refresh === "string" && credential.refresh.length > 0
+@@ -126,9 +110,9 @@ function mutate(FileAuthStorageBackend, authPath, remove, selected, onlyIfMissin
+ 	const backend = new FileAuthStorageBackend(authPath);
+ 	return backend.withLock((current) => {
+ 		const data = parseCredentials(current);
+-		// ChatGPT subscription and OpenAI API-key credentials are one mutually
+-		// exclusive Settings route; never let ambient Codex import win a race
+-		// with selecting the direct OpenAI route.
++		// Invariant: ChatGPT subscription and OpenAI API-key credentials are one
++		// mutually exclusive Settings route; never let ambient Codex import win a
++		// race with selecting the direct OpenAI route.
+ 		if (selected && onlyIfMissing && (
+ 			selected.provider in data
+ 			|| (selected.provider === "openai-codex" && "openai" in data)
+@@ -186,9 +170,9 @@ async function makeRuntime(imported, authPath) {
+ 		|| typeof imported.readStoredCredential !== "function") {
+ 		throw new Error("package_mismatch");
+ 	}
+-	// Static catalogs only: the worker never refreshes model availability over
+-	// the network, and getAuth still refreshes/persists OAuth through the
+-	// normal request-auth path.
++	// Invariant: Static catalogs only: the worker never refreshes model
++	// availability over the network, and getAuth still refreshes/persists OAuth
++	// through the normal request-auth path.
+ 	return imported.ModelRuntime.create({
+ 		authPath,
+ 		modelsPath: modelsPathFor(authPath),
+@@ -200,14 +184,9 @@ async function makeRuntime(imported, authPath) {
+ const THINKING_LEVEL_NAMES = new Set([
+ 	"off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+ 
+-// Each model's reasoning levels come from pi-ai's getSupportedThinkingLevels,
+-// which pi-coding-agent's entry does not re-export. pi-ai is found where a
+-// package manager installs Pi's own dependency: nested in Pi's package, or
+-// beside it (Bun's store and hoisted layouts). Bun's resolver is not used,
+-// because with no node_modules it falls back to its global cache. This is not
+-// a public Pi surface, so it fails soft: when pi-ai is not there at Pi's
+-// version, will not load, lacks the function, or the function throws or
+-// answers nonsense, models carry no reasoning_levels and the reply names why.
++// Read model reasoning via Pi's own installed pi-ai, never Bun's global cache.
++// This unexported API fails soft; absent/invalid results omit reasoning levels
++// and report why, without failing the model list.
+ function piAiEntry(root) {
+ 	const real = realpathSync(root);
+ 	for (const dir of [resolve(real, "node_modules/@earendil-works/pi-ai"),
+@@ -274,8 +253,8 @@ async function main(request, root, imported, FileAuthStorageBackend) {
+ 	}
+ 	const authPath = process.env.RECURSE_PI_AUTH_PATH;
+ 	if (!authPath) throw new Error("invalid_input");
+-	// Pi writes auth.json in place and applies mode 0600 only when it creates
+-	// the file, so an existing wider file would keep its mode across every
++	// Invariant: Pi writes auth.json in place and applies mode 0600 only when it
++	// creates the file, so an existing wider file would keep its mode across every
+ 	// login and refresh. Restrict it before any action can write to it.
+ 	if (existsSync(authPath)) chmodSync(authPath, 0o600);
+ 	if (request.action === "seed") {
+@@ -284,12 +263,9 @@ async function main(request, root, imported, FileAuthStorageBackend) {
+ 		return;
+ 	}
+ 
+-	// Pi's model list for the requested built-in routes: the bundled catalog
+-	// plus any stored pi.dev refresh (models-store.json), read with no network.
+-	// With update:true it first does what `pi update --models` does: fetch
+-	// pi.dev's catalogs (no credentials sent; only logged-in providers) into
+-	// models-store.json, bounded by 15 s. A failed provider keeps its old
+-	// catalog and is reported in `errors`.
++	// Spec: list_models reads bundled/stored Pi catalogs without network.
++	// update:true fetches logged-in providers from pi.dev without credentials,
++	// bounded to 15s; failed providers retain catalogs and report errors.
+ 	if (request.action === "list_models") {
+ 		const ids = request.providers;
+ 		if (!Array.isArray(ids) || ids.length > 16
+@@ -378,8 +354,9 @@ async function main(request, root, imported, FileAuthStorageBackend) {
+ 		emit({ kind: "credential", selected: false, changed: false });
+ 		return;
+ 	}
+-	// A missing selection inside a readable store is a completed no-selection
+-	// state; an unreadable store is a failure, never an ambient fallback.
++	// Invariant: A missing selection inside a readable store is a completed
++	// no-selection state; an unreadable store is a failure, never an ambient
++	// fallback.
+ 	let store;
+ 	try {
+ 		store = JSON.parse(readFileSync(authPath, "utf8"));

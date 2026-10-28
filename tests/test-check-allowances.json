@@ -1,0 +1,117 @@
+[
+  {
+    "file": "tests/backend/fixtures/agent_store/cases.json",
+    "rule": "T4",
+    "reason": "Historical Python-written SQLite bytes are cross-opened by the current AgentStore Worker; preserve the recorded format provenance (recorder at 27c590ca4^)."
+  },
+  {
+    "file": "tests/backend/fixtures/auth_session/cases.json",
+    "rule": "T4",
+    "reason": "Historical Python-minted cookies verify through current OperatorAuth, preserving signed-session compatibility and tampering/expiry coverage (recorder at 27c590ca4^)."
+  },
+  {
+    "file": "tests/backend/fixtures/runtime_logging/cases.json",
+    "rule": "T4",
+    "reason": "Constructed secret-bearing event and exception inputs exercise the current RuntimeLogger redaction boundary; retain honest Python-recorder provenance, not live-capture or expected-output parity authority. Native file-sink and rotation tests remain independent."
+  },
+  {
+    "file": "tests/backend/fixtures/session_entries/cases.json",
+    "rule": "T4",
+    "reason": "Historical constructed Pi v3 JSONL bytes are recreated unchanged for native cursor-budget, identity-swap and link-refusal boundaries; retain recorder provenance, not live-capture or Python step-output parity authority. Other archived malformed/oversize inputs remain intact without claiming current asserted coverage."
+  },
+  {
+    "file": "tests/backend/fixtures/session_files/cases.json",
+    "rule": "T4",
+    "reason": "Constructed unsafe-name, owned/foreign manifest/blob, malformed-debris and active-HTML security inputs exercise current filename sanitization and native owner, scan-budget and safe-preview boundaries. Retain honest recorder provenance, not live-capture or Python expected-output authority; all remaining rows are consumed by these cases."
+  },
+  {
+    "file": "tests/backend/fixtures/session_index/cases.json",
+    "rule": "T4",
+    "reason": "Constructed legacy session-header and tree inputs exercise current native ID/cwd binding, unsafe-leaf refusal, BOM/NaN/Unicode acceptance and header-size/cache boundaries. Retain recorder provenance and exact input specs, not live capture or deleted-Python resolution/indexing output authority; every remaining tree spec feeds these native cases."
+  },
+  {
+    "file": "tests/backend/fixtures/fs_utils/cases.json",
+    "rule": "T4",
+    "reason": "Constructed unsafe-leaf/private-lock inputs and quoted non-finite JSON bytes exercise current pinned-filesystem refusals, private existing/new lock permissions and numeric/string format preservation. Retain honest recorder provenance, not live-capture or deleted-Python output/atomic-writer authority; remaining rows feed these native cases."
+  },
+  {
+    "file": "tests/backend/fixtures/local_roots/cases.json",
+    "rule": "T4",
+    "reason": "Constructed root/env inputs exercise current isolated-launch refusals, secret filtering and native root resolution/preparation on private filesystem paths and an open lock descriptor. Retain honest recorder provenance, not deleted-Python output authority; all remaining inputs are consumed by these cases."
+  },
+  {
+    "file": "tests/backend/fixtures/coding_backend_launch/cases.json",
+    "rule": "T4",
+    "reason": "Constructed tool-environment options exercise current buildEnv with real private agent-directory preparation and filesystem workspace acceptance/refusal, inherited credential/descriptor filtering and context validation. Recorder provenance is historical; no retired CLI/RPC/credential-injection output is an oracle."
+  },
+  {
+    "file": "tests/backend/fixtures/auth_service/cases.json",
+    "rule": "T4",
+    "reason": "Constructed bearer/capability/raw-header CSRF, host, proxy-IP and every-cookie-copy inputs assert current security policy; ServiceAuth also rereads real private registry/token files. All inputs are consumed and old results removed. Historical recorder provenance is not deleted-Python output authority or native HTTP transport evidence."
+  },
+  {
+    "file": "tests/backend/fixtures/conversation_store/cases.json",
+    "rule": "T4",
+    "reason": "Constructed metadata and validation inputs exercise current key/order security policy and real AgentStore SQLite admission, privacy filtering, stale title/pin/model preservation, volatile-only saves, session clearing and read-only legacy model normalization. All retained inputs are consumed; historical provenance is not deleted-Python result or SQL-schema authority."
+  },
+  {
+    "file": "tests/backend/fixtures/failure_sentences/cases.json",
+    "rule": "T4",
+    "reason": "Constructed error/context inputs exercise current public failure-formatting privacy and code-point bounds. Four live path-safe sentence oracles remain independently checked against current policy; four representative retry inputs assert current classifications/notices. All retained inputs are consumed. Historical provenance is not deleted-Python parity, live-capture or whole delivery-path authority."
+  },
+  {
+    "file": "tests/backend/fixtures/http_auth/cases.json",
+    "rule": "T4",
+    "reason": "Historical constructed raw HTTP requests/setup and provenance are retained; consumed current fields are independently derived native authentication policy expectations, not the deleted Python response goldens. The existing TCP/server case verifies status, auth-probe identity/ownership/body bounds and cookie/password lifecycle, not Python parity, live captures, production SQLite ownership or login-delay timing."
+  },
+  {
+    "file": "tests/backend/fixtures/http_settings/cases.json",
+    "rule": "T4",
+    "reason": "Historical constructed HTTP/setup inputs and provenance are retained with consumed independently derived current controller, private credential/pending/config file and protocol expectations. Existing fake Pi storage/runtime, clock/randomness, Extras, scripted loopback replies and no-op mutation lease are not installed SDK locking/refresh, real provider login, model-catalog or real Extras authority. Added Meta credential is a synthetic isolation input; URL saves capture real HTTP responses."
+  },
+  {
+    "file": "tests/backend/fixtures/http_static/cases.json",
+    "rule": "T4",
+    "reason": "Historical constructed raw HTTP/setup inputs and recorder provenance are retained with consumed independently derived current static/router/cache expectations for all 64 rows. Native filesystem/FrontendCache/TCP cases preserve generation, path/symlink refusal, validators, ranges and last-good refresh; open auth, scripted readiness and injected clock are not production readiness, browser/build, live-capture or symlink-swap race authority."
+  },
+  {
+    "file": "tests/backend/fixtures/http_transport/cases.json",
+    "rule": "T4",
+    "reason": "All 99 historical constructed requests and recorder provenance remain; the existing Bun TCP/scripted-app case consumes independently derived current response, selected raw integrity-header and redacted accounting expectations. Retired Python responses/events are not authority. Framing completion is not EOF or proof of absent later HEAD bytes; numeric accounting/timing tokens are schema-checked, not asserted as actual wire counts."
+  },
+  {
+    "file": "tests/backend/fixtures/http_tree/cases.json",
+    "rule": "T4",
+    "reason": "All 50 historical constructed requests, four setups, original header save, exact seed and recorder provenance remain. The existing native TCP/router/auth/web-log case consumes independently source-derived current response/log policy; three current JSON saves enforce generated response/log identity. Scripted tree/index/readiness/run/process callbacks are not Python parity, live captures, production AgentTree/ConversationStore or native process-cleanup authority. Existing native owner tests and diagnostic budget security cases remain independent."
+  },
+  {
+    "file": "tests/backend/fixtures/memory_snapshot/cases.json",
+    "rule": "T4",
+    "reason": "All eight historical constructed filesystem/render input rows and recorder provenance remain; existing native filesystem cases consume independently source-derived current local/global metadata, ordering, refusal, scan budgets and complete prompt expectations, plus the existing render-budget case consumes a reviewed current digest/byte/escape policy. Old Python prompt/hash values are not authority or live captures. Native hardlink/directory safety tests remain independent; no installed-SDK prompt-marker or model-boundary claim."
+  },
+  {
+    "file": "tests/backend/fixtures/preview/cases.json",
+    "rule": "T4",
+    "reason": "All four constructed filesystem specs and historical recorder provenance remain. The existing native case consumes independently source-derived current publication/availability, public metadata, verified-download and unchanged filesystem-state expectations in full; both native leaf-symlink refusal cases remain. These reviewed current values are not Python-parity or live-capture authority, nor streaming openDownload, owner-lifecycle or concurrent-swap proof."
+  },
+  {
+    "file": "tests/backend/fixtures/supervisor_reads/cases.json",
+    "rule": "T4",
+    "reason": "All eight constructed owner/worker scenarios, 73 operations, exact legacy JSONL bytes and historical recorder provenance remain. The existing loop consumes independently source-derived current outputs, callback arguments and logs with native JSONL reads/history claims/view projection. Scripted owner/leaf workers, clock and blob-close flags are not Python-parity, live-capture, native Pi/store/attachment I/O, OS-descriptor cleanup or concurrent-reaper authority; delete refusal asserts no reported success after owner loss, not leaf rollback."
+  },
+  {
+    "file": "tests/backend/fixtures/prompt_stamp/cases.json",
+    "rule": "T4",
+    "reason": "All 32 constructed provenance, hostile-marker, Unicode sender, skill-prefix and hidden-context input rows and historical recorder provenance remain. The existing loop consumes independently source-derived current formatting/refusal expectations, retaining every old hostile-marker check; current Error class/name/message replace three retired Python exception names. This is not Python-parity, live-capture, authenticated delivery, installed-SDK/native prompt-marker or model-boundary authority."
+  },
+  {
+    "file": "tests/backend/fixtures/reminder_text/cases.json",
+    "rule": "T4",
+    "reason": "All four retained constructed hostile-marker inputs and historical recorder provenance remain. The existing case verifies exact escaped strings and underscore/hyphen marker absence; 15 nonsecurity wrap, recognition and unwrap rows were removed. Historical provenance is not Python-parity, live-capture, SDK/native prompt-boundary or model-safety authority."
+  },
+  {
+    "file": "tests/backend/fixtures/tool_projection/cases.json",
+    "rule": "T4",
+    "reason": "All323 retained constructed credential/path/name and owner-detail inputs and historical recorder provenance remain; the existing dispatch retains all109 separate public-summary guards and owner-positive command/Unicode checks. Removed58 nonsecurity normalization, width, whitespace, line/tool-count and stats rows. Owner details may retain bounded original text; internal tokenization/shaping are not public sanitizers. These are not Python-parity, live-capture, SDK/native integration or authorization-boundary oracles."
+  }
+]

@@ -1,0 +1,5 @@
+const tests: BrowserTest[] = [];
+// Regression: #2400 early file, paste and drop attempts cannot vanish before owner readiness.
+const attachmentStartup: BrowserTest = async (browser, base) => {
+  return browser ?? base;
+};

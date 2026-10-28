@@ -1,0 +1,229 @@
+diff --git a/dist/codemode/codemode.d.ts b/dist/codemode/codemode.d.ts
+index 6a26e43076d86829ae1b54f201d69788f6e646fb..af3ea0f8baeb848a70769d2db8097c30e945499b 100644
+--- a/dist/codemode/codemode.d.ts
++++ b/dist/codemode/codemode.d.ts
+@@ -44,7 +44,7 @@ import { type CodemodeNamespace } from "./describe.ts";
+  * Version of everything in this module that turns stored results into what a script sees: result mapping, globals,
+  * start data. Bump it when that changes, so a call started before an upgrade is not replayed by different code.
+  */
+-export declare const CODEMODE_MODULE_VERSION = 2;
++export declare const CODEMODE_MODULE_VERSION = 3;
+ export declare const CODEMODE_TOOL_NAME = "codemode";
+ /** One tool as the script sees it: `tools.<jsName>`. */
+ /**
+diff --git a/dist/codemode/codemode.js b/dist/codemode/codemode.js
+index fcf0dacd4e5e54804e8d52842fcbf6c1ecea077f..038720bfb9e5f37ab98560408f25a1402a56199f 100644
+--- a/dist/codemode/codemode.js
++++ b/dist/codemode/codemode.js
+@@ -50,7 +50,7 @@ import { DEFAULT_MAX_OUTPUT_TOKENS, formatResult } from "./output.js";
+  * Version of everything in this module that turns stored results into what a script sees: result mapping, globals,
+  * start data. Bump it when that changes, so a call started before an upgrade is not replayed by different code.
+  */
+-export const CODEMODE_MODULE_VERSION = 2;
++export const CODEMODE_MODULE_VERSION = 3;
+ export const CODEMODE_TOOL_NAME = "codemode";
+ export const CodemodeRunDoc = defineDoc({
+     kind: "pi.codemode.run",
+@@ -122,7 +122,9 @@ export function createCodemodeExtension(options) {
+  * schema-less tool's output, else its error diagnostics.
+  */
+ function outcomeOf(name, structured, result) {
+-    const value = structured ? result.structuredOutput : textOf(result.structuredOutput);
++    const value = structured || (name === "read" && !result.isError)
++        ? result.structuredOutput
++        : textOf(result.structuredOutput);
+     if (!result.isError || (structured && value !== undefined))
+         return { ok: true, value };
+     const message = structured ? "" : value;
+diff --git a/dist/codemode/describe.js b/dist/codemode/describe.js
+index 9d7926617b74e13948baff224dcb1c272c859996..bcbfcd962fbaedaf5621525ffc401a6833235fd4 100644
+--- a/dist/codemode/describe.js
++++ b/dist/codemode/describe.js
+@@ -5,6 +5,17 @@ export const DEFAULT_CODEMODE_INLINE_BUDGET = 3000;
+ /** Characters per token when estimating the cost of a tool section. */
+ const CHARS_PER_TOKEN = 4;
+ const TEXT_OUTPUT_SCHEMA = { type: "string" };
++const READ_OUTPUT_SCHEMA = {
++    anyOf: [TEXT_OUTPUT_SCHEMA, {
++        type: "object",
++        properties: {
++            type: { const: "image" },
++            data: { type: "string" },
++            mimeType: { type: "string" },
++        },
++        required: ["type", "data", "mimeType"],
++    }],
++};
+ const DESCRIPTION_INTRO = `Run JavaScript that calls other tools. The input is raw JavaScript (not JSON, no code fence), run as an async function body in a QuickJS sandbox: top-level \`await\` and \`return\` work. No Node, file system, network, or timers.
+ - \`await tools.<name>({ ...args })\` resolves to a string, or an object if the tool's declaration says so, and rejects with an Error on failure. A tool whose declaration returns an object resolves on failure too when it returned that object; check its fields. Calls still running when the script ends are cancelled.
+ - The script survives a restart: it resumes where it was, without running finished calls again.
+@@ -30,7 +41,7 @@ export function declarationOf(tool) {
+         name: tool.name,
+         description: tool.description,
+         inputSchema: tool.parameters,
+-        outputSchema: tool.structuredOutputSchema ?? TEXT_OUTPUT_SCHEMA,
++        outputSchema: tool.structuredOutputSchema ?? (tool.name === "read" ? READ_OUTPUT_SCHEMA : TEXT_OUTPUT_SCHEMA),
+     };
+ }
+ /** `toolSample` of a tool: its description and TypeScript declaration. */
+diff --git a/dist/harness/generation.js b/dist/harness/generation.js
+index 136bed4..d883a3a 100644
+--- a/dist/harness/generation.js
++++ b/dist/harness/generation.js
+@@ -103,10 +103,14 @@ export const GenerationTask = defineTask({
+         request: async (task, runtime, context) => {
+             const { attempt, compacted, model: ref, thinkingLevel, streamOptions, cutoff } = task.state.checkpoint;
+             const conversationId = runtime.conversationId;
++            // A crash after admission but before the cut resumes at that same boundary,
++            // never replaying the old request cutoff or losing the queued operator input.
++            if (await interruptBoundary(runtime, undefined, context))
++                return;
+             await runtime.commit(async (tx) => {
+                 const live = await tx.doc(LiveDoc, conversationId);
+                 await convertPartial(tx, live, conversationId);
+-                live.generation = { attempt };
++                live.generation = { attempt, streaming: true };
+                 return undefined;
+             }, context);
+             const model = runtime.models.getModel(ref.provider, ref.modelId);
+@@ -126,6 +130,8 @@ export const GenerationTask = defineTask({
+                 ...(thinkingLevel === "off" ? {} : { reasoning: thinkingLevel }),
+             };
+             const message = await streamResponse(runtime, model, messages, options, attempt, context);
++            if (await interruptBoundary(runtime, message, context))
++                return;
+             const request = { attempt, compacted, model: ref, cutoff, messages: view.messages };
+             await classify(runtime, request, message, context);
+         },
+@@ -284,6 +290,21 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
+     let timer;
+     let inFlight;
+     let stopped = false;
++    let latest;
++    // Separate provider cancellation from task cancellation: Stop still owns the
++    // task signal and its cascade; an operator steer must never abort a tool.
++    const controller = new AbortController();
++    const stop = () => controller.abort();
++    runtime.signal.addEventListener("abort", stop, { once: true });
++    if (runtime.signal.aborted)
++        stop();
++    const watch = await runtime.watchDoc(LiveDoc, runtime.conversationId, context);
++    const observe = (live) => {
++        if (live?.generation?.interrupted)
++            controller.abort();
++    };
++    watch.start(observe);
++    observe(watch.value);
+     const flush = () => {
+         timer = undefined;
+         const partial = pending;
+@@ -312,24 +333,72 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
+         });
+     };
+     try {
+-        const events = runtime.models.streamSimple(model, { messages: [...messages] }, options);
++        const events = runtime.models.streamSimple(model, { messages: [...messages] }, { ...options, signal: controller.signal });
+         for await (const event of events) {
+             // A partial without content, such as pi-ai's opening `start` event, shows nothing; a deferred response
+             // never gets past it, so it never leaves a partial.
+             if (event.type === "done" || event.type === "error" || event.partial.content.length === 0)
+                 continue;
+-            pending = event.partial;
++            // Copy every delivered delta, not only the throttled UI checkpoint.
++            // Abort terminal events may discard content, so they must not replace it.
++            latest = copyJson(event.partial, { omitUndefinedProperties: true });
++            pending = latest;
+             if (timer === undefined && inFlight === undefined)
+                 timer = setTimeout(flush, interval);
+         }
+-        return await events.result();
++        const result = await events.result();
++        return controller.signal.aborted && !runtime.signal.aborted && latest !== undefined ? latest : result;
+     }
+     finally {
+         stopped = true;
+         clearTimeout(timer);
+         await inFlight;
++        await watch.stop();
++        runtime.signal.removeEventListener("abort", stop);
+     }
+ }
++/**
++ * Recurse Pi patch: rerun tests/backend/pi_interrupt_patch.test.ts on upgrades.
++ * Commit the exact cut and queued steer atomically with a prepare checkpoint.
++ * No toolCall or provider parser scratch survives; thinking replay is Pi AI's job.
++ * The same task/run owns all inputs and emits one final outcome/report.
++ */
++async function interruptBoundary(runtime, partial, context) {
++    let interrupted = false;
++    await runtime.commit(async (tx) => {
++        const boundary = await prepareBoundary(tx, runtime.conversationId, runtime.settings);
++        const live = await tx.doc(LiveDoc, runtime.conversationId);
++        if (!live.generation?.interrupted) {
++            if (partial !== undefined && live.generation !== undefined)
++                delete live.generation.streaming;
++            return undefined;
++        }
++        interrupted = true;
++        const source = partial ?? live.generation.message;
++        if (source !== undefined) {
++            const content = source.content.flatMap((block) => {
++                if (block.type === "text")
++                    return [{ type: "text", text: block.text, ...(block.textSignature === undefined ? {} : { textSignature: block.textSignature }) }];
++                if (block.type === "thinking")
++                    return [{ type: "thinking", thinking: block.thinking, ...(block.thinkingSignature === undefined ? {} : { thinkingSignature: block.thinkingSignature }), ...(block.redacted ? { redacted: true } : {}) }];
++                return [];
++            });
++            const { role, api, provider, model, usage, timestamp } = source;
++            await appendAssistant(tx, runtime.conversationId, { role, api, provider, model, usage, timestamp, content, stopReason: "interrupted" });
++        }
++        const { users, reset } = await applyBoundary(tx, boundary, "postTools", runtime.now());
++        delete live.generation;
++        if (reset) {
++            endRun(tx, live, runtime.taskId, { status: "unanswered", reason: "reset" });
++            if (users.length > 0)
++                await startRun(tx, runtime.conversationId, live, users);
++            return { status: "terminal", outcome: { status: "completed", result: {} } };
++        }
++        live.run.inputs.push(...users);
++        return { status: "running", checkpoint: { phase: "prepare", attempt: 1 } };
++    }, context);
++    return interrupted;
++}
+ /** Classify a terminal provider message in one commit that also clears the partial. */
+ async function classify(runtime, request, message, context) {
+     // An abort mark or close: the abort invocation or the reopened run handles the committed state.
+diff --git a/dist/harness/submissions.js b/dist/harness/submissions.js
+index ee076b5..d28cb2d 100644
+--- a/dist/harness/submissions.js
++++ b/dist/harness/submissions.js
+@@ -164,10 +164,14 @@ export async function admitSubmission(tx, conversationId, draft, now, queueModes
+         if (draft.type === "write")
+             items.push({ id, mode: "write", entry: value });
+         else {
+-            const mode = draft.whenBusy === "steer" ? "steer" : "followUp";
++            // Recurse Pi patch: rerun tests/backend/pi_interrupt_patch.test.ts on upgrade.
++            // Interrupt is still a durable steer; only an active provider stream is cut.
++            const mode = draft.whenBusy === "steer" || draft.whenBusy === "interrupt" ? "steer" : "followUp";
+             const content = value;
+             const entry = draft.entry === undefined ? {} : { entry: pickInputEntry(draft.entry) };
+             items.push({ id, mode, content, ...entry });
++            if (draft.whenBusy === "interrupt" && live.generation?.streaming)
++                live.generation.interrupted = true;
+         }
+         if (boundary === undefined)
+             return id;
+diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
+index ea3adc9..6f63750 100644
+--- a/dist/harness/types.d.ts
++++ b/dist/harness/types.d.ts
+@@ -25,7 +25,8 @@ export type SubmissionDraft = {
+ } & ({
+     readonly type: "input";
+     readonly content: UserInput;
+-    readonly whenBusy?: "steer" | "followUp" | "reject";
++    /** Interrupt only streaming model output; tools keep boundary steering. */
++    readonly whenBusy?: "steer" | "interrupt" | "followUp" | "reject";
+     /** Place the input as this entry; default `pi.user` without data. The kind must not start with `pi.`. */
+     readonly entry?: InputEntry;
+ } | {
