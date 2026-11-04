@@ -38,6 +38,7 @@ import {
 } from "../../src/observability/runtime_logging.ts";
 import {
   fauxHost,
+  held,
   idle,
   lifecycle,
   testDeps,
@@ -96,6 +97,19 @@ describe("durableModels", () => {
     expect((await models.getAuth("openai-codex"))?.auth.apiKey).toBe(
       "codex-access",
     );
+    const authPath = join(dir, "auth.json");
+    const stored = JSON.parse(await Bun.file(authPath).text());
+    stored.openai.key = "sk-openai-updated";
+    await Bun.write(authPath, JSON.stringify(stored));
+    expect((await models.getAuth("openai"))?.auth.apiKey).toBe(
+      "sk-openai-updated",
+    );
+    await Promise.all([models.logout("anthropic"), models.logout("openai")]);
+    expect(await models.getAuth("anthropic")).toBeUndefined();
+    expect(await models.getAuth("openai")).toBeUndefined();
+    expect(JSON.parse(await Bun.file(authPath).text())).toEqual({
+      "openai-codex": stored["openai-codex"],
+    });
   });
 
   test("an Anthropic subscription resolves as OAuth, not an env key", async () => {
@@ -239,23 +253,6 @@ async function shellGroup(host: DurableHost, cid: string): Promise<number> {
   return pgid!;
 }
 
-const untilAborted = (gate: Promise<void>, signal: AbortSignal | undefined) =>
-  signal?.aborted
-    ? Promise.resolve()
-    : Promise.race([
-        gate,
-        new Promise<void>((resolve) =>
-          signal?.addEventListener("abort", () => resolve()),
-        ),
-      ]);
-
-const heldAnswer =
-  (gate: Promise<void>, text: string) =>
-  async (_context: unknown, options?: { signal?: AbortSignal }) => {
-    await untilAborted(gate, options?.signal);
-    return fauxAssistantMessage(text);
-  };
-
 const startShell = () =>
   fauxAssistantMessage(
     fauxToolCall("bash", { command: "sleep 60", background: true }),
@@ -371,6 +368,53 @@ describe("DurableHost", () => {
       expect(settled.tool_started_at_ms).toBeUndefined();
       expect(settled.tool_elapsed_ms).toBeUndefined();
     } finally {
+      await host.close();
+    }
+  });
+
+  // Regression: #3013 live view subscribers must see deferred progress before it is stored.
+  test("view subscribers see streamed answers before their progress is persisted", async () => {
+    const faux = fauxProvider({ tokensPerSecond: 100 });
+    const models = createModels();
+    models.setProvider(faux.provider);
+    faux.setResponses([fauxAssistantMessage("streamed answer ".repeat(1000))]);
+    const host = hostFor({ c1: record("c1", root) }, models);
+    const { harness } = await host.open("c1");
+    let persisted = false;
+    const commits = harness.observeCommits({
+      end: () => {},
+      advance: ({ changes }) => {
+        for (const change of changes)
+          if (
+            change.type === "document" &&
+            change.kind === "change" &&
+            change.record.kind === LiveDoc.definition.kind &&
+            JSON.stringify(change.value.generation ?? null).includes("streamed")
+          )
+            persisted = true;
+      },
+    });
+    let progress: Rec | undefined;
+    const unsubscribe = host.subscribeView("c1", () => {
+      void host.view("c1").then((page) => {
+        if (
+          !persisted &&
+          (page.blocks as Rec[]).some(
+            (row) =>
+              row.role === "assistant" && String(row.text).includes("streamed"),
+          )
+        )
+          progress = page;
+      });
+    });
+    try {
+      await host.send("c1", "Stream an answer", "stream");
+      await until(() => progress !== undefined);
+      expect(progress!.turn_status).not.toBe("idle");
+      expect(persisted).toBe(false);
+    } finally {
+      unsubscribe();
+      commits.detach();
       await host.close();
     }
   });
@@ -493,7 +537,7 @@ describe("DurableHost", () => {
     const opens = logged.filter(([event]) => event === "durable_open");
     const [[, fields, level]] = opens as [string, Rec, number][];
     const phases =
-      "runtime env search safety storage harness root track recover resume";
+      "runtime env search safety storage harness root_conversation root_snapshot root_mcp root_import root_report root track recover resume";
     const names = phases.split(" ").map((name) => `${name}_ms`);
     const details = slow
       ? [
@@ -503,6 +547,10 @@ describe("DurableHost", () => {
           "env_files_ms",
           "storage_migration_ms",
           "storage_metadata_ms",
+          "storage_queue_ms",
+          "storage_dispatch_ms",
+          "storage_execution_ms",
+          "storage_reply_ms",
           "storage_db_bytes",
           "storage_wal_bytes",
           "storage_stat_ms",
@@ -515,11 +563,12 @@ describe("DurableHost", () => {
     expect(Object.keys(fields)).toEqual([
       "cid",
       ...names,
+      "focus_wait_ms",
       ...details,
       "total_ms",
     ]);
     expect(fields.cid).toBe("c1");
-    for (const name of [...names, ...details, "total_ms"]) {
+    for (const name of [...names, "focus_wait_ms", ...details, "total_ms"]) {
       expect(Number.isFinite(fields[name])).toBe(true);
       expect(fields[name]).toBeGreaterThanOrEqual(0);
     }
@@ -552,9 +601,8 @@ describe("DurableHost", () => {
 
   test("a stop naming a stale run is refused with 409 and leaves the live run going", async () => {
     const { faux, models } = fauxModels();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => (release = resolve));
-    faux.setResponses([heldAnswer(held, "late")]);
+    const { step, release } = held(fauxAssistantMessage("late"));
+    faux.setResponses([step]);
     const records = { c1: record("c1", root) };
     const host = hostFor(records, models);
     const deps = stopDeps(host, records);
@@ -585,9 +633,8 @@ describe("DurableHost", () => {
   // Feature: #2538 retirement hides the run before the Harness closes.
   test("retire stops the run, closes the Harness, retires its storage, and refuses sends", async () => {
     const { faux, models } = fauxModels();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => (release = resolve));
-    faux.setResponses([heldAnswer(held, "late")]);
+    const { step, release } = held(fauxAssistantMessage("late"));
+    faux.setResponses([step]);
     const records: Record<string, Rec> = { c1: record("c1", root) };
     const host = hostFor(records, models);
     const storage = join(host.storagePath("c1"), "..", "..");
@@ -622,9 +669,8 @@ describe("DurableHost", () => {
   test("retire keeps the storage until the Harness closes, even when the abort fails", async () => {
     const { faux, models } = fauxModels();
     let restoreClose: (() => void) | undefined;
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => (release = resolve));
-    faux.setResponses([heldAnswer(held, "late")]);
+    const { step, release } = held(fauxAssistantMessage("late"));
+    faux.setResponses([step]);
     const records: Record<string, Rec> = { c1: record("c1", root) };
     const host = hostFor(records, models);
     const storage = join(host.storagePath("c1"), "..", "..");
@@ -697,16 +743,14 @@ describe("DurableHost", () => {
 
   test("status, queued input, thinking text, and the compaction summary", async () => {
     const { faux, models } = fauxModels();
-    let release!: () => void;
-    const held = new Promise<void>((resolve) => (release = resolve));
+    const { step, release } = held(
+      fauxAssistantMessage([
+        fauxThinking("**Plan** check the queue"),
+        fauxText("first answer"),
+      ]),
+    );
     faux.setResponses([
-      async (_context, options) => {
-        await untilAborted(held, options?.signal);
-        return fauxAssistantMessage([
-          fauxThinking("**Plan** check the queue"),
-          fauxText("first answer"),
-        ]);
-      },
+      step,
       fauxAssistantMessage("second answer"),
       fauxAssistantMessage("summary of the work"),
     ]);
@@ -742,14 +786,7 @@ describe("DurableHost", () => {
       const marker = ((await host.view("c1")).blocks as Rec[]).find(
         (b) => b.role === "compaction",
       )!;
-      expect(
-        await host.markerSummary("c1", marker.offset as number),
-      ).toMatchObject({ marker: "compact" });
-      expect(
-        String(
-          (await host.markerSummary("c1", marker.offset as number))!.summary,
-        ),
-      ).toContain("summary of the work");
+      expect(String(marker.text)).toContain("summary of the work");
     } finally {
       await host.close();
     }
@@ -843,7 +880,46 @@ describe("DurableHost", () => {
       await host.send("c1", "first", "r1");
       await until(idle(host));
       const first = await host.open("c1");
-      expect(descriptors().length).toBeGreaterThanOrEqual(3);
+      expect(descriptors().length).toBe(2);
+      const inspecting = Promise.withResolvers<void>();
+      const expire = Promise.withResolvers<void>();
+      const viewing = Promise.withResolvers<void>();
+      const read = Promise.withResolvers<void>();
+      const inspect = first.harness.inspect.bind(first.harness);
+      const snapshot = first.harness.snapshot.bind(first.harness);
+      first.harness.inspect = async (ctx) => {
+        const result = await inspect(ctx);
+        inspecting.resolve();
+        await expire.promise;
+        return result;
+      };
+      first.harness.snapshot = new Proxy(snapshot, {
+        async apply(target, thisArg, args) {
+          if (args[0] === ReportDoc) {
+            viewing.resolve();
+            await read.promise;
+          }
+          return Reflect.apply(target, thisArg, args);
+        },
+      });
+      try {
+        await inspecting.promise;
+        const page = host.view("c1").then(
+          (value) => value,
+          (error) => error,
+        );
+        await viewing.promise;
+        expire.resolve();
+        await host.serial("c1", async () => {});
+        expect(host.opened.has("c1")).toBe(true);
+        read.resolve();
+        expect(JSON.stringify(await page)).toContain("first reply");
+      } finally {
+        expire.resolve();
+        read.resolve();
+        first.harness.inspect = inspect;
+        first.harness.snapshot = snapshot;
+      }
       await first.harness.closed;
       await until(() => descriptors().length === 0);
       const failing = await host.open("c1");
@@ -886,7 +962,7 @@ describe("DurableHost", () => {
       await other.harness.closed;
       expect((await host.open("c1")).harness).toBe(reopened.harness);
       expect(groupAlive(pgid)).toBe(true);
-      expect(descriptors().length).toBeGreaterThanOrEqual(3);
+      expect(descriptors().length).toBe(2);
       await host.stopProcesses("c1");
       await reopened.harness.closed;
       await until(() => descriptors().length === 0);
@@ -1297,7 +1373,11 @@ test("a server killed mid-generation resumes and finishes the turn on restart", 
   }
 }, 20_000);
 
-async function killedWithShell(dataDir: string): Promise<number> {
+async function killedWithShell(
+  dataDir: string,
+  phase: (name: string) => void = () => {},
+): Promise<number> {
+  phase("shell fixture spawn");
   const child = Bun.spawn(
     [
       process.execPath,
@@ -1308,6 +1388,7 @@ async function killedWithShell(dataDir: string): Promise<number> {
   );
   let pgid: number;
   try {
+    phase("shell fixture stdout");
     const reader = child.stdout.getReader();
     let out = "";
     while (!out.includes("\n")) {
@@ -1316,11 +1397,13 @@ async function killedWithShell(dataDir: string): Promise<number> {
       out += new TextDecoder().decode(value);
     }
     pgid = (JSON.parse(out) as { pgid: number }).pgid;
+    phase("shell fixture exit");
     child.kill("SIGKILL");
     await child.exited;
   } finally {
     child.kill("SIGKILL");
   }
+  phase("shell fixture group check");
   expect(groupAlive(pgid)).toBe(true);
   return pgid;
 }
@@ -1347,28 +1430,51 @@ function restartedHost(
   return { faux, host, records };
 }
 
-test("a failed open after shell recovery leaves no group or storage lock", async () => {
-  const dataDir = mkdtempSync(join(root, "kill-open-failure-"));
-  const pgid = await killedWithShell(dataDir);
-  let fail = true;
-  const { host, faux } = restartedHost(dataDir, { value: true }, (event) => {
-    if (event === "durable_open" && fail) throw new Error("open report failed");
+describe("failed-open recovery diagnostics", () => {
+  let pending: { phase: string } | undefined;
+  afterEach(() => {
+    const unfinished = pending;
+    pending = undefined;
+    if (unfinished)
+      throw new Error(`Failed-open recovery awaiting ${unfinished.phase}`);
   });
-  faux.setResponses(
-    Array.from({ length: 4 }, () => fauxAssistantMessage("resumed answer")),
-  );
-  try {
-    const failed = await host.open("c1").catch((error: unknown) => error);
-    expect(String(failed)).toContain("open report failed");
-    expect(groupAlive(pgid)).toBe(false);
-    fail = false;
-    const opened = await host.open("c1");
-    expect(opened.ready).toBe(true);
-    expect(groupAlive(pgid)).toBe(false);
-  } finally {
-    await host.close();
-  }
-}, 20_000);
+
+  // Regression: #3106 A recovery timeout identifies the unfinished await.
+  test("a failed open after shell recovery leaves no group or storage lock", async () => {
+    const stage = { phase: "shell fixture setup" };
+    pending = stage;
+    const phase = (name: string) => {
+      stage.phase = name;
+    };
+    const dataDir = mkdtempSync(join(root, "kill-open-failure-"));
+    const pgid = await killedWithShell(dataDir, phase);
+    let fail = true;
+    const { host, faux } = restartedHost(dataDir, { value: true }, (event) => {
+      if (event === "durable_open" && fail)
+        throw new Error("open report failed");
+    });
+    faux.setResponses(
+      Array.from({ length: 4 }, () => fauxAssistantMessage("resumed answer")),
+    );
+    try {
+      phase("failed host open");
+      const failed = await host.open("c1").catch((error: unknown) => error);
+      expect(String(failed)).toContain("open report failed");
+      phase("recovered shell group check");
+      expect(groupAlive(pgid)).toBe(false);
+      fail = false;
+      phase("host reopen");
+      const opened = await host.open("c1");
+      expect(opened.ready).toBe(true);
+      phase("reopened shell group check");
+      expect(groupAlive(pgid)).toBe(false);
+    } finally {
+      phase("host close");
+      await host.close();
+      if (pending === stage) pending = undefined;
+    }
+  }, 20_000);
+});
 
 test("a deletion after a restart stops the shell group of a conversation this process never opened", async () => {
   const dataDir = mkdtempSync(join(root, "kill-reap-"));

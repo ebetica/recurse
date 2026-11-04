@@ -3,6 +3,7 @@ import {
   copyFile,
   mkdir,
   mkdtemp,
+  readFile,
   rm,
   symlink,
   unlink,
@@ -10,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
+import { brotliDecompressSync } from "node:zlib";
 import { dirname, join } from "node:path";
 
 import {
@@ -28,6 +30,7 @@ import {
   type BodySpec,
 } from "./http_corpus";
 import { Refs, runRefCases, type RefCase } from "./http_refs";
+import { API_REVISION } from "../../src/web/api_v1/schema";
 import { serveOpen } from "./http_open_app";
 import corpus from "./fixtures/http_static/cases.json";
 import seed from "./fixtures/http_static/seed.json";
@@ -138,12 +141,14 @@ describe("corpus", () => {
               const {
                 theme,
                 release: served,
+                api_revision: revision,
                 ...json
               } = (
                 body as {
                   json: Record<string, unknown>;
                 }
               ).json;
+              expect(revision, item.name).toBe(API_REVISION);
               expect(theme, item.name).toMatch(/^[0-9a-f]{12}$/);
               expect(served, item.name).toEqual(release);
               body = { json };
@@ -212,6 +217,34 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
       `/static/app.js?v=${version}`,
     );
     expect(shell).toContain(`src="/static/app.js?v=${version}"`);
+    const fetchApp = (acceptEncoding: string) =>
+      fetch(`http://127.0.0.1:${running.port}/static/app.js?v=${version}`, {
+        headers: { "accept-encoding": acceptEncoding },
+        decompress: false,
+      } as RequestInit);
+    let brotli = await fetchApp("gzip, br");
+    for (
+      let tries = 0;
+      brotli.headers.get("content-encoding") !== "br";
+      tries++
+    ) {
+      expect(tries).toBeLessThan(100);
+      await brotli.arrayBuffer();
+      await Bun.sleep(10);
+      brotli = await fetchApp("gzip, br");
+    }
+    expect(
+      brotliDecompressSync(
+        new Uint8Array(await brotli.arrayBuffer()),
+      ).toString(),
+    ).toBe(await readFile(join(root, "web/dist/app.js"), "utf8"));
+    expect(brotli.headers.get("vary")).toBe("Accept-Encoding");
+    for (const acceptEncoding of ["gzip", "identity"]) {
+      const plain = await fetchApp(acceptEncoding);
+      expect(plain.headers.get("content-encoding")).toBeNull();
+      expect(plain.headers.get("vary")).toBe("Accept-Encoding");
+      expect(await plain.text()).toBe('console.log("app");\n');
+    }
     const faviconUrl = shell.match(
       /<link rel="icon" href="([^"]+)" type="image\/svg\+xml"/,
     )?.[1];
@@ -222,6 +255,25 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
     expect(favicon.status).toBe(200);
     expect(favicon.headers.get("content-type")).toBe("image/svg+xml");
     expect(await favicon.text()).toContain('viewBox="0 0 64 64"');
+    const revalidated = await fetch(
+      `http://127.0.0.1:${running.port}${faviconUrl}`,
+      { headers: { "if-none-match": favicon.headers.get("etag")! } },
+    );
+    expect(revalidated.status).toBe(304);
+    expect(revalidated.headers.get("cache-control")).toBe("no-cache");
+    expect(await revalidated.text()).toBe("");
+    const lastModified = favicon.headers.get("last-modified")!;
+    for (const [since, status] of [
+      [lastModified, 304],
+      [new Date(Date.parse(lastModified) - 1000).toUTCString(), 200],
+    ] as const) {
+      const byDate = await fetch(
+        `http://127.0.0.1:${running.port}${faviconUrl}`,
+        { headers: { "if-modified-since": since } },
+      );
+      expect(byDate.status).toBe(status);
+      await byDate.arrayBuffer();
+    }
     for (const name of ["favicon-32.png", "apple-touch-icon.png"]) {
       const image = await fetch(
         `http://127.0.0.1:${running.port}/static/brand/${name}`,

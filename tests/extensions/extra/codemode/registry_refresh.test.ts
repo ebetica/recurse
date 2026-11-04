@@ -21,7 +21,7 @@ import {
   createCodemodeTool,
 } from "@earendil-works/pi-durable/codemode";
 import { CodemodeSandbox } from "@earendil-works/pi-codemode";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 for (const wrapped of [false, true]) {
   test(`hook-installed tools ${wrapped ? "are visible with" : "stay invisible without"} the codemode agent wrapper`, async () => {

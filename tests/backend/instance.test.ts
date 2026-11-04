@@ -5,8 +5,10 @@ import {
   mkdirSync,
   mkdtempSync,
   rmSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
   writeFileSync,
-  utimesSync,
 } from "node:fs";
 
 import { tmpdir } from "node:os";
@@ -21,6 +23,7 @@ import {
   type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import { LiveDoc } from "@earendil-works/pi-durable";
 import { setSafetyReviewOff } from "../../src/extensions/core/safety/durable";
 import { publishedFiles } from "../../src/agents/runtime/attachments/published";
 import * as artifacts from "../../src/artifacts";
@@ -29,12 +32,14 @@ import { buildInstance, type Instance } from "../../src/agents/instance";
 import { cleanOnce, markerRecord, rootFromEnv } from "../../tools/worktree";
 
 import { Config } from "../../src/config";
+import { RECURSE_SETTINGS_SKILL } from "../../src/coding_backend/skills";
 import type { RuntimeLogRecord } from "../../src/observability/runtime_logging";
 import { Cancelled } from "../../src/utils/tasks";
 import { TreeLifecycleBusy } from "../../src/agents/mutation_guard";
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { AuthStorage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { buildConversationsApp } from "./http_conversations_app";
+import { conversationEvents } from "../../src/web/conversation_events";
 
 const roots: string[] = [];
 const live: Instance[] = [];
@@ -256,6 +261,11 @@ text(await tools.publish({paths:[${JSON.stringify(source)}]}));
   expect(result).toContain('command\\\": \\\"publish');
   expect(result).toContain("present");
   expect(result).toContain("Published artifact-source.md");
+  const view = await instance.durable.view(cid);
+  const script = (view.blocks as any[]).find((row) => row.name === "codemode");
+  expect(script.files.map((file: any) => file.name)).toEqual([
+    "artifact-source.md",
+  ]);
   expect(
     (
       await publishedFiles(
@@ -302,7 +312,7 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
       initial = JSON.stringify((await instance.durable.prompt(cid)).request);
       return fauxAssistantMessage(
         fauxToolCall("codemode", {
-          code: 'text(await searchTools("effort levels colour themes")); text(await searchTools("create Artifact"));',
+          code: 'text(await searchTools("recurse_settings")); text(await searchTools("create Artifact"));',
         }),
         { stopReason: "toolUse" },
       );
@@ -311,7 +321,7 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
       discovered = JSON.stringify(request.messages.at(-1));
       return fauxAssistantMessage(
         fauxToolCall("codemode", {
-          code: 'text(await describeTool("recurse_settings")); text(await describeTool("artifact"));',
+          code: `text(await tools.read({path:${JSON.stringify(RECURSE_SETTINGS_SKILL)}})); text(await describeTool("recurse_settings")); text(await describeTool("artifact"));`,
         }),
         { stopReason: "toolUse" },
       );
@@ -342,6 +352,11 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
   );
   await opened.conversation.waitForIdle(BACKGROUND_CONTEXT);
   expect(initial).toContain("searchTools");
+  expect(initial).toContain("<name>recurse-settings</name>");
+  expect(initial).toContain(RECURSE_SETTINGS_SKILL);
+  expect((await instance.agentTools.skillsFor(cid))?.[0]).toContainEqual(
+    expect.objectContaining({ name: "recurse-settings" }),
+  );
   expect(initial).not.toContain('"name":"recurse_settings"');
   expect(initial).not.toContain("### `recurse_settings`");
   expect(initial).not.toContain('"name":"artifact"');
@@ -350,6 +365,10 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
   expect(discovered).toContain("recurse_settings");
   expect(discovered).toContain("artifact");
   expect(described).toContain("Ghostty palette file");
+  expect(described).toContain("including the level-1 safety reviewer");
+  expect(described).toContain(
+    "Change Recurse settings; read the recurse-settings skill first.",
+  );
   expect(described).toContain("set_level");
   expect(described).toContain("from_file");
   expect(result).toContain("No Artifacts.");
@@ -359,7 +378,7 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
   expect(JSON.stringify(capture.request)).toContain("describeTool");
 });
 
-// Regression: #2852 native publications use persistent storage, not scratch.
+// Regression: #2852 publications persist; #2951 unreadable lookups recover.
 test("native publications remain in Files after scratch removal and restart", async () => {
   const { root, env } = await world();
   seedPiModelList(join(root, "data", "config"));
@@ -378,11 +397,7 @@ test("native publications remain in Files after scratch removal and restart", as
   writeFileSync(source, "persistent publication\n");
   faux.setResponses([
     fauxAssistantMessage(
-      fauxToolCall(
-        "publish",
-        { paths: [source] },
-        { id: "persistent-publish" },
-      ),
+      fauxToolCall("publish", { paths: [source] }, { id: "__proto__" }),
       { stopReason: "toolUse" },
     ),
     fauxAssistantMessage("Published the report."),
@@ -396,9 +411,53 @@ test("native publications remain in Files after scratch removal and restart", as
   await opened.conversation.waitForIdle(BACKGROUND_CONTEXT);
   const saved = instance.conversations.load(cid)!;
   const collection = instance.agentTemp.uploadsDir(String(saved.tmp_key));
-  expect(
-    (await publishedFiles(collection, cid)).map((file) => file.name),
-  ).toEqual(["report.txt"]);
+  const stored = await publishedFiles(collection, cid);
+  expect(stored.map((file) => file.name)).toEqual(["report.txt"]);
+  const parkedCollection = `${collection}.held`;
+  renameSync(collection, parkedCollection);
+  const abort = new AbortController();
+  let reader:
+    | { read(): Promise<{ value?: Uint8Array }>; cancel(): Promise<void> }
+    | undefined;
+  try {
+    const response = await conversationEvents(
+      null,
+      (cursor) => instance.reads.readViewEvents(cid, cursor),
+      () => instance.durable.subscribeView(cid, () => {}),
+      abort.signal,
+    );
+    reader = response.body!.getReader();
+    expect(new TextDecoder().decode((await reader!.read()).value)).toContain(
+      '"files_pending":true',
+    );
+  } finally {
+    renameSync(parkedCollection, collection);
+  }
+  const invalid = join(collection, `${"f".repeat(32)}.json`);
+  writeFileSync(invalid, "{");
+  try {
+    const partialFrame = new TextDecoder().decode((await reader!.read()).value);
+    expect(partialFrame).toContain('"files_pending":true');
+    expect(partialFrame).toContain("report.txt");
+  } finally {
+    unlinkSync(invalid);
+  }
+  try {
+    const recoveredFrame = new TextDecoder().decode(
+      (await reader!.read()).value,
+    );
+    expect(recoveredFrame).toContain('"files_pending":false');
+  } finally {
+    abort.abort();
+    await reader?.cancel();
+  }
+  const recovered = await instance.durable.view(cid);
+  const recoveredRow = (recovered.blocks as any[]).find(
+    (block) => block.name === "publish",
+  );
+  expect(recoveredRow.files.map((file: any) => file.name)).toEqual([
+    "report.txt",
+  ]);
   const scratch = await instance.agentTemp.agentTempPath(saved);
   await instance.shutdown();
   rmSync(scratch, { recursive: true, force: true });
@@ -409,6 +468,155 @@ test("native publications remain in Files after scratch removal and restart", as
   const page = await resumed.durable.view(cid);
   const row = (page.blocks as any[]).find((block) => block.name === "publish");
   expect(row.files.map((file: any) => file.name)).toEqual(["report.txt"]);
+});
+
+// Regression: #2951 a failed publication is not rescanned on every view.
+test("failed publication scans once and delayed views use current run state", async () => {
+  const { root, env } = await world();
+  seedPiModelList(join(root, "data", "config"));
+  const instance = await build(env);
+  const faux = fauxProvider({ tokensPerSecond: 20_000 });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  depsOf(instance.durable).models = models;
+  depsOf(instance.durable).settings = () => ["faux/faux-1", "off"];
+  const continuation = held(fauxAssistantMessage("Finished."));
+  const existing = join(root, "existing.txt");
+  const nestedFirst = join(root, "nested-first.txt");
+  const nestedLast = join(root, "nested-last.txt");
+  const gates = ["one", "two", "finish"].map((name) => join(root, name));
+  const wait = (path: string) =>
+    `while [ ! -e ${JSON.stringify(path)} ]; do sleep 0.05; done`;
+  for (const path of [existing, nestedFirst, nestedLast])
+    writeFileSync(path, "existing publication");
+  const command = `printf ready; ${wait(gates[0]!)}; printf step1; ${wait(gates[1]!)}; printf step2; ${wait(gates[2]!)}`;
+  faux.setResponses([
+    fauxAssistantMessage(
+      [
+        fauxToolCall("publish", { paths: [existing] }, { id: "constructor" }),
+        fauxToolCall(
+          "publish",
+          { paths: [join(root, "missing.txt")] },
+          { id: "__proto__" },
+        ),
+      ],
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage(
+      fauxToolCall(
+        "codemode",
+        {
+          code: `await tools.publish({paths:[${JSON.stringify(nestedFirst)}]}); await tools.bash({command:${JSON.stringify(command)}}); await tools.publish({paths:[${JSON.stringify(nestedLast)}]});`,
+        },
+        { id: "held-script" },
+      ),
+      { stopReason: "toolUse" },
+    ),
+    continuation.step,
+  ]);
+  await ready(instance);
+  const cid = String(
+    (await instance.create.create({ title: "Failed publication" })).id,
+  );
+  const opened = await instance.durable.open(cid);
+  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+  const host = instance.durable as any;
+  const scan = host.publishedFiles;
+  let attempts = 0;
+  host.publishedFiles = async (...args: any[]) => {
+    if (args[1].includes("__proto__")) attempts++;
+    return scan.apply(host, args);
+  };
+  try {
+    await instance.delivery.deliver(cid, "Publish a missing file.", {
+      origin: "operator",
+    });
+    const liveTool = async () =>
+      (
+        await opened.harness.snapshot(
+          LiveDoc,
+          opened.conversation.id,
+          BACKGROUND_CONTEXT,
+        )
+      )?.nestedTools?.find((slot) => slot.name === "bash");
+    await durableUntil(
+      async () => (await liveTool())?.output?.includes("ready") === true,
+    );
+    const collection = instance.agentTemp.uploadsDir(
+      String(instance.conversations.load(cid)!.tmp_key),
+    );
+    const invalid = join(collection, `${"f".repeat(32)}.json`);
+    writeFileSync(invalid, "{");
+    try {
+      const first = await instance.durable.view(cid);
+      const good = (first.blocks as any[]).find((block) =>
+        block.files?.some((file: any) => file.name === "existing.txt"),
+      );
+      expect(good.files.map((file: any) => file.name)).toEqual([
+        "existing.txt",
+      ]);
+      for (const [index, marker] of ["step1", "step2"].entries()) {
+        writeFileSync(gates[index]!, "go");
+        await durableUntil(
+          async () => (await liveTool())?.output?.includes(marker) === true,
+        );
+        await instance.durable.view(cid);
+      }
+      expect(attempts).toBe(1);
+      writeFileSync(gates[2]!, "go");
+      await continuation.started;
+      const finished = await instance.durable.view(cid);
+      expect(
+        (finished.blocks as any[]).some((block) =>
+          block.files?.some((file: any) => file.name === "nested-last.txt"),
+        ),
+      ).toBeTrue();
+      expect(attempts).toBe(2);
+    } finally {
+      unlinkSync(invalid);
+      for (const gate of gates) writeFileSync(gate, "go");
+    }
+    await durableUntil(
+      async () => (await instance.durable.view(cid)).files_pending === false,
+      20_000,
+    );
+    const completedAttempts = attempts;
+    for (let i = 0; i < 3; i++) await instance.durable.view(cid);
+    expect(attempts).toBe(completedAttempts);
+    const views = host.views;
+    const page = views.page;
+    let sampled!: () => void;
+    let unblock!: () => void;
+    const sampledPage = new Promise<void>((resolve) => (sampled = resolve));
+    const blockedPage = new Promise<void>((resolve) => (unblock = resolve));
+    views.page = async (...args: any[]) => {
+      const result = await page.apply(views, args);
+      sampled();
+      await blockedPage;
+      return result;
+    };
+    try {
+      const inFlight = instance.durable.view(cid);
+      await sampledPage;
+      expect(instance.durable.metadata(cid).status).toBe("running");
+      continuation.release();
+      await opened.conversation.waitForIdle(BACKGROUND_CONTEXT);
+      const settled = instance.durable.metadata(cid);
+      expect(settled.status).toBe("idle");
+      unblock();
+      const result = await inFlight;
+      expect(result.turn_status).toBe("idle");
+      expect(
+        (result.run_state_clock as [string, number])[1],
+      ).toBeGreaterThanOrEqual(settled.run_state_clock[1]);
+    } finally {
+      unblock();
+      views.page = page;
+    }
+  } finally {
+    continuation.release();
+    host.publishedFiles = scan;
+  }
 });
 
 test("Durable delivery persists only unique operator admission times", async () => {
@@ -676,6 +884,7 @@ test("Durable owners are wired and start() runs startup in order", async () => {
   await instance.shutdown();
 });
 
+// Regression: #3031 Deletion awaits recoverable legacy tool-detail retirement.
 test("consumer seams reach their owners", async () => {
   const { root, env } = await world();
   const instance = await build(env);
@@ -709,7 +918,7 @@ test("consumer seams reach their owners", async () => {
     createHash("sha256").update(cid, "utf8").digest("hex"),
   );
   mkdirSync(ownerDir, { recursive: true });
-  depsOf(instance.reap).retireToolDetails(cid);
+  expect(await instance.reap.reap(cid)).toContain(cid);
   expect(existsSync(ownerDir)).toBe(false);
 });
 
@@ -726,11 +935,13 @@ test("warmOpen builds the shared Models and Settings' catalog, so the first open
   await ready(instance);
   const cid = String((await instance.create.create({ title: "warm" })).id);
   const list = join(root, "data", "config", "pi-model-list.json");
-  utimesSync(list, new Date(1_000_000), new Date(1_000_000));
+  const catalog = JSON.parse(readFileSync(list, "utf8"));
+  catalog.models[0].name += " (refreshed)";
+  writeFileSync(list, JSON.stringify(catalog));
   const config = Config.prototype as unknown as Record<string, () => unknown>;
   const spies = [
     // test-check-allow: T3 Call-through counts real credential store construction.
-    spyOn(AuthStorage, "create"),
+    spyOn(AuthStorage, "createLazy"),
     // test-check-allow: T3 Call-through counts real Settings catalog file reads.
     spyOn(config, "readPiModelList"),
     // test-check-allow: T3 Call-through counts real catalog policy construction.
@@ -744,7 +955,7 @@ test("warmOpen builds the shared Models and Settings' catalog, so the first open
       true,
     ]);
     for (const spy of spies) spy.mockClear();
-    instance.config.writeAvailableModels();
+    await instance.config.writeAvailableModels();
     await instance.durable.open(cid);
     expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0, 0, 0]);
   } finally {
@@ -799,5 +1010,88 @@ test("FI-1: an external lease delays no tree, view or Stop request", async () =>
   } finally {
     holder.kill();
     await holder.exited;
+  }
+});
+
+// Regression: #3050 parallel native level edits must not overwrite another conversation's edit.
+test("parallel native Settings level edits both persist", async () => {
+  const { root, env } = await world();
+  seedPiModelList(join(root, "data", "config"));
+  const instance = await build(env);
+  const faux = fauxProvider({ tokensPerSecond: 20_000 });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  depsOf(instance.durable).models = models;
+  depsOf(instance.durable).settings = () => ["faux/faux-1", "off"];
+  await ready(instance);
+  const edits = [1, 2].map((level) => {
+    const entry = instance.config.effortLevels()[level]!;
+    return {
+      level,
+      model: entry.model,
+      reasoning: entry.reasoning === "low" ? "high" : "low",
+      marker: `PARALLEL-LEVEL-${level}`,
+    };
+  });
+  const conversations = [];
+  for (const edit of edits) {
+    const cid = String(
+      (await instance.create.create({ title: edit.marker })).id,
+    );
+    const opened = await instance.durable.open(cid);
+    await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+    conversations.push({ cid, opened, edit });
+  }
+  let release!: () => void;
+  const together = new Promise<void>((resolve) => (release = resolve));
+  let arrivals = 0;
+  const respond: FauxResponseStep = async (request) => {
+    const messages = JSON.stringify(request.messages);
+    const edit = edits.find((entry) => messages.includes(entry.marker));
+    if (!edit) throw new Error("missing parallel Settings intent");
+    if (++arrivals === edits.length) release();
+    await together;
+    return fauxAssistantMessage(
+      fauxToolCall("codemode", {
+        code: `await describeTool("recurse_settings"); text(await tools.recurse_settings(${JSON.stringify({ action: "set_level", level: edit.level, model: edit.model, reasoning: edit.reasoning })}));`,
+      }),
+      { stopReason: "toolUse" },
+    );
+  };
+  faux.setResponses([
+    respond,
+    respond,
+    fauxAssistantMessage("First level saved."),
+    fauxAssistantMessage("Second level saved."),
+  ]);
+  try {
+    await Promise.all(
+      conversations.map(({ cid, edit }) =>
+        instance.delivery.deliver(cid, edit.marker, {
+          origin: "operator",
+          messageId: edit.marker,
+        }),
+      ),
+    );
+    await Promise.all(
+      conversations.map(({ opened }) =>
+        opened.conversation.waitForIdle(BACKGROUND_CONTEXT),
+      ),
+    );
+    expect(arrivals).toBe(edits.length);
+    const saved = JSON.parse(
+      readFileSync(instance.config.paths.EFFORT_LEVELS_FILE, "utf8"),
+    );
+    for (const edit of edits) {
+      expect(saved.levels[String(edit.level)]).toEqual({
+        model: edit.model,
+        reasoning: edit.reasoning,
+      });
+      expect(instance.config.effortLevels()[edit.level]!.reasoning).toBe(
+        edit.reasoning,
+      );
+    }
+  } finally {
+    release();
   }
 });

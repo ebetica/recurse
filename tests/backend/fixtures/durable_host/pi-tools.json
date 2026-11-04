@@ -1,0 +1,94 @@
+[
+  {
+    "name": "read",
+    "description": "Read text or jpg/png/gif/webp/bmp images (attached). Text is capped at 2,000 lines/50KB; use offset/limit and continue until complete.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the file to read (relative or absolute)"
+        },
+        "offset": {
+          "type": "number",
+          "description": "Line number to start reading from (1-indexed)"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Maximum number of lines to read"
+        }
+      },
+      "required": ["path"]
+    }
+  },
+  {
+    "name": "write",
+    "description": "Write a file, overwriting existing content; creates parent directories.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the file to write (relative or absolute)"
+        },
+        "content": {
+          "type": "string",
+          "description": "Content to write to the file"
+        }
+      },
+      "required": ["path", "content"]
+    }
+  },
+  {
+    "name": "edit",
+    "description": "Replace exact, unique, non-overlapping original-file text (not incrementally). Merge overlapping/nearby changes; omit large unchanged spans.",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Path to the file to edit (relative or absolute)"
+        },
+        "edits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "oldText": {
+                "type": "string",
+                "description": "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
+              },
+              "newText": {
+                "type": "string",
+                "description": "Replacement text for this targeted edit."
+              }
+            },
+            "required": ["oldText", "newText"]
+          },
+          "description": "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits. If two changes touch the same block or nearby lines, merge them into one edit instead."
+        }
+      },
+      "required": ["path", "edits"]
+    }
+  },
+  {
+    "name": "codemode",
+    "description": "Run raw JavaScript (no JSON/fences) as a restart-resumable async function body in QuickJS; await/return work. No Node, filesystem, network or timers.\nawait tools.name(args) returns a string or declared object. Thrown errors reject; object-returning tools may report failure in fields—check them. Pending calls are cancelled on script end; completed calls are not replayed after restart.\nOptional first line: // @options: {\"max_output_tokens\":10000,\"timeout_ms\":60000}\nOutput via text(value), image(dataUrlOrImageBlock), console.log(...) or return; exit() stops. Images also report a saved temporary path.\nstore(key,value)/load(key) persist JSON across calls. Native tools use the same arguments. Discover others with ALL_TOOLS, searchTools(query,{limit?,namespace?}), describeTool(name), describeNamespace(name).",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string",
+          "description": "Raw JavaScript source."
+        }
+      },
+      "required": ["code"]
+    },
+    "constrainedSampling": {
+      "type": "grammar",
+      "variants": {
+        "openai_lark": "\nstart: options_source | plain_source\noptions_source: OPTIONS_LINE NEWLINE SOURCE\nplain_source: SOURCE\n\nOPTIONS_LINE: /[ \\t]*\\/\\/ @options:[^\\r\\n]*/\nNEWLINE: /\\r?\\n/\nSOURCE: /[\\s\\S]+/\n"
+      }
+    }
+  }
+]

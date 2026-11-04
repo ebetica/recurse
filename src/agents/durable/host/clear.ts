@@ -7,7 +7,8 @@ import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Conversation } from "@earendil-works/pi-durable";
-import * as trash from "../../../utils/trash";
+import { retirePath } from "../../../utils/trash_sweep";
+import { slowSpan } from "../../../observability/slow_span";
 import { isDirectory } from "../archive.ts";
 import type { DurableHost } from "../host.ts";
 import { draft, type Held } from "./send.ts";
@@ -78,16 +79,23 @@ export async function resumeClear(
 ): Promise<ClearState | undefined> {
   let clear = host.clears.get(cid);
   if (clear === undefined) {
-    const text = await readFile(clearPath(host, cid), "utf8").catch(
-      () => undefined,
-    );
-    clear = text === undefined ? undefined : (JSON.parse(text) as ClearState);
+    const text = await slowSpan("clear_read_call", cid, () =>
+      readFile(clearPath(host, cid), "utf8"),
+    ).catch(() => undefined);
+    clear =
+      text === undefined
+        ? undefined
+        : slowSpan("clear_parse", cid, () => JSON.parse(text) as ClearState);
     if (clear !== undefined) host.clears.set(cid, clear);
   }
   // Invariant: A clear stopped while archiving (its archive directory exists)
   // is finished before anything opens the partly moved old store.
   const kept = join(host.archive.root, `${cid}.clear-${clear?.archive}`);
-  if (clear && !clear.rotated && (await isDirectory(kept)))
+  if (
+    clear &&
+    !clear.rotated &&
+    (await slowSpan("clear_archive_stat_call", cid, () => isDirectory(kept)))
+  )
     await retireCleared(host, cid, clear);
   return clear;
 }
@@ -99,9 +107,14 @@ export async function retireCleared(
   clear: ClearState,
 ): Promise<void> {
   clear.archive ??= randomBytes(4).toString("hex");
-  if (!(await host.keepStore(cid, "clear", `clear-${clear.archive}`)))
-    throw new Error("the cleared history could not be archived");
-  trash.retire(join(host.storagePath(cid), ".."), host.deps.trashDir);
+  if (
+    !(await host.keepStore(cid, "clear", `clear-${clear.archive}`, async () => {
+      // Spec: @tla rename {paths:[host.storagePath(cid)]}
+      await retirePath(join(host.storagePath(cid), ".."), host.deps.trashDir);
+      return true;
+    }))
+  )
+    throw new Error("the cleared history could not be retired");
   clear.rotated = true;
   await writeClear(host, cid, clear);
 }

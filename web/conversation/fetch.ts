@@ -17,10 +17,11 @@ import {
 } from "./cache.js";
 import { phaseFor } from "./freshness.js";
 import { inputEl } from "../dom.js";
-import { syncPanes } from "../panes.js";
+import { notePaneConversationRendered, syncPanes } from "../panes.js";
 import {
   clearFocusedEventsGone,
   focusedEventsLive,
+  notePollActivity,
   retargetFocusedEvents,
 } from "./poll.js";
 import {
@@ -66,13 +67,13 @@ async function fetchConvView(
       purpose === "focused" ? conversationRequestDispatched(id) : null;
     const focusedQuery = new URLSearchParams({ focused: "1" });
     if (purpose === "stop") focusedQuery.set("purpose", "stop");
-    if (switchTiming) {
-      focusedQuery.set("switch_trace", switchTiming.traceId);
-      focusedQuery.set(
-        "client_dispatch_ms",
-        switchTiming.clickToDispatchMs.toFixed(3),
-      );
-    }
+    const switchHeaders: Record<string, string> = switchTiming
+      ? {
+          "x-recurse-trace": switchTiming.traceId,
+          "x-recurse-client-dispatch-ms":
+            switchTiming.clickToDispatchMs.toFixed(3),
+        }
+      : {};
     const r =
       purpose === "prefetch"
         ? /* Invariant: Warm reads must not pin connections indefinitely. */
@@ -83,7 +84,7 @@ async function fetchConvView(
           )
         : await backendFor(id).api(
             `/api/conversations/${id}?${focusedQuery}`,
-            {},
+            { headers: switchHeaders },
             { availability: core ? "core" : "optional" },
           );
     if (pollToken !== null && pollToken !== pollGeneration)
@@ -97,12 +98,22 @@ async function fetchConvView(
     }
     if (!r.ok) return { status: r.status, conv: null };
     let conv = (await r.json()) as Conversation;
+    const clock = r.headers.get("x-recurse-run-state-clock");
+    const separator = clock?.lastIndexOf(":") ?? -1;
+    if (clock && separator > 0) {
+      const at = Number(clock.slice(separator + 1));
+      if (Number.isFinite(at))
+        conv.run_state_clock = [clock.slice(0, separator), at];
+    }
     const backend = backendFor(id);
     if (backend.label)
       conv = {
         ...conv,
         id: conversationId(backend.label, conv.id),
         parent: conv.parent ? conversationId(backend.label, conv.parent) : null,
+        // Spec: A backend older than the taken_over rename sends `pinned`;
+        // drop this one release after the rename.
+        taken_over: conv.taken_over ?? conv.pinned,
       };
     if (
       (pollToken !== null && pollToken !== pollGeneration) ||
@@ -121,7 +132,7 @@ async function fetchConvView(
       return { status: 0, conv: null };
     if (id in state.pendingTakeovers) {
       conv.muted = state.pendingTakeovers[id];
-      conv.pinned = state.pendingTakeovers[id];
+      conv.taken_over = state.pendingTakeovers[id];
     }
     state.convCache.set(id, conv, purpose !== "prefetch");
     return { status: 200, conv };
@@ -139,19 +150,25 @@ export function showCached(id: string): boolean {
   state.currentConv = conv;
   state.openConvHash = convHash(conv);
   renderConv(conv);
+  notePaneConversationRendered(id);
   return true;
 }
 
-// When each conversation's latest applied read landed (performance.now()).
+// When each conversation's latest applied metadata read landed.
 const convReadAt = new Map<string, number>();
+let latestRead: { id: string; started: number } | null = null;
 
-// An events frame's run state belongs to the same snapshot as its rows. Take
-// it when the frame was requested (`at`) after the latest applied read landed,
-// so a slow read never leaves settled rows beside a stale running status.
+// Server-side sample clocks order run-state reads without assuming a shared
+// client/server clock.
 export function applyFrameRunState(id: string, page: ViewPage, at: number) {
   const conv = state.currentConv;
   if (conv?.id !== id || typeof page.turn_status !== "string") return;
-  if (at <= (convReadAt.get(id) ?? Infinity)) return;
+  const clock = page.run_state_clock;
+  const latest = conv.run_state_clock;
+  if (clock && latest) {
+    if (clock[0] !== latest[0] || clock[1] <= latest[1]) return;
+    conv.run_state_clock = clock;
+  } else if (at <= (convReadAt.get(id) ?? Infinity)) return;
   const run = page.active_run ?? null;
   if (conv.status === page.turn_status && (conv.active_run ?? null) === run)
     return;
@@ -168,6 +185,7 @@ export async function refreshConv(
   if (state.selectedId === DRAFT || !state.selectedId) return false;
   inputEl.placeholder = "Message this agent…";
   const id = state.selectedId;
+  const requestedAt = performance.now();
   const wasRunning =
     state.currentConv?.id === id &&
     ["running", "interrupting"].includes(state.currentConv.status);
@@ -210,6 +228,7 @@ export async function refreshConv(
       release();
       focusedPathReady();
     });
+  const blocksChanged = (await blocksPromise) || settledRowsChanged;
   if (
     (generation !== null && generation !== pollGeneration) ||
     id !== state.selectedId
@@ -224,6 +243,20 @@ export async function refreshConv(
     return false;
   }
   coldStage(COLD_FOCUSED);
+  const current = state.currentConv;
+  const latest = current?.run_state_clock;
+  const read = conv.run_state_clock;
+  const olderRead = latestRead?.id === id && latestRead.started > requestedAt;
+  if (
+    current?.id === id &&
+    (olderRead ||
+      (latest && read && latest[0] === read[0] && latest[1] > read[1]))
+  ) {
+    conv.status = current.status;
+    conv.active_run = current.active_run;
+    conv.run_state_clock = latest;
+  }
+  if (!olderRead) latestRead = { id, started: requestedAt };
   state.currentConv = conv;
   convReadAt.set(id, performance.now());
   setStopReadAuthoritative(id);
@@ -232,7 +265,6 @@ export async function refreshConv(
   // it is).
   clearFocusedEventsGone(id);
   if (purpose === "focused") retargetFocusedEvents(id);
-  const blocksChanged = (await blocksPromise) || settledRowsChanged;
   const hash = convHash(conv);
   // Invariant: A switch with nothing cached has never painted this thread, so
   // it renders even in the (unreachable-by-construction) case of a matching
@@ -244,6 +276,8 @@ export async function refreshConv(
   ) {
     state.openConvHash = hash;
     renderConv(conv);
+    notePaneConversationRendered(id);
+    notePollActivity();
   }
   noteRefreshApplied(id);
   applyFreshness();

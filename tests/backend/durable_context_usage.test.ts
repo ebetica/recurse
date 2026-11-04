@@ -1,3 +1,4 @@
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -6,8 +7,9 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { EntryRecord, StorageWrite } from "@earendil-works/pi-durable";
 import {
   openWorkerSqliteStorage,
-  SqliteWorker,
+  type SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker";
+import { runtime } from "../../src/agents/durable/host/load";
 import {
   ContextUsage,
   promptTokens,
@@ -22,23 +24,35 @@ test("latest committed response replaces pre-compaction usage without a turn-end
   const root = await mkdtemp(join(tmpdir(), "durable-context-"));
   const dir = join(root, "conversations", "c1", "durable");
   await mkdir(dir, { recursive: true });
-  const worker = new SqliteWorker();
+  const { host, faux, records } = fauxHost(root);
+  const worker = host.sqlite(await runtime());
   const storage = await openWorkerSqliteStorage(
     worker,
     join(dir, "session.sqlite"),
   );
-  const { host, faux, records } = fauxHost(root);
   let closed = false;
-  const append = (rows: EntryRecord[]) =>
-    storage.commit(
-      rows.map((value) => ({ type: "entry", value })),
-      context,
+  const append = async (rows: EntryRecord[], owner: SqliteWorker = worker) => {
+    const seeded = await openWorkerSqliteStorage(
+      owner,
+      join(dir, "session.sqlite"),
     );
+    try {
+      await commitWrites(
+        seeded,
+        rows.map((value) => ({ type: "entry", value })),
+        context,
+      );
+    } finally {
+      await seeded.close(context);
+    }
+  };
   try {
-    await storage.commit(
+    await commitWrites(
+      storage,
       [{ type: "conversation", value: { id: 1 } } as StorageWrite],
       context,
     );
+    await storage.close(context);
     await append(entries.slice(0, 3));
     expect(promptTokens((await host.contextUsage("c1")).usage)).toBe(348357);
     await append(entries.slice(3, 4));
@@ -102,6 +116,7 @@ test("latest committed response replaces pre-compaction usage without a turn-end
             },
           ],
         })) as unknown as EntryRecord[],
+        reopened.sqlite(await runtime()),
       );
       expect((await reopened.contextUsage("c1")).usage).toBeNull();
     } finally {
@@ -110,7 +125,7 @@ test("latest committed response replaces pre-compaction usage without a turn-end
   } finally {
     if (!closed) await host.close();
     await storage.close(context);
-    worker.close();
+    await worker.close();
     await rm(root, { recursive: true, force: true });
   }
 }, 30000);

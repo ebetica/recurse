@@ -6,6 +6,7 @@ import steeredOperatorRows from "../web/fixtures/steered-operator-rows.json";
 import {
   gotoRoot,
   mockConversation,
+  reloadConversation,
   waitForLayout,
   type BrowserTest,
 } from "./common";
@@ -386,7 +387,7 @@ export const turnGroupTests: BrowserTest[] = [
         for (const [shape, next] of Object.entries(shapes)) {
           rows = next;
           await gotoRoot(page, base);
-          await page.reload();
+          await reloadConversation(page);
           await page.getByText(rows.at(-1).text, { exact: true }).waitFor();
           const block = (text: string) =>
             page
@@ -558,7 +559,7 @@ export const turnGroupTests: BrowserTest[] = [
             rows,
           }));
           await gotoRoot(page, base);
-          await page.reload();
+          await reloadConversation(page);
           const text = (value: string) =>
             page.getByText(value, { exact: true });
           const operator = text(rows[30].text);
@@ -703,7 +704,7 @@ export const turnGroupTests: BrowserTest[] = [
               cacheWrite: 0,
             };
             await gotoRoot(page, base);
-            await page.reload();
+            await reloadConversation(page);
             const group = count
               ? page.locator('[data-group^="chunk:"]').first()
               : page.locator(".activity-group").last();

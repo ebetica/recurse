@@ -3,7 +3,7 @@
 // Spec: macOS stat lines carry pid, (comm), state, ppid, pgid, sid and, as
 // field 22, the per-boot unique process id (sys/proc_info.h, any user's).
 import { dlopen, FFIType, ptr } from "bun:ffi";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import fs from "node:fs";
 import { opendir, readFile, readdir, stat } from "node:fs/promises";
 import { errno } from "./libc";
 
@@ -147,7 +147,8 @@ export function procTextSync(
   root = PROC,
 ): string {
   if (emulated(root)) return macText(Number(pid), file);
-  return readFileSync(`${root}/${pid}/${file}`, "utf8");
+  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+  return fs.readFileSync(`${root}/${pid}/${file}`, "utf8");
 }
 
 /** Entry names of `root`; on macOS, every pid above 0, as in procfs. */
@@ -156,7 +157,8 @@ export async function procIds(root = PROC): Promise<string[]> {
 }
 
 export function procIdsSync(root = PROC): string[] {
-  return emulated(root) ? macIds() : readdirSync(root);
+  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+  return emulated(root) ? macIds() : fs.readdirSync(root);
 }
 
 /** Names under `root`, streamed on Linux; on macOS, every pid. */
@@ -183,7 +185,8 @@ export async function procEntry(root = PROC, pid?: number): Promise<void> {
 }
 
 export function procEntryExists(pid: number | string, root = PROC): boolean {
-  if (!emulated(root)) return existsSync(`${root}/${pid}`);
+  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+  if (!emulated(root)) return fs.existsSync(`${root}/${pid}`);
   try {
     macStat(Number(pid));
     return true;
@@ -194,7 +197,8 @@ export function procEntryExists(pid: number | string, root = PROC): boolean {
 
 /** The kernel boot id: Linux boot_id, macOS kern.bootsessionuuid. */
 export function bootIdTextSync(path = BOOT_ID_PATH): string {
-  if (!mac || path !== BOOT_ID_PATH) return readFileSync(path, "utf8");
+  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+  if (!mac || path !== BOOT_ID_PATH) return fs.readFileSync(path, "utf8");
   const name = new TextEncoder().encode("kern.bootsessionuuid\0");
   const buffer = new Uint8Array(64);
   const length = new BigUint64Array([64n]);

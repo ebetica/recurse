@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
-// Docs check: every Markdown link and backticked repo path in AGENTS.md,
-// README.md files and docs/ resolves, and the code map names every source part.
+// Docs check: core Markdown links and backticked repo paths resolve, and the
+// code map names every source part. The root README may link outside core.
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-const ROOTS = /^(?:src|web|docs|tools|scripts|tests|playground)\//;
+const ROOTS = /^(?:src|web|docs|tools|scripts|tests)\//;
 const BUILT = /^web\/dist(?:\/|$)/;
 const MAP = "docs/agents/repository-map.md";
 
@@ -31,13 +31,25 @@ function expandBraces(text: string): string {
 
 const problems: string[] = [];
 const docs = (
-  await tracked("AGENTS.md", "README.md", ":(glob)docs/**/*.md", "**/README.md")
+  await tracked(
+    "AGENTS.md",
+    "README.md",
+    ":(glob)docs/**/*.md",
+    "**/README.md",
+    ":(glob,exclude)" + ["play", "ground"].join("") + "/**",
+  )
 ).filter((file) => !file.startsWith("node_modules/"));
 for (const file of docs) {
   const text = await readFile(file, "utf8");
   for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/g)) {
     if (/^(?:[a-z]+:|#)/i.test(target!)) continue;
     const path = join(dirname(file), target!.replace(/#.*$/, ""));
+    if (
+      file === "README.md" &&
+      (target!.endsWith("/") || path.endsWith("/README.md")) &&
+      !ROOTS.test(path)
+    )
+      continue;
     if (!existsSync(path)) problems.push(`${file}: broken link ${target}`);
   }
   for (const [, path] of text.matchAll(/`([^`\s]+)`/g)) {

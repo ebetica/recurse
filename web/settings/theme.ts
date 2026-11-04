@@ -1,7 +1,8 @@
-// Preview server palettes immediately; ordered saves survive reopening.
+// Picker sheets preview palettes immediately; saves survive reopening.
 import { apiJson, jpost } from "../api.js";
 import { CHECK_ICON } from "../icons.js";
 import { applyTheme, setThemePreview } from "./themes.js";
+import { settingsDetail } from "./layout.js";
 
 let saves = Promise.resolve();
 let revision = 0;
@@ -27,19 +28,15 @@ interface ThemeSettings {
 }
 
 export function buildThemeSection(body: HTMLElement): void {
+  body.classList.add("settings-row-group");
   const cards = document.createElement("div");
   cards.className = "theme-cards";
   cards.setAttribute("role", "group");
   cards.setAttribute("aria-label", "Theme");
-  const message = document.createElement("p");
-  message.className = "msg err";
-  message.setAttribute("role", "alert");
-  message.hidden = true;
   const appearance = document.createElement("div");
   appearance.className = "theme-appearance";
   appearance.setAttribute("role", "group");
   appearance.setAttribute("aria-label", "Appearance");
-  appearance.append("Appearance:");
   for (const value of ["system", "dark", "light"]) {
     const button = document.createElement("button");
     button.type = "button";
@@ -47,19 +44,55 @@ export function buildThemeSection(body: HTMLElement): void {
     button.disabled = true;
     button.dataset.appearance = value;
     button.textContent = value[0]!.toUpperCase() + value.slice(1);
-    button.addEventListener("click", () =>
-      choose({ ...current, appearance: value }),
+    button.addEventListener(
+      "click",
+      () => current && choose({ ...current, appearance: value }),
     );
     appearance.append(button);
   }
-  body.append(appearance, cards, message);
-  let current: ThemeSettings;
+  const appearanceRow = document.createElement("div");
+  appearanceRow.className = "group";
+  const appearanceItem = document.createElement("div");
+  appearanceItem.className = "item";
+  appearanceItem.append(appearance);
+  appearanceRow.append(appearanceItem);
+  const appearanceBody = document.createElement("div");
+  const themeBody = document.createElement("div");
+  appearanceBody.append(appearanceRow);
+  themeBody.append(cards);
+  body.append(appearanceBody, themeBody);
+  const messages = [body, appearanceBody, themeBody].map((parent) => {
+    const message = document.createElement("p");
+    message.className = "msg err";
+    message.setAttribute("role", "alert");
+    message.hidden = true;
+    parent.append(message);
+    return message;
+  });
+  let current: ThemeSettings | undefined;
+  const appearanceDetail = settingsDetail(appearanceBody, "Appearance", () =>
+    current
+      ? current.appearance[0]!.toUpperCase() + current.appearance.slice(1)
+      : "Loading…",
+  );
+  const themeDetail = settingsDetail(
+    themeBody,
+    "Theme",
+    () =>
+      current?.themes.find((theme) => theme.name === current?.theme)?.label ??
+      current?.theme ??
+      "Loading…",
+  );
   const showProblems = (problems: string[]) => {
-    message.textContent = problems.join(" ");
-    message.hidden = !problems.length;
+    for (const message of messages) {
+      message.textContent = problems.join(" ");
+      message.hidden = !problems.length;
+    }
   };
   const paint = (settings: ThemeSettings) => {
     current = settings;
+    appearanceDetail.refresh();
+    themeDetail.refresh();
     showProblems(settings.problems);
     if (!cards.childElementCount) {
       for (const theme of settings.themes) {
@@ -98,13 +131,16 @@ export function buildThemeSection(body: HTMLElement): void {
           preview.append(half);
         }
         button.append(preview);
-        button.addEventListener("click", () =>
-          choose({
-            ...current,
-            theme: theme.name,
-            appearance:
-              variants.length === 1 ? theme.appearance : current.appearance,
-          }),
+        button.addEventListener(
+          "click",
+          () =>
+            current &&
+            choose({
+              ...current,
+              theme: theme.name,
+              appearance:
+                variants.length === 1 ? theme.appearance : current.appearance,
+            }),
         );
         cards.append(button);
       }

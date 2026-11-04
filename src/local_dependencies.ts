@@ -165,8 +165,8 @@ export async function prepareManagedDependencies(
     if (!ready) {
       process.stderr.write(`dependencies: preparing ${basename(checkout)}\n`);
       const staging = paths.staging;
-      const { retire } = await import("./utils/trash");
-      retire(staging, paths.trash);
+      const { retirePath } = await import("./utils/trash_sweep");
+      await retirePath(staging, paths.trash);
       await mkdir(staging, { mode: 0o700 });
       try {
         await writeFile(
@@ -198,18 +198,18 @@ export async function prepareManagedDependencies(
         if ((await managedDependencyRoot(checkout)) !== resolve(dataDir))
           throw new Error("checkout retired during dependency install");
         await writeFile(join(staging, ".ready"), expected.fingerprint);
-        retire(paths.install, paths.trash);
+        await retirePath(paths.install, paths.trash);
         await rename(staging, paths.install);
       } catch (error) {
-        retire(staging, paths.trash);
+        await retirePath(staging, paths.trash);
         throw error;
       }
     }
     const link = join(checkout, "node_modules");
     try {
       if (!(await lstat(link)).isSymbolicLink()) {
-        const { retire } = await import("./utils/trash");
-        retire(link, join(dataDir, "worktrees", ".trash"));
+        const { retirePath } = await import("./utils/trash_sweep");
+        await retirePath(link, join(dataDir, "worktrees", ".trash"));
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;

@@ -7,6 +7,7 @@ import {
   resolveContentLink,
 } from "./backends/backend.js";
 import { html, nothing, type TemplateResult } from "lit";
+import { SERVER_COMPACTION_MARKER } from "../src/extensions/core/context/server-compaction.js";
 import { keyed } from "lit/directives/keyed.js";
 import { refusedNoteT } from "./thread-render/refused.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
@@ -29,6 +30,7 @@ import { messageMarkdownFragment } from "./util.js";
 import { renderMathPlaceholders } from "./math.js";
 import {
   INLINE_IMAGE_STYLE,
+  captionInlineImage,
   isAllowedAttachmentHref,
   isAllowedInlineImageSrc,
   scopedAttachmentPreviewHref,
@@ -70,6 +72,7 @@ import {
   activityStatusKind,
   liveActivityState,
   thinkingSummaryTail,
+  thinkingSummaryBody,
   type ActivityStatusKind,
 } from "./thread-render/tool_activity.js";
 import {
@@ -151,7 +154,7 @@ import {
   toggleToolSeries,
   toolSeriesKey,
 } from "./conversation/disclosure.js";
-import { msgsEl } from "./dom.js";
+import { liveBarEl, msgsEl } from "./dom.js";
 import { anchoredPaint, paint } from "./conversation/thread.js";
 import { stoppingId } from "./conversation/stop.js";
 import { linkPrReferences } from "./pr-references.js";
@@ -209,11 +212,7 @@ function applyImagePolicy(
       : scopedAttachmentPreviewHref(src);
     if (raster) {
       img.setAttribute("src", resolveUrl(backend, raster));
-      img.setAttribute("loading", "lazy");
-      img.setAttribute("decoding", "async");
-      img.setAttribute("style", INLINE_IMAGE_STYLE);
-      if (!(img.getAttribute("alt") || "").trim())
-        img.setAttribute("alt", "image");
+      captionInlineImage(img);
     } else {
       const blocked = document.createElement("span");
       blocked.className = "blocked-image";
@@ -274,7 +273,11 @@ function footerTail(fragment: DocumentFragment): void {
   while (walker.nextNode()) {
     const node = walker.currentNode;
     if (node.nodeType === Node.TEXT_NODE) {
-      if (node.textContent?.trim()) tail = node as Text;
+      if (
+        node.textContent?.trim() &&
+        !node.parentElement?.closest(".thread-image")
+      )
+        tail = node as Text;
     } else if ((node as Element).matches("img, br, hr")) tail = null;
   }
   const match = tail?.data.match(/\S+\s*$/);
@@ -426,7 +429,7 @@ function syncThinkingPill(
   rows: readonly LiveThinkingRow[],
   panelKind: string,
   boundary?: ActivityBoundary,
-): { key: string | null; text: string } {
+): string | null {
   const source = panelKind === "thinking" ? liveThinkingEntry(rows) : null;
   const sameSource =
     source?.id &&
@@ -473,12 +476,7 @@ function syncThinkingPill(
       loadThinking(conv.id, entry, key, true);
     scheduleThinkingRefresh(conv.id, entry, key);
   }
-  const loaded = key === null ? undefined : thinkingData.get(key);
-  return {
-    key,
-    text:
-      key !== null && thinkingOpen.has(key) ? thinkingSummaryTail(loaded) : "",
-  };
+  return key;
 }
 function toggleThinkingPill(key: string): void {
   const entry = thinkingPillEntries.get(key);
@@ -622,13 +620,15 @@ export function userBubble(
   // the prose and before the upload previews.
   return html`${visibleText}${images.map(
     ({ url, alt }) =>
-      html`<img
-        src=${resolveUrl(renderingBackend(), url)}
-        alt=${alt || "image"}
-        loading="lazy"
-        decoding="async"
-        style=${INLINE_IMAGE_STYLE}
-      />`,
+      html`<span class="thread-image"
+        ><img
+          src=${resolveUrl(renderingBackend(), url)}
+          alt=${alt || "image.png"}
+          loading="lazy"
+          decoding="async"
+          style=${INLINE_IMAGE_STYLE}
+        /><span class="image-filename">Image</span></span
+      >`,
   )}${files.map(
     (f) =>
       html`<a
@@ -688,10 +688,13 @@ function markerT(conv: Conversation, entry: MessageEntry): TemplateResult {
         : nothing}
     </div>`;
   }
-  if (entry.marker !== "compact") {
+  const serverCompacted =
+    entry.marker === "compact" && entry.content === SERVER_COMPACTION_MARKER;
+  if (entry.marker !== "compact" || serverCompacted) {
     return html`<div
-      class="thread-marker"
+      class="thread-marker ${serverCompacted ? "compacted-activity" : ""}"
       role="note"
+      data-row-id=${serverCompacted ? entry.id : nothing}
       data-message-offset=${entry.offset}
     >
       <span>
@@ -738,29 +741,27 @@ function markerT(conv: Conversation, entry: MessageEntry): TemplateResult {
     data-message-offset=${entry.offset}
   >
     <div class="thread-marker">
-      <span
-        ><button
-          class="compacted-head"
-          type="button"
-          title=${label}
-          aria-label=${label}
-          aria-expanded=${summaryOpen ? "true" : "false"}
-          aria-controls=${summaryId}
-          @click=${(event: Event) => {
-            messageDisclosures.toggle(conv.id, identity);
-            if (state.currentConv)
-              anchoredPaint(
-                state.currentConv,
-                event.currentTarget as HTMLElement,
-              );
-          }}
+      <button
+        class="compacted-head"
+        type="button"
+        title=${label}
+        aria-label=${label}
+        aria-expanded=${summaryOpen ? "true" : "false"}
+        aria-controls=${summaryId}
+        @click=${(event: Event) => {
+          messageDisclosures.toggle(conv.id, identity);
+          if (state.currentConv)
+            anchoredPaint(
+              state.currentConv,
+              event.currentTarget as HTMLElement,
+            );
+        }}
+      >
+        ${disclosureCaret}
+        <span class="compacted-label"
+          >${entry.detail || "Context compacted"}</span
         >
-          ${disclosureCaret}
-          <span class="compacted-label"
-            >${entry.detail || "Context compacted"}</span
-          >
-        </button>
-      </span>
+      </button>
     </div>
     ${summaryOpen
       ? html`<div class="disclosure-body" id=${summaryId}>
@@ -1002,6 +1003,7 @@ function assistantAttachments(
               loading="lazy"
               decoding="async"
             />
+            <span class="image-filename" title=${view.alt}>${view.alt}</span>
           </button>
           <a
             class="agent-attachment-download-icon"
@@ -1547,7 +1549,9 @@ function foldedReplyImagesT(items: readonly TurnGroupItem[]): TemplateResult {
     return images.length
       ? html`<div class="msg assistant">
           <div class="content">
-            ${images.map((image) => unsafeHTML(image.outerHTML))}
+            ${images.map((image) =>
+              unsafeHTML((image.closest(".thread-image") ?? image).outerHTML),
+            )}
           </div>
         </div>`
       : nothing;
@@ -1938,8 +1942,8 @@ export function activityBoundaryT(
     <div class="activity-body" id=${bodyId}>
       ${boundary.slices.some((slice) => slice.turn.partial)
         ? html`<div class="turn-note" role="note">
-            Only the most recent part of this response is shown — it was too
-            large to load whole.
+            Earlier parts of this response are not loaded. Scroll up to load
+            more.
           </div>`
         : nothing}
       ${turnGroupItemsT(
@@ -1959,7 +1963,6 @@ export function activityBoundaryT(
     </div>
     ${status === "waiting" ? waitingPanelT(conv) : nothing}
     ${compactionPoint ? markerT(conv, compactionPoint.turn.system!) : nothing}
-    ${current && running ? workingT(conv, boundary) : nothing}
   </section>`;
 }
 
@@ -2223,9 +2226,11 @@ let expandedToolsKey: string | null = null;
 
 function updateThinkingPillTimer(): void {
   if (typeof performance === "undefined") return;
-  const spans = msgsEl.querySelectorAll<HTMLElement>(
-    ".live-thinking-elapsed[data-thinking-received]",
-  );
+  const selector = ".live-thinking-elapsed[data-thinking-received]";
+  const spans = [
+    ...msgsEl.querySelectorAll<HTMLElement>(selector),
+    ...liveBarEl.querySelectorAll<HTMLElement>(selector),
+  ];
   if (!spans.length) {
     if (thinkingPillTimer !== null && typeof window !== "undefined") {
       window.clearInterval(thinkingPillTimer);
@@ -2274,6 +2279,7 @@ function thinkingElapsedT(
 function liveToolLabelVisible(conv: Conversation, elapsedMs: number): boolean {
   return (
     elapsedMs >= TOOL_LABEL_DELAY_MS &&
+    !liveActivityState(rowThreads.get(conv.id)?.rows ?? []).hasThinking &&
     conv.status === "running" &&
     stoppingId !== conv.id &&
     !conv.retry_notice
@@ -2302,32 +2308,31 @@ export function workingT(
       : null;
   const stopping = conv.status === "interrupting" || stoppingId === conv.id;
   const overlay = stopping ? "Interrupting this turn…" : null;
-  const thinkingPreview = syncThinkingPill(
+  const pillKey = syncThinkingPill(
     conv,
     rows,
     overlay || retryNotice ? "" : panel.kind,
     boundary,
   );
-  const thinkingFull =
-    thinkingPreview.key === null ? null : thinkingData.get(thinkingPreview.key);
-  const thinkingExpanded =
-    thinkingPreview.key !== null && thinkingOpen.has(thinkingPreview.key);
+  const thinkingFull = pillKey === null ? null : thinkingData.get(pillKey);
+  const thinkingExpanded = pillKey !== null && thinkingOpen.has(pillKey);
   const thinkingText =
     thinkingExpanded &&
-    activityThinkingKey !== thinkingPreview.key &&
+    activityThinkingKey !== pillKey &&
     typeof thinkingFull === "string"
-      ? thinkingFull.trim()
+      ? thinkingSummaryBody(thinkingFull, panel.title)
       : "";
   const label = overlay ?? retryNotice ?? panel.label;
+  const showTools = liveToolLabelVisible(conv, longest);
   const title =
     overlay ??
     retryNotice ??
-    (toolVisible ? runningToolsLabel(tools) : panel.title);
-  const showTools = liveToolLabelVisible(conv, longest);
+    (showTools ? runningToolsLabel(tools) : panel.title);
   const toolsKey = `${conv.id}\0${conv.active_run ?? panel.key.split("\0", 1)[0]}`;
   if (!tools.length) expandedToolsKey = null;
   const toolsExpanded = showTools && expandedToolsKey === toolsKey;
   const titleState = (() => {
+    if (title === "Waiting") return { title, changed: false };
     if (panel.kind !== "thinking" || overlay || retryNotice || showTools)
       return { title, changed: false };
     const now = typeof performance === "undefined" ? 0 : performance.now();
@@ -2357,14 +2362,14 @@ export function workingT(
     overlay === null &&
     !retryNotice &&
     panel.kind === "thinking" &&
-    (showTools || panel.thinkingElapsedMs !== undefined)
+    (toolVisible || panel.thinkingElapsedMs !== undefined)
       ? thinkingElapsedT(
-          showTools ? longest : panel.thinkingElapsedMs!,
-          showTools || titleState.title !== "Thinking",
+          toolVisible ? longest : panel.thinkingElapsedMs!,
+          toolVisible || titleState.title !== "Thinking",
         )
       : nothing;
   const hasSummary =
-    thinkingPreview.key !== null &&
+    pillKey !== null &&
     typeof thinkingFull === "string" &&
     Boolean(thinkingSummaryTail(thinkingFull));
   const toggle = showTools
@@ -2372,16 +2377,16 @@ export function workingT(
         expandedToolsKey = toolsExpanded ? null : toolsKey;
         paint(conv);
       }
-    : thinkingPreview.key !== null
-      ? () => toggleThinkingPill(thinkingPreview.key!)
+    : pillKey !== null
+      ? () => toggleThinkingPill(pillKey)
       : null;
   const canToggle =
     showTools ||
     (panel.kind === "thinking" &&
-      thinkingPreview.key !== null &&
-      (!thinkingData.has(thinkingPreview.key) ||
-        thinkingSources.get(thinkingPreview.key) !==
-          thinkingPillEntries.get(thinkingPreview.key)?.offset ||
+      pillKey !== null &&
+      (!thinkingData.has(pillKey) ||
+        thinkingSources.get(pillKey) !==
+          thinkingPillEntries.get(pillKey)?.offset ||
         hasSummary ||
         thinkingExpanded));
   const thinkingPrefix =
@@ -2389,8 +2394,8 @@ export function workingT(
     !showTools &&
     !overlay &&
     !retryNotice &&
-    titleState.title !== "Thinking"
-      ? "Thinking ·\u00a0"
+    !["Thinking", "Waiting"].includes(titleState.title)
+      ? `${panel.thinkingActive === false ? "Waiting" : "Thinking"} ·\u00a0`
       : nothing;
   const head = html`<span class="live-thinking-head"
     >${thinkingPrefix}<span class="live-thinking-title"

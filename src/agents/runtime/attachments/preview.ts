@@ -109,7 +109,7 @@ export async function describe(
   }
 }
 /** Read the whole blob from its start, checking it against the manifest. */
-async function verifiedRead(
+export async function verifiedRead(
   blob: FileHandle,
   manifest: Manifest,
   keep: Uint8Array | null,

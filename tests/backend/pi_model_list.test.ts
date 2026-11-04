@@ -28,9 +28,9 @@ function makeConfig(authed: () => Iterable<string> = () => []): Config {
 const listText = (config: Config) =>
   readFileSync(config.paths.PI_MODEL_LIST_FILE, "utf8");
 
-test("the stored list follows route order and a bad entry keeps the old list", () => {
+test("the stored list follows route order and a bad entry keeps the old list", async () => {
   const config = makeConfig();
-  const stored = config.setPiModelList([
+  const stored = await config.setPiModelList([
     { provider: "openrouter", id: "vendor/m", name: "M", context_window: 9 },
     { provider: "anthropic", id: "a", name: "A", context_window: 5 },
   ]);
@@ -41,16 +41,16 @@ test("the stored list follows route order and a bad entry keeps the old list", (
     "openrouter/vendor/m",
   ]);
   const before = listText(config);
-  expect(() =>
+  await expect(
     config.setPiModelList([
       { provider: "anthropic", id: "b", name: "", context_window: 5 },
     ]),
-  ).toThrow("invalid Pi model list entry");
-  expect(() =>
+  ).rejects.toThrow("invalid Pi model list entry");
+  await expect(
     config.setPiModelList([
       { provider: "not-a-route", id: "b", name: "B", context_window: 5 },
     ]),
-  ).toThrow("invalid Pi model list entry");
+  ).rejects.toThrow("invalid Pi model list entry");
   expect(listText(config)).toBe(before);
 });
 
@@ -70,7 +70,7 @@ test("login and logout change the shown routes at once, with no relist", () => {
   expect([listText(config), stat()]).toEqual(before);
 });
 
-test("a stored ladder id Pi no longer lists is kept, named, and refused", () => {
+test("a stored ladder id Pi no longer lists is kept, named, and refused", async () => {
   const config = makeConfig(() => ["anthropic"]);
   seedPiModelList(config.paths.CONFIG_DIR);
   const ladder = {
@@ -106,11 +106,11 @@ test("a stored ladder id Pi no longer lists is kept, named, and refused", () => 
   expect(readFileSync(config.paths.EFFORT_LEVELS_FILE, "utf8")).toBe(text);
   const edited = structuredClone(ladder);
   edited.levels["4"]!.reasoning = "low";
-  expect(config.setEffortLevels(edited)).toMatchObject({
+  expect(await config.setEffortLevels(edited)).toMatchObject({
     levels: { "2": { model: "anthropic/claude-gone-4" } },
   });
   edited.levels["3"]!.model = "anthropic/claude-gone-4";
-  expect(() => config.setEffortLevels(edited)).toThrow(
+  await expect(config.setEffortLevels(edited)).rejects.toThrow(
     "unsupported model for effort level 3",
   );
 });
@@ -138,9 +138,9 @@ test("custom providers follow Pi's routes", () => {
   ]);
 });
 
-test("a list of hundreds of models is built once, not per call", () => {
+test("a list of hundreds of models is built once, not per call", async () => {
   const config = makeConfig(() => ["openrouter"]);
-  config.setPiModelList(
+  await config.setPiModelList(
     Array.from({ length: 500 }, (_, n) => ({
       provider: "openrouter",
       id: `vendor/m${n}`,

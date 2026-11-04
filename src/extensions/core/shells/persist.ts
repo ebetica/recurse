@@ -1,19 +1,20 @@
 // Best-effort session-scoped shell records support liveness and
-// interrupted-command recovery. Corrupt records, /proc errors or failed writes
-// must not crash Pi, block commands or escape handlers.
+// interrupted-command recovery. Record initialization, reads and mutations are
+// asynchronous. Corrupt records, /proc errors or failed writes must not crash
+// Pi, block commands or escape handlers.
 
 import {
-  mkdirSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { join } from "node:path";
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import { dirname, join } from "node:path";
 import {
   HAS_PROCESS_TABLE,
-  bootIdTextSync,
+  bootIdText,
   procTextSync,
 } from "../../../utils/process_table.ts";
 
@@ -25,8 +26,8 @@ export interface CompletionRecord {
 }
 
 export interface CompletionPersistence {
-  loadPending(): CompletionRecord[];
-  acknowledge(completionIds: readonly string[]): boolean;
+  loadPending(): Promise<CompletionRecord[]>;
+  acknowledge(completionIds: readonly string[]): Promise<boolean>;
 }
 
 const RECURSE_RECOVERY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -82,8 +83,17 @@ export interface StoreOptions {
   terminatedTtlMs?: number;
 }
 
-// Session-scoped atomic shell JSON store. Concurrent readers never see torn
-// writes; methods are total and never throw.
+type Mutation = ({ kind: "write"; text: string } | { kind: "remove" }) & {
+  result: Promise<boolean>;
+  resolve(ok: boolean): void;
+};
+
+type MutationQueue = { pending: Mutation[]; done: Promise<void> };
+const activeTemps = new Set<string>();
+const mutations = new Map<string, MutationQueue>();
+
+// Session-scoped atomic shell JSON store. Per-record mutations stay ordered;
+// concurrent writes coalesce behind the active write. Readers never see tears.
 export class RegistryStore {
   /** The session-scoped directory holding this session's shell records. */
   readonly dir: string;
@@ -91,6 +101,7 @@ export class RegistryStore {
   readonly sessionScoped: boolean;
   private readonly keepTerminated: number;
   private readonly terminatedTtlMs: number;
+  private readonly initialized: Promise<void>;
 
   constructor(
     baseDir: string,
@@ -102,35 +113,99 @@ export class RegistryStore {
     this.dir = join(baseDir, seg);
     this.keepTerminated = opts.keepTerminated ?? 500;
     this.terminatedTtlMs = opts.terminatedTtlMs ?? 6 * 60 * 60 * 1000;
-    try {
-      mkdirSync(this.dir, { recursive: true });
-    } catch {}
+    this.initialized = mkdir(this.dir, { recursive: true }).then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   private fileFor(id: string): string {
     return join(this.dir, `${sanitizeSegment(id)}.json`);
   }
 
-  /** Atomically write a record (temp file + rename). Never throws. */
-  write(rec: ShellRecord): boolean {
-    const path = this.fileFor(rec.id);
-    const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  /** Commit an atomic snapshot; newer queued snapshots share one write. */
+  write(rec: ShellRecord): Promise<boolean> {
     try {
-      writeFileSync(tmp, JSON.stringify({ ...rec, updatedAt: Date.now() }));
-      // Invariant: Rename is atomic on the same filesystem.
-      renameSync(tmp, path);
-      return true;
+      return this.enqueue(this.fileFor(rec.id), {
+        kind: "write",
+        text: JSON.stringify({ ...rec, updatedAt: Date.now() }),
+      });
     } catch {
+      return Promise.resolve(false);
+    }
+  }
+
+  private enqueue(
+    path: string,
+    operation: { kind: "write"; text: string } | { kind: "remove" },
+  ): Promise<boolean> {
+    const queue = mutations.get(path);
+    const last = queue?.pending.at(-1);
+    if (operation.kind === "write" && last?.kind === "write") {
+      last.text = operation.text;
+      return last.result;
+    }
+    let resolve!: (ok: boolean) => void;
+    const result = new Promise<boolean>((done) => {
+      resolve = done;
+    });
+    const mutation: Mutation = { ...operation, result, resolve };
+    if (queue) queue.pending.push(mutation);
+    else {
+      const next: MutationQueue = {
+        pending: [mutation],
+        done: Promise.resolve(),
+      };
+      mutations.set(path, next);
+      next.done = this.drain(path, next);
+    }
+    return result;
+  }
+
+  private async drain(path: string, queue: MutationQueue): Promise<void> {
+    await this.initialized;
+    while (queue.pending.length) {
+      const mutation = queue.pending.shift()!;
+      let ok = false;
+      const tmp = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
       try {
-        unlinkSync(tmp);
-      } catch {}
-      return false;
+        if (mutation.kind === "write") {
+          activeTemps.add(tmp);
+          await writeFile(tmp, mutation.text);
+          // Invariant: Rename is atomic on the same filesystem.
+          await rename(tmp, path);
+        } else await unlink(path);
+        ok = true;
+      } catch {
+        if (mutation.kind === "write") await unlink(tmp).catch(() => {});
+      } finally {
+        activeTemps.delete(tmp);
+      }
+      mutation.resolve(ok);
+    }
+    mutations.delete(path);
+  }
+
+  /** Drain pending commits before recovery, pruning or ownership transfer. */
+  async flush(id?: string): Promise<void> {
+    await this.initialized;
+    const path = id === undefined ? undefined : this.fileFor(id);
+    for (;;) {
+      const queues = path
+        ? [mutations.get(path)].filter(
+            (queue): queue is MutationQueue => !!queue,
+          )
+        : [...mutations]
+            .filter(([file]) => dirname(file) === this.dir)
+            .map(([, queue]) => queue);
+      if (!queues.length) return;
+      await Promise.all(queues.map((queue) => queue.done));
     }
   }
 
   /** Pending terminal notifications, in their original arrival order. */
-  loadPendingCompletions(): CompletionRecord[] {
-    return this.readAll()
+  async loadPendingCompletions(): Promise<CompletionRecord[]> {
+    return (await this.readAll())
       .flatMap((record) => (record.completion ? [record.completion] : []))
       .sort(
         (a, b) =>
@@ -143,34 +218,38 @@ export class RegistryStore {
   // Acknowledge only notices durable in Pi. Remove terminated records
   // immediately; running records retain their file with the payload cleared.
   // Unacknowledged completions remain untouched.
-  acknowledgeCompletions(completionIds: readonly string[]): boolean {
+  async acknowledgeCompletions(
+    completionIds: readonly string[],
+  ): Promise<boolean> {
+    await this.flush();
     const ids = new Set(completionIds);
     let ok = true;
-    for (const record of this.readAll()) {
+    for (const record of await this.readAll()) {
       if (!record.completion || !ids.has(record.completion.id)) continue;
       const terminated = record.status !== "running";
       if (terminated) {
-        this.remove(record.id);
-        if (this.readRecord(record.id) !== undefined) ok = false;
+        await this.remove(record.id);
+        if ((await this.readRecord(record.id)) !== undefined) ok = false;
         continue;
       }
       delete record.completion;
-      const before = this.readRecord(record.id)?.completion;
-      this.write(record);
-      if (before && this.readRecord(record.id)?.completion) ok = false;
+      const before = (await this.readRecord(record.id))?.completion;
+      await this.write(record);
+      if (before && (await this.readRecord(record.id))?.completion) ok = false;
     }
     return (
       ok &&
-      !this.loadPendingCompletions().some((completion) =>
+      !(await this.loadPendingCompletions()).some((completion) =>
         ids.has(completion.id),
       )
     );
   }
 
-  readRecord(id: string): ShellRecord | undefined {
+  async readRecord(id: string): Promise<ShellRecord | undefined> {
+    await this.initialized;
     try {
       const record = JSON.parse(
-        readFileSync(this.fileFor(id), "utf8"),
+        await readFile(this.fileFor(id), "utf8"),
       ) as ShellRecord;
       return record && typeof record.id === "string" ? record : undefined;
     } catch {
@@ -179,17 +258,18 @@ export class RegistryStore {
   }
 
   /** Delete a shell's record file. Never throws. */
-  remove(id: string): void {
+  async remove(id: string): Promise<void> {
     try {
-      unlinkSync(this.fileFor(id));
+      await this.enqueue(this.fileFor(id), { kind: "remove" });
     } catch {}
   }
 
   /** Read and parse every valid record, skipping corrupt/torn/partial files. */
-  readAll(): ShellRecord[] {
+  async readAll(): Promise<ShellRecord[]> {
+    await this.initialized;
     let names: string[];
     try {
-      names = readdirSync(this.dir);
+      names = await readdir(this.dir);
     } catch {
       return [];
     }
@@ -198,7 +278,7 @@ export class RegistryStore {
       if (!name.endsWith(".json")) continue;
       try {
         const rec = JSON.parse(
-          readFileSync(join(this.dir, name), "utf8"),
+          await readFile(join(this.dir, name), "utf8"),
         ) as ShellRecord;
         if (rec && typeof rec.id === "string" && typeof rec.status === "string")
           out.push(rec);
@@ -209,23 +289,26 @@ export class RegistryStore {
 
   // Prune old terminated records and stale temp files. Keep running shells;
   // acknowledged records are removed immediately by acknowledgeCompletions.
-  prune(now = Date.now()): void {
+  async prune(now = Date.now()): Promise<void> {
+    await this.flush();
     let names: string[];
     try {
-      names = readdirSync(this.dir);
+      names = await readdir(this.dir);
     } catch {
       return;
     }
     for (const name of names) {
-      if (name.endsWith(".tmp")) {
+      if (name.endsWith(".tmp") && !activeTemps.has(join(this.dir, name))) {
         try {
-          unlinkSync(join(this.dir, name));
+          await unlink(join(this.dir, name));
         } catch {}
       }
     }
     // Invariant: Never age/cap unacknowledged notices before their delivery is
     // durable.
-    const terminated = this.readAll().filter((r) => r.status !== "running");
+    const terminated = (await this.readAll()).filter(
+      (r) => r.status !== "running",
+    );
     const survivors: ShellRecord[] = [];
     for (const r of terminated) {
       const ended = r.endedAt ?? r.updatedAt ?? 0;
@@ -236,7 +319,7 @@ export class RegistryStore {
         (pendingRecurseLoss && now - ended <= RECURSE_RECOVERY_TTL_MS)
       )
         continue;
-      if (now - ended > this.terminatedTtlMs) this.remove(r.id);
+      if (now - ended > this.terminatedTtlMs) await this.remove(r.id);
       else survivors.push(r);
     }
     if (survivors.length > this.keepTerminated) {
@@ -244,26 +327,29 @@ export class RegistryStore {
         (a, b) =>
           (b.endedAt ?? b.updatedAt ?? 0) - (a.endedAt ?? a.updatedAt ?? 0),
       );
-      for (const r of survivors.slice(this.keepTerminated)) this.remove(r.id);
+      for (const r of survivors.slice(this.keepTerminated))
+        await this.remove(r.id);
     }
   }
 }
 
-let cachedBootId: string | undefined | null = null;
+let cachedBootId: string | undefined;
+let bootIdReady: Promise<void> | undefined;
 
-// Cached kernel boot id; absent without a process table or on read failure.
-// Records with a boot generation must then fail closed.
+/** Prepare the immutable boot token once, before any child is spawned. */
+export function prepareBootId(): Promise<void> {
+  return (bootIdReady ??= bootIdText().then(
+    (text) => {
+      const raw = text.trim();
+      if (/^[0-9a-f-]{8,64}$/i.test(raw)) cachedBootId = raw.toLowerCase();
+    },
+    () => {},
+  ));
+}
+
+/** Cached boot token; unavailable tokens refuse boot-tagged signals. */
 export function getBootId(): string | undefined {
-  if (cachedBootId !== null) return cachedBootId;
-  let boot: string | undefined;
-  try {
-    const raw = bootIdTextSync().trim();
-    if (/^[0-9a-f-]{8,64}$/i.test(raw)) boot = raw.toLowerCase();
-  } catch {
-    boot = undefined;
-  }
-  cachedBootId = boot;
-  return boot;
+  return cachedBootId;
 }
 
 // Read stat field 22 (Linux start jiffies, macOS unique process id) for

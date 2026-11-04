@@ -1,13 +1,20 @@
 import { afterAll, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
 import {
+  closeSync,
+  constants,
   copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
   renameSync,
   rmSync,
+  statSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,6 +26,8 @@ import {
 import { DurableHost } from "../../src/agents/durable/host.ts";
 import { WARNING } from "../../src/observability/runtime_logging.ts";
 import { testDeps, until } from "./fixtures/durable_host/host.ts";
+import { openDescriptors as descriptors } from "./fixtures/durable_sqlite/descriptors.ts";
+import { holdStoragePage } from "./fixtures/durable_sqlite/held_page.ts";
 
 const root = mkdtempSync(join(tmpdir(), "agent-archive-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
@@ -98,14 +107,55 @@ test("a failed archive keeps the store, warns each retry, and a later retire arc
   await w.host.close();
 });
 
-test("a service conversation is deleted, not archived", async () => {
-  const w = world({ title: "Service thread", service_principal: "svc" });
-  await talk(w);
-  expect(await w.host.retire("c1")).toBe(true);
-  expect(existsSync(join(w.data, "conversations/c1"))).toBe(false);
-  expect(await w.host.archive.search("", 0, 10)).toEqual([]);
-  await w.host.close();
-});
+// Regression: #3055 skipped archives still drain readers before retirement.
+test.each([
+  ["service", { service_principal: "svc" }],
+  ["unkeyed", { tmp_key: undefined }],
+] as const)(
+  "a %s conversation drains cold readers before deletion",
+  async (_kind, record) => {
+    const w = world(record);
+    let held: ReturnType<typeof holdStoragePage> | undefined;
+    let reading: Promise<unknown> | undefined;
+    let retiring: Promise<boolean> | undefined;
+    try {
+      await talk(w);
+      await w.host.close();
+      w.host = new DurableHost(w.host.deps);
+      const identity = statSync(w.host.storagePath("c1"));
+      held = holdStoragePage(w.host);
+      reading = w.host.view("c1");
+      void reading.catch(() => undefined);
+      await held.reached;
+      expect(descriptors(identity).length).toBeGreaterThan(0);
+      w.host.deps.load("c1")!.reap_deferred = Date.now() / 1000;
+      let retired = false;
+      retiring = w.host.retire("c1").then((value) => {
+        retired = true;
+        return value;
+      });
+      void retiring.catch(() => undefined);
+      await until(
+        () =>
+          retired ||
+          w.logs.some(([event]) => event === "durable_storage_read_wait"),
+      );
+      expect(descriptors(identity).length).toBeGreaterThan(0);
+      expect(existsSync(join(w.data, "conversations/c1"))).toBe(true);
+      expect(retired).toBe(false);
+      held.release();
+      await reading;
+      expect(await retiring).toBe(true);
+      expect(descriptors(identity)).toEqual([]);
+      expect(existsSync(join(w.data, "conversations/c1"))).toBe(false);
+      expect(await w.host.archive.search("", 0, 10)).toEqual([]);
+    } finally {
+      held?.release();
+      await Promise.allSettled([reading, retiring]);
+      await w.host.close();
+    }
+  },
+);
 
 test("a clear stopped mid-archive finishes archiving before the next open", async () => {
   const w = world({ title: "Halfway" });
@@ -151,4 +201,88 @@ test("a clear stopped mid-archive finishes archiving before the next open", asyn
     { archive_id: "c1.clear-abcd1234", reason: "clear", title: "Halfway" },
   ]);
   await again.host.close();
+});
+
+// Regression: #3055 archive expiry must close search readers before rename.
+test("archive expiry waits for the real SQLite search reader to close", async () => {
+  const w = world({ title: "Reading archive" });
+  let pipe: number | undefined;
+  let syncing: Promise<unknown> | undefined;
+  let expiring: Promise<number> | undefined;
+  const dir = join(w.host.archive.root, "c1.20261011-k1");
+  const database = join(dir, "session.sqlite");
+  const metadata = join(dir, "message-search-state.json");
+  const temporary = `${metadata}.tmp`;
+  const held = join(dir, "held-reader.fifo");
+  const buffer = new Uint8Array(4096);
+  const drain = () => {
+    if (pipe === undefined) return;
+    for (;;) {
+      try {
+        if (!readSync(pipe, buffer, 0, buffer.length, null)) return;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EAGAIN") return;
+        throw error;
+      }
+    }
+  };
+  try {
+    await talk(w);
+    expect(await w.host.retire("c1")).toBe(true);
+    const identity = statSync(database);
+    expect(descriptors(identity)).toEqual([]);
+    const saved = readFileSync(metadata, "utf8");
+    expect(await Bun.spawn(["mkfifo", temporary]).exited).toBe(0);
+    pipe = openSync(temporary, constants.O_RDWR | constants.O_NONBLOCK);
+    const fifo = statSync(temporary);
+    for (;;) {
+      try {
+        writeSync(pipe, buffer);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "EAGAIN") break;
+        throw error;
+      }
+    }
+    rmSync(join(dir, "transcript.txt"));
+    syncing = w.host.messageSearch.sync({
+      cid: "c1",
+      path: database,
+      archived: true,
+    });
+    void syncing.catch(() => undefined);
+    await until(
+      () =>
+        existsSync(join(dir, "transcript.txt")) &&
+        descriptors(fifo).some((fd) => fd !== pipe),
+    );
+    expect(descriptors(identity).length).toBeGreaterThan(0);
+    renameSync(temporary, held);
+    writeFileSync(temporary, saved);
+    let expired = false;
+    expiring = w.host.archive
+      .expire(0, join(w.data, "trash"), 1, Date.now() / 1000 + 1)
+      .then((count) => {
+        expired = true;
+        return count;
+      });
+    void expiring.catch(() => undefined);
+    await until(
+      () => expired || w.logs.some(([event]) => event === "search_store_wait"),
+    );
+    expect(descriptors(identity).length).toBeGreaterThan(0);
+    expect(expired).toBe(false);
+    expect(statSync(database).ino).toBe(identity.ino);
+    drain();
+    await syncing;
+    expect(await expiring).toBe(1);
+    expect(descriptors(identity)).toEqual([]);
+    expect(existsSync(database)).toBe(false);
+    expect(await w.host.archive.search("", 0, 10)).toEqual([]);
+  } finally {
+    drain();
+    await Promise.allSettled([syncing, expiring]);
+    if (pipe !== undefined) closeSync(pipe);
+    rmSync(held, { force: true });
+    await w.host.close();
+  }
 });

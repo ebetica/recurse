@@ -112,8 +112,8 @@ export interface DeliveryDeps {
     recordedFile: string,
     recordedCwd: string,
   ): Promise<string | null>;
-  noteLevelTurnFailure(level: number, kind: string): void;
-  noteLevelTurnSuccess(level: number): void;
+  noteLevelTurnFailure(level: number, kind: string): Promise<void>;
+  noteLevelTurnSuccess(level: number): Promise<void>;
   // Reports ignore mid-run abort; pre-start abort reaches onError.
   tasks: TaskSet;
   /** Instance shutdown: aborts detached report tasks. */
@@ -742,7 +742,7 @@ export class SupervisorDelivery {
     } catch {
       return [null, false];
     }
-    const [rows, , , ok] = scanSessionTurns(
+    const [rows, , , ok] = await scanSessionTurns(
       sessionId,
       path,
       sessionCwd,
@@ -775,11 +775,11 @@ export class SupervisorDelivery {
   }
 
   /** Mark or clear the conversation's effort level after one settled turn. */
-  updateLevelReachability(
+  async updateLevelReachability(
     conv: ConversationRecord,
     error: string | null,
     aborted: boolean,
-  ): void {
+  ): Promise<void> {
     try {
       const level = validLevel(conv.level);
       if (level === null) return;
@@ -788,8 +788,8 @@ export class SupervisorDelivery {
         const kind = providerOutageKind(error, {
           model: typeof stored === "string" ? stored : null,
         });
-        if (kind !== null) this.deps.noteLevelTurnFailure(level, kind);
-      } else if (!aborted) this.deps.noteLevelTurnSuccess(level);
+        if (kind !== null) await this.deps.noteLevelTurnFailure(level, kind);
+      } else if (!aborted) await this.deps.noteLevelTurnSuccess(level);
     } catch (exc) {
       logException(this.deps.log, "level_reachability_update_failed", exc, {
         conversation_id: String(conv.id || ""),
@@ -808,7 +808,7 @@ export class SupervisorDelivery {
       const conv = conversations.load(cid, { withPending: false });
       checkAbort(signal);
       if (conv === null) return;
-      this.updateLevelReachability(conv, args.error, args.aborted);
+      await this.updateLevelReachability(conv, args.error, args.aborted);
       checkAbort(signal);
       const sample = args.settledSample;
       if (sample !== null && sample !== undefined) {

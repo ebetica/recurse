@@ -72,7 +72,7 @@ async function review(c: (typeof cases)[number]) {
     id = created.match(/subagent ([0-9a-f]{12})/)![1]!;
     for (let i = 0; i < 120 && !reply.includes("VERDICT:"); i++) {
       await Bun.sleep(10_000);
-      const rows = (await subagent("messages", id, "--limit", "10"))
+      const rows = (await subagent("tail", id))
         .split("\n")
         .filter(Boolean)
         .map((line) => JSON.parse(line) as { role?: string; text?: string });

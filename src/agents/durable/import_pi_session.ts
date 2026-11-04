@@ -52,7 +52,7 @@ import {
 } from "../../extensions/core/environment/managed_tools";
 import { openWorkerSqliteStorage, SqliteWorker } from "./sqlite_worker";
 import { recordReplyTimes } from "./reply_times";
-import * as trash from "../../utils/trash";
+import { retirePath } from "../../utils/trash_sweep";
 
 type Rec = Record<string, unknown>;
 type Draft = { -readonly [K in keyof EntryDraft]: EntryDraft[K] };
@@ -335,7 +335,7 @@ export async function importPiSession(
       )
         refuse("The destination already belongs to another import.");
       if (options.publish && marker.backend !== "durable") {
-        trash.retire(options.destination, options.trashDir);
+        await retirePath(options.destination, options.trashDir);
         options.log("pi_import_uncommitted_retired", {
           conversation_id: options.conversationId,
         });
@@ -382,7 +382,7 @@ export async function importPiSession(
     if (!selectedModel)
       refuse("The conversation's model is not available on Durable.");
     await mkdir(dirname(options.destination), { recursive: true, mode: 0o700 });
-    trash.retire(stage, options.trashDir);
+    await retirePath(stage, options.trashDir);
     await mkdir(stage, { mode: 0o700 });
     const storage = await openWorkerSqliteStorage(
       options.worker,
@@ -624,7 +624,7 @@ export async function importPiSession(
     try {
       if (harness) await harness.close(background);
     } finally {
-      trash.retire(stage, options.trashDir);
+      await retirePath(stage, options.trashDir);
     }
     if (!(error instanceof Deferred)) throw error;
     result = { status: "deferred", reason: error.message };

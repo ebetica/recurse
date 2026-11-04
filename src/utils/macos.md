@@ -50,7 +50,7 @@ you are done, remove the clone with `rm -rf ~/recurse-pr-$N`.
 
 Once `tests/check.sh macos` passes:
 
-1. Install: `curl -fsSL https://raw.githubusercontent.com/ebetica/recurse/main/install.sh | bash`.
+1. Install: `curl -fsSL https://github.com/ebetica/recurse/releases/latest/download/install.sh | bash`.
    If `~/.local/bin` is not on `PATH`, add it.
 2. Start: `mkdir -p ~/scratch/recurse-try && recurse ~/scratch/recurse-try`,
    then open http://127.0.0.1:8787.

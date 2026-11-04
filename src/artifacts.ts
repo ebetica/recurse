@@ -21,6 +21,7 @@ import { constants as fsConstants, type Stats } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { APP_ENTRY, buildPage } from "./artifacts/app";
 import * as startupMetrics from "./observability/startup_metrics";
+import { slowSpan } from "./observability/slow_span";
 import { timed, timingDetail, timingId } from "./observability/request_timing";
 import { CHECKOUT_ROOT } from "./build_dir";
 import { flockExclusive } from "./utils/flock";
@@ -29,7 +30,7 @@ import { procStat } from "./utils/proc_stat";
 export const DOCUMENT_ENTRY = "index.md";
 
 export type AppPage = { html: Buffer; sourceMap: string | null };
-import * as trash from "./utils/trash";
+import { retirePath } from "./utils/trash_sweep";
 import { pyCompactJson } from "./utils/py_compact_json";
 
 export const SVG_MEDIA_TYPE = "image/svg+xml";
@@ -321,15 +322,17 @@ async function spawnGit(
   let timedOut = false;
   let tooLarge = false;
   startupMetrics.count("artifact_git_subprocesses");
-  const child = Bun.spawn(["git", ...argv], {
-    cwd: "/",
-    env: { ...gitEnv(ctx), ...env },
-    stdin: "ignore",
-    stdout: "pipe",
-    stderr: "pipe",
-    detached: true,
-    signal: controller.signal,
-  });
+  const child = slowSpan("artifact_git_spawn", undefined, () =>
+    Bun.spawn(["git", ...argv], {
+      cwd: "/",
+      env: { ...gitEnv(ctx), ...env },
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+      detached: true,
+      signal: controller.signal,
+    }),
+  );
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
@@ -1470,7 +1473,7 @@ async function retireOwner(
     return true;
   });
   if (!admitted) return false;
-  const retired = trash.retire(root, ctx.trashDir);
+  const retired = await retirePath(root, ctx.trashDir);
   await unlink(marker);
   return retired;
 }
@@ -1547,7 +1550,7 @@ export async function recoverArtifactDirectories(
       return candidate;
     });
     if (root) {
-      trash.retire(root, ctx.trashDir);
+      await retirePath(root, ctx.trashDir);
       await unlink(marker);
     }
   }
@@ -2244,7 +2247,7 @@ export async function finalizeDelete(
   const displaced = join(root, `.deleted-${artifactId}`);
   if (await pathExists(displaced)) {
     try {
-      trash.retire(displaced, ctx.trashDir);
+      await retirePath(displaced, ctx.trashDir);
     } catch {
       throw new ArtifactCorrupt("artifact cleanup is pending");
     }

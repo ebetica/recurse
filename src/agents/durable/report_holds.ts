@@ -1,6 +1,6 @@
 // Parent reports held while their child or a local descendant works (the rule
 // is in delivery.ts). Holders are open conversations only, and every way one
-// stops holding rechecks all held reports (durable/README.md "Held reports").
+// stops holding rechecks all held reports.
 import type { LiveRow } from "./follow.ts";
 
 export interface HeldReporter {

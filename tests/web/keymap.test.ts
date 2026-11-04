@@ -58,7 +58,10 @@ describe("Normal mode", () => {
     expect(press(normal, "P", {}, { metaKey: true }).handled).toBe(false);
   });
 
-  test("vim keys and arrows share tree traversal while Enter/i enter Insert", () => {
+  test("h/ArrowLeft go to the parent, H toggles agents, and Enter/i enter Insert", () => {
+    expect(press(normal, "h").command).toBe("parent");
+    expect(press(normal, "ArrowLeft").command).toBe("parent");
+    expect(press(normal, "H").command).toBe("toggle-agents");
     for (const key of ["i", "Enter"]) {
       const next = press(normal, key);
       expect(next.state.mode).toBe("insert");
@@ -99,18 +102,20 @@ describe("right pane focus mode", () => {
   });
 
   // Feature: #2314 pane exits can move focus without closing the pane.
-  test("p returns to the thread, Escape to agents, o toggles, and h closes", () => {
+  test("p returns to the thread, Escape to agents, o toggles, h closes, and H toggles agents", () => {
     const pane = initialKeymapState("pane");
     for (const [key, command] of [
       ["p", "focus-thread"],
       ["Escape", "focus-agents"],
       ["o", "toggle-pane"],
-      ["h", "close-pane"],
     ] as const) {
       const exit = press(pane, key, { target: "pane" });
       expect(exit.command).toBe(command);
       expect(exit.state.mode).toBe("normal");
     }
+    const toggleAgents = press(pane, "H", { target: "pane" });
+    expect(toggleAgents.command).toBe("toggle-agents");
+    expect(toggleAgents.state.mode).toBe("pane");
     for (const key of ["p", "o", "h"])
       expect(
         press(pane, key, { target: "pane" }, { repeat: true }).command,

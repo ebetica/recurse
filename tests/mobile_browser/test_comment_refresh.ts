@@ -94,6 +94,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#input").fill("Composer draft survives refresh");
       const open = async (id: string) => {
         if (width === 390) {
+          await page.locator("#input").blur();
           await page.locator("#pane-fab").click();
           await page.locator(`.pane-menu-item[data-pane="${id}"]`).click();
         } else await page.locator(`.rail-btn[data-pane="${id}"]`).click();

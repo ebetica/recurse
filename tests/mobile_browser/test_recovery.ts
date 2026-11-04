@@ -198,7 +198,7 @@ async function test_still_stale_shell_offers_a_themed_retry(
         const style = (globalThis as any).getComputedStyle(el);
         return [style.borderTopColor, style.color, style.minHeight];
       }),
-    ).toEqual([border, text, mobile ? "44px" : "32px"]);
+    ).toEqual([border, text, mobile ? "44px" : "36px"]);
     await retry.click();
     await page.waitForURL(/_recurse_retry=/);
     await notice.waitFor();
@@ -630,7 +630,7 @@ async function test_focused_conversation_outranks_background_reads(
   const page = await context.newPage();
   const errors = captureErrors(page);
   await context.addInitScript(
-    `(()=>{window.__order=[];const real=window.fetch.bind(window);window.fetch=(input,init)=>{const u=new URL(typeof input==="string"?input:input.url,location.href),p=u.pathname+(u.search||"");if(p.startsWith("/api"))window.__order.push(p);return real(input,init)}})()`,
+    `(()=>{window.__order=[];const real=window.fetch.bind(window);window.fetch=(input,init)=>{const u=new URL(typeof input==="string"?input:input.url,location.href),p=u.pathname+(u.search||"")+(new Headers(init&&init.headers).has("x-recurse-client-dispatch-ms")?" timed":"");if(p.startsWith("/api"))window.__order.push(p);return real(input,init)}})()`,
   );
   await page.route(base + "api/tree", (r: any) => r.fulfill({ json: tree }));
   await mockConversation(page, base, "main", () =>
@@ -656,9 +656,7 @@ async function test_focused_conversation_outranks_background_reads(
   expect(reads.length).toBeGreaterThan(0);
   expect(reads[0].startsWith("/api/conversations/main")).toBeTrue();
   const main = reads.find((p) => p.startsWith("/api/conversations/main?"));
-  expect(main).toContain("focused=1");
-  expect(main).toContain("switch_trace=");
-  expect(main).toContain("client_dispatch_ms=");
+  expect(main).toBe("/api/conversations/main?focused=1 timed");
   const focusedAt = cold.indexOf(main);
   for (const p of cold.slice(0, focusedAt)) expect(p).not.toContain("/diff");
   expect(cold.findIndex((p: string) => p.startsWith("/api/tree"))).toBeLessThan(
@@ -708,9 +706,7 @@ async function test_focused_conversation_outranks_background_reads(
   );
   const switched: any[] = await page.evaluate("window.__order");
   const kid = switched.find((p) => p.startsWith("/api/conversations/kid?"));
-  expect(kid).toContain("focused=1");
-  expect(kid).toContain("switch_trace=");
-  expect(kid).toContain("client_dispatch_ms=");
+  expect(kid).toBe("/api/conversations/kid?focused=1 timed");
   console.log(`Focused conversation paint: ${Number(timing)}ms`);
   await backgroundAborted;
   expect(

@@ -23,6 +23,8 @@ export interface KeymapState {
 
 export type KeyCommand =
   | "parent"
+  | "toggle-agents"
+  | "close-pane"
   | "next"
   | "previous"
   | "open"
@@ -41,7 +43,6 @@ export type KeyCommand =
   | "pane-next"
   | "pane-previous"
   | "pane-fullscreen"
-  | "close-pane"
   | "interrupt"
   | "commit-rename"
   | "cancel-local"
@@ -120,6 +121,7 @@ export const NORMAL_BINDINGS: readonly Binding[] = [
     command: "parent",
     description: "collapse subagents / parent",
   },
+  { keys: ["H"], command: "toggle-agents", description: "show / hide agents" },
   { keys: ["j", "ArrowDown"], command: "next", description: "next agent" },
   {
     keys: ["k", "ArrowUp"],
@@ -263,6 +265,11 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
         command: "close-pane",
         description: "close pane / back to agents",
       },
+      {
+        keys: ["H"],
+        command: "toggle-agents",
+        description: "show / hide agents",
+      },
     ],
   },
 ];
@@ -361,7 +368,8 @@ export function reduceKeymap(
       return result(paneState, null, false);
     // Invariant: o toggles visibility from either focus context. p moves focus
     // between thread and pane without changing an open pane's layout; Escape
-    // returns to agents leaving the pane open. h still closes the pane.
+    // returns to agents leaving the pane open. h closes the pane; H toggles
+    // the agent bar.
     if (event.key === "Escape") return action("focus-agents");
     if (event.key === "P")
       return event.repeat
@@ -375,6 +383,10 @@ export function reduceKeymap(
       return event.repeat
         ? result(paneState, null, true)
         : action("close-pane");
+    if (event.key === "H")
+      return event.repeat
+        ? result(paneState, null, true)
+        : result(paneState, "toggle-agents", true);
     // Invariant: j/k switch between the available right-side panes. Arrows are
     // deliberately left native so the mouse/trackpad/arrow keys still scroll
     // pane content.

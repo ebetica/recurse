@@ -23,7 +23,7 @@ curl -fsSL https://bun.sh/install | bash
 To install Recurse:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ebetica/recurse/main/install.sh | bash
+curl -fsSL https://github.com/ebetica/recurse/releases/latest/download/install.sh | bash
 ```
 
 To run recurse on a working directory, then open http://127.0.0.1:8787:

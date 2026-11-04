@@ -1,6 +1,7 @@
 // Folds immutable /view windows into renderer turns without a second parser.
 // New instances rebuild; same-lineage rows upsert by id, live rows replace.
 // Compaction stays in-session; held rows are uncapped, served pages bounded.
+// Same-instance resets replace their range, retaining settled older history.
 import type {
   MessageEntry,
   ToolStat,
@@ -16,6 +17,7 @@ import {
   streamingRowText,
 } from "../partial-tool-args.js";
 import type { ViewBlock, ViewPage } from "./view-blocks.js";
+import { textHash } from "../../src/agents/view/text_hash.js";
 import {
   summarizeListedTools,
   visibleAssistant,
@@ -34,6 +36,8 @@ export interface RowFold {
   state: RowThread | null;
   changed: boolean;
   reset: boolean;
+  /** A text delta followed text this thread does not hold; read in full. */
+  gap?: boolean;
 }
 
 export interface ClearedMarker {
@@ -150,25 +154,70 @@ export function foldRowThread(
     !Array.isArray(page.blocks)
   )
     return { state: prev ?? null, changed: false, reset: false };
-  const fresh = (page.blocks as unknown[])
-    .filter(isRow)
-    .map((row) =>
-      Number.isFinite(row.tool_elapsed_ms)
-        ? { ...row, tool_received_at_ms: performance.now() }
-        : row,
-    );
-  if (!prev || prev.instanceId !== page.instance_id || page.reset)
+  // Invariant: A text delta extends held text whose first `text_from`
+  // characters hash to `text_hash`. A stale page's unmatched delta is dropped;
+  // a current one cannot apply, so the thread rereads from scratch (revision
+  // -1 asks the server for a full window).
+  const sameInstance = prev?.instanceId === page.instance_id;
+  const heldRows = new Map(
+    sameInstance ? prev!.rows.map((row) => [row.id, row]) : [],
+  );
+  const stale = sameInstance && page.revision < prev!.revision;
+  let gap = false;
+  const fresh = (page.blocks as unknown[]).filter(isRow).flatMap((row) => {
+    if (typeof row.text_from === "number") {
+      const held = heldRows.get(row.id)?.text;
+      const { text_from: from, text_hash: hash, ...rest } = row;
+      const prefix = held?.slice(0, from);
+      if (prefix?.length !== from || textHash(prefix) !== hash) {
+        if (!stale) gap = true;
+        return [];
+      }
+      row = { ...rest, text: prefix + row.text };
+    }
+    return Number.isFinite(row.tool_elapsed_ms)
+      ? [{ ...row, tool_received_at_ms: performance.now() }]
+      : [row];
+  });
+  if (gap)
+    return {
+      state: prev ? { ...prev, revision: -1 } : null,
+      changed: false,
+      reset: false,
+      gap: true,
+    };
+  if (!prev || !sameInstance || page.reset) {
+    const firstOrder = fresh[0]?.order;
+    const replaced = new Set([
+      ...fresh.map((row) => row.id),
+      ...(page.removed ?? []),
+    ]);
+    const prefix =
+      sameInstance &&
+      page.session !== undefined &&
+      page.session === prev!.sessionKey &&
+      firstOrder !== undefined
+        ? prev!.rows.filter(
+            (row) =>
+              !row.live &&
+              !row.running &&
+              !row.live_thinking &&
+              !replaced.has(row.id) &&
+              (row.order ?? 0) < firstOrder,
+          )
+        : [];
     return {
       state: {
         instanceId: page.instance_id,
         revision: page.revision,
-        rows: fresh,
+        rows: [...prefix, ...fresh],
         sessionKey: page.session,
         retryNotice: page.retry_notice,
       },
       changed: true,
       reset: true,
     };
+  }
   if (
     prev.revision === page.revision &&
     direction === "newer" &&
@@ -338,8 +387,12 @@ function validCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function addRowUsage(acc: UsageAcc, usage: ViewBlock["usage"]): void {
-  acc.replies += 1;
+function addRowUsage(
+  acc: UsageAcc,
+  usage: ViewBlock["usage"],
+  reply = true,
+): void {
+  acc.replies += Number(reply);
   if (!usage || typeof usage !== "object") return;
   const { input, output, cacheRead, cacheWrite } = usage as TurnUsage;
   if (
@@ -739,6 +792,26 @@ export function rowsToTurns(
         // self-healing race the stream refold corrects on resync.
         const total = parseRunTotal(row.usage);
         if (total) {
+          if (
+            (row.usage as { stopReason?: string })?.stopReason === "cache_warm"
+          ) {
+            const target = build ?? lastClosed;
+            if (target) {
+              addRowUsage(
+                target.finalized,
+                {
+                  input: total.input,
+                  output: total.output,
+                  cacheRead: total.cacheRead,
+                  cacheWrite: total.cacheWrite,
+                  cost: total.total,
+                },
+                false,
+              );
+              if (!build) summarizeBuild(target);
+            }
+            return;
+          }
           if (build) {
             applyRunTotal(build, total);
             build.replySettled = true;

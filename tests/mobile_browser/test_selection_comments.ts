@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect } from "bun:test";
+import { waitForPaneScroll } from "./pane_layout";
 declare const document: any;
 
 import {
@@ -10,6 +11,7 @@ import {
   mockConversation,
   postFixture,
   runBrowserTests,
+  rootAgentId,
   turn,
   type BrowserTest,
 } from "./common";
@@ -356,8 +358,174 @@ async function testSelectionCommentReplacement(
   }
 }
 
+async function checkArtifactCommentSend(
+  browser: any,
+  base: string,
+): Promise<void> {
+  for (const mobile of [false, true]) {
+    for (const moves of [true, false]) {
+      for (const submit of ["button", "Control+Enter", "Meta+Enter"]) {
+        const item = await postFixture(base, "seed-pane-reading");
+        const context = await browser.newContext({
+          viewport: { width: mobile ? 412 : 1280, height: 844 },
+          isMobile: mobile,
+          hasTouch: mobile,
+        });
+        try {
+          await context.addInitScript(
+            ({ moves, mac }: any) => {
+              const browser = globalThis as any;
+              if (!moves) delete browser.Element.prototype.moveBefore;
+              Object.defineProperty(browser.navigator, "platform", {
+                value: mac ? "MacIntel" : "Linux x86_64",
+              });
+            },
+            { moves, mac: submit === "Meta+Enter" },
+          );
+          const page = await context.newPage();
+          const errors = captureErrors(page);
+          await gotoRoot(page, base);
+          const link = page.locator(`a[href="#artifact=${item.id}"]`);
+          await link.click();
+          const paragraph = page.locator(".report-doc p").nth(50);
+          await paragraph.scrollIntoViewIfNeeded();
+          const paneSelector = '.pane-col[data-pane="report"]';
+          const scrollerSelector = mobile
+            ? paneSelector
+            : `${paneSelector} .pane-body`;
+          await waitForPaneScroll(page, scrollerSelector, paneSelector);
+          const original = await paragraph.elementHandle();
+          await page.evaluate(() => {
+            (globalThis as any).__commentPageMarker = true;
+          });
+          const loads: string[] = [];
+          const contentRequests: string[] = [];
+          const deliveries: string[] = [];
+          page.on("request", (request: any) => {
+            if (
+              request
+                .url()
+                .endsWith(`/api/conversations/${rootAgentId()}/deliver`)
+            )
+              deliveries.push(request.postDataJSON().content);
+          });
+          page.on("load", () => loads.push(page.url()));
+          page.on("request", (request: any) => {
+            if (
+              /\/api\/artifacts\/[^/]+\/(file|page)$/.test(
+                new URL(request.url()).pathname,
+              )
+            )
+              contentRequests.push(request.url());
+          });
+          await paragraph.selectText();
+          const popover = page.locator(".report-comment-popover");
+          await popover.waitFor();
+          const reply = `Preserved ${mobile} ${moves} ${submit}`;
+          const note = `Reply only ${reply}`;
+          await popover.locator("textarea").fill(note);
+          const secondNote = `Also preserve ${mobile} ${moves} ${submit}`;
+          const beforeStage = await page
+            .locator(scrollerSelector)
+            .evaluate((element: any) => element.scrollTop);
+          if (submit === "button")
+            await popover
+              .getByRole("button", { name: "Comment", exact: true })
+              .click();
+          else {
+            await popover.locator("textarea").press(submit);
+            await popover.waitFor({ state: "hidden" });
+            expect(deliveries).toEqual([]);
+            expect(
+              await page.locator(".report-sendbar-label").textContent(),
+            ).toContain("1 comment");
+            expect(
+              await page
+                .locator(scrollerSelector)
+                .evaluate((element: any) => element.scrollTop),
+            ).toBe(beforeStage);
+            expect(
+              await page
+                .locator(`${paneSelector} .pane-body`)
+                .evaluate((element: any) => element === document.activeElement),
+            ).toBe(true);
+            await paragraph.selectText();
+            await popover.waitFor();
+            await popover.locator("textarea").fill(secondNote);
+            await popover.locator("textarea").press(submit);
+            await popover.waitFor({ state: "hidden" });
+            expect(deliveries).toEqual([]);
+            expect(
+              await page.locator(".report-sendbar-label").textContent(),
+            ).toContain("2 comments");
+            expect(
+              await page
+                .locator(scrollerSelector)
+                .evaluate((element: any) => element.scrollTop),
+            ).toBe(beforeStage);
+            if (moves && submit === "Meta+Enter")
+              await shot(
+                page,
+                mobile
+                  ? "artifact-staged-phone.png"
+                  : "artifact-staged-desktop.png",
+              );
+          }
+          const scroll = await page
+            .locator(scrollerSelector)
+            .evaluate((element: any) => element.scrollTop);
+          expect(scroll).toBeGreaterThan(0);
+          const delivered = page.waitForResponse((response: any) =>
+            response
+              .url()
+              .endsWith(`/api/conversations/${rootAgentId()}/deliver`),
+          );
+          if (submit === "button")
+            await page
+              .getByRole("button", { name: "Submit comments", exact: true })
+              .click();
+          else await page.keyboard.press(submit);
+          expect((await delivered).ok()).toBe(true);
+          await page.locator(".msg.user", { hasText: note }).waitFor();
+          expect(deliveries).toHaveLength(1);
+          expect(deliveries[0]).toContain(note);
+          if (submit !== "button") {
+            expect(deliveries[0]).toContain(secondNote);
+            expect(
+              await page.locator(".msg.user", { hasText: secondNote }).count(),
+            ).toBe(1);
+          }
+          expect(
+            await page.evaluate(() => (globalThis as any).__commentPageMarker),
+          ).toBe(true);
+          await page.getByText(reply, { exact: true }).waitFor();
+          if (!(await paragraph.isVisible())) await link.click();
+          await paragraph.waitFor();
+          await waitForPaneScroll(page, scrollerSelector, paneSelector);
+          expect(
+            await page.evaluate(() => (globalThis as any).__commentPageMarker),
+          ).toBe(true);
+          expect(
+            await original!.evaluate((node: any) => node.isConnected),
+          ).toBe(true);
+          expect(
+            await page
+              .locator(scrollerSelector)
+              .evaluate((element: any) => element.scrollTop),
+          ).toBe(scroll);
+          expect(loads).toEqual([]);
+          expect(contentRequests).toEqual([]);
+          expect(errors).toEqual([]);
+        } finally {
+          await context.close();
+        }
+      }
+    }
+  }
+}
+
 export const tests: BrowserTest[] = [
-  // Regression: #2600 a final Artifact paragraph also ends past nonselectable chrome. (also Feature #2377 font-scale changes reach selection-comment coverage and preserve toolbar spacing.; #2600 reopening the current Artifact must keep its paragraphs attached.)
+  // Regression: #3128 Cmd/Ctrl+Enter stages selection comments before sending the batch; #3108 submitting Artifact comments preserves the document and reading position. (also #3064 controls stay outside native selections; #2949 Escape in the composer does not stage an Artifact selection; #2600 final paragraphs extend past chrome and reopening keeps them attached; Feature #2377 font-scale changes preserve toolbar spacing.)
   async function test_selection_comments_artifact_mouse_clicks(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
@@ -384,8 +552,11 @@ export const tests: BrowserTest[] = [
         );
         expect(selected.trim()).not.toBe("");
         await popover.waitFor();
-        if (method === "triple")
+        await page.locator(".report-sendbar.on").waitFor();
+        if (method === "triple") {
+          await paragraph.scrollIntoViewIfNeeded();
           await shot(page, "selection-triple-artifact.png");
+        }
         expect(
           await page.evaluate(() => String((globalThis as any).getSelection())),
         ).toBe(selected);
@@ -410,6 +581,7 @@ export const tests: BrowserTest[] = [
         expect(await page.locator(".report-comment").count()).toBe(0);
         await composer.fill("");
         await page.keyboard.press("Escape");
+        expect(await page.locator(".report-comment").count()).toBe(0);
         await selectWithMouse(page, paragraph, "triple");
         await popover.waitFor();
         await popover.locator("textarea").fill("Discuss this paragraph.");
@@ -428,6 +600,7 @@ export const tests: BrowserTest[] = [
     } finally {
       await context.close();
     }
+    await checkArtifactCommentSend(browser, base);
   },
   // Regression: #2600 Chromium extends triple-click ranges past nonselectable chrome.
   async function test_selection_comments_mouse_clicks(browser, base) {

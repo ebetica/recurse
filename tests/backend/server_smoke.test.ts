@@ -61,8 +61,10 @@ function checkout(scope = root): string {
   mkdirSync(dir, { recursive: true });
   cpSync(join(REPO, "src"), join(dir, "src"), { recursive: true });
   mkdirSync(join(dir, "web"));
-  for (const file of ["index.html", "icons.ts", "theme.css"])
-    cpSync(join(REPO, "web", file), join(dir, "web", file));
+  for (const file of ["index.html", "icons.ts", "theme.css", "sidebar"])
+    cpSync(join(REPO, "web", file), join(dir, "web", file), {
+      recursive: true,
+    });
   for (const linked of ["node_modules"])
     symlinkSync(join(REPO, linked), join(dir, linked));
   return dir;
@@ -226,6 +228,7 @@ test("bun src/server.ts: check, login, create, send, view, SSE, stop, SIGTERM", 
     },
   );
   const pgid = server.pid;
+  let searchPgid: number | undefined;
   try {
     const base = await listeningUrl(join(root, "server.out"));
     const identityConfig = join(repo, ".git", "config");
@@ -326,9 +329,16 @@ test("bun src/server.ts: check, login, create, send, view, SSE, stop, SIGTERM", 
     expect((await json(await api(`/api/conversations/${cid}`))).backend).toBe(
       "durable",
     );
-    expect(
-      await dataDirGroups(env.CHAT_DATA_DIR!, pgid, "pi_auth_worker"),
-    ).toEqual([]);
+    const searchGroups = await dataDirGroups(
+      env.CHAT_DATA_DIR!,
+      pgid,
+      "pi_auth.worker",
+    );
+    expect(searchGroups).toHaveLength(1);
+    searchPgid = searchGroups[0]!;
+    expect(await readFile(`/proc/${searchPgid}/cmdline`, "utf8")).toContain(
+      join(dir, "src/extensions/extra/fff/fff_thread.worker.ts"),
+    );
 
     const roots = [env.CHAT_DATA_DIR!, env.RECURSE_HOME!, env.HOME!];
     let before = await digest(roots);
@@ -367,6 +377,7 @@ test("bun src/server.ts: check, login, create, send, view, SSE, stop, SIGTERM", 
   }
   await until(async () => (await groupMembers(pgid)).length === 0, 10_000);
   await expectGroupGone(pgid);
+  await expectGroupGone(searchPgid!);
   const stores = [
     ...new Bun.Glob("conversations/*/durable/session.sqlite").scanSync(
       env.CHAT_DATA_DIR!,

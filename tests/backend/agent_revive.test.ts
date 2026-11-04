@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import {
   existsSync,
   mkdirSync,
@@ -41,6 +42,7 @@ import {
 import { MAX_REVIVE_BYTES } from "../../src/agents/durable/import_archive";
 import { createModels } from "@earendil-works/pi-ai";
 import { ReviveDoc } from "../../src/agents/durable/revive_doc";
+import { runtime } from "../../src/agents/durable/host/load";
 import { openShellHarness } from "../extensions/core/shells/fixtures/durable_harness";
 import { RegistryStore } from "../../src/extensions/core/shells/persist";
 
@@ -528,17 +530,14 @@ async function externalStore() {
 }
 
 async function inspectStore(cid: string) {
-  const worker = new SqliteWorker();
+  const { harness, conversation } = await instance.durable.open(cid);
   const storage = await openWorkerSqliteStorage(
-    worker,
+    instance.durable.sqlite(await runtime()),
     instance.durable.storagePath(cid),
+    undefined,
+    undefined,
+    true,
   );
-  const harness = await Harness.open(
-    storage,
-    { models: createModels(), registry: createRegistry() },
-    context,
-  );
-  const conversation = await harness.root(context);
   try {
     return {
       agent: await harness.snapshot(AgentDoc, conversation.id, context),
@@ -547,8 +546,7 @@ async function inspectStore(cid: string) {
       tasks: (await storage.scanTasks({}, 100, undefined, context)).items,
     };
   } finally {
-    await harness.close(context);
-    worker.close();
+    await storage.close(context);
   }
 }
 
@@ -575,7 +573,7 @@ test("external archive and bare Durable copies use new ids, sanitize, remain pas
   }, context);
   await setSafetyReviewOff(conversation, true, context);
   await harness.close(context);
-  worker.close();
+  await worker.close();
   await writeFile(
     join(dir, "meta.json"),
     JSON.stringify({
@@ -644,7 +642,7 @@ test("missing source and parent directories revive in the valid instance default
   const source = await harness.root(context);
   await source.commit((tx) => configure(tx, source.id, { cwd: gone }), context);
   await harness.close(context);
-  worker.close();
+  await worker.close();
   await writeFile(
     join(dir, "meta.json"),
     JSON.stringify({ ...entry, workdir: gone }),
@@ -709,7 +707,7 @@ test("external shell ownership never signals source processes and copied shells 
     );
     await until(
       async () =>
-        store.readAll().filter((record) => record.status === "running")
+        (await store.readAll()).filter((record) => record.status === "running")
           .length === 2 &&
         (await source.harness.inspect(context)).tasks.some(
           ({ record }) => typeof record.memos?.["recurse.shell"] === "string",
@@ -718,7 +716,7 @@ test("external shell ownership never signals source processes and copied shells 
     const tool = (await source.harness.inspect(context)).tasks.find(
       ({ record }) => typeof record.memos?.["recurse.shell"] === "string",
     )!.record;
-    pgids.push(...store.readAll().map((record) => record.pid!));
+    pgids.push(...(await store.readAll()).map((record) => record.pid!));
     for (const pgid of pgids) expect(process.kill(-pgid, 0)).toBe(true);
     const dir = join(root, "live-shell-export");
     mkdirSync(dir, { recursive: true });
@@ -773,7 +771,7 @@ test("external shell ownership never signals source processes and copied shells 
       }
       expect(gone).toMatchObject({ code: "ESRCH" });
     }
-    worker.close();
+    await worker.close();
   }
 }, 60_000);
 
@@ -823,7 +821,7 @@ test("legacy Pi JSONL imports recorded history and continues without modifying t
   expect(await readFile(path)).toEqual(before);
 }, 60_000);
 
-test("external admission refuses wrong shapes, links, oversize and unsupported schemas", async () => {
+test("external admission refuses wrong shapes, links, oversize and newer schemas, and migrates a Pi 1.3.0 store", async () => {
   const reject = (path: string) =>
     instance.revive.reviveFrom(path, null).then(
       () => "revived",
@@ -842,7 +840,7 @@ test("external admission refuses wrong shapes, links, oversize and unsupported s
   const db = await worker.openDatabase(join(dir, "session.sqlite"));
   await db.run("UPDATE durable_schema SET version = 999");
   await db.close();
-  worker.close();
+  await worker.close();
   expect(await reject(dir)).toContain("schema version 999");
   const huge = join(root, "huge.jsonl");
   const { open } = await import("node:fs/promises");
@@ -851,4 +849,99 @@ test("external admission refuses wrong shapes, links, oversize and unsupported s
   await handle.close();
   expect(await reject(huge)).toContain("256 MiB");
   expect((await stat(huge)).size).toBe(MAX_REVIVE_BYTES + 1);
+  await mkdir(join(root, "pi-1.3"));
+  const old = join(root, "pi-1.3", "session.sqlite");
+  const oldDb = new Database(old);
+  oldDb.exec(
+    await readFile(
+      join(import.meta.dir, "fixtures/pi_1_3_store/session.sql"),
+      "utf8",
+    ),
+  );
+  oldDb.close();
+  const before = await readFile(old);
+  const revived = String((await instance.revive.reviveFrom(old, null)).id);
+  expect(await transcript(revived)).toContain("Remembered PI13-CODEWORD.");
+  await send(revived, "pi 1.3 follow-up");
+  await until(
+    () => asked.some((t) => t.includes("pi 1.3 follow-up")) && idle(),
+  );
+  expect(
+    bodies[asked.findIndex((t) => t.includes("pi 1.3 follow-up"))],
+  ).toContain("PI13-TOOL-OUTPUT");
+  expect(await readFile(old)).toEqual(before);
 }, 60_000);
+
+// Regression: #3055 revival must retain storage once its record is published.
+test("a revive retains published storage when temporary-directory setup fails", async () => {
+  const config = new Config({
+    env: {
+      ...env,
+      CHAT_DATA_DIR: join(root, "published-revive"),
+      RECURSE_TEMP_IN_DATA_DIR: "1",
+    },
+  });
+  await mkdir(config.paths.CONFIG_DIR, { recursive: true });
+  await cp(
+    join(data, "config/model-providers.json"),
+    join(config.paths.CONFIG_DIR, "model-providers.json"),
+  );
+  const current = await buildInstance({
+    config,
+    sink: { write: () => undefined },
+  });
+  let blocked = false;
+  const scope = config.paths.AGENT_TEMP_INSTANCE_DIR;
+  try {
+    await current.start();
+    await until(() => current.lifecycle.readinessSnapshot().ready);
+    const agent = await current.create.create({
+      title: "Published revive",
+      model,
+    });
+    const cid = String(agent.id);
+    await current.delivery.deliver(cid, "saved before published revival", {
+      source: "agent",
+      sender: null,
+    });
+    await until(
+      () =>
+        asked.some((text) => text.includes("saved before published revival")) &&
+        current.durable.runningCount() === 0,
+    );
+    await current.reap.requestReap(cid, null);
+    await until(() => current.conversations.load(cid) === null);
+    const [entry] = await current.durable.archive.search(
+      "Published revive",
+      0,
+      5,
+    );
+    expect(entry?.cid).toBe(cid);
+    retire(scope, join(root, "published-scope-trash"));
+    await writeFile(scope, "blocked");
+    blocked = true;
+    await expect(current.revive.revive(cid, null)).rejects.toThrow(
+      /EEXIST|ENOTDIR/,
+    );
+    expect(current.conversations.load(cid)?.revived_from).toBe(
+      entry!.archive_id,
+    );
+    expect(existsSync(current.durable.storagePath(cid))).toBe(true);
+    expect(
+      existsSync(
+        join(current.durable.archive.root, entry!.archive_id, "session.sqlite"),
+      ),
+    ).toBe(false);
+    await unlink(scope);
+    blocked = false;
+    expect(await current.revive.revive(cid, null)).toMatchObject({ id: cid });
+    const history = JSON.stringify(
+      await current.durable.transcript(cid, { limit: 50 }),
+    );
+    expect(history).toContain("saved before published revival");
+    expect(history).toContain("Revived from the agent archive");
+  } finally {
+    if (blocked) await unlink(scope);
+    await current.shutdown();
+  }
+});

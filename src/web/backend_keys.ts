@@ -1,9 +1,11 @@
 // Minting shares login's throttle/delay; only operator sessions manage keys.
 // Malformed mint bodies never echo input, which may contain a password.
 import type { BackendKeys } from "../auth/backend_keys";
+import type { HomeCallbacks } from "../backends/home_callbacks";
 import type { LoginDeps } from "./login";
 import { jsonDictBody } from "./login";
 import { validBackendKeyName } from "../auth/backend_keys";
+import { keyedLabel } from "../backends/label";
 import { clientIp, LOGIN_PASSWORD_MAX_CHARS } from "./request_auth";
 import { HttpError, jsonResponse, type Router, type Exchange } from "./router";
 
@@ -15,9 +17,9 @@ export function requireOperator(ex: Exchange): void {
 
 export function registerBackendKeyRoutes(
   router: Router,
-  deps: LoginDeps & { backendKeys: BackendKeys },
+  deps: LoginDeps & { backendKeys: BackendKeys; homeCallbacks?: HomeCallbacks },
 ): void {
-  const { operator, throttle, backendKeys } = deps;
+  const { operator, throttle, backendKeys, homeCallbacks } = deps;
   router.post("/api/backend-keys", async (ex) => {
     let body: Record<string, unknown>;
     try {
@@ -57,7 +59,16 @@ export function registerBackendKeyRoutes(
   });
   router.get("/api/backend-keys", async (ex) => {
     requireOperator(ex);
-    return jsonResponse(await backendKeys.list());
+    const urls = new Map(
+      ((await homeCallbacks?.homes()) ?? []).map((h) => [h.id, h.url]),
+    );
+    return jsonResponse(
+      (await backendKeys.list()).map((key) => ({
+        ...key,
+        url: urls.get(key.id) ?? null,
+        label: keyedLabel(key.name, key.id),
+      })),
+    );
   });
   router.delete("/api/backend-keys/self", async (ex) => {
     if (
@@ -66,6 +77,19 @@ export function registerBackendKeyRoutes(
     )
       throw new HttpError(403, "backend key required");
     await backendKeys.revoke(ex.state.backend_key_id);
+    return jsonResponse({ ok: true });
+  });
+  router.put("/api/backend-keys/self/callback", async (ex) => {
+    if (
+      ex.state.auth_method !== "backend-key" ||
+      typeof ex.state.backend_key_id !== "string" ||
+      !homeCallbacks
+    )
+      throw new HttpError(403, "backend key required");
+    await homeCallbacks.register(
+      ex.state.backend_key_id,
+      await jsonDictBody(ex),
+    );
     return jsonResponse({ ok: true });
   });
   router.delete("/api/backend-keys/{id}", async (ex) => {

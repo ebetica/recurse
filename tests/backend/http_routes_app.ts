@@ -124,7 +124,7 @@ export async function buildRoutesApp(
     requireActionReady,
     drafts,
     files: {
-      async admitConversationUpload(owner, data, filename) {
+      async admitConversationUpload(owner, data, filename, crop) {
         if (!owner) throw new KeyError("attachment owner not found");
         const live =
           nodes.get(owner) ?? (records.has(owner) ? node(owner) : null);
@@ -133,9 +133,27 @@ export async function buildRoutesApp(
         try {
           return {
             ...(await fenced(() =>
-              temp.addConversationUpload(owner, data, filename),
+              temp.addConversationUpload(owner, data, filename, { crop }),
             )),
           };
+        } finally {
+          live.releaseFileOp();
+        }
+      },
+      async checkConversationCropOwner(owner) {
+        const live =
+          nodes.get(owner) ?? (records.has(owner) ? node(owner) : null);
+        if (!live || !live.tryAdmitFileOp())
+          throw new KeyError("attachment owner not found");
+        live.releaseFileOp();
+      },
+      async cancelConversationCrop(owner, crop) {
+        const live =
+          nodes.get(owner) ?? (records.has(owner) ? node(owner) : null);
+        if (!live || !live.tryAdmitFileOp())
+          throw new KeyError("attachment owner not found");
+        try {
+          await fenced(() => temp.cancelConversationCrop(owner, crop));
         } finally {
           live.releaseFileOp();
         }

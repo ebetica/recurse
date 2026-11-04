@@ -11,7 +11,8 @@ import {
 import { $, msgsEl, scrollBtn, scrollEl, titleEl } from "../dom.js";
 import { fillViewport, loadOlder } from "./navigation.js";
 import { poll } from "./poll.js";
-import { releaseViewportHold } from "./thread.js";
+import { BOTTOM_FOLLOW_THRESHOLD_PX } from "./scroll-anchor.js";
+import { followLatestReply } from "./thread.js";
 import { renderSidebar } from "../sidebar.js";
 import { DRAFT, state } from "../state.js";
 import { copyText } from "../tool_details.js";
@@ -35,7 +36,10 @@ export function updateScrollBtn(): void {
       follow(top);
       scrollEl.scrollTop = top;
     }
-    scrollBtn.classList.toggle("visible", fromBottom > 2 * viewport);
+    scrollBtn.classList.toggle(
+      "visible",
+      fromBottom > BOTTOM_FOLLOW_THRESHOLD_PX,
+    );
     scrollEl.classList.toggle("content-above", top > 1);
     scrollEl.classList.toggle("content-below", fromBottom > 1);
   });
@@ -62,12 +66,12 @@ scrollEl.addEventListener(
   { passive: true },
 );
 export function scrollToLatest(): void {
-  releaseViewportHold();
+  followLatestReply();
   scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: "smooth" });
 }
 scrollBtn.addEventListener("click", scrollToLatest);
 
-// Pinning prevents agent deletion and quiets upward reports.
+// Taking over prevents agent deletion and quiets upward reports.
 const takeoverBtn = $<HTMLButtonElement>("#takeover-btn")!;
 // Serializes absolute-state POSTs to prevent reversed completion.
 let takeoverBusy = false;
@@ -112,33 +116,40 @@ export async function requestTakeoverToggle(
   const conv = state.currentConv?.id === id ? state.currentConv : null;
   const desired = !optimisticTakenOver(id);
   const beforeConvMuted = conv?.muted;
-  const beforeConvPinned = conv?.pinned;
+  const beforeConvTakenOver = conv?.taken_over;
   const beforeNodeMuted = node.muted;
-  const beforeNodePinned = node.pinned;
+  const beforeNodeTakenOver = node.taken_over;
   takeoverBusy = true;
   state.pendingTakeovers[id] = desired;
   if (conv) {
     conv.muted = desired;
-    conv.pinned = desired;
+    conv.taken_over = desired;
   }
   node.muted = desired;
-  node.pinned = desired;
+  node.taken_over = desired;
   paintTakeoverControl(state.currentConv);
   renderSidebar();
   try {
-    const r = await backendFor(id).jpost(`/api/conversations/${id}/pin`, {
-      pinned: desired,
-    });
+    const backend = backendFor(id);
+    const url = `/api/conversations/${id}`;
+    let r = await backend.jpost(`${url}/take-over`, { taken_over: desired });
+    // Spec: A connected backend older than the taken_over rename only has
+    // `/pin`; drop this fallback one release after the rename.
+    if (r.status === 404)
+      r = await backend.jpost(`${url}/pin`, { pinned: desired });
     if (!r.ok) throw new Error("take over failed");
-    const applied = (await r.json()) as { pinned: boolean };
-    const took = applied.pinned;
+    const applied = (await r.json()) as {
+      taken_over?: boolean;
+      pinned?: boolean;
+    };
+    const took = applied.taken_over ?? applied.pinned === true;
     if (state.nodes[id]) {
       state.nodes[id].muted = took;
-      state.nodes[id].pinned = took;
+      state.nodes[id].taken_over = took;
     }
     if (state.currentConv?.id === id) {
       state.currentConv.muted = took;
-      state.currentConv.pinned = took;
+      state.currentConv.taken_over = took;
     }
     if (state.pendingTakeovers[id] === desired)
       delete state.pendingTakeovers[id];
@@ -148,11 +159,11 @@ export async function requestTakeoverToggle(
       delete state.pendingTakeovers[id];
     if (conv && state.currentConv?.id === id) {
       conv.muted = beforeConvMuted;
-      conv.pinned = beforeConvPinned;
+      conv.taken_over = beforeConvTakenOver;
     }
     if (state.nodes[id]) {
       state.nodes[id].muted = beforeNodeMuted;
-      state.nodes[id].pinned = beforeNodePinned;
+      state.nodes[id].taken_over = beforeNodeTakenOver;
     }
     poll();
     return { ok: false, reason: "failed" };

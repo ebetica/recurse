@@ -2,7 +2,7 @@
 // Missing/old/disabled RTK or failed rewriting preserves the reviewed command.
 // Keep commit-hook output with any Git flags; RTK summaries discard it.
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { defineExtension, hook, ToolTask } from "@earendil-works/pi-durable";
@@ -11,9 +11,9 @@ type Scope = { cwd: string; env: Record<string, string> };
 
 /** Whether ./scripts/ensure-rtk.sh found a supported RTK for this checkout. The
  * launcher runs it before the server starts, so one read per process holds. */
-export function rtkReady(buildDir: string): boolean {
+export async function rtkReady(buildDir: string): Promise<boolean> {
   try {
-    return readFileSync(join(buildDir, ".rtk-status"), "utf8")
+    return (await readFile(join(buildDir, ".rtk-status"), "utf8"))
       .trim()
       .startsWith("ready:");
   } catch {
@@ -26,7 +26,7 @@ export interface RtkOptions {
   buildDir: string;
 }
 
-let enabled: boolean | undefined;
+let enabled: Promise<boolean> | undefined;
 
 export function createRtk(options: RtkOptions) {
   return {
@@ -36,13 +36,16 @@ export function createRtk(options: RtkOptions) {
   };
 }
 
-export function rtkExtension(scope: () => Promise<Scope>, enabled: boolean) {
+export function rtkExtension(
+  scope: () => Promise<Scope>,
+  enabled: boolean | Promise<boolean>,
+) {
   return defineExtension({
     name: "recurse-rtk",
     hooks: [
       hook(ToolTask, {
         beforeTool: async (call) => {
-          if (!enabled) return;
+          if (!(await enabled)) return;
           const command = call.arguments.command;
           if (
             call.name !== "bash" ||

@@ -8,11 +8,12 @@ import {
   verify,
   type ECDH,
 } from "node:crypto";
-import { readFile, stat } from "node:fs/promises";
+import { readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import {
   fauxAssistantMessage,
+  fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
 import { buildApp, WebLogSink } from "../../src/web/app";
@@ -100,8 +101,8 @@ function verifyVapid(header: string, publicKey: string, audience: string) {
   expect(claimed.sub).toBe("mailto:recurse@localhost");
 }
 
-// Feature: #2870 a finished top-level or taken-over agent sends one Web Push to each opted-in device
-test("finished top-level and taken-over agents push one encrypted, VAPID-signed notice per device, a held report once on release; children, removed and gone devices get none", async () => {
+// Regression: #2903 finished notices wait for owned background and monitored shells, then notify once after completion
+test("finished notices wait for shells and descendants; top-level and taken-over agents push once per device, children and removed devices get none", async () => {
   const ua = createECDH("prime256v1");
   ua.generateKeys();
   const rfcUa = createECDH("prime256v1");
@@ -146,6 +147,15 @@ test("finished top-level and taken-over agents push one encrypted, VAPID-signed 
     const last = JSON.stringify(request.messages.at(-1)?.content);
     if (last.includes("<message>")) return fauxAssistantMessage("Title");
     if (last.includes("Done")) return fauxAssistantMessage("Parent read it");
+    if (last.includes("say shell") || last.includes("say monitor"))
+      return fauxAssistantMessage(
+        fauxToolCall("bash", {
+          command: `while [ ! -e '${join(root, "finish-shell")}' ]; do sleep 0.01; done; echo finished`,
+          background: true,
+          monitor: last.includes("say monitor"),
+        }),
+        { stopReason: "toolUse" },
+      );
     const word = /say (\w+)/.exec(last)?.[1];
     if (word === "slowly") await gate;
     return fauxAssistantMessage(`**Done**: ${word}\nsecond line`);
@@ -281,7 +291,7 @@ test("finished top-level and taken-over agents push one encrypted, VAPID-signed 
     const child = await agent("Child agent", top);
     await say(child, "beta");
     await until(() => pushes.length === 2);
-    await json(`/api/conversations/${child}/pin`, { pinned: true });
+    await json(`/api/conversations/${child}/take-over`, { taken_over: true });
     await say(child, "gamma");
     await until(() => pushes.length === 3);
     expect(notices()).toEqual([
@@ -308,13 +318,29 @@ test("finished top-level and taken-over agents push one encrypted, VAPID-signed 
       body: "Parent read it",
     });
 
+    await app.instance.durable.setSafetyReviewOff(top, true);
+    for (const mode of ["shell", "monitor"]) {
+      const before = pushes.length;
+      const beforeReports = reported(top);
+      await say(top, mode);
+      await until(() => app.instance.durable.reportHolds.settled(top));
+      expect(app.instance.durable.shells(top).active_count).toBe(1);
+      expect(pushes.length).toBe(before);
+      await writeFile(join(root, "finish-shell"), "");
+      await until(() => reported(top) >= beforeReports + 2);
+      await until(() => pushes.length === before + 1);
+      expect(app.instance.durable.shells(top).active_count).toBe(0);
+      expect(notices().at(-1)?.cid).toBe(top);
+      await unlink(join(root, "finish-shell"));
+    }
+
     expect(
       await json("/api/settings/notifications/devices/remove", {
         endpoint: device("/device").endpoint,
       }),
     ).toEqual({ subscribed: false });
     await say(top, "delta");
-    expect(pushes.length).toBe(4);
+    expect(pushes.length).toBe(6);
 
     await json("/api/settings/notifications/devices", {
       subscription: device("/gone"),
@@ -326,12 +352,71 @@ test("finished top-level and taken-over agents push one encrypted, VAPID-signed 
       "/device",
       "/device",
       "/device",
+      "/device",
+      "/device",
       "/gone",
     ]);
     expect(logs.join("\n")).toContain("status=410");
     await say(top, "zeta");
-    expect(pushes.length).toBe(5);
+    expect(pushes.length).toBe(7);
     expect(JSON.parse(await readFile(file, "utf8")).devices).toEqual([]);
+
+    await json("/api/settings/notifications/devices", {
+      subscription: device("/viewer"),
+    });
+    const streams: AbortController[] = [];
+    const view = async (cid: string, viewing = true) => {
+      const abort = new AbortController();
+      streams.push(abort);
+      const response = await fetch(
+        `${running.url}/api/conversations/${cid}/events?viewing=${viewing}`,
+        { signal: abort.signal },
+      );
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      expect((await reader.read()).done).toBe(false);
+      return () => {
+        abort.abort();
+        void reader.cancel().catch(() => {});
+      };
+    };
+    const beforeViews = pushes.length;
+    try {
+      const closeFirst = await view(top);
+      const closeSecond = await view(top);
+      await say(top, "viewed");
+      await until(
+        () => !app.instance.tasks.names().includes(`agent-notification:${top}`),
+      );
+      expect(pushes.length).toBe(beforeViews);
+      expect(app.instance.notifications.hasViewer(top)).toBe(true);
+      closeFirst();
+      await say(top, "stillviewed");
+      await until(
+        () => !app.instance.tasks.names().includes(`agent-notification:${top}`),
+      );
+      expect(pushes.length).toBe(beforeViews);
+      closeSecond();
+      await until(() => !app.instance.notifications.hasViewer(top));
+
+      const other = await agent("Other conversation");
+      await view(other);
+      await view(top, false);
+      expect(app.instance.notifications.hasViewer(other)).toBe(true);
+      expect(app.instance.notifications.hasViewer(top)).toBe(false);
+      await say(top, "elsewhere");
+      await until(() => pushes.length === beforeViews + 1);
+      expect(JSON.parse(decrypt(pushes.at(-1)!.body, ua, auth))).toEqual({
+        cid: top,
+        title: "Top agent",
+        body: "Done: elsewhere",
+      });
+    } finally {
+      for (const stream of streams) stream.abort();
+    }
+    await until(() => !app.instance.notifications.hasViewer(top));
+    await say(top, "disconnected");
+    await until(() => pushes.length === beforeViews + 2);
   } finally {
     await running.close();
     await app.instance.shutdown();

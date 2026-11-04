@@ -71,6 +71,11 @@ each other.
 - Name observable behaviour, not mechanisms, in settings, APIs, flags, keys,
   and UI. Rename public names that need explanation. Tell users what something
   is; avoid unexplained jargon and metaphors.
+- UI text: label controls. Add a sentence only for consequences a user can't
+  infer (data loss, what is or isn't shared, irreversible actions) or for an
+  actionable error. No implementation names (environment variables, file
+  paths, internal terms). At most one primary (blue) button per section: its
+  main action.
 
 ## Repository map
 

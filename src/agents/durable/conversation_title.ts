@@ -26,6 +26,7 @@ const TitleAttempt = defineDoc<{
   history: "latest",
   fork: "initial",
   initial: () => ({ attempted: false }),
+  checkpointWhen: () => false,
 });
 
 export async function nameConversation(input: {

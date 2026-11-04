@@ -1,0 +1,44 @@
+[
+  {
+    "name": "artifact",
+    "description": "Create only on explicit operator request; update requested Artifacts instead of duplicating them. List or rename existing Artifacts. Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. Apps have no network/browser storage; use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). Commit output reports publication/app checks; fix problems and recommit. Read wide/narrow screenshots. Link [Title](#artifact=ID).",
+    "parameters": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "create"
+            },
+            {
+              "type": "string",
+              "const": "list"
+            },
+            {
+              "type": "string",
+              "const": "rename"
+            }
+          ]
+        },
+        "title": {
+          "type": "string",
+          "description": "For create/rename."
+        },
+        "from_file": {
+          "type": "string",
+          "description": "Source .md/.html for create; relative to cwd."
+        },
+        "id": {
+          "type": "string",
+          "description": "For rename."
+        },
+        "all": {
+          "type": "boolean",
+          "description": "List all Artifacts (default: this agent only)."
+        }
+      }
+    }
+  }
+]

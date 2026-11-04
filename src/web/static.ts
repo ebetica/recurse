@@ -1,13 +1,15 @@
 // Shell/entry weak ETags revalidate; equal generation pins are immutable.
 // Mismatched scripts reload current shell, never run newer bundles in old HTML.
 // Hashed chunks are immutable; other disk assets support conditional/ranges.
-// Async refresh serves last-good snapshots while another request warms them.
+// Async refresh serves last-good snapshots; entries get off-loop Brotli copies.
 
 import { createHash, randomBytes } from "node:crypto";
 import { readFile, realpath, stat, type FileHandle } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
+import { promisify } from "node:util";
+import zlib from "node:zlib";
 
-import { concatBytes } from "../http_transport";
+import { concatBytes, negotiateAcceptEncoding } from "../http_transport";
 import { htmlEscape } from "../auth/session";
 import { brandingFile, brandResponse, readBrand } from "../branding";
 import type { Release } from "../release";
@@ -17,11 +19,10 @@ import {
   PRIVATE_REVALIDATE,
   conditionalBytes,
   conditionalJson,
+  ifNoneMatchMatches,
 } from "./caching";
 import { HttpError, jsonResponse, type Router } from "./router";
-
-/** Remote-control API version; bump for incompatible changes. */
-export const REMOTE_CONTROL_API = 1;
+import { API_MAJOR, API_REVISION } from "./api_v1/schema";
 
 /** Content types for the static frontend assets served at /static. */
 export const STATIC_TYPES: Readonly<Record<string, string>> = {
@@ -33,6 +34,7 @@ export const STATIC_TYPES: Readonly<Record<string, string>> = {
   ".ttf": "font/ttf",
   ".woff": "font/woff",
   ".woff2": "font/woff2",
+  ".wasm": "application/wasm",
 };
 export const FRONTEND_ASSET_NAMES = ["app.js", "app.css"] as const;
 export const FRONTEND_REFRESH_MS = 1000;
@@ -102,6 +104,32 @@ export async function fillIconSlots(
     if (typeof icon !== "string") throw new Error(`unknown icon slot ${name}`);
     return icon;
   });
+}
+
+const brotliCompress = promisify(zlib.brotliCompress);
+/** Brotli copies by asset bytes; null while compressing or after a failure. */
+const brotliCopies = new WeakMap<Uint8Array, Uint8Array | null>();
+
+/** The ready Brotli copy of `bytes`; otherwise start one off the event loop. */
+function brotliCopy(bytes: Uint8Array): Uint8Array | undefined {
+  const copy = brotliCopies.get(bytes);
+  if (copy !== undefined) return copy ?? undefined;
+  brotliCopies.set(bytes, null);
+  void brotliCompress(bytes, {
+    params: {
+      [zlib.constants.BROTLI_PARAM_QUALITY]: 11,
+      [zlib.constants.BROTLI_PARAM_SIZE_HINT]: bytes.byteLength,
+    },
+  }).then(
+    (out) => brotliCopies.set(bytes, new Uint8Array(out)),
+    () => undefined,
+  );
+  return undefined;
+}
+
+function acceptsBrotli(headers: Request["headers"]): boolean {
+  const n = negotiateAcceptEncoding(headers);
+  return n.headerPresent && (n.explicit.get("br") ?? n.wildcard) > 0;
 }
 
 /** Last-good browser generation with a non-blocking live refresh. */
@@ -211,6 +239,7 @@ export class FrontendCache {
       throw new GenerationChanged(
         "frontend generation changed while being read",
       );
+    for (const bytes of assets.values()) brotliCopy(bytes);
     return [shell, assets, after];
   }
 
@@ -373,21 +402,36 @@ export async function fileResponse(
   headers: Readonly<Record<string, string>>,
 ): Promise<Response> {
   const info = await stat(path);
+  const mtime = info.mtimeMs / 1000;
+  const validators = {
+    "last-modified": new Date(Math.floor(mtime) * 1000).toUTCString(),
+    etag: `"${createHash("md5")
+      .update(`${pyFloatRepr(mtime)}-${info.size}`)
+      .digest("hex")}"`,
+  };
+  // Spec: RFC 9110 13.2.2: If-Modified-Since only without If-None-Match.
+  // Gzip drops this strong ETag, so compressed assets revalidate by date.
+  const ifNoneMatch = request.headers.get("if-none-match");
+  const since = Date.parse(request.headers.get("if-modified-since") ?? "");
+  if (
+    ifNoneMatch !== null
+      ? ifNoneMatchMatches(ifNoneMatch, validators.etag)
+      : since >= Math.floor(mtime) * 1000
+  )
+    return new Response(null, {
+      status: 304,
+      headers: { ...headers, ...validators },
+    });
   const data = await readBytes(path);
-  const size = data.byteLength;
   const contentType = mediaType.startsWith("text/")
     ? `${mediaType}; charset=utf-8`
     : mediaType;
-  const mtime = info.mtimeMs / 1000;
   const base: Record<string, string> = {
     ...headers,
     "content-type": contentType,
     "accept-ranges": "bytes",
-    "content-length": String(size),
-    "last-modified": new Date(Math.floor(mtime) * 1000).toUTCString(),
-    etag: `"${createHash("md5")
-      .update(`${pyFloatRepr(mtime)}-${size}`)
-      .digest("hex")}"`,
+    "content-length": String(data.byteLength),
+    ...validators,
   };
   return rangedResponse(request, data, base);
 }
@@ -631,7 +675,8 @@ export function registerStaticRoutes(
     const [, , version] = await deps.frontend.snapshot();
     return conditionalJson(ex.request, {
       version,
-      api: REMOTE_CONTROL_API,
+      api: API_MAJOR,
+      api_revision: API_REVISION,
       display_name:
         (await readBrand(brandingFile(dirname(deps.themesFile)))).name ??
         deps.displayName,
@@ -681,11 +726,15 @@ export function registerStaticRoutes(
         const media = STATIC_TYPES[ext] ?? "application/octet-stream";
         if (ext === ".js" && requested !== current)
           return reloadResponse(current);
+        const brotli = acceptsBrotli(ex.request.headers)
+          ? brotliCopy(cached)
+          : undefined;
         return conditionalBytes(
           ex.request,
-          cached,
+          brotli ?? cached,
           media,
           requested === current ? IMMUTABLE_YEAR : PRIVATE_REVALIDATE,
+          brotli ? { "content-encoding": "br" } : {},
         );
       }
       const base = await realpath(resolve(deps.staticDir)).catch(() =>

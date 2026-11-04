@@ -1,5 +1,10 @@
-// SDK skill discovery for Durable prompts; no CLI or model process.
+// SDK discovery includes the bundled settings skill for every cwd.
 import { loadSkills } from "@earendil-works/pi-coding-agent";
+import { fileURLToPath } from "node:url";
+
+export const RECURSE_SETTINGS_SKILL = fileURLToPath(
+  new URL("../../skills/recurse-settings/SKILL.md", import.meta.url),
+);
 
 export interface SkillInfo {
   name: string;
@@ -19,7 +24,7 @@ export async function listSkills(
   return loadSkills({
     cwd: o.cwd,
     agentDir,
-    skillPaths: [...(o.skillPaths ?? [])],
+    skillPaths: [RECURSE_SETTINGS_SKILL, ...(o.skillPaths ?? [])],
     includeDefaults: true,
   })
     .skills.filter((skill) => {

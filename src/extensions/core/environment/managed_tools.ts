@@ -2,10 +2,11 @@
 // env. Native env calls use host validation. Recurse identity, safety scope and
 // model-policy names cannot be overridden; imports drop and log them, and tool
 // environments ignore stored protected values.
+import { Type } from "typebox";
 import { resolve } from "node:path";
 import { readFile, stat } from "node:fs/promises";
 import { parse } from "dotenv";
-import { Type } from "@earendil-works/pi-ai";
+import {} from "@earendil-works/pi-ai";
 import {
   configure,
   defineDoc,
@@ -26,6 +27,7 @@ export const EnvironmentDoc = defineDoc<{ overrides: Record<string, string> }>({
   history: "latest",
   fork: "current",
   initial: () => ({ overrides: {} }),
+  checkpointWhen: () => false,
 });
 
 export type EnvironmentChange = {
@@ -110,7 +112,7 @@ export function managedTools(
       defineTool({
         name: "env",
         description:
-          "Set, unset, list or load environment overrides from a dotenv file. Changes apply to subsequent tools and persist across turns/restarts. Values are never printed; unset removes overrides, not ambient defaults. RECURSE_*, PI_* and CHAT_DATA_DIR are protected (16,384 characters/value, 64 KiB total; multiline allowed). No stdin: load requires a file path.",
+          "Environment overrides affect later tools and persist across turns/restarts. Results hide values. Unset removes overrides, not ambient defaults. Protected: RECURSE_*, PI_*, CHAT_DATA_DIR. Limits: 16,384 chars/value, 64 KiB total; multiline allowed.",
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("set"),
@@ -118,24 +120,21 @@ export function managedTools(
             Type.Literal("list"),
             Type.Literal("load"),
           ]),
-          name: Type.Optional(
-            Type.String({ description: "Variable name for set." }),
-          ),
+          name: Type.Optional(Type.String({ description: "For set." })),
           value: Type.Optional(
             Type.String({
-              description: "Variable value for set; never printed in results.",
+              description: "For set.",
             }),
           ),
           names: Type.Optional(
             Type.Array(Type.String(), {
               minItems: 1,
-              description: "Variable names for unset.",
+              description: "For unset.",
             }),
           ),
           path: Type.Optional(
             Type.String({
-              description:
-                "Dotenv file path for load, relative to current cwd.",
+              description: "Dotenv file for load; relative to cwd.",
             }),
           ),
         }),
@@ -185,8 +184,7 @@ export function managedTools(
         description: "Change cwd for subsequent tools and turns.",
         parameters: Type.Object({
           directory: Type.String({
-            description:
-              "Directory path; relative paths resolve against the current effective cwd",
+            description: "Relative paths use the current cwd.",
           }),
         }),
         executionMode: "sequential",

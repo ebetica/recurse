@@ -397,6 +397,7 @@ export function createLineSelection(opts: {
       end = null;
       closeRangeBox();
       paint();
+      opts.notify();
       return true;
     },
     consumeClick(): boolean {
@@ -450,6 +451,7 @@ export function commentable(
     editor.box.remove();
     editor = null;
     row.classList.remove("commenting");
+    ctx.onChange();
   }
   const toggle = () => {
     if (editor) {

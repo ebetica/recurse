@@ -1,6 +1,6 @@
 // Test-only wrapper: crash once with an uncommitted write; the replacement Worker
 // handles the retained batch with the real production handler.
-import "../../../../src/agents/agent_store_worker";
+import "../../../../src/agents/agent_store.worker";
 import { existsSync, unlinkSync } from "node:fs";
 import { Database } from "bun:sqlite";
 import type { WorkerRequest } from "../../../../src/agents/agent_store";

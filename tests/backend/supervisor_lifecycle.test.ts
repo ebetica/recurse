@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { afterAll, expect, test, spyOn } from "bun:test";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
@@ -8,12 +9,11 @@ import {
   ToolTask,
   type Registry,
 } from "@earendil-works/pi-durable";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import {
-  Type,
-  fauxAssistantMessage,
-  fauxToolCall,
-} from "@earendil-works/pi-ai";
-import { acquireSupervisorLock, LOCK_FD_ENV } from "../../src/launcher/lock";
+  acquireSupervisorLock,
+  LOCK_FD_ENV,
+} from "../../src/launcher/lock.cli";
 import { SqliteWorker } from "../../src/agents/durable/sqlite_worker";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
 import { fauxHost, until } from "./fixtures/durable_host/host";
@@ -135,6 +135,7 @@ function harness(overrides: Partial<LifecycleDeps> = {}): Harness {
       noteProjectionStale: () => void (projectionReady = false),
       noteProjectionReady: () => void (projectionReady = true),
       refreshProjection: async () => ({}),
+      migrateTakenOverNames: async () => 0,
     },
     assertLegacyImported: async () => {},
     nodes: {
@@ -306,16 +307,13 @@ test("supervisor_lifecycle: the watcher retires residue before shutdown", async 
   mkdirSync(join(dataDir, "trash"));
   for (const name of ["inbox", "spawn_requests", "process_registry", "btw"])
     mkdirSync(join(dataDir, name));
+  const watching = Promise.withResolvers<void>();
   h.deps.sleep = async (_seconds, signal) => {
+    watching.resolve();
     await abortable(new Promise(() => {}), signal);
   };
   const watcher = h.life.startWatcher();
-  while (
-    ["inbox", "spawn_requests", "process_registry", "btw"].some((name) =>
-      existsSync(join(dataDir, name)),
-    )
-  )
-    await Bun.sleep(5);
+  await watching.promise;
   for (const name of ["inbox", "spawn_requests", "process_registry", "btw"])
     expect(existsSync(join(dataDir, name))).toBe(false);
 

@@ -1,12 +1,11 @@
 // Revive settles passive before note/index publication; crashes can retry.
-// Reap IDs must be absent; clear/import use new IDs. Failed create rolls back.
-// Foreign process ownership is dropped; safety resets on for imported stores.
+// Reap IDs must be absent; clear/import use new IDs. Only unpublished creates
+// roll back. Imports drop foreign ownership and reset safety on.
 // TaskSet work outlives HTTP; concurrent revives share it.
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   isDirectory,
-  moveStore,
   type AgentArchive,
   type ArchivedAgent,
 } from "../durable/archive";
@@ -28,7 +27,10 @@ export class ReviveRefused extends Error {
 }
 
 export interface ReviveDeps {
-  archive: Pick<AgentArchive, "root" | "get" | "search" | "markRevived"> &
+  archive: Pick<
+    AgentArchive,
+    "root" | "get" | "search" | "markRevived" | "move"
+  > &
     Partial<Pick<AgentArchive, "hold">>;
   importFrom?(path: string): Promise<ArchivedAgent>;
   /** conversations/<cid>/durable. */
@@ -153,7 +155,7 @@ export class SupervisorRevive {
     notes: string[],
   ): Promise<ConversationRecord> {
     const dir = this.deps.storageDir(cid);
-    if (!(await moveStore(from, dir)))
+    if (!(await this.deps.archive.move(from, dir)))
       throw new ReviveRefused(
         `The archived history of ${entry.archive_id} is missing.`,
         410,
@@ -206,13 +208,16 @@ export class SupervisorRevive {
         );
       return conv;
     } catch (error) {
-      await moveStore(dir, from).catch((undo: unknown) =>
-        this.deps.log(
-          "agent_revive_undo_failed",
-          { cid, error: String(undo) },
-          true,
-        ),
-      );
+      if (this.deps.load(cid) === null)
+        await this.deps.archive
+          .move(dir, from)
+          .catch((undo: unknown) =>
+            this.deps.log(
+              "agent_revive_undo_failed",
+              { cid, error: String(undo) },
+              true,
+            ),
+          );
       throw error;
     }
   }

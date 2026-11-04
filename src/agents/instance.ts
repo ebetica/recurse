@@ -2,8 +2,7 @@
 // Reject unimported state before building; agent work begins only at start().
 // Start storage, verify process cleanup, refresh spawn-workdir, then watcher.
 // Old groups must be gone before Durable resume; web app owns HTTP checks.
-import { existsSync, statSync } from "node:fs";
-import { lstat } from "node:fs/promises";
+import { lstat, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { AgentStore } from "./agent_store";
@@ -38,6 +37,9 @@ import {
   renderMemoryPrompt,
 } from "./runtime/memory_snapshot";
 import { collectionSnapshot } from "./runtime/node_files";
+import { SidebarScript, type TreeSource } from "../sidebar_script";
+import { agent } from "../web/api_v1/agent";
+import { agentContext } from "../web/api_v1/context";
 import { piBinding } from "./runtime/pi/session";
 import {
   ProcessCleanupPending,
@@ -45,7 +47,7 @@ import {
 } from "./runtime/pi_protocol";
 import { Prompts } from "./runtime/prompts";
 import { piRuntimeErrors } from "./runtime/runtime_factory";
-import { TouchedPrs } from "./touched_prs";
+import { ConversationPrs } from "./conversation_prs";
 import { timeoutScheduler } from "./runtime/stall_timer";
 import { TurnPrep } from "./runtime/turn_prep";
 import {
@@ -86,6 +88,7 @@ import { ShellRegistry } from "../pi_bg_shell";
 import { PiSessionRetirement } from "../pi_session_retirement";
 import { ProcessLifecycle } from "../process_lifecycle";
 import { McpChecks } from "../mcp_checks";
+import { UsageLimits } from "../extensions/extra/usage-limits/usage-limits.ts";
 import { MCP_FILE_NAME } from "../mcp_config";
 import {
   ERROR,
@@ -140,9 +143,9 @@ const sleepFor = (seconds: number, signal?: AbortSignal): Promise<void> =>
 
 const newHexId = (): string => randomUUID().replaceAll("-", "");
 
-function isDirSync(path: string): boolean {
+async function isDir(path: string): Promise<boolean> {
   try {
-    return statSync(path).isDirectory();
+    return (await stat(path)).isDirectory();
   } catch {
     return false;
   }
@@ -197,9 +200,7 @@ export async function buildInstance(options: InstanceOptions) {
     repoDir: paths.REPO_DIR,
     dataDir: paths.DATA_DIR,
     env,
-    backgroundTask: (name, work) => {
-      tasks.spawn(name, work);
-    },
+    log: (event, fields) => logEvent(log.agents, INFO, event, { fields }),
   });
   const roots = resolveRoots(env);
   const mcpChecks = new McpChecks({
@@ -216,6 +217,7 @@ export async function buildInstance(options: InstanceOptions) {
     signal: shutdownController.signal,
     providerToken: async (provider) => durableHost?.providerToken(provider),
   });
+  const usageLimits = new UsageLimits(join(roots.piAgent, "usage-limits.json"));
   const backend = new SessionIndex(join(paths.DATA_DIR, "pi_sessions"));
   const lease = new TreeLifecycle({
     dataDir: paths.DATA_DIR,
@@ -306,6 +308,7 @@ export async function buildInstance(options: InstanceOptions) {
       durableSafetyOff: (cid): boolean | undefined =>
         durableHost?.safetyReviewOff(cid),
       treeRefresh: (entry) => treeView.refresh(entry),
+      treeInvalidate: () => treeView.invalidate(),
       treeRebuild: (entries) => treeView.rebuildAll(entries),
       treeDiscard: (cid) => treeView.discard(cid),
 
@@ -366,9 +369,10 @@ export async function buildInstance(options: InstanceOptions) {
     },
     nodes: { allTurnTasks: () => nodes.allTurnTasks() },
     expireHistory: async () => {
-      reapHistory.expire(historyPolicy);
+      await config.refreshDeletedAgentHistoryDays();
+      await reapHistory.expire(historyPolicy);
       const expired = await durable.archive.expire(
-        config.deletedAgentHistoryDays(),
+        await config.refreshDeletedAgentHistoryDays(),
         paths.TRASH_DIR,
         paths.AGENT_HISTORY_EXPIRY_LIMIT,
       );
@@ -421,14 +425,20 @@ export async function buildInstance(options: InstanceOptions) {
   agentTools = await AgentTools.create({
     config,
     skills,
-    gitReady: () => {
-      const local = isDirSync(config.repoUrl);
-      if (local && !existsSync(join(config.repoUrl, ".git")))
-        return isDirSync(config.repoUrl);
-      return existsSync(join(paths.REPO_DIR, ".git"));
+    gitReady: async () => {
+      const local = await isDir(config.repoUrl);
+      if (
+        local &&
+        !(await stat(join(config.repoUrl, ".git")).catch(() => null))
+      )
+        return isDir(config.repoUrl);
+      return (
+        (await stat(join(paths.REPO_DIR, ".git")).catch(() => null)) !== null
+      );
     },
-    targetIsGitRepo: () =>
-      !isDirSync(config.repoUrl) || existsSync(join(config.repoUrl, ".git")),
+    targetIsGitRepo: async () =>
+      !(await isDir(config.repoUrl)) ||
+      (await stat(join(config.repoUrl, ".git")).catch(() => null)) !== null,
     loadConversation: async (cid) => conversations.load(cid),
     effectiveWorkdir: (conv) => conversations.effectiveWorkdir(conv),
     agentTempPath: (conv) => agentTemp.agentTempPath(conv),
@@ -487,6 +497,7 @@ export async function buildInstance(options: InstanceOptions) {
     agentStore,
     importFinalized,
     setSafetyReviewOff: (cid, off) => durableHost!.setSafetyReviewOff(cid, off),
+    modelChanged: (cid) => durableHost?.invalidatePromptCache(cid),
     actionRequest: (kind, cid) => parked.actionRequest(kind, cid),
     requestRun: (cid) => delivery.requestRun(cid),
     tasks,
@@ -509,11 +520,41 @@ export async function buildInstance(options: InstanceOptions) {
     worktrees: paths.WORKTREES,
     workdirReady: () => workdirGit.ready(),
   };
+  const sidebarRows = () => {
+    const rows = treeView.serve();
+    const agents = new Map(
+      treeView.serveBase(rows).map((row) => {
+        const id = String(row.id);
+        return [
+          id,
+          {
+            ...agent(
+              row,
+              durableHost?.shells(id).items ?? [],
+              durableHost?.metadata(id).pending.length ?? 0,
+            ),
+            context: agentContext(
+              row,
+              durableHost?.cachedContextUsage(id) ?? null,
+              config,
+            ),
+          },
+        ];
+      }),
+    );
+    return rows.map((row) => ({
+      ...row,
+      agent: agents.get(String(row.id))!,
+    })) as unknown as TreeSource[];
+  };
+  const sidebarScript = new SidebarScript(paths.CONFIG_DIR, sidebarRows);
   const durable: DurableHost = new DurableHost({
     config,
+    sidebarScript,
     dataDir: paths.DATA_DIR,
     trashDir: paths.TRASH_DIR,
     piAgentDir: roots.piAgent,
+    usageLimits,
     load: (cid, fields) =>
       conversations.load(cid, { withPending: false, fields }),
     uploadParts: (cid, text, attachmentIds) => {
@@ -554,6 +595,7 @@ export async function buildInstance(options: InstanceOptions) {
             })
           : null) ?? conv,
       ),
+    collectionPath: (conv) => agentTemp.uploadsDir(String(conv.tmp_key)),
     agentEnv: async (conv, recordTiming) => {
       let mark = performance.now();
       const phase = (name: string) => {
@@ -602,14 +644,16 @@ export async function buildInstance(options: InstanceOptions) {
       );
     },
     stopGroup: (group) => processes.stopGroup(group),
-    ownProcess: async (proc, cid) =>
-      void (await processes.registerProcess(proc, "mcp", cid)),
+    ownProcess: async (proc, cid, kind = "mcp") =>
+      void (await processes.registerProcess(proc, kind, cid)),
     releaseProcess: async (proc) =>
       (await processes.cleanupProcessObject(proc)) !== false,
     log: (event, fields, level = INFO) =>
       logEvent(log.agents, level, event, { fields }),
     safetyChanged: (cid) => conversations.refreshTreeRow(cid),
     rowChanged: (cid) => conversations.refreshTreeRow(cid),
+    prsCreated: (cid, urls, since) =>
+      conversationPrs.recordCreated(cid, urls, since),
     titleSettings: () => config.resolveEffortLevel(1),
     applyTitle: (cid, title) => {
       const current = conversations.metadataSnapshot(cid);
@@ -624,11 +668,15 @@ export async function buildInstance(options: InstanceOptions) {
     operatorMessageAdmitted: (cid, at) => {
       conversations.saveActivity(cid, at, at);
     },
-    // Invariant: Only top-level and taken-over agents notify, once per run
-    // key in this process, after the run is reported and while commits show
-    // nothing running or queued. Like reports, a crash before the cursor
-    // advance may repeat one.
+    // Invariant: Top-level and taken-over agents notify once per reported run
+    // key in this process, with nothing running or queued, no owned live shells
+    // (including monitors), and no working descendants. Like reports, a crash
+    // before the cursor advance may repeat one.
     report: async (cid, report) => {
+      conversationPrs.refresh(cid, "run_end");
+      // Invariant: The stamp is flushed before the report cursor advances, so
+      // a crash re-reports an unstamped run; a re-reported run keeps its stamp.
+      await conversations.stampReply(cid, report.key, now());
       const outcome = await delivery.reportDurableRun(cid, report);
       const row = conversations.metadataSnapshot(cid);
       if (
@@ -637,9 +685,18 @@ export async function buildInstance(options: InstanceOptions) {
         notifiedRuns.get(cid) !== report.key &&
         row !== null &&
         typeof row.side_of !== "string" &&
-        (!row.parent || row.pinned === true) &&
+        (!row.parent || row.taken_over === true) &&
         durable.reportHolds.settled(cid) &&
-        nodes.pendingCount(cid) === 0
+        nodes.pendingCount(cid) === 0 &&
+        durable.shells(cid).active_count === 0 &&
+        conversations
+          .descendants(cid)
+          .every(
+            (child) =>
+              durable.reportHolds.settled(child) &&
+              nodes.pendingCount(child) === 0 &&
+              durable.shells(child).active_count === 0,
+          )
       ) {
         notifiedRuns.delete(cid);
         notifiedRuns.set(cid, report.key);
@@ -727,7 +784,26 @@ export async function buildInstance(options: InstanceOptions) {
     warmSettings: () => void (config.effortLevels(), config.chatModels()),
   });
   durableHost = durable;
-  const touchedPrs = new TouchedPrs(conversations, tasks);
+  const conversationPrs = new ConversationPrs({
+    store: conversations,
+    git: workdirGit,
+    // Invariant: A conversation deleted or closing meanwhile links nothing.
+    cwd: async (cid) => {
+      const conv = conversations.load(cid, { withPending: false });
+      if (conv === null) return null;
+      try {
+        const persisted = durable.owns(conv)
+          ? await durable.effectiveCwd(cid)
+          : null;
+        const stored = conversations.effectiveWorkdir(conv);
+        return (await workdirGit.resolveDiffCwd(stored, persisted))[0];
+      } catch {
+        return null;
+      }
+    },
+    tasks,
+    now,
+  });
 
   spawnWorkdir = new SpawnWorkdir(paths.DATA_DIR, () =>
     workdirGit.defaultSpawnWorkdir(),
@@ -841,7 +917,6 @@ export async function buildInstance(options: InstanceOptions) {
     monotonic,
   });
   reap = new SupervisorReap({
-    drainTouchedPrs: () => touchedPrs.drain(),
     errors: { ProcessCleanupPending, TakenOverReapBlocked },
     conversations,
     nodes,
@@ -986,11 +1061,12 @@ export async function buildInstance(options: InstanceOptions) {
     processes,
     mcpChecks,
     workdirGit,
-    touchedPrs,
+    conversationPrs,
     backend,
     lease,
     oauth,
     notifications,
+    usageLimits,
     anthropic,
     codex,
     openrouter,
@@ -999,6 +1075,8 @@ export async function buildInstance(options: InstanceOptions) {
     retirement,
     skills,
     treeView,
+    sidebarRows,
+    sidebarScript,
     agentTemp,
     drafts,
     parked,

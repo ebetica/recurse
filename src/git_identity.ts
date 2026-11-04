@@ -3,6 +3,7 @@
 // Record GitHub's account locally when available; otherwise leave identity
 // unset so Git refuses commits rather than inventing an author.
 import { gitEnv } from "./workdir_git";
+import { slowSpan } from "./observability/slow_span";
 
 const pending = new Map<string, Promise<boolean>>();
 type Env = Readonly<Record<string, string | undefined>>;
@@ -29,12 +30,14 @@ async function resolveIdentity(
 ): Promise<boolean> {
   const env = gitEnv(environ);
   async function git(...args: string[]): Promise<string> {
-    const child = Bun.spawn(["git", "-C", repoDir, ...args], {
-      env,
-      stdout: "pipe",
-      stderr: "ignore",
-      stdin: "ignore",
-    });
+    const child = slowSpan("git_identity_spawn", undefined, () =>
+      Bun.spawn(["git", "-C", repoDir, ...args], {
+        env,
+        stdout: "pipe",
+        stderr: "ignore",
+        stdin: "ignore",
+      }),
+    );
     const timer = setTimeout(() => child.kill(), 5000);
     try {
       const [text, code] = await Promise.all([

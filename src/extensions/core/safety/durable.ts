@@ -76,6 +76,7 @@ const SafetyDoc = defineDoc<{ off: boolean; unavailable?: string }>({
   history: "latest",
   fork: "initial",
   initial: () => ({ off: false }),
+  checkpointWhen: () => false,
 });
 
 type UsageTotals = Omit<Usage, "cost"> & { cost: Usage["cost"] };
@@ -118,6 +119,7 @@ export const DeniedReviewDoc = defineDoc<DeniedReviewState>({
     safetyWaitMs: 0,
     recent: [],
   }),
+  checkpointWhen: () => false,
 });
 
 // Write the escape hatch only for the host's authenticated toggle route.
@@ -202,7 +204,7 @@ export type SafetyOptions = {
   agent(api: HookApi, context: Context): Promise<DurableSafetyAgent>;
   mcpServer?(name: string): string | undefined;
   reviewAction?: typeof reviewAction;
-  loadConfig?: typeof loadSafetyConfig;
+  loadConfig?: (configDir: string) => SafetyConfig | Promise<SafetyConfig>;
   now?: () => number;
 };
 
@@ -354,7 +356,7 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       context,
       options,
     )) as typeof completeSimple;
-  const runs = new Map<string, RunState>();
+  const runs = new Map<string, { key: string; state: Promise<RunState> }>();
   const reviewTails = new Map<string, Promise<void>>();
   const started = new Map<string, number>();
 
@@ -368,42 +370,51 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     const live = await api.snapshot(LiveDoc, api.conversationId, context);
     const runKey = String(live?.run?.inputs[0] ?? live?.run?.taskId ?? "none");
     const prior = runs.get(key);
-    if (prior?.key === runKey) return prior;
-    // Invariant: A resumed run retains its denial count.
-    const stored = await api.snapshot(
-      DeniedReviewDoc,
-      api.conversationId,
-      context,
-    );
-    const raced = runs.get(key);
-    if (raced?.key === runKey) return raced;
-    const trusted = host.trusted();
-    const config = loadConfig(host.configDir);
-    if (config.error) safeLog(invalidConfigMessage());
-    const state: RunState = {
-      key: runKey,
-      config,
-      pathScope: loadTrustedPathScope({
-        RECURSE_WORKSPACE_ROOT: trusted.workspaceRoot,
-        RECURSE_WORKTREES_ROOT: trusted.worktreesRoot,
-        RECURSE_AGENT_TMPDIR: trusted.tempRoot,
-        CHAT_DATA_DIR: trusted.dataDir,
-      }),
-      modelPolicy: loadTrustedModelPolicy({
-        RECURSE_MODEL_POLICY: trusted.modelPolicy,
-      }),
-      breaker: new DenialCircuitBreaker(),
-      denied: new Set(),
-      open: false,
-      stopPending: false,
-    };
-    for (const id of stored?.run?.key === runKey ? stored.run.denied : []) {
-      state.denied.add(id);
-      state.open = state.breaker.recordDenial().open;
+    if (prior?.key === runKey) return prior.state;
+    const loading = (async (): Promise<RunState> => {
+      // Invariant: Parallel calls share initialization and the denial budget.
+      const stored = await api.snapshot(
+        DeniedReviewDoc,
+        api.conversationId,
+        context,
+      );
+      const trusted = host.trusted();
+      const [config, pathScope] = await Promise.all([
+        loadConfig(host.configDir),
+        loadTrustedPathScope({
+          RECURSE_WORKSPACE_ROOT: trusted.workspaceRoot,
+          RECURSE_WORKTREES_ROOT: trusted.worktreesRoot,
+          RECURSE_AGENT_TMPDIR: trusted.tempRoot,
+          CHAT_DATA_DIR: trusted.dataDir,
+        }),
+      ]);
+      if (config.error) safeLog(invalidConfigMessage());
+      const state: RunState = {
+        key: runKey,
+        config,
+        pathScope,
+        modelPolicy: loadTrustedModelPolicy({
+          RECURSE_MODEL_POLICY: trusted.modelPolicy,
+        }),
+        breaker: new DenialCircuitBreaker(),
+        denied: new Set(),
+        open: false,
+        stopPending: false,
+      };
+      for (const id of stored?.run?.key === runKey ? stored.run.denied : []) {
+        state.denied.add(id);
+        state.open = state.breaker.recordDenial().open;
+      }
+      state.stopPending = state.open;
+      return state;
+    })();
+    runs.set(key, { key: runKey, state: loading });
+    try {
+      return await loading;
+    } catch (error) {
+      if (runs.get(key)?.state === loading) runs.delete(key);
+      throw error;
     }
-    state.stopPending = state.open;
-    runs.set(key, state);
-    return state;
   }
 
   async function acquireReviewSlot(key: string): Promise<() => void> {
@@ -471,7 +482,6 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     const rows = reviewRows(await agent.conversation.context(context));
     let transcript = "";
     let durableEvidence = "";
-    let blocks: readonly string[] | undefined;
     let journalFailure: string | undefined;
     if (conversationId) {
       const byId = new Map(rows.map((row) => [row.id, row]));
@@ -486,7 +496,6 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         });
         durableEvidence = journal.cacheKey;
         transcript = journal.journalEvidence;
-        blocks = journal.evidenceBlocks;
       } catch (error) {
         journalFailure =
           error instanceof Error ? error.message : "reviewer journal failed";
@@ -504,12 +513,11 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         action,
         durableEvidence,
         conversationId,
-        blocks,
         complete,
         inputs: {
           dataDir: host.trusted().dataDir,
           statsRoot: host.trusted().statsRoot,
-          processSnapshot: ownedProcessSnapshot(host.shells()),
+          processSnapshot: await ownedProcessSnapshot(host.shells()),
           actingAgent: { id: agent.id, title: agent.title },
         },
       });

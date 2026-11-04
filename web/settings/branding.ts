@@ -1,13 +1,16 @@
-// Home-only name and icon settings, applied to the shell after reload.
+// Home-only name and icon editor sheet, applied to the shell after reload.
 import { api, jpost } from "../api.js";
+import { settingsDetail } from "./layout.js";
 
 export function buildBrandingSection(body: HTMLElement): void {
   body.innerHTML = `
     <form class="brand-settings">
-      <label>App name<input name="name" type="text" maxlength="80" required></label>
-      <div class="row"><button class="primary" type="submit">Save name</button><button class="secondary" type="button" name="reset-name">Reset to default</button></div>
-      <label>App icon (PNG or SVG, up to 1 MiB)<input name="icon" type="file" accept="image/png,image/svg+xml,.png,.svg"></label>
-      <button class="secondary" type="button" name="reset-icon">Reset to default</button>
+      <div class="group">
+        <label class="item field">App name<input name="name" type="text" maxlength="80" required></label>
+        <div class="item actions"><button class="secondary" type="button" name="reset-name">Reset to default</button><button class="primary" type="submit">Save name</button></div>
+        <label class="item field">App icon (PNG or SVG, up to 1 MiB)<input name="icon" type="file" accept="image/png,image/svg+xml,.png,.svg"></label>
+        <div class="item actions"><button class="secondary" type="button" name="reset-icon">Reset to default</button></div>
+      </div>
       <p class="hint">Reload the page to see changes.</p><p class="msg" role="status"></p>
     </form>`;
   const form = body.querySelector<HTMLFormElement>("form")!;
@@ -20,11 +23,13 @@ export function buildBrandingSection(body: HTMLElement): void {
   const resetIcon = form.querySelector<HTMLButtonElement>(
     '[name="reset-icon"]',
   )!;
+  const detail = settingsDetail(body, "Name and icon", () => name.value);
   const show = async (response: Response, saved = false) => {
     const value = (await response.json()) as { name: string; detail?: string };
     if (!response.ok)
       throw new Error(value.detail || "Couldn't save name and icon.");
     name.value = value.name;
+    detail.refresh();
     if (saved) msg.textContent = "Saved. Reload the page to see changes.";
   };
   const run = async (work: () => Promise<Response>) => {

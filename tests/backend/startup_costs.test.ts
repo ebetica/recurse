@@ -1,6 +1,7 @@
 import { expect, test } from "bun:test";
 import { switchoverWorld, until } from "./fixtures/durable_host/host";
 
+// Feature: #3074 Root subphases share the existing open event.
 test("a slow open reports environment and storage costs with its maintenance owner", async () => {
   const messages: string[] = [];
   const world = await switchoverWorld({
@@ -42,11 +43,13 @@ test("a slow open reports environment and storage costs with its maintenance own
     await guard;
     await instance.lifecycle.settleMaintenanceJobs();
     expect(world.requests.length).toBeGreaterThan(0);
-    const opened = messages.find(
+    const opens = messages.filter(
       (message) =>
         message.startsWith("event=durable_open ") &&
         message.includes(`cid=${cid} `),
     );
+    expect(opens).toHaveLength(1);
+    const [opened] = opens;
     for (const name of [
       "env_ms",
       "env_clear_ms",
@@ -64,6 +67,11 @@ test("a slow open reports environment and storage costs with its maintenance own
       "storage_metadata_ms",
       "storage_db_bytes",
       "storage_wal_bytes",
+      "root_conversation_ms",
+      "root_snapshot_ms",
+      "root_mcp_ms",
+      "root_import_ms",
+      "root_report_ms",
     ])
       expect(opened).toMatch(new RegExp(`\\b${name}=\\d+`));
     expect(messages).toContainEqual(

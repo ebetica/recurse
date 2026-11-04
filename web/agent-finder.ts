@@ -155,7 +155,7 @@ export class AgentMentionIndex {
         normalizedId: normalizeMentionText(node.id),
         tokens: titleTokens(normalizeMentionText(title)),
         status: node.status,
-        takenOver: node.pinned === true,
+        takenOver: node.taken_over === true,
       };
       this.entries.set(node.id, indexed);
     }
@@ -352,7 +352,7 @@ export function agentMentionRevision(nodes: MentionNode[]): string {
   // polls O(n) rather than sorting thousands of ids merely to discover nothing
   // changed.
   for (const node of nodes) {
-    const value = `${node.id}\0${node.parent || ""}\0${node.title || ""}\0${node.updated || 0}\0${node.status || ""}\0${node.pinned ? 1 : 0}\0${node.remote || ""}\0${node.offline ? 1 : 0}\n`;
+    const value = `${node.id}\0${node.parent || ""}\0${node.title || ""}\0${node.updated || 0}\0${node.status || ""}\0${node.taken_over ? 1 : 0}\0${node.remote || ""}\0${node.offline ? 1 : 0}\n`;
     for (let i = 0; i < value.length; i++) {
       hash ^= value.charCodeAt(i);
       hash = Math.imul(hash, 0x01000193);

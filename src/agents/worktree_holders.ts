@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { Cancelled, checkAbort } from "../utils/tasks";
+import { slowSpan } from "../observability/slow_span";
 
 export class WorktreeHolders {
   constructor(private readonly dataDir: string) {}
@@ -25,12 +26,14 @@ export class WorktreeHolders {
     const rel = relative(parent, path);
     if (isAbsolute(rel) || rel === ".." || rel.startsWith("../")) return;
     checkAbort(signal);
-    const child = Bun.spawn(
-      [
-        process.execPath,
-        fileURLToPath(new URL("./worktree_hold.ts", import.meta.url)),
-      ],
-      { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+    const child = slowSpan("worktree_holder_spawn", cid, () =>
+      Bun.spawn(
+        [
+          process.execPath,
+          fileURLToPath(new URL("./worktree_hold.ts", import.meta.url)),
+        ],
+        { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      ),
     );
     child.stdin.write(
       JSON.stringify({ dataDir: this.dataDir, workdir: path, cid }),

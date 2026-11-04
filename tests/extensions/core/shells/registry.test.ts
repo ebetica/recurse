@@ -5,8 +5,16 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
+import fsPromises, {
+  open,
+  readFile,
+  readdir,
+  readlink,
+  type FileHandle,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -170,8 +178,9 @@ test("managed shells scrub runner-only descriptor environments", async () => {
       `test "${"$"}{RECURSE_TEST_OVERRIDE:-}" = applied`,
     ].join(" && ");
     const shell = reg.run(command, "foreground", process.cwd());
+    await reg.waitForLaunch(shell);
     assert.equal(await reg.waitForExit(shell, 5000), "exited");
-    assert.equal(shell.exitCode, 0, reg.trimmedOutput(shell));
+    assert.equal(shell.exitCode, 0, await reg.trimmedOutput(shell));
   } finally {
     for (const [name, value] of previous) {
       if (value === undefined) delete process.env[name];
@@ -191,9 +200,10 @@ test("a missing agent environment file is a no-op", async () => {
     }),
   );
   const shell = reg.run("printf unchanged", "foreground", process.cwd());
+  await reg.waitForLaunch(shell);
   assert.equal(await reg.waitForExit(shell, 5000), "exited");
   assert.equal(shell.exitCode, 0);
-  assert.equal(reg.trimmedOutput(shell), "unchanged");
+  assert.equal(await reg.trimmedOutput(shell), "unchanged");
 });
 
 test("a shell names the bash call that runs it, and only that call", async () => {
@@ -217,14 +227,16 @@ test("a shell names the bash call that runs it, and only that call", async () =>
       undefined,
       "toolu_01Abc",
     );
+    await reg.waitForLaunch(named);
     const unnamed = reg.run(print, "foreground", process.cwd());
+    await reg.waitForLaunch(unnamed);
     for (const shell of [named, unnamed])
       assert.equal(
         await reg.waitForExit(shell, reg.cfg.foregroundWaitMs),
         "exited",
       );
-    assert.equal(reg.trimmedOutput(named), "toolu_01Abc");
-    assert.equal(reg.trimmedOutput(unnamed), "unset");
+    assert.equal(await reg.trimmedOutput(named), "toolu_01Abc");
+    assert.equal(await reg.trimmedOutput(unnamed), "unset");
   } finally {
     if (previous === undefined) delete process.env.RECURSE_TOOL_CALL_ID;
     else process.env.RECURSE_TOOL_CALL_ID = previous;
@@ -235,20 +247,23 @@ test("foreground execution: trimmed output, merged streams, exit codes, nothing 
   const n = new FakeNotifier();
   const reg = new ShellRegistry(n, testConfig({ foregroundWaitMs: 60_000 }));
   const ok = reg.run("echo hello world", "foreground", process.cwd());
+  await reg.waitForLaunch(ok);
   assert.equal(await reg.waitForExit(ok, reg.cfg.foregroundWaitMs), "exited");
   assert.equal(ok.exitCode, 0);
-  assert.match(reg.trimmedOutput(ok), /hello world/);
+  assert.match(await reg.trimmedOutput(ok), /hello world/);
   assert.equal(n.messages.length, 0);
   const merged = reg.run(
     "echo out; echo err 1>&2",
     "foreground",
     process.cwd(),
   );
+  await reg.waitForLaunch(merged);
   await waitFor(() => merged.completed);
   const out = readFileSync(merged.logPath, "utf8");
   assert.match(out, /out/);
   assert.match(out, /err/);
   const failed = reg.run("exit 3", "foreground", process.cwd());
+  await reg.waitForLaunch(failed);
   await waitFor(() => failed.completed);
   assert.equal(failed.exitCode, 3);
 });
@@ -268,6 +283,7 @@ test("commands run as a non-login shell: startup files are not sourced", async (
       environment: () => ({ HOME: home }),
     });
     const shell = reg.run("echo hi", "foreground", process.cwd());
+    await reg.waitForLaunch(shell);
     await waitFor(() => shell.completed);
     assert.equal(shell.exitCode, 0);
   } finally {
@@ -284,6 +300,7 @@ test("slow command is backgrounded, then reports completion", async () => {
     "foreground",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   const res = await reg.waitForExit(shell, reg.cfg.foregroundWaitMs);
   assert.equal(res, "timeout");
   reg.backgroundify(shell);
@@ -300,12 +317,14 @@ test("background reminder excludes the shell its own notice just announced", asy
     testConfig({ foregroundWaitMs: 80 }),
   );
   const first = reg.run("sleep 0.5", "background", process.cwd());
+  await reg.waitForLaunch(first);
   assert.equal(
     reg.backgroundShellReminder(first.id),
     undefined,
     "a launch notice never echoes the shell it announces",
   );
   const second = reg.run("sleep 0.5", "background", process.cwd());
+  await reg.waitForLaunch(second);
   const reminder = reg.backgroundShellReminder(second.id) ?? "";
   assert.match(
     reminder,
@@ -325,12 +344,14 @@ test("background reminder only includes live backgrounded shells", async () => {
     testConfig({ foregroundWaitMs: 60_000 }),
   );
   const foreground = reg.run("echo quick", "foreground", process.cwd());
+  await reg.waitForLaunch(foreground);
   assert.equal(
     await reg.waitForExit(foreground, reg.cfg.foregroundWaitMs),
     "exited",
   );
   assert.equal(reg.backgroundShellReminder(), undefined);
   const background = reg.run("sleep 0.4", "background", process.cwd());
+  await reg.waitForLaunch(background);
   assert.match(reg.backgroundShellReminder() ?? "", new RegExp(background.id));
   await cleanupRegistry(reg, background);
   await waitFor(() => reg.backgroundShellReminder() === undefined);
@@ -342,10 +363,13 @@ test("live shell tracking is capped separately from retained history", async () 
     testConfig({ maxTrackedShells: 1, maxLiveShells: 2 }),
   );
   const first = reg.run("sleep 1", "background", process.cwd());
+  await reg.waitForLaunch(first);
   const second = reg.run("sleep 1", "background", process.cwd());
+  await reg.waitForLaunch(second);
   assert.equal(first.status, "running");
   assert.equal(second.status, "running");
   const third = reg.run("echo no-slot", "background", process.cwd());
+  await reg.waitForLaunch(third);
   assert.equal(third.status, "error");
   assert.equal(third.launchError, "live-cap");
   assert.match(reg.backgroundShellReminder() ?? "", new RegExp(first.id));
@@ -363,13 +387,15 @@ test("live-cap rejection spawns no process and writes no ownership record", asyn
     store,
   );
   const first = reg.run("sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(first);
   await waitFor(() => first.pid !== undefined);
   const rejected = reg.run(`touch ${marker}`, "background", process.cwd());
+  await reg.waitForLaunch(rejected);
   assert.equal(rejected.status, "error");
   assert.equal(rejected.launchError, "live-cap");
   assert.equal(rejected.child, undefined);
   assert.equal(reg.get(rejected.id), undefined);
-  assert.equal(store.readRecord(rejected.id), undefined);
+  assert.equal(await store.readRecord(rejected.id), undefined);
   assert.equal(reg.list().length, 1);
   assert.throws(() => readFileSync(marker));
   await reg.shutdown();
@@ -381,8 +407,10 @@ test("an exiting background slot admits the next launch", async () => {
     testConfig({ maxLiveShells: 1 }),
   );
   const first = reg.run("sleep 0.1", "background", process.cwd());
+  await reg.waitForLaunch(first);
   await waitFor(() => first.completed);
   const next = reg.run("sleep 1", "background", process.cwd());
+  await reg.waitForLaunch(next);
   assert.equal(next.status, "running");
   await reg.shutdown();
 });
@@ -400,21 +428,23 @@ test("foreground overflow is killed and removed without a stale record", async (
     store,
   );
   const first = reg.run("sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(first);
   await waitFor(() => first.pid !== undefined);
   const foreground = reg.run(
     "printf overflow; sleep 30",
     "foreground",
     process.cwd(),
   );
+  await reg.waitForLaunch(foreground);
   assert.equal(
     await reg.waitForExit(foreground, reg.cfg.foregroundWaitMs),
     "timeout",
   );
   assert.equal(reg.canBackgroundify(foreground), false);
-  assert.match(reg.trimmedOutput(foreground), /overflow/);
+  assert.match(await reg.trimmedOutput(foreground), /overflow/);
   assert.equal(await reg.discardUnowned(foreground), true);
   assert.equal(reg.get(foreground.id), undefined);
-  assert.equal(store.readRecord(foreground.id), undefined);
+  assert.equal(await store.readRecord(foreground.id), undefined);
   assert.ok(foreground.pid !== undefined && !pidAlive(foreground.pid));
   await reg.shutdown();
 });
@@ -430,12 +460,14 @@ test("foreground handoff reminder lists prior shells in stable order", async () 
       "background",
       process.cwd(),
     );
+    await reg.waitForLaunch(first);
     await waitFor(() => first.pid !== undefined);
     const second = reg.run(
       "while :; do sleep 30; done",
       "foreground",
       process.cwd(),
     );
+    await reg.waitForLaunch(second);
     await waitFor(() => second.pid !== undefined);
     assert.equal(
       await reg.waitForExit(second, reg.cfg.foregroundWaitMs),
@@ -456,6 +488,7 @@ test("background mode returns immediately and later completes", async () => {
   const n = new FakeNotifier();
   const reg = new ShellRegistry(n, testConfig());
   const shell = reg.run("sleep 0.2; echo bg-done", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   assert.equal(shell.status, "running");
   await waitFor(() =>
     n.messages.some((m) => /bg-done/.test(m.text) && /exited 0/.test(m.text)),
@@ -490,6 +523,7 @@ test("run() stores the per-shell line limit and completions honor it", async () 
     undefined,
     5,
   );
+  await reg.waitForLaunch(shell);
   assert.equal(shell.lineLimit, 5);
   assert.equal(
     reg.run("echo hi", "background", process.cwd(), undefined, 5000).lineLimit,
@@ -509,8 +543,8 @@ test("run() stores the per-shell line limit and completions honor it", async () 
   )!;
   assert.match(done.text, /16 lines \+ \d+ bytes truncated/);
   assert.match(done.text, /Read offset=4 limit=16 to continue/);
-  assert.match(reg.trimmedOutput(shell), /16 lines \+/);
-  assert.match(reg.trimmedOutput(shell, 20), /line-10/);
+  assert.match(await reg.trimmedOutput(shell), /16 lines \+/);
+  assert.match(await reg.trimmedOutput(shell, 20), /line-10/);
 });
 
 test("completion message middle-elides a huge command, keeps log and output", async () => {
@@ -547,6 +581,7 @@ test("EXTERNAL kill of the whole group: one completion, reports the signal, time
     "background",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   await waitFor(() => {
     try {
       return readFileSync(pidFile, "utf8").trim().length > 0;
@@ -579,6 +614,7 @@ test("EXTERNAL kill of only the LEADER: still exactly one completion", async () 
   const n = new FakeNotifier();
   const reg = new ShellRegistry(n, testConfig({ scheduleSeconds: [0.03, 5] }));
   const shell = reg.run("sleep 3", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   await waitFor(() => shell.pid !== undefined);
   process.kill(shell.pid!, "SIGKILL");
   await waitFor(() => shell.completed);
@@ -596,12 +632,85 @@ test("shutdown resolves once TERM-exiting process groups are gone", async () => 
   const n = new FakeNotifier();
   const reg = new ShellRegistry(n, testConfig({ killGraceMs: 60_000 }));
   const a = reg.run("exec sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(a);
   const b = reg.run("exec sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(b);
   await waitFor(() => a.pid !== undefined && b.pid !== undefined);
   await reg.shutdown();
   for (const shell of [a, b])
     assert.throws(() => process.kill(-shell.pgid!, 0), { code: "ESRCH" });
 });
+
+// Regression: #3076 Shutdown during readback cannot grant shell ownership.
+test(
+  "shutdown cancels ownership while its persisted record is being read",
+  { skip: process.platform !== "linux" },
+  async () => {
+    const state = mkdtempSync(join(tmpdir(), "pi-bg-shell-readback-"));
+    dirs.push(state);
+    const store = new RegistryStore(state, "owner");
+    const reg = new ShellRegistry(
+      new FakeNotifier(),
+      testConfig({ killGraceMs: 5000 }),
+      store,
+    );
+    const shell = reg.run(
+      "trap '' TERM; echo trap-ready; exec sleep 30",
+      "background",
+      process.cwd(),
+    );
+    await reg.waitForLaunch(shell);
+    let feeder: import("bun").Subprocess<"pipe", "pipe", "inherit"> | undefined;
+    try {
+      await waitFor(() =>
+        readFileSync(shell.logPath, "utf8").includes("trap-ready"),
+      );
+      await store.flush(shell.id);
+      const path = join(store.dir, `${shell.id}.json`);
+      const record = readFileSync(path, "utf8");
+      unlinkSync(path);
+      assert.equal(await Bun.spawn(["mkfifo", path]).exited, 0);
+      const ownership = reg.hasDurableOwnership(shell);
+      feeder = Bun.spawn(
+        [
+          "bash",
+          "-c",
+          'exec 3>"$1"; echo reader-ready; read -r release; printf "%s" "$2" >&3',
+          "readback",
+          path,
+          record,
+        ],
+        { stdin: "pipe", stdout: "pipe", stderr: "inherit" },
+      );
+      const reader = feeder.stdout!.getReader();
+      const ready = await reader.read();
+      assert.match(new TextDecoder().decode(ready.value), /reader-ready/);
+      reader.releaseLock();
+      const stopping = reg.shutdown();
+      feeder.stdin!.write("release\n");
+      feeder.stdin!.end();
+      assert.equal(await feeder.exited, 0);
+      assert.equal(await ownership, false);
+      assert.equal(
+        process.kill(-shell.pgid!, 0),
+        true,
+        "TERM-resistant group is still alive at readback",
+      );
+      process.kill(-shell.pgid!, "SIGKILL");
+      await stopping;
+      assert.throws(() => process.kill(-shell.pgid!, 0), { code: "ESRCH" });
+    } finally {
+      feeder?.kill();
+      if (shell.pgid !== undefined) {
+        try {
+          process.kill(-shell.pgid, "SIGKILL");
+        } catch {}
+      }
+      await reg.shutdown();
+      await feeder?.exited;
+    }
+  },
+);
 
 test("shutdown is idempotent and closes spawning before its first await", async () => {
   const reg = new ShellRegistry(
@@ -609,6 +718,7 @@ test("shutdown is idempotent and closes spawning before its first await", async 
     testConfig({ killGraceMs: 30 }),
   );
   const shell = reg.run("trap '' TERM; sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   await waitFor(() => shell.pid !== undefined);
   const first = reg.shutdown();
   assert.equal(reg.shutdown(), first);
@@ -627,6 +737,7 @@ test("shutdown escalates a SIGTERM-resistant group before resolving", async () =
     "background",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   await waitFor(() => shell.pid !== undefined);
   await waitFor(() =>
     readFileSync(shell.logPath, "utf8").includes("trap-ready"),
@@ -649,6 +760,7 @@ test("leader exit remains active until detached group descendants finish", async
     "background",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   await waitFor(() => {
     try {
       return readFileSync(childFile, "utf8").trim().length > 0;
@@ -682,6 +794,7 @@ test("shutdown escalates to SIGKILL for TERM-resistant descendants", async () =>
     "background",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   await waitFor(() => {
     try {
       return readFileSync(childFile, "utf8").trim().length > 0;
@@ -714,6 +827,7 @@ test("monitor mode streams new lines and stays bounded under a flood", async () 
     "monitor",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   try {
     await waitFor(() => n.messages.some((m) => /floodline/.test(m.text)));
     for (const m of n.messages) {
@@ -741,9 +855,10 @@ test("fallback no-session storage never authorizes detached handoff", async () =
     store,
   );
   const shell = reg.run("sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   try {
     await waitFor(() => shell.pid !== undefined && pidAlive(shell.pid));
-    assert.equal(reg.hasDurableOwnership(shell), false);
+    assert.equal(await reg.hasDurableOwnership(shell), false);
     assert.equal(await reg.discardUnowned(shell), true);
     assert.ok(!pidAlive(shell.pid!));
   } finally {
@@ -762,9 +877,10 @@ test("a detached launch is stopped when exact ownership cannot be persisted", as
     store,
   );
   const shell = reg.run("trap '' TERM; sleep 30", "monitor", process.cwd());
+  await reg.waitForLaunch(shell);
   try {
     await waitFor(() => shell.pid !== undefined && pidAlive(shell.pid));
-    assert.equal(reg.hasDurableOwnership(shell), false);
+    assert.equal(await reg.hasDurableOwnership(shell), false);
     await reg.discardUnowned(shell);
     await waitFor(() => !pidAlive(shell.pid!));
     assert.ok(!pidAlive(shell.pid!));
@@ -784,6 +900,7 @@ test("monitor bounds the partial-line buffer under a no-newline flood", async ()
     "monitor",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   try {
     await waitFor(() => shell.monitorPos >= 500000);
     assert.ok(
@@ -803,6 +920,7 @@ test("monitor delivers a completion message when the process exits", async () =>
     "monitor",
     process.cwd(),
   );
+  await reg.waitForLaunch(shell);
   await waitFor(() => n.messages.some((m) => /exited 0/.test(m.text)));
   assert.ok(shell.completed);
   assert.ok(n.find(/\[monitor /), "streamed at least one monitor batch");
@@ -813,6 +931,7 @@ test("registry stays bounded: oldest completed shells are evicted", async () => 
   const reg = new ShellRegistry(n, testConfig({ maxTrackedShells: 5 }));
   for (let i = 0; i < 20; i++) {
     const s = reg.run(`echo run-${i}`, "background", process.cwd());
+    await reg.waitForLaunch(s);
     // eslint-disable-next-line no-await-in-loop
     await waitFor(() => s.completed);
   }
@@ -823,6 +942,7 @@ test("a completed shell holds no active timers (does not keep the loop alive)", 
   const n = new FakeNotifier();
   const reg = new ShellRegistry(n, testConfig());
   const shell = reg.run("echo quick", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   await waitFor(() => shell.completed);
   assert.equal(shell.monitorTimer, undefined);
 });
@@ -835,6 +955,7 @@ test("callback failures are contained (notifier throw never escapes)", async () 
   };
   const reg = new ShellRegistry(throwing, testConfig());
   const shell = reg.run("echo x", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   await waitFor(() => shell.completed);
   assert.ok(shell.completed);
 });
@@ -846,8 +967,103 @@ test("spawn failure is handled without throwing", async () => {
     testConfig({ shell: "/nonexistent/shell/binary" }),
   );
   const shell = reg.run("echo hi", "foreground", process.cwd());
+  await reg.waitForLaunch(shell);
   const res = await reg.waitForExit(shell, 500);
   await waitFor(() => shell.status === "error");
   assert.equal(shell.status, "error");
   void res;
+});
+
+// Regression: #3094 Pending log I/O cannot launch after cancellation or shutdown.
+test("pending log opens cannot launch after shutdown or cancellation", async () => {
+  if (process.platform !== "linux") return;
+  for (const action of ["shutdown", "abort"] as const) {
+    const config = testConfig({ maxLiveShells: 1 });
+    const reg = new ShellRegistry(new FakeNotifier(), config);
+    const marker = join(config.logDir!, "must-not-run");
+    const shell = reg.run(
+      `printf late > ${JSON.stringify(marker)}`,
+      action === "shutdown" ? "background" : "foreground",
+      process.cwd(),
+    );
+    const controller = new AbortController();
+    const launched = reg.waitForLaunch(shell, controller.signal);
+    const originalOpen = fsPromises.open;
+    let entered!: () => void;
+    let failed!: (error: unknown) => void;
+    const opening = new Promise<void>((resolve, reject) => {
+      entered = resolve;
+      failed = reject;
+    });
+    fsPromises.open = async (...args) => {
+      if (args[0] !== shell.logPath || args[1] !== "a")
+        return originalOpen(...args);
+      try {
+        const fifo = Bun.spawn(["mkfifo", shell.logPath], {
+          stdout: "ignore",
+          stderr: "pipe",
+        });
+        const [status, errors] = await Promise.all([
+          fifo.exited,
+          new Response(fifo.stderr).text(),
+        ]);
+        assert.equal(status, 0, errors);
+        const request = originalOpen(...args);
+        entered();
+        return request;
+      } catch (error) {
+        failed(error);
+        throw error;
+      }
+    };
+    let reader: FileHandle | undefined;
+    try {
+      await opening;
+      assert.equal(
+        shell.fd,
+        undefined,
+        "the real FIFO open is still waiting for a reader",
+      );
+      if (action === "shutdown") {
+        const rejected = reg.run(
+          "printf rejected",
+          "background",
+          process.cwd(),
+        );
+        assert.equal(rejected.launchError, "live-cap");
+      }
+      const stopped =
+        action === "shutdown"
+          ? reg.shutdown()
+          : (controller.abort(), Promise.resolve());
+      reader = await open(shell.logPath, "r+");
+      await launched;
+      await stopped;
+      await reg.shutdown();
+      await reader.close();
+      reader = undefined;
+      assert.equal(shell.status, "error");
+      assert.equal(shell.child, undefined);
+      assert.equal(shell.pid, undefined);
+      assert.equal(shell.fd, undefined);
+      await assert.rejects(readFile(marker));
+      const descriptors = await readdir("/proc/self/fd");
+      const targets = await Promise.all(
+        descriptors.map((fd) =>
+          readlink(`/proc/self/fd/${fd}`).catch(() => ""),
+        ),
+      );
+      assert.equal(
+        targets.includes(shell.logPath),
+        false,
+        "the late-opened log descriptor is closed",
+      );
+    } finally {
+      fsPromises.open = originalOpen;
+      reader ??= await open(shell.logPath, "r+").catch(() => undefined);
+      if (shell.child) await reg.discardUnowned(shell);
+      await reg.shutdown();
+      await reader?.close();
+    }
+  }
 });

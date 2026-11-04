@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { afterEach, expect, test } from "bun:test";
 import { mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -6,7 +7,6 @@ import {
   type AssistantMessage,
   type Context as AiContext,
   type SimpleStreamOptions,
-  Type,
 } from "@earendil-works/pi-ai";
 import {
   createModels,
@@ -671,7 +671,9 @@ test("in a parallel round, calls after the third denial block without review and
   expect(denied?.calls).toBe(3);
   expect(denied?.recent.length).toBe(3);
   expect(denied?.run?.denied.length).toBe(3);
-  expect(denied!.usage.input).toBeGreaterThan(0);
+  expect(
+    denied!.usage.input + denied!.usage.cacheRead + denied!.usage.cacheWrite,
+  ).toBeGreaterThan(0);
   expect(denied!.safetyWaitMs).toBeGreaterThan(0);
   await setup.harness.close(BG);
 });

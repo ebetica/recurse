@@ -11,7 +11,7 @@ versioned product ([src/artifacts/README.md](../../../artifacts/README.md)).
 **Source files:** [store.ts](store.ts) (locks and bounded scans) ·
 [publish.ts](publish.ts) (adding and removing files) · [published.ts](published.ts)
 (listings and download headers) · [preview.ts](preview.ts) (downloads) ·
-[base.ts](base.ts) · [../agent_temp.ts](../agent_temp.ts) (directory lifetime) ·
+[base.ts](base.ts) · [crop.ts](crop.ts) (idempotent crop cancellation) · [../agent_temp.ts](../agent_temp.ts) (directory lifetime) ·
 [../attachment_drafts.ts](../attachment_drafts.ts) (uploads before a conversation exists)
 
 ## How it works
@@ -23,8 +23,39 @@ supervisor decide who may write and pass explicit quotas on each call. Deleting
 an agent fences new writes first, so a late write cannot bring its directory back.
 
 Each file gets an opaque storage ID, with its display name kept separately. A
-file is published atomically, and only after its bytes and metadata validate. Listings come in
+publication copies and hashes the open source in bounded chunks; a file is
+published atomically, and only after its bytes and metadata validate. Listings come in
 bounded pages, and deleting a file needs no proof that no message refers to it.
+A publication lookup is complete only when its collection and every manifest
+can be read. Valid results stay visible while incomplete lookups retry.
+
+Comment crops may supply an owner-scoped operation key and expiry; the pair
+identifies the operation and its URL. Replays return
+the same file only when filename, bytes and expiry match. Cancellation records a
+bounded, expiring marker under the collection lock before removing the file;
+late admissions cannot recreate it. Expired operations can replay or delete an
+existing file but cannot create one. Existing collection maintenance prunes expired
+markers. Cancellation and admission hold the same owner lifecycle lease. Normal
+file deletion records the same marker for a crop before removing it. Marker and
+collection directory are synced before removal; the directory is synced again
+after removal. Each collection admits at most 256 unexpired crop operations,
+including cancellation markers, so an admitted crop always reserves its marker.
+If cancellation of an unknown operation arrives at capacity, an owner-wide
+expiring barrier blocks new crop admissions through that operation's expiry;
+replays and cancellations of existing files continue. The barrier can be extended
+by later overflow cancellations and is pruned when expired.
+
+The authenticated `GET /api/conversations/{cid}/attachment-crops` capability
+check returns `{idempotent: true, now}` with server time in Unix milliseconds.
+A client checks it before uploading to a potentially older backend. Multipart
+`POST /api/attachments` accepts `crop_key` (32 lowercase hex characters) and
+`crop_expires` (13-digit Unix milliseconds, no more than one hour ahead) together
+with `owner` and `file`, but not a draft. Successful replays return the normal
+upload response. `DELETE /api/conversations/{cid}/attachment-crops/{key}?expires=...`
+returns `{ok: true}` even when no file was admitted. A conflicting or cancelled
+upload and a new upload after expiry return 409; invalid inputs return 422 and
+an unavailable owner returns 404. Expired uploads may still be replayed if the
+matching file exists, and cancellation may still delete them.
 
 ## Rules for changes
 

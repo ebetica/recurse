@@ -39,16 +39,16 @@ function contextText(context: { messages: UserMessage[] }): string {
 }
 
 // test-check-allow: T9 Fail-closed verdicts and bounded owned-process evidence.
-test("owned process context is explicit and bounded when unavailable", () => {
-  const context = ownedProcessSnapshot(undefined);
+test("owned process context is explicit and bounded when unavailable", async () => {
+  const context = await ownedProcessSnapshot(undefined);
   expect(context).toContain("Process snapshot: unavailable");
   expect(context.length).toBeLessThanOrEqual(32 * 1024);
 });
 
-test("owned process context fails closed on oversized registry", () => {
+test("owned process context fails closed on oversized registry", async () => {
   const root = mkdtempSync(join(tmpdir(), "pi-safety-snapshot-"));
   try {
-    const context = ownedProcessSnapshot(
+    const context = await ownedProcessSnapshot(
       Array.from({ length: 101 }, () => ({
         pid: 999_999,
         pgid: 999_999,
@@ -72,7 +72,7 @@ test("leaderless records carry caution without including unrelated processes", a
   const root = mkdtempSync(join(tmpdir(), "pi-safety-leaderless-"));
   try {
     {
-      const context = ownedProcessSnapshot([
+      const context = await ownedProcessSnapshot([
         { pid: 2_000_000, pgid: 2_000_000, identity: "gone" },
       ]);
       expect(context).toContain(
@@ -100,7 +100,7 @@ test("a reused leader PGID is excluded from owned context", async () => {
   });
   const root = mkdtempSync(join(tmpdir(), "pi-safety-reused-pgid-"));
   try {
-    const context = ownedProcessSnapshot([
+    const context = await ownedProcessSnapshot([
       {
         pid: child.pid!,
         pgid: child.pid!,
@@ -135,7 +135,7 @@ test("reused-only records stop before the bounded member scan", async () => {
   );
   const root = mkdtempSync(join(tmpdir(), "pi-safety-reused-only-"));
   try {
-    const context = ownedProcessSnapshot([
+    const context = await ownedProcessSnapshot([
       ...children.map((child) => ({
         pid: child.pid!,
         pgid: child.pid!,
@@ -170,31 +170,38 @@ test("reused-only records stop before the bounded member scan", async () => {
   }
 });
 
-test("owned process context reports an actual detached group", async () => {
+// Regression: #3063 owned-process review context performs no blocking I/O.
+test("owned process context reports an actual detached group without blocking I/O", async () => {
   if (process.platform !== "linux") return;
-  const child = spawn("sleep", ["30"], { detached: true, stdio: "ignore" });
-  await new Promise<void>((resolve, reject) => {
-    child.once("spawn", () => resolve());
-    child.once("error", reject);
-  });
   const root = mkdtempSync(join(tmpdir(), "pi-safety-live-snapshot-"));
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--preload",
+      join(process.cwd(), "tests/dev/blocking_trace_preload.ts"),
+      join(import.meta.dir, "fixtures/owned-process-snapshot.ts"),
+    ],
+    {
+      env: { ...process.env, RECURSE_BLOCKING_TRACE: join(root, "trace.json") },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
   try {
-    const raw = readFileSync(`/proc/${child.pid}/stat`, "utf8");
-    const identity = raw
-      .slice(raw.lastIndexOf(")") + 1)
-      .trim()
-      .split(/\s+/)[19];
-    const context = ownedProcessSnapshot([
-      { pid: child.pid!, pgid: child.pid!, identity: identity! },
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
     ]);
-    expect(context).toContain(`pid=${child.pid}`);
-    expect(context).toContain(`pgid=${child.pid}`);
-    expect(context).toContain(`sid=${child.pid}`);
+    expect(code, stderr).toBe(0);
+    const result = JSON.parse(stdout);
+    expect(result.blocking).toEqual([]);
+    expect(result.snapshot).toContain(`pid=${result.pid}`);
+    expect(result.snapshot).toContain(`pgid=${result.pid}`);
+    expect(result.snapshot).toContain(`sid=${result.pid}`);
   } finally {
-    try {
-      process.kill(-child.pid!, "SIGKILL");
-    } catch {}
-    await new Promise<void>((resolve) => child.once("exit", () => resolve()));
+    child.kill();
+    await child.exited;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -365,7 +372,7 @@ describe("reviewAction request parameters", () => {
         id: "claude-sonnet-5",
         reasoning: false,
       } as any;
-      const blocks = ["stable-record"];
+      const evidence = "stable-record";
       const complete = async (_model: any, context: any) =>
         reply(allowJson, context);
       await reviewAction(
@@ -373,12 +380,11 @@ describe("reviewAction request parameters", () => {
         model,
         "low",
         [],
-        blocks.join(""),
+        evidence,
         "bash: secret-action",
         complete as any,
         "generation-stats",
         "stats-conversation",
-        blocks,
         { statsRoot: root, processSnapshot: "fixture process snapshot" },
       );
       const cidDigest = createHash("sha256")
@@ -396,7 +402,7 @@ describe("reviewAction request parameters", () => {
         cacheRead: 3,
         cacheWrite: 1,
         output: 2,
-        evidenceBytes: blocks[0]!.length,
+        evidenceBytes: evidence.length,
         gapSeconds: null,
       });
       expect(JSON.stringify(record)).not.toContain("stable-record");
@@ -407,12 +413,11 @@ describe("reviewAction request parameters", () => {
         model,
         "low",
         [],
-        blocks.join(""),
+        evidence,
         "bash: no-cid",
         complete as any,
         "generation-stats",
         undefined,
-        blocks,
         { statsRoot: root, processSnapshot: "fixture process snapshot" },
       );
       expect(readdirSync(join(root, "reviewer-journals"))).toEqual([cidDigest]);
@@ -455,7 +460,6 @@ describe("reviewAction request parameters", () => {
             complete as any,
             "generation-race",
             cid,
-            ["stable-record"],
             { statsRoot: root, processSnapshot: "fixture process snapshot" },
           ),
         ),
@@ -487,43 +491,40 @@ describe("reviewAction request parameters", () => {
       seen.push({ context, options });
       return reply(allowJson, context);
     };
-    const firstBlocks = ["canonical-header\nrecord-1"];
-    const secondBlocks = [...firstBlocks, "\nrecord-2"];
+    const first = "canonical-header\nrecord-1";
+    const second = `${first}\nrecord-2`;
     await reviewAction(
       sessionCtx,
       model,
       "low",
       [],
-      firstBlocks.join(""),
+      first,
       "bash: first",
       complete as any,
       "generation-a",
       "conversation-a",
-      firstBlocks,
     );
     await reviewAction(
       sessionCtx,
       model,
       "low",
       [],
-      secondBlocks.join(""),
+      second,
       "bash: second",
       complete as any,
       "generation-a",
       "conversation-a",
-      secondBlocks,
     );
     await reviewAction(
       sessionCtx,
       model,
       "low",
       [],
-      secondBlocks.join(""),
+      second,
       "bash: third",
       complete as any,
       "generation-a",
       "conversation-a",
-      secondBlocks,
     );
 
     expect(seen).toHaveLength(3);
@@ -531,10 +532,11 @@ describe("reviewAction request parameters", () => {
     const expectedActions = ["bash: first", "bash: second", "bash: third"];
     for (const [index, { context, options }] of seen.entries()) {
       expect(options.metadata).toBeUndefined();
-      expect(context.messages).toHaveLength(1);
-      const request = context.messages[0].content[0].text;
+      const request = contextText(context);
       expect(request.match(/canonical-header/g)).toHaveLength(1);
-      expect(request).toContain(expectedActions[index]!);
+      expect(context.messages.at(-1).content[0].text).toContain(
+        expectedActions[index]!,
+      );
     }
 
     expect(
@@ -572,6 +574,111 @@ describe("reviewAction request parameters", () => {
         "policy-a",
       ),
     );
+  });
+
+  // Regression: #2982 Anthropic reviews cache only through a breakpoint on the last evidence message.
+  test("Anthropic reviews mark the last evidence message and resend it as a stable cached prefix", async () => {
+    const bodies: any[] = [];
+    const events = [
+      {
+        type: "message_start",
+        message: {
+          id: "msg",
+          type: "message",
+          role: "assistant",
+          model: "claude-haiku-5-5",
+          content: [],
+          stop_reason: null,
+          usage: { input_tokens: 1, output_tokens: 1 },
+        },
+      },
+      {
+        type: "content_block_start",
+        index: 0,
+        content_block: { type: "text", text: "" },
+      },
+      {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "OK" },
+      },
+      { type: "content_block_stop", index: 0 },
+      {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn" },
+        usage: { output_tokens: 1 },
+      },
+      { type: "message_stop" },
+    ];
+    const server = Bun.serve({
+      port: 0,
+      async fetch(request) {
+        bodies.push(await request.json());
+        return new Response(
+          events
+            .map((e) => `event: ${e.type}\ndata: ${JSON.stringify(e)}\n\n`)
+            .join(""),
+          { headers: { "content-type": "text/event-stream" } },
+        );
+      },
+    });
+    try {
+      const model = {
+        id: "claude-haiku-5-5",
+        name: "Claude Haiku",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: server.url.origin,
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200_000,
+        maxTokens: 8_000,
+      } as any;
+      const record = (n: number) =>
+        `\n${JSON.stringify({ record: n, text: "r".repeat(5_000) })}`;
+      let evidence = "header";
+      for (const n of [1, 2, 3]) {
+        evidence += record(n);
+        const verdict = await reviewAction(
+          ctx,
+          model,
+          "low",
+          [],
+          evidence,
+          `bash: action-${n}`,
+          undefined,
+          "generation-a",
+          "conversation-anthropic",
+        );
+        expect(verdict.decision).toBe("allow");
+      }
+      expect(bodies).toHaveLength(3);
+      const marked = (body: any) =>
+        body.messages.findIndex((message: any) =>
+          message.content.some((block: any) => block.cache_control),
+        );
+      for (const [n, body] of bodies.entries()) {
+        expect(marked(body)).toBe(body.messages.length - 2);
+        expect(JSON.stringify(body.messages.at(-2))).toContain(
+          `\\"record\\":${n + 1}`,
+        );
+        expect(JSON.stringify(body.messages.at(-1))).toContain(
+          `action-${n + 1}`,
+        );
+      }
+      const prefix = (body: any, end: number) =>
+        JSON.stringify(
+          [body.system, body.messages.slice(0, end + 1)],
+          (k, v) => (k === "cache_control" ? undefined : v),
+        );
+      const [, second, third] = bodies;
+      expect(prefix(third, marked(second))).toBe(
+        prefix(second, marked(second)),
+      );
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("re-asks with the policy inlined when the reviewer reports it never arrived", async () => {

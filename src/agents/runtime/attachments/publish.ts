@@ -29,7 +29,17 @@ import {
   type Manifest,
   type OwnerLimits,
 } from "./base";
-import { publicMetadata } from "./preview";
+import { openIn, publicMetadata, verifiedRead } from "./preview";
+import {
+  CropConflict,
+  MAX_CROP_OPERATIONS,
+  cropBarrier,
+  cropId,
+  cropMarkers,
+  cropOperation,
+  recordCropCancellation,
+  type CropOperation,
+} from "./crop";
 import {
   blobName,
   cleanupDebris,
@@ -44,8 +54,8 @@ const defaultId = (): string => randomUUID().replaceAll("-", "");
 export interface PublishOptions {
   limits?: OwnerLimits;
   now?: number;
-
   ids?: () => string;
+  crop?: CropOperation;
 }
 function baseManifest(
   id: string,
@@ -128,8 +138,19 @@ async function writeTmpBlob(
     prefix: prefix.subarray(0, prefixSize),
   };
 }
-async function prepareCollection(fd: FileHandle, owner: string): Promise<void> {
-  await cleanupDebris(fd, owner);
+function activeCrops(
+  manifests: Manifest[],
+  markers: Map<string, number>,
+  except?: string,
+): number {
+  const now = Date.now();
+  return manifests.filter(
+    (manifest) =>
+      manifest.id !== except &&
+      !markers.has(String(manifest.id)) &&
+      typeof manifest.crop_expires === "number" &&
+      manifest.crop_expires > now,
+  ).length;
 }
 /** Immediately visible authenticated browser upload. */
 export async function addUpload(
@@ -147,10 +168,53 @@ export async function addUpload(
       `file is too large (max ${Math.floor(limits.maxFileBytes / (1024 * 1024))} MB)`,
     );
   const display = displayName(basename(filename || ""));
-  const [id, ext] = mintUploadId(filename, ids);
+  const [randomId, ext] = mintUploadId(filename, ids);
+  const crop = options.crop;
+  const id = crop ? cropId(owner, crop) : randomId;
   let offset = 0;
   return await withLockedCollection(collection, async (fd) => {
-    await prepareCollection(fd, owner);
+    const manifests = await cleanupDebris(fd, owner);
+    if (crop) {
+      cropOperation(crop.key, String(crop.expires));
+      const markers = await cropMarkers(fd);
+      if (markers.has(id)) throw new CropConflict("crop operation cancelled");
+      const existing = await readManifest(fd, owner, id);
+      if (existing) {
+        if (
+          existing.source !== SOURCE_UPLOAD ||
+          existing.crop_expires !== crop.expires ||
+          existing.name !== display ||
+          existing.size !== data.length ||
+          existing.sha256 !== createHash("sha256").update(data).digest("hex")
+        )
+          throw new CropConflict(
+            "crop operation conflicts with existing upload",
+          );
+        try {
+          const opened = await openIn(fd, owner, id, limits.maxFileBytes);
+          try {
+            await verifiedRead(opened.blob, opened.manifest, null);
+          } finally {
+            await opened.blob.close();
+          }
+        } catch {
+          throw new CropConflict("crop upload is unavailable");
+        }
+        return { ...publicMetadata(existing), ext };
+      }
+      try {
+        await lstatAt(fd.fd, manifestName(id));
+        throw new CropConflict("crop operation manifest is unavailable");
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      }
+      if (crop.expires <= Date.now())
+        throw new CropConflict("crop operation expired");
+      if (await cropBarrier(fd))
+        throw new AttachmentError("crop operation limit reached");
+      if (markers.size + activeCrops(manifests, markers) >= MAX_CROP_OPERATIONS)
+        throw new AttachmentError("crop operation limit reached");
+    }
     const staged = await writeTmpBlob(
       fd,
       id,
@@ -179,6 +243,7 @@ export async function addUpload(
           SOURCE_UPLOAD,
           now,
         ),
+        ...(crop ? { crop_expires: crop.expires } : {}),
         intent_sha256: "",
         run_id: null,
         tool_call_id: null,
@@ -191,6 +256,41 @@ export async function addUpload(
     }
   });
 }
+/** Record cancellation before removing an admitted crop under the same lock. */
+export async function cancelCrop(
+  collection: string,
+  owner: string,
+  crop: CropOperation,
+): Promise<void> {
+  const id = cropId(owner, crop);
+  await withLockedCollection(collection, async (fd) => {
+    const manifests = await cleanupDebris(fd, owner);
+    const existing = await readManifest(fd, owner, id);
+    if (
+      existing &&
+      (existing.source !== SOURCE_UPLOAD ||
+        existing.crop_expires !== crop.expires)
+    )
+      throw new CropConflict("crop operation conflicts with existing upload");
+    cropOperation(crop.key, String(crop.expires));
+    const markers = await cropMarkers(fd);
+    await recordCropCancellation(
+      fd,
+      id,
+      crop.expires,
+      activeCrops(manifests, markers, id),
+      !existing,
+    );
+    if (
+      existing &&
+      (await removeCommittedLocked(fd, id, manifestBlob(existing))) ===
+        "record-failed"
+    )
+      throw new AttachmentError("crop cancellation unavailable");
+    if (existing) await fd.sync();
+  });
+}
+
 /** Manifest unlink is the commit; a stuck blob remains for later cleanup. */
 export async function removeFile(
   collection: string,
@@ -202,12 +302,18 @@ export async function removeFile(
     return await withLockedCollection(collection, async (fd) => {
       const manifest = await readManifest(fd, owner, id);
       if (!manifest) return false;
+      if (manifest.crop_expires !== undefined) {
+        if (typeof manifest.crop_expires !== "number")
+          throw new AttachmentError("invalid crop operation expiry");
+        await recordCropCancellation(fd, id, manifest.crop_expires);
+      }
       const result = await removeCommittedLocked(
         fd,
         id,
         manifestBlob(manifest),
       );
       if (result === "record-failed") return false;
+      if (manifest.crop_expires !== undefined) await fd.sync();
       return true;
     });
   } catch (error) {
@@ -489,11 +595,11 @@ export async function registerFile(
       const created = now ?? Date.now() / 1000;
       admitPublishRate(manifests, limits, created);
       const id = ids();
+      const chunk = new Uint8Array(Math.min(size, 1024 * 1024));
       const staged = await writeTmpBlob(
         fd,
         id,
         async () => {
-          const chunk = new Uint8Array(64 * 1024);
           const { bytesRead } = await sourceFd.read(
             chunk,
             0,

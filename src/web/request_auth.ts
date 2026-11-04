@@ -1,11 +1,11 @@
 // Authenticate before decode: CSRF, scoped bearer, local/loopback/session.
 // Service calls never grant operator rights; agent markers narrow key routes.
 // Joined duplicate headers fail closed; every session-cookie copy must verify.
-// Settings/auth routes refuse all agent markers, even empty or duplicates.
+// Operator routes refuse agent markers; callback tokens reach one route only.
 
 import { constants } from "node:fs";
 import { open, readFile, rename } from "node:fs/promises";
-import { isIPv6 } from "node:net";
+import { isIP, isIPv6 } from "node:net";
 import { join } from "node:path";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 
@@ -15,6 +15,8 @@ import {
   backendAgentAllowed,
   type BackendKeys,
 } from "../auth/backend_keys";
+import { CALLBACK_TOKEN_PREFIX } from "../backends/connected";
+import { keyedLabel } from "../backends/label";
 import { COOKIE_NAME, type OperatorAuth } from "../auth/session";
 import {
   SERVICE_BODY_MAX_BYTES,
@@ -33,6 +35,7 @@ import {
 import { parsePythonJson } from "../utils/py_compact_json";
 import type { Middleware } from "../server";
 import { jsonResponse, type Exchange } from "./router";
+import { loopbackAudience } from "./route_audience";
 
 export const LOGIN_MAX_FREE = 5;
 export const LOGIN_LOCK_BASE = 1.0;
@@ -376,23 +379,40 @@ export interface RequestAuthDeps {
   readonly serviceOwns: (principal: string, cid: string) => Promise<boolean>;
   /** The `web` logger for service audit events. */
   readonly logger: RuntimeLogger;
+  /** The connection label a remote's callback token belongs to. */
+  readonly remoteEventLabel?: (authorization: string) => string | null;
+  /** An operator browser request, with its CSRF-checked Origin if any. */
+  readonly operatorSeen?: (origin: string | null) => void;
+  /** A connected home's request other than a relay poll or its result. */
+  readonly homeSeen?: () => void;
 }
 
 /** Fail closed on raw marker presence, even with an invalid agent id. */
 export function agentMarked(ex: Exchange): boolean {
   return (
-    ex.request.headers.has("x-recurse-agent") || ex.state.backend_agent != null
+    ex.request.headers.has("x-recurse-agent") ||
+    ex.request.headers.has("x-recurse-agent-caller") ||
+    ex.state.backend_agent != null
   );
 }
 
-function operatorSettingsPath(path: string): boolean {
+function operatorConversationPath(path: string): boolean {
+  return /^\/api\/conversations\/[^/]+\/(safety|take-over|pin|promote)$/.test(
+    path.replace(/\/+$/, ""),
+  );
+}
+
+function operatorOnlyPath(path: string): boolean {
   const normalized = path.replace(/\/+$/, "");
   return (
     normalized === "/api/settings" ||
     normalized.startsWith("/api/settings/") ||
     normalized === "/api/pi" ||
+    normalized.startsWith("/api/sidebar/") ||
+    normalized === "/api/v1/agents/tags" ||
     normalized.startsWith("/api/pi/") ||
-    ["/login", "/logout", "/api/password"].includes(normalized)
+    ["/login", "/logout", "/api/password"].includes(normalized) ||
+    operatorConversationPath(normalized)
   );
 }
 
@@ -401,9 +421,29 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
   const tailscaleLogin = deps.tailscaleLogin?.trim().toLowerCase();
   return (next) => async (ex) => {
     const headers = ex.request.headers;
-    if (operatorSettingsPath(ex.path) && agentMarked(ex))
+    const relayPoll =
+      ex.path === "/api/relay/requests" ||
+      /^\/api\/relay\/requests\/[^/]+\/result$/.test(ex.path);
+    const passive =
+      relayPoll ||
+      (ex.request.method === "GET" &&
+        ["/api/status", "/api/version", "/api/tree/events"].includes(ex.path));
+    const operator = (ex: Exchange) => {
+      if (headers.has("sec-fetch-site"))
+        deps.operatorSeen?.(
+          ex.request.method === "GET" ? null : headers.get("origin"),
+        );
+      else if (!passive) deps.homeSeen?.();
+      return next(ex);
+    };
+    const operatorOnly = operatorOnlyPath(ex.path);
+    if (operatorOnly && agentMarked(ex))
       return jsonResponse(
-        { detail: "only the operator can change settings or sign in" },
+        {
+          detail: headers.has("x-recurse-agent-caller")
+            ? "remote agent not allowed here"
+            : "only the operator can perform this action",
+        },
         403,
       );
     const mintKey =
@@ -423,8 +463,34 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
     if (
       authorization?.toLowerCase().startsWith(`bearer ${BACKEND_KEY_PREFIX}`)
     ) {
-      const key = await deps.backendKeys?.verify(authorization);
-      if (!key) return jsonResponse({ detail: "unauthorized" }, 401);
+      const key = await deps.backendKeys?.verify(
+        authorization,
+        clientIp(headers, ex.client),
+      );
+      if (!key) {
+        if (["/api/relay/requests", "/api/status"].includes(ex.path)) {
+          const ip = [clientIp(headers, ex.client), ex.client?.host].find(
+            (value) => value !== undefined && isIP(value),
+          );
+          logEvent(deps.logger, INFO, "backend_key_rejected", {
+            fields: {
+              key_id:
+                /^Bearer recurse-link_([a-f0-9]{16})_[a-f0-9]{64}$/i.exec(
+                  authorization,
+                )?.[1] ?? null,
+              route: ex.path,
+              ip: ip ?? "unknown",
+              user_agent: (headers.get("user-agent") ?? "")
+                .replace(
+                  /recurse-link_[a-f0-9]{16}_[a-f0-9]{64}/gi,
+                  "[redacted]",
+                )
+                .slice(0, 160),
+            },
+          });
+        }
+        return jsonResponse({ detail: "unauthorized" }, 401);
+      }
       ex.state.auth_method = "backend-key";
       ex.state.principal = `backend-key:${key.name}`;
       ex.state.backend_key_id = key.id;
@@ -435,13 +501,14 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
           !backendAgentAllowed(ex.request.method, ex.path)
         )
           return jsonResponse({ detail: "remote agent not allowed here" }, 403);
-        ex.state.backend_agent = `${agent}@${key.name}`;
+        ex.state.backend_agent = `${agent}@${keyedLabel(key.name, key.id)}`;
       }
       logEvent(deps.logger, DEBUG, "backend_key_request", {
         fields: { name: key.name, method: ex.request.method, route: ex.path },
       });
       if (!backendKeyAllowed(ex.request.method, ex.path))
         return jsonResponse({ detail: "backend key not allowed here" }, 403);
+      if (!passive) deps.homeSeen?.();
       return next(ex);
     }
     if (headers.has("x-recurse-agent-caller"))
@@ -449,6 +516,18 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
         { detail: "agent provenance requires a backend key" },
         403,
       );
+    if (
+      authorization?.toLowerCase().startsWith(`bearer ${CALLBACK_TOKEN_PREFIX}`)
+    ) {
+      const label =
+        ex.path === "/api/remote-events" && ex.request.method === "POST"
+          ? deps.remoteEventLabel?.(authorization)
+          : null;
+      if (!label) return jsonResponse({ detail: "unauthorized" }, 401);
+      ex.state.auth_method = "remote-callback";
+      ex.state.remote_event_label = label;
+      return next(ex);
+    }
     let caller = null;
     if (ex.path.startsWith("/api/") && headers.get("authorization"))
       caller = await deps.service.principal(
@@ -494,16 +573,41 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
       )
         return jsonResponse({ detail: "unauthorized" }, 401);
       ex.state.auth_method = "tailscale";
-      return next(ex);
+      return operator(ex);
     }
     if (loopbackAuthenticated(ex, deps.loopbackToken)) {
+      const audience = loopbackAudience(ex.request.method, ex.path);
+      const bundled = ["subagent", "worktree", "supervisor"].includes(
+        headers.get("x-recurse-bundled-tool") ?? "",
+      );
+      if (
+        operatorOnly ||
+        audience === "web" ||
+        (audience === "tool" && !bundled)
+      ) {
+        if (
+          !(await deps.operator.enabled()) ||
+          !(await cookieAuthed(ex, deps.operator))
+        )
+          return operatorOnly
+            ? jsonResponse({ detail: "operator authentication required" }, 403)
+            : jsonResponse(
+                {
+                  detail: "web app only: use /api/v1 or tools/subagent.ts",
+                  code: "web_only",
+                },
+                403,
+              );
+        ex.state.auth_method = "cookie";
+        return next(ex);
+      }
       ex.state.principal = "loopback";
       ex.state.auth_method = "loopback";
       return next(ex);
     }
     if (!(await deps.operator.enabled())) {
       ex.state.auth_method = "local";
-      return next(ex);
+      return operator(ex);
     }
     const authed = await cookieAuthed(ex, deps.operator);
     if (ex.path !== "/login" && !mintKey && !authed) {
@@ -511,7 +615,8 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
         return jsonResponse({ detail: "unauthorized" }, 401);
       return htmlResponse(await deps.operator.loginPage(), 401);
     }
-    if (authed) ex.state.auth_method = "cookie";
-    return next(ex);
+    if (!authed) return next(ex);
+    ex.state.auth_method = "cookie";
+    return operator(ex);
   };
 }

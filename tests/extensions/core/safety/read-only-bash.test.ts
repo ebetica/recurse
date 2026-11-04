@@ -215,12 +215,12 @@ test("every Bun command goes to the reviewer, including Recurse's own CLIs", () 
     reviewed(
       `bun ${subagent} --help`,
       `bun ${worktree} --help`,
-      `bun ${subagent} messages agent-1`,
+      `bun ${subagent} read agent-1@remote`,
       `bun ${subagent} tail agent-1`,
       `bun ${subagent} wait agent-1 --timeout 1`,
-      "bun $RECURSE_SRC/tools/subagent.ts messages agent-1",
+      "bun $RECURSE_SRC/tools/subagent.ts read agent-1@remote",
       'bun "${RECURSE_SRC}/tools/worktree.ts" --help',
-      `bun --config=/dev/null --no-env-file ${subagent} messages agent-1`,
+      `bun --config=/dev/null --no-env-file ${subagent} read agent-1@remote`,
       `rg x && bun ${subagent} tail agent-1`,
     );
   } finally {

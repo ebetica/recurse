@@ -251,7 +251,9 @@ export class CodexAuth {
     await this.store.removeCredentials([PROVIDER, API_PROVIDER]);
   }
 
-  async startLogin(): Promise<{ url: string }> {
+  /** Persist PKCE state; return the authorize URL and the redirect address
+   * whose unreachable page the user pastes back. */
+  async startLogin(): Promise<{ url: string; redirectUrl: string }> {
     const random = this.options.randomBytes ?? defaultRandom;
     const verifier = b64url(random(32));
     const challenge = b64url(sha256(verifier));
@@ -269,7 +271,7 @@ export class CodexAuth {
       codex_cli_simplified_flow: "true",
       originator: ORIGINATOR,
     });
-    return { url: `${AUTHORIZE_URL}?${query}` };
+    return { url: `${AUTHORIZE_URL}?${query}`, redirectUrl: REDIRECT_URI };
   }
 
   private async pending(): Promise<[string, string | null]> {

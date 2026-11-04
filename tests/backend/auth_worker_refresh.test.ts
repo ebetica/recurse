@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHECKOUT_ROOT, PI_PACKAGE_ROOT } from "../../src/build_dir";
 
-const WORKER = join(CHECKOUT_ROOT, "src/pi_auth_worker.mjs");
+const WORKER = join(CHECKOUT_ROOT, "src/pi_auth.worker.mjs");
 const BODY_MARKER = "FAKE_TOKEN_BODY_MARKER_7f3a";
 let work = "";
 let server: ReturnType<typeof Bun.serve>;

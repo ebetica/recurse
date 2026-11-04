@@ -117,6 +117,7 @@ export interface AgentNodeDeps {
   importFinalized(): boolean | null;
   /** Authenticated operator control; commit before publishing its notice. */
   setSafetyReviewOff?(cid: string, off: boolean): Promise<void>;
+  modelChanged?(cid: string): void;
   /** compaction._action_request(kind, cid). */
   actionRequest(kind: "clear" | "compact", cid: string): unknown;
   requestRun(cid: string): void;
@@ -845,7 +846,8 @@ export class AgentNode {
           throw new ValueError(
             "finish or stop the current turn before switching model",
           );
-        if (conv.model !== resolved) {
+        const changed = conv.model !== resolved;
+        if (changed) {
           const home = config.ladderHome(resolved);
           if (home !== null) [conv.level, conv.model, conv.effort] = home;
           else {
@@ -861,6 +863,7 @@ export class AgentNode {
         }
         conv.updated = this.deps.now();
         await conversations.save(conv, titleToken);
+        if (changed) this.deps.modelChanged?.(this.cid);
         return this.withPending(conv);
       },
     );

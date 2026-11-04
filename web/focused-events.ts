@@ -11,9 +11,9 @@ import {
 } from "./connection/sse-transport.js";
 import type { ViewPage } from "./row-thread-state/view-blocks.js";
 
-export function focusedEventsUrl(cid: string): string {
+export function focusedEventsUrl(cid: string, viewing = false): string {
   return backendFor(cid).url(
-    `/api/conversations/${encodeURIComponent(cid)}/events`,
+    `/api/conversations/${encodeURIComponent(cid)}/events?text_deltas=true${viewing ? "&viewing=true" : ""}`,
   );
 }
 
@@ -51,10 +51,13 @@ export function parseTerminalStatus(raw: unknown): string | null {
 export interface FocusedEventHandlers {
   onPage: (kind: "snapshot" | "rows", page: ViewPage, at: number) => void;
   onTerminal: (status: string) => void;
+  onActivity?: () => void;
   onTransportError: () => void;
 }
 
 export interface FocusedEventOptions {
+  /** Visible main conversation, not an embedded side conversation. */
+  viewing?: boolean;
   /** Held tail cursor ({instance}:{revision}) to resync from on connect. */
   lastEventId?: string | null;
 }
@@ -84,7 +87,7 @@ export function subscribeFocusedEvents(
   factory: FocusedTransportFactory = defaultFactory,
 ): FocusedSubscription | null {
   const conn = factory(
-    focusedEventsUrl(cid),
+    focusedEventsUrl(cid, options.viewing),
     {
       lastEventId: options.lastEventId ?? null,
       ...(backendFor(cid).label
@@ -101,6 +104,7 @@ export function subscribeFocusedEvents(
           if (status) handlers.onTerminal(status);
         }
       },
+      onActivity: handlers.onActivity,
       onFailure: (status) => {
         if (status === 404) handlers.onTerminal("gone");
         else handlers.onTransportError();

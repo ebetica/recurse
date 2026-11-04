@@ -18,6 +18,10 @@ import { registerFile } from "../../../../src/agents/runtime/attachments/publish
 import { lookupByCall } from "../../../../src/agents/runtime/attachments/published.ts";
 import { readThemeSettings, themePalettes } from "../../../../src/themes.ts";
 import { Config } from "../../../../src/config.ts";
+import shellTools from "../../../backend/fixtures/durable_host/shell-tools.json";
+import environmentTools from "../../../backend/fixtures/durable_host/environment-tools.json";
+import searchTools from "../../../backend/fixtures/durable_host/search-tools.json";
+import artifactTools from "../../../backend/fixtures/durable_host/artifact-tools.json";
 
 type Rec = Record<string, any>;
 test("host tools match Pi results; later calls and restart use committed cwd/env", async () => {
@@ -29,6 +33,7 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
   await mkdir(collection, { recursive: true, mode: 0o700 });
   await writeFile(join(target, "fixture.txt"), "managed needle\n");
   await writeFile(join(target, "legacy.txt"), "legacy publication\n");
+  await writeFile(join(target, "artifact.md"), "# Requested Artifact\n");
   const palette = themePalettes[0]!;
   await writeFile(
     join(target, "palette.ghostty"),
@@ -38,6 +43,11 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
       ...palette.palette.map((colour, index) => `palette = ${index}=${colour}`),
     ].join("\n"),
   );
+  const environmentArgs = {
+    action: "set",
+    name: "DURABLE_PARITY",
+    value: "quoted ' value",
+  } as const;
   const calls = [["chdir", { directory: "target" }]] as const;
   const recorded = JSON.parse(
     (
@@ -56,6 +66,7 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
   const laterCalls = [
     ["bash", { command: 'printf \'%s:%s\' "$PWD" "$DURABLE_PARITY"' }, "bash"],
     ["grep", { pattern: "needle", path: "fixture.txt" }, "grep"],
+    ["find", { pattern: "fixture.txt" }, "find"],
     [
       "bash",
       {
@@ -64,6 +75,17 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
       "legacy-publish",
     ],
     ["publish", { paths: ["fixture.txt"] }, "publish"],
+    ["wait", {}, "wait"],
+    [
+      "artifact",
+      {
+        action: "create",
+        title: "Requested Artifact",
+        from_file: "artifact.md",
+      },
+      "artifact-create",
+    ],
+    ["artifact", { action: "list" }, "artifact-list"],
     ["recurse_settings", { action: "levels" }, "levels"],
     [
       "recurse_settings",
@@ -110,6 +132,10 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
   records.side = { id: "side", side_of: "child" };
   faux.setResponses([
     fauxAssistantMessage(
+      fauxToolCall("env", environmentArgs, { id: "env-set" }),
+      { stopReason: "toolUse" },
+    ),
+    fauxAssistantMessage(
       calls.map(([name, args], index) =>
         fauxToolCall(name, args, { id: `call-${index}` }),
       ),
@@ -117,7 +143,8 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     ),
     (request) => {
       observed = request.messages.filter(
-        (message) => message.role === "toolResult",
+        (message) =>
+          message.role === "toolResult" && message.toolCallId !== "env-set",
       ) as Rec[];
       return fauxAssistantMessage(
         laterCalls.map(([name, args, id]) => fauxToolCall(name, args, { id })),
@@ -136,11 +163,9 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     await opened.conversation.configure(
       {
         modelTools: {
-          add: [
-            (await opened.conversation.agent(context)).callable.find(
-              (tool) => tool.name === "recurse_settings",
-            )!,
-          ],
+          add: (await opened.conversation.agent(context)).callable.filter(
+            (tool) => ["recurse_settings", "artifact"].includes(tool.name),
+          ),
         },
       },
       context,
@@ -152,10 +177,6 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
       ).href
     );
     await safety.setSafetyReviewOff(opened.conversation, true, context);
-    await host.changeEnvironment("c1", {
-      set: { DURABLE_PARITY: "quoted ' value" },
-      unset: [],
-    });
     await host.send("c1", "exercise tools", "parity");
     await opened.conversation.waitForIdle(context);
     expect(
@@ -171,12 +192,65 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
         details: result.details,
       })),
     );
+    const environment = followup.find(
+      (result) => result.toolCallId === "env-set",
+    )!;
+    expect(environment.isError).not.toBe(true);
+    expect(environment.content).toEqual([
+      { type: "text", text: "Set DURABLE_PARITY." },
+    ]);
     expect(
       followup.find((result) => result.toolCallId === "bash")!.content[0].text,
     ).toContain(`${target}:quoted ' value`);
     expect(
       followup.find((result) => result.toolCallId === "grep")!.content[0].text,
     ).toContain("managed needle");
+    expect(
+      followup.find((result) => result.toolCallId === "find")!.content[0].text,
+    ).toContain("fixture.txt");
+    const capture = await opened.captures.latest("c1");
+    const request = JSON.parse(capture!.json);
+    expect(
+      request.context.messages
+        .flatMap((message: Rec) => message.toolsAdded ?? [])
+        .filter((tool: Rec) => ["bash", "wait"].includes(tool.name)),
+    ).toEqual(shellTools);
+    expect(
+      request.context.messages
+        .flatMap((message: Rec) => message.toolsAdded ?? [])
+        .filter((tool: Rec) => ["env", "chdir", "publish"].includes(tool.name)),
+    ).toEqual(environmentTools);
+    expect(
+      request.context.messages
+        .flatMap((message: Rec) => message.toolsAdded ?? [])
+        .filter((tool: Rec) => ["grep", "find"].includes(tool.name)),
+    ).toEqual(searchTools);
+    expect(
+      request.context.messages
+        .flatMap((message: Rec) => message.toolsAdded ?? [])
+        .filter((tool: Rec) => tool.name === "artifact"),
+    ).toEqual(artifactTools);
+    const artifact = JSON.parse(
+      followup.find((result) => result.toolCallId === "artifact-create")!
+        .content[0].text,
+    );
+    expect(artifact.title).toBe("Requested Artifact");
+    expect(artifact.path).toBe(
+      `$CHAT_DATA_DIR/artifact_repos/c1/${artifact.id}`,
+    );
+    expect(
+      await readFile(
+        join(root, "artifact_repos", "c1", artifact.id, "index.md"),
+        "utf8",
+      ),
+    ).toBe("# Requested Artifact\n");
+    expect(
+      followup.find((result) => result.toolCallId === "artifact-list")!
+        .content[0].text,
+    ).toContain(artifact.id);
+    const waited = followup.find((result) => result.toolCallId === "wait")!;
+    expect(waited.isError).not.toBe(true);
+    expect(waited.content[0].text).toBe("No backgrounded shells to wait for.");
     const tools = ((await host.view("c1")).blocks as Rec[]).filter(
       (block) => block.kind === "tool_call",
     );
@@ -184,7 +258,7 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
       followup.find((result) => result.toolCallId === "publish")!.content[0]
         .text,
     ).toContain("Published fixture.txt (15 bytes).");
-    expect(tools).toHaveLength(calls.length + laterCalls.length);
+    expect(tools).toHaveLength(1 + calls.length + laterCalls.length);
     const shared = followup.find(
       (result) => result.toolCallId === "share-link",
     )!;
@@ -232,7 +306,7 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
         /#share-(missing|remote)$/.test(block.id) ? "error" : "finished",
       );
       expect((detail!.input as Rec).payload.value).toEqual(
-        [...calls, ...laterCalls][index]![1],
+        [["env", environmentArgs], ...calls, ...laterCalls][index]![1],
       );
       expect((detail!.result as Rec).payload.value.content).toBeDefined();
     }
@@ -247,10 +321,8 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
       const detail = await fetch(url);
       expect(detail.status).toBe(200);
       expect(((await detail.json()) as Rec).input.payload.value).toEqual(
-        calls[0][1],
+        environmentArgs,
       );
-      const events = await fetch(`${url}/events?cursor=0&limit=1`);
-      expect(((await events.json()) as Rec).events).toHaveLength(1);
       const raw = await fetch(`${url}/raw`);
       expect(raw.headers.get("content-type")).toBe("application/x-ndjson");
       expect(

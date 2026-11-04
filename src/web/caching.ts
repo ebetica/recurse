@@ -1,6 +1,6 @@
 // Weak body ETags revalidate pre-compression bytes with 304 responses.
 // Authenticated payloads are private/no-cache; generation-pinned assets
-// immutable.
+// immutable. Revalidation retains security headers for proxies and browsers.
 
 import { createHash } from "node:crypto";
 
@@ -28,11 +28,14 @@ function finish(
   cacheControl: string,
 ): Response {
   const etag = weakEtag(body);
-  if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag))
-    return new Response(null, {
-      status: 304,
-      headers: { "cache-control": cacheControl, etag },
-    });
+  if (ifNoneMatchMatches(request.headers.get("if-none-match"), etag)) {
+    const headers = new Headers(response.headers);
+    headers.delete("content-length");
+    headers.delete("content-type");
+    headers.set("cache-control", cacheControl);
+    headers.set("etag", etag);
+    return new Response(null, { status: 304, headers });
+  }
   response.headers.set("cache-control", cacheControl);
   response.headers.set("etag", etag);
   return response;

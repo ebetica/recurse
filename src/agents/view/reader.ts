@@ -10,7 +10,6 @@ import {
   HEADER_BYTES,
   VIEW_RAW_LINE_BYTES,
   assistantText,
-  boundaryKind,
   entryIdentity,
   groupPiTurns,
   joinText,
@@ -107,6 +106,8 @@ export interface ConversationBlock {
   readonly artifact_id?: string;
   readonly order: number;
   readonly offset: number;
+  readonly text_from?: number;
+  readonly text_hash?: number;
 }
 
 export interface ConversationSnapshot {
@@ -129,12 +130,16 @@ export interface ConversationProjection {
   idleFor(now?: number): number;
   reset(sessionKey: string): void;
   hasBlock(id: string): boolean;
-  unresolvedAttachments(): string[];
+  unresolvedAttachments(force?: ReadonlySet<string>): string[];
   attachFiles(attachments: Record<string, JsonObject[]>): void;
   ingest(entries: readonly unknown[], live?: boolean): number;
   prepend(entries: readonly unknown[]): void;
   syncLive(entries: readonly JsonObject[], caughtUp: boolean): void;
-  changes(since: number, limit: number): ConversationSnapshot;
+  changes(
+    since: number,
+    limit: number,
+    textDeltas?: boolean,
+  ): ConversationSnapshot;
   window(options: {
     after?: string | null;
     before?: string | null;
@@ -218,8 +223,8 @@ export class ViewEntry {
   hasBlock(id: string): boolean {
     return this.projection.hasBlock(id);
   }
-  unresolvedAttachments(): string[] {
-    return this.projection.unresolvedAttachments();
+  unresolvedAttachments(force?: ReadonlySet<string>): string[] {
+    return this.projection.unresolvedAttachments(force);
   }
   attachFiles(attachments: Record<string, JsonObject[]>): void {
     this.projection.attachFiles(attachments);
@@ -233,8 +238,12 @@ export class ViewEntry {
   syncLive(entries: JsonObject[], options: { caughtUp: boolean }): void {
     this.projection.syncLive(entries, options.caughtUp);
   }
-  changes(since: number, limit: number): ConversationSnapshot {
-    return this.projection.changes(since, limit);
+  changes(
+    since: number,
+    limit: number,
+    textDeltas = false,
+  ): ConversationSnapshot {
+    return this.projection.changes(since, limit, textDeltas);
   }
   window(options: {
     after?: string | null;
@@ -1007,31 +1016,6 @@ export async function thinkingText(
   }
 }
 
-/** Summary text for a compaction marker at its exact byte offset. */
-export async function markerSummary(
-  sessionFile: string,
-  offset: number | boolean,
-): Promise<JsonObject | null> {
-  if (
-    typeof offset !== "boolean" &&
-    (!Number.isSafeInteger(offset) || offset < 0)
-  )
-    return null;
-  try {
-    const entry = await new AsyncJsonlRangeReader(sessionFile).entryAt(
-      Number(offset),
-      HEADER_BYTES,
-    );
-    if (entry === null || boundaryKind(entry) !== "compaction") return null;
-    const summary = entry.summary;
-    if (typeof summary !== "string" || !stripPythonWhitespace(summary))
-      return null;
-    return { summary, marker: "compact" };
-  } catch {
-    return null;
-  }
-}
-
 function blockSender(text: string): [string | null, string | null] {
   const [, sender, senderName] = splitPiUserText(text);
   return [sender, senderName];
@@ -1068,6 +1052,9 @@ function servedBlock(
     kind: block.kind,
     role: block.role,
     text: block.text,
+    ...(block.text_from
+      ? { text_from: block.text_from, text_hash: block.text_hash }
+      : {}),
     ...(block.thinking ? { thinking_title: block.thinking } : {}),
     ...(block.has_thinking ? { has_thinking: true } : {}),
     ...(typeof block.thinking_start_ms === "number"
@@ -1108,15 +1095,19 @@ function servedBlock(
     sender,
     sender_name: senderName,
     stat: block.stat,
-    // Invariant: The tool publishes one file per call; a bash call may publish
-    // many.
+    // Invariant: Legacy calls publish one file; scripts may publish many.
     attachment:
-      block.name === "bash" || block.name === "publish"
+      block.name === "bash" ||
+      block.name === "publish" ||
+      block.name === "codemode"
         ? null
         : (files[0] ?? null),
     pr_links: prLinks,
     ...(block.calls ? { calls: block.calls } : {}),
-    ...((block.name === "bash" || block.name === "publish") && files.length
+    ...((block.name === "bash" ||
+      block.name === "publish" ||
+      block.name === "codemode") &&
+    files.length
       ? { files }
       : {}),
   };
@@ -1128,15 +1119,17 @@ export function window(
   inputs: ViewInputs,
   options: {
     caughtUp: boolean;
+    liveSynced?: boolean;
     after?: string | null;
     before?: string | null;
     limit?: number;
     since?: number | null;
     instance?: string | null;
+    textDeltas?: boolean;
   } = { caughtUp: false },
 ): JsonObject {
   const live = JSON.parse(inputs.live) as JsonObject[];
-  view.syncLive(live, { caughtUp: options.caughtUp });
+  if (!options.liveSynced) view.syncLive(live, { caughtUp: options.caughtUp });
   view.attachFiles(JSON.parse(inputs.files) as Record<string, JsonObject[]>);
   const envelope = JSON.parse(inputs.envelope) as JsonObject;
   const limit = Math.min(Math.max(options.limit ?? 50, 1), VIEW_WINDOW_MAX);
@@ -1144,7 +1137,7 @@ export function window(
     options.since !== null &&
     options.since !== undefined &&
     options.instance === view.instanceId
-      ? view.changes(options.since, limit)
+      ? view.changes(options.since, limit, options.textDeltas)
       : view.window({ after: options.after, before: options.before, limit });
   return {
     status: "ready",

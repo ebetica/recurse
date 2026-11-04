@@ -1,7 +1,7 @@
-// Settings' updates for a supervised, self-deploying server: install.sh --check
-// at most daily per installed release, cached in the data directory; "Update
-// now" goes over the supervisor's IPC channel, never inherited by children.
-// Hosted, isolated test, unsupervised and channel-less installs are skipped.
+// Settings updates: install.sh --check at most daily per release, cached in the
+// data directory. "Update now" uses the supervisor's child-private IPC channel.
+// Self-deploy-disabled, isolated test, unsupervised and channel-less installs
+// are skipped.
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { selfDeployEnabledByEnv } from "./launcher/git";
 import {
@@ -91,13 +91,15 @@ export class RecurseUpdates {
   /** Why Settings neither checks nor updates this Recurse, or null. */
   private refusal(): string | null {
     if (this.deps.env.RECURSE_ISOLATED_ROOT)
-      return "Updates are off for isolated test installs (RECURSE_ISOLATED_ROOT).";
+      return "Updates are unavailable in test installations.";
     if (!selfDeployEnabledByEnv(this.deps.env))
-      return "This is a hosted deployment (RECURSE_SELF_DEPLOY is off): it is updated by redeploying it, not from Settings.";
+      return "Updates are managed outside Settings.";
     if (!this.deps.send)
-      return "Recurse was started with --once or --prebuilt, so it neither checks for updates nor restarts itself. Run `recurse update` in a terminal, then restart Recurse.";
+      return "Update this installation manually, then restart Recurse.";
     if (this.cached?.key === this.key && this.cached.skipped)
-      return this.cached.skipped;
+      return this.cached.skipped.includes("is not a Git checkout")
+        ? "Reinstall Recurse to enable updates."
+        : "No update channel configured. Update this installation manually.";
     return null;
   }
 

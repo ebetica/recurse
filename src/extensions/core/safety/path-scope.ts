@@ -1,4 +1,6 @@
-import { lstatSync, readlinkSync, realpathSync, statSync } from "node:fs";
+// Trusted roots resolve asynchronously per run; action targets are rechecked.
+import fs from "node:fs";
+import { realpath, stat } from "node:fs/promises";
 import {
   basename,
   dirname,
@@ -31,11 +33,13 @@ const CREDENTIAL_DOTFILES = new Set([
   ".pypirc",
 ]);
 
-function realDirectory(value: string | undefined): string | undefined {
+async function realDirectory(
+  value: string | undefined,
+): Promise<string | undefined> {
   if (!value || !isAbsolute(value)) return undefined;
   try {
-    const resolved = realpathSync.native(value);
-    return statSync(resolved).isDirectory() ? resolved : undefined;
+    const resolved = await realpath(value);
+    return (await stat(resolved)).isDirectory() ? resolved : undefined;
   } catch {
     return undefined;
   }
@@ -59,7 +63,8 @@ function collectSymlinkDestinations(
     prefix = join(prefix, part);
     let symbolic = false;
     try {
-      symbolic = lstatSync(prefix).isSymbolicLink();
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+      symbolic = fs.lstatSync(prefix).isSymbolicLink();
     } catch (error) {
       // Invariant: Only a missing prefix proves the remaining suffix
       // nonexistent.
@@ -71,8 +76,10 @@ function collectSymlinkDestinations(
       // Invariant: Keep outside intermediate symlink hops even if realpath
       // returns inside. Resolve relative links from their physical parent, not
       // an alias's lexical depth.
-      const physicalParent = realpathSync.native(dirname(prefix));
-      const linkTarget = readlinkSync(prefix);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+      const physicalParent = fs.realpathSync.native(dirname(prefix));
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+      const linkTarget = fs.readlinkSync(prefix);
       // Invariant: Reject parent traversal rather than hiding symlink hops with
       // lexical collapse of `..`.
       if (linkTarget.split(/[\\/]/).includes("..")) return false;
@@ -80,7 +87,8 @@ function collectSymlinkDestinations(
       destinations.push(immediate);
       if (!collectSymlinkDestinations(immediate, destinations, visited))
         return false;
-      destinations.push(realpathSync.native(prefix));
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+      destinations.push(fs.realpathSync.native(prefix));
     } catch {
       // Invariant: A dangling symlink is not a new path.
       return false;
@@ -113,7 +121,8 @@ function resolveTarget(
   const suffix: string[] = [];
   while (true) {
     try {
-      lstatSync(cursor);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+      fs.lstatSync(cursor);
     } catch (error) {
       if (!isMissing(error)) return undefined;
       const parent = dirname(cursor);
@@ -125,7 +134,8 @@ function resolveTarget(
     try {
       return {
         lexical,
-        real: resolve(realpathSync.native(cursor), ...suffix),
+        // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+        real: resolve(fs.realpathSync.native(cursor), ...suffix),
         symlinkDestinations,
       };
     } catch {
@@ -177,18 +187,20 @@ function isCarvedOut(parts: readonly string[]): boolean {
 }
 
 /** Resolve the runner-provided roots once, before any model action runs. */
-export function loadTrustedPathScope(
+export async function loadTrustedPathScope(
   env: NodeJS.ProcessEnv,
-): TrustedPathScope | undefined {
-  const workspace = realDirectory(env[WORKSPACE_ROOT_ENV]);
+): Promise<TrustedPathScope | undefined> {
+  const [workspace, worktrees, tmp, agentTmp, dataDir] = await Promise.all([
+    realDirectory(env[WORKSPACE_ROOT_ENV]),
+    realDirectory(env[WORKTREES_ROOT_ENV]),
+    realDirectory("/tmp"),
+    realDirectory(env.RECURSE_AGENT_TMPDIR),
+    realDirectory(env.CHAT_DATA_DIR),
+  ]);
   if (!workspace) return undefined;
-  const worktrees = realDirectory(env[WORKTREES_ROOT_ENV]);
   if (env[WORKTREES_ROOT_ENV] && !worktrees) return undefined;
-  const tmp = realDirectory("/tmp");
   if (!tmp) return undefined;
-  const agentTmp = realDirectory(env.RECURSE_AGENT_TMPDIR);
   // Invariant: Unresolvable runner-owned CHAT_DATA_DIR disables the fast-path.
-  const dataDir = realDirectory(env.CHAT_DATA_DIR);
   if (env.CHAT_DATA_DIR && !dataDir) return undefined;
   return {
     workspace,

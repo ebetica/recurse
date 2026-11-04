@@ -75,12 +75,14 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
   min-height: 44px; color: var(--text); overflow-wrap: anywhere; }
 .diff-pr-title a:hover { color: var(--accent); }
 .diff-pr-title svg { flex: none; width: 16px; height: 16px; margin-top: var(--space-1); }
+.diff-pr-meta { margin: calc(-1 * var(--space-3)) 0 var(--space-2); color: var(--muted);
+  font-size: 0.8125rem; }
 .diff-pr-body { font-size: 0.84375rem; line-height: 1.5; overflow-wrap: anywhere; }
 .diff-pr-body.clamped { position: relative; display: -webkit-box;
   -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
 .diff-pr-body.clamped.overflowing::after { content: ""; position: absolute; left: 0; right: 0;
   bottom: 0; height: 1.5em; pointer-events: none;
-  background: linear-gradient(transparent, var(--edge-bg, var(--panel))); }
+  background: linear-gradient(transparent, var(--panel)); }
 .diff-pr-body > :first-child { margin-top: 0; }
 .diff-pr-body .table-scroll { overflow-x: auto; }
 .btn.diff-pr-more { min-height: 44px; padding-left: 0; }

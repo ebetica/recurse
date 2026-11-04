@@ -1,8 +1,29 @@
 diff --git a/src/aux-finders.ts b/src/aux-finders.ts
-index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e2013f7caab0 100644
+index 12e1ecbf072a2212e74f90ecd59da283006188ca..f326dd13ee5f18cadb539502c5aed4f9766670ee 100644
 --- a/src/aux-finders.ts
 +++ b/src/aux-finders.ts
-@@ -24,13 +24,16 @@ export interface AuxOpts {
+@@ -1,11 +1,11 @@
+ import fs from "node:fs";
+ import path from "node:path";
+ import type { FileFinderApi } from "@ff-labs/fff-node";
+-import type { FilePickerFactory } from "./file-picker";
++import { FINDER_IDLE_MS, type FilePickerFactory } from "./file-picker";
+ import { HOME_DIR } from "./paths";
+ 
+ export const MAX_AUX = 3;
+-export const IDLE_TTL_MS = 5 * 60 * 1000;
++export const IDLE_TTL_MS = FINDER_IDLE_MS;
+ 
+ interface AuxPicker {
+   root: string;
+@@ -18,19 +18,23 @@ export interface AuxOpts {
+   enableHomeDirScanning?: boolean;
+   followSymlinks?: boolean;
+   pickers: FilePickerFactory;
++  idleRetentionMs?: number;
+   // Called before a newly spawned aux picker starts a scan that covers $HOME.
+   onHomeDirScan?: (root: string) => void;
+ }
  
  export class AuxFinderPool {
    private entries: AuxPicker[] = [];
@@ -20,7 +41,15 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
      for (const e of this.entries) {
        e.finder.destroy();
      }
-@@ -49,6 +52,10 @@ export class AuxFinderPool {
+@@ -42,13 +46,17 @@ export class AuxFinderPool {
+   private sweepIdle(now = Date.now()): void {
+     const kept: AuxPicker[] = [];
+     for (const e of this.entries) {
+-      if (now - e.lastUsed > IDLE_TTL_MS) {
++      if (now - e.lastUsed > (this.opts.idleRetentionMs ?? IDLE_TTL_MS)) {
+         if (!e.finder.isDestroyed) e.finder.destroy();
+       } else {
+         kept.push(e);
        }
      }
      this.entries = kept;
@@ -31,7 +60,7 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
    }
  
    async acquire(
-@@ -56,16 +63,16 @@ export class AuxFinderPool {
+@@ -56,16 +64,13 @@ export class AuxFinderPool {
      opts?: { exact?: boolean },
    ): Promise<{ finder: FileFinderApi; root: string }> {
      this.sweepIdle();
@@ -40,24 +69,22 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
 -      if (e.finder.isDestroyed) continue;
 -      if (opts?.exact ? e.root !== maybeRoot : !rootCovers(e.root, maybeRoot)) continue;
 -      if (!covering || e.root.length > covering.root.length) covering = e;
-+    const cached = this.entries.find(
-+      (entry) => entry.root === maybeRoot && !entry.finder.isDestroyed,
-+    );
-+    if (cached && opts?.exact) {
-+      cached.lastUsed = Date.now();
-+      return { finder: cached.finder, root: cached.root };
-     }
+-    }
 -
 -    if (covering) {
 -      covering.lastUsed = Date.now();
 -      return { finder: covering.finder, root: covering.root };
++    const cached = this.entries.find(
++      (entry) => entry.root === maybeRoot && !entry.finder.isDestroyed,
++    );
 +    if (cached) {
-+      cached.finder.destroy();
-+      this.entries = this.entries.filter((entry) => entry !== cached);
++      cached.lastUsed = Date.now();
++      if (!opts?.exact) this.opts.pickers.refresh(cached.finder);
++      return { finder: cached.finder, root: cached.root };
      }
  
      // Coalesce concurrent creations for the same root so we scan once. A slow
-@@ -87,6 +94,15 @@ export class AuxFinderPool {
+@@ -87,6 +92,15 @@ export class AuxFinderPool {
    }
  
    private async create(root: string): Promise<AuxPicker> {
@@ -73,7 +100,7 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
      if (this.entries.length >= MAX_AUX) {
        let oldest = this.entries[0];
        for (const e of this.entries) if (e.lastUsed < oldest.lastUsed) oldest = e;
-@@ -94,22 +110,20 @@ export class AuxFinderPool {
+@@ -94,22 +108,20 @@ export class AuxFinderPool {
        this.entries = this.entries.filter((e) => e !== oldest);
      }
  
@@ -97,12 +124,12 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
  
      const entry: AuxPicker = { root, finder, lastUsed: Date.now() };
      this.entries.push(entry);
-+    this.idleTimer ??= setInterval(() => this.sweepIdle(), IDLE_TTL_MS);
++    this.idleTimer ??= setInterval(() => this.sweepIdle(), this.opts.idleRetentionMs ?? IDLE_TTL_MS);
 +    this.idleTimer.unref?.();
      return entry;
    }
  
-@@ -120,9 +134,9 @@ export class AuxFinderPool {
+@@ -120,9 +132,9 @@ export class AuxFinderPool {
  }
  
  // Split an absolute path into an existing directory (the aux root) and a
@@ -115,7 +142,7 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
  export function resolveAuxRoot(absPath: string): { root: string; suffix: string } | null {
    const trimmed = path.normalize(absPath.trim()).replace(/\/+$/, "") || "/";
    if (!path.isAbsolute(trimmed)) return null;
-@@ -139,13 +153,13 @@ export function resolveAuxRoot(absPath: string): { root: string; suffix: string
+@@ -139,13 +151,13 @@ export function resolveAuxRoot(absPath: string): { root: string; suffix: string
      try {
        stat = fs.statSync(candidate);
      } catch {
@@ -135,23 +162,148 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..023bda0828cb55bf5562928eec41e201
      return { root: candidate, suffix: parts.slice(i).join("/") };
    }
 diff --git a/src/file-picker.ts b/src/file-picker.ts
-index d77ed027eb9ff43fc9cd936aa26f183854d428ad..1dd6451c882207a5f916d309c27ac86ab1ee9a6a 100644
+index d77ed027eb9ff43fc9cd936aa26f183854d428ad..5610c19f5f6d0022748feb1a33aaea2143c6c62f 100644
 --- a/src/file-picker.ts
 +++ b/src/file-picker.ts
-@@ -6,6 +6,9 @@ export interface PickerOptions {
+@@ -6,24 +6,63 @@ export interface PickerOptions {
    enableHomeDirScanning?: boolean;
    enableFsRootScanning?: boolean;
    followSymlinks?: boolean;
 +  disableContentIndexing?: boolean;
 +  disableMmapCache?: boolean;
 +  disableWatch?: boolean;
++}
++
++// fff memory-maps grep content: persistently for cached files, transiently at
++// 256 KiB and above on Linux. Truncating a mapped file in place (editors, Pi's
++// edit tool, formatters) makes the next access raise SIGBUS, which kills the
++// host process. A 1-byte cache budget and a size cap below the transient-map
++// threshold keep every grep read on read(2); larger files are not grepped.
++const NO_MMAP = { cacheBudgetMaxBytes: 1, cacheBudgetMaxFileSize: 256 * 1024 - 1 };
++
++export const REFRESH_INTERVAL_MS = 5 * 60 * 1000;
++export const FINDER_IDLE_MS = 30 * 60 * 1000;
++let scanTail: Promise<void> = Promise.resolve();
++
++/** Serialize native initialization/rescans across all conversations, including
++ * scans that outlive waitForScan's timeout. A usable index need not wait. */
++function scheduleScan(
++  start: () => Promise<FileFinderApi>,
++): Promise<FileFinderApi> {
++  const ready = scanTail.then(start);
++  scanTail = ready
++    .then(async (finder) => {
++      while (!finder.isDestroyed) {
++        const progress = finder.getScanProgress();
++        if (!progress.ok || !progress.value.isScanning) return;
++        await finder.waitForScan(SCAN_TIMEOUT_MS);
++      }
++    })
++    .catch(() => {});
++  return ready;
  }
  
  /** Opens every picker in this pi process — the cwd picker and the aux pickers —
+  * on the same frecency/history databases. */
+ export class FilePickerFactory {
+   private dbDisabled = false;
++  private scans = new WeakMap<
++    FileFinderApi,
++    { at: number; pending?: Promise<unknown> }
++  >();
+   private readonly frecencyDbPath: string;
+   private readonly historyDbPath: string;
+   private readonly onDbFailure?: (error: string) => void;
++  private readonly refreshIntervalMs: number;
+ 
+   constructor(opts: {
+     frecencyDbPath: string;
+     historyDbPath: string;
+     onDbFailure?: (error: string) => void;
++    refreshIntervalMs?: number;
+   }) {
+     this.frecencyDbPath = opts.frecencyDbPath;
+     this.historyDbPath = opts.historyDbPath;
+     this.onDbFailure = opts.onDbFailure;
++    this.refreshIntervalMs = opts.refreshIntervalMs ?? REFRESH_INTERVAL_MS;
+   }
+ 
+   /** True once the databases were given up on, so pickers open without them. */
+@@ -33,26 +72,48 @@ export class FilePickerFactory {
+ 
+   /** Opens a scanned, ready-to-use picker. Throws if it cannot be created. */
+   async create(options: PickerOptions): Promise<FileFinderApi> {
+-    const { FileFinder } = await loadSdk();
+-    const result = this.openWithDbFallback(FileFinder, options);
+-
+-    if (!result.ok) {
+-      throw new Error(
+-        `Failed to create FFF file picker for ${options.basePath}: ${result.error}`,
+-      );
+-    }
++    return scheduleScan(async () => {
++      const { FileFinder } = await loadSdk();
++      const result = this.openWithDbFallback(FileFinder, options);
++      if (!result.ok) {
++        throw new Error(
++          `Failed to create FFF file picker for ${options.basePath}: ${result.error}`,
++        );
++      }
++      await result.value.waitForScan(SCAN_TIMEOUT_MS);
++      this.scans.set(result.value, { at: Date.now() });
++      return result.value;
++    });
++  }
+ 
+-    // waitForScan() also resolves on timeout, so this bounds startup rather
+-    // than guaranteeing a complete index.
+-    await result.value.waitForScan(SCAN_TIMEOUT_MS);
+-    return result.value;
++  /** Refresh an old index in the background; searches retain its current files. */
++  refresh(finder: FileFinderApi): void {
++    const state = this.scans.get(finder);
++    if (!state || state.pending || Date.now() - state.at < this.refreshIntervalMs)
++      return;
++    state.at = Date.now();
++    state.pending = scheduleScan(async () => {
++      if (!finder.isDestroyed) {
++        const result = finder.scanFiles();
++        if (!result.ok) throw new Error(result.error);
++        await finder.waitForScan(SCAN_TIMEOUT_MS);
++      }
++      return finder;
++    })
++      .catch((error) => {
++        console.warn(`(fff): Background file refresh failed: ${String(error)}`);
++      })
++      .finally(() => {
++        state.at = Date.now();
++        state.pending = undefined;
++      });
+   }
+ 
+   private openWithDbFallback(
+     FileFinder: FileFinderStatic,
+     options: PickerOptions,
+   ): Result<FileFinderApi> {
+-    const init: InitOptions = { ...options, aiMode: true };
++    const init: InitOptions = { ...options, ...NO_MMAP, aiMode: true };
+     if (this.dbDisabled) return FileFinder.create(init);
+ 
+     const result = FileFinder.create({
 diff --git a/src/index.ts b/src/index.ts
-index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f745a16cd22 100644
+index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..ade4f49820e660d8f4a0ca51b7ae84ce313b4be0 100644
 --- a/src/index.ts
 +++ b/src/index.ts
+@@ -30,7 +30,7 @@ import type {
+ import { Type, type TSchema } from "@sinclair/typebox";
+ import { AuxFinderPool, routePathConstraint } from "./aux-finders";
+ import { type FffMode, loadConfig, VALID_MODES } from "./config";
+-import { FilePickerFactory } from "./file-picker";
++import { FilePickerFactory, FINDER_IDLE_MS, REFRESH_INTERVAL_MS } from "./file-picker";
+ import { isFsRoot, isHomeDir, resolveDbPaths } from "./paths";
+ import { buildQuery } from "./query";
+ 
 @@ -89,12 +89,18 @@ function toolNameList(names: ToolNames): string[] {
  // Cursor store — simple bounded Map for pagination cursors
  // ---------------------------------------------------------------------------
@@ -206,16 +358,77 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
  }
  
  // ---------------------------------------------------------------------------
-@@ -513,6 +522,52 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -446,10 +455,18 @@ export default function fffExtension(pi: ExtensionAPI) {
+   let pickers: FilePickerFactory | null = null;
+   let auxPool: AuxFinderPool | null = null;
+ 
++  function intervalFlag(name: string, fallback: number): number {
++    const value = Number(pi.getFlag(name));
++    return Number.isFinite(value) && value > 0 ? value : fallback;
++  }
++  const refreshIntervalMs = intervalFlag("fff-refresh-interval-ms", REFRESH_INTERVAL_MS);
++  const idleRetentionMs = intervalFlag("fff-idle-retention-ms", FINDER_IDLE_MS);
++
+   function initializeFinderFactories(): void {
+     if (pickers) return;
+ 
+     pickers = new FilePickerFactory({
++      refreshIntervalMs,
+       frecencyDbPath: resolvedDbPaths.frecency,
+       historyDbPath: resolvedDbPaths.history,
+       onDbFailure: (error) =>
+@@ -459,6 +476,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+         ),
+     });
+     auxPool = new AuxFinderPool({
++      idleRetentionMs,
+       enableFsRootScanning,
+       enableHomeDirScanning,
+       followSymlinks,
+@@ -479,12 +497,15 @@ export default function fffExtension(pi: ExtensionAPI) {
+   }
+ 
+   // in case cwd changes we need to figure this out
+-  function ensureFinder(cwd: string): Promise<FileFinderApi> {
++  async function ensureFinder(cwd: string, refresh = true): Promise<FileFinderApi> {
++    initializeFinderFactories();
+     const optOut = scanOptOutReason(cwd);
+     if (optOut) return Promise.reject(new Error(optOut));
+ 
+-    if (mainFinder && !mainFinder.isDestroyed && finderCwd === cwd)
+-      return Promise.resolve(mainFinder);
++    if (mainFinder && !mainFinder.isDestroyed && finderCwd === cwd) {
++      if (refresh) pickers!.refresh(mainFinder);
++      return mainFinder;
++    }
+ 
+     if (finderPromise) return finderPromise;
+ 
+@@ -503,6 +524,9 @@ export default function fffExtension(pi: ExtensionAPI) {
+         enableHomeDirScanning,
+         enableFsRootScanning,
+         followSymlinks,
++        disableContentIndexing: true,
++        disableMmapCache: true,
++        disableWatch: true,
+       });
+       finderCwd = cwd;
+       return mainFinder;
+@@ -513,6 +537,61 @@ export default function fffExtension(pi: ExtensionAPI) {
      return finderPromise;
    }
  
 +  let searchTail: Promise<void> = Promise.resolve();
++  let idleTimer: ReturnType<typeof setTimeout> | undefined;
++  let admittedSearches = 0;
 +
 +  async function acquireSearch(
 +    cwd: string,
 +    signal: AbortSignal | undefined,
++    resume = false,
 +  ): Promise<{ finder: FileFinderApi; release: () => void }> {
++    admittedSearches++;
++    clearTimeout(idleTimer);
 +    let resolveTurn!: () => void;
 +    const turn = new Promise<void>((resolve) => { resolveTurn = resolve; });
 +    const previous = searchTail;
@@ -225,6 +438,10 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
 +      if (released) return;
 +      released = true;
 +      resolveTurn();
++      if (--admittedSearches === 0) {
++        idleTimer = setTimeout(destroyFinder, idleRetentionMs);
++        idleTimer.unref?.();
++      }
 +    };
 +    try {
 +      await new Promise<void>((resolve, reject) => {
@@ -248,7 +465,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
 +        previous.then(done, reject);
 +      });
 +      if (signal?.aborted) throw new Error("Operation aborted");
-+      const finder = await ensureFinder(cwd);
++      const finder = await ensureFinder(cwd, !resume);
 +      return { finder, release };
 +    } catch (error) {
 +      release();
@@ -259,7 +476,16 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
    function stopHomeScanStatus(): void {
      if (homeScanTimer) {
        clearInterval(homeScanTimer);
-@@ -562,47 +617,53 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -546,6 +625,8 @@ export default function fffExtension(pi: ExtensionAPI) {
+   }
+ 
+   function destroyFinder() {
++    clearTimeout(idleTimer);
++    idleTimer = undefined;
+     stopHomeScanStatus();
+     if (mainFinder && !mainFinder.isDestroyed) {
+       mainFinder.destroy();
+@@ -562,47 +643,53 @@ export default function fffExtension(pi: ExtensionAPI) {
      pathParam: string | undefined,
      pattern: string,
      exclude: string | string[] | undefined,
@@ -289,19 +515,20 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
      if (signal.aborted) return [];
 -    const f = await ensureFinder(activeCwd);
 -    if (signal.aborted) return [];
+-
+-    const result = f.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
+-    if (!result.ok) return [];
 +    const search = await acquireSearch(cwd, signal);
 +    try {
 +      if (signal.aborted) return [];
  
--    const result = f.mixedSearch(query, { pageSize: MENTION_MAX_RESULTS });
--    if (!result.ok) return [];
+-    return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
+-      if (mixed.type === "directory") {
 +      const result = search.finder.mixedSearch(query, {
 +        pageSize: MENTION_MAX_RESULTS,
 +      });
 +      if (!result.ok) return [];
- 
--    return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
--      if (mixed.type === "directory") {
++
 +      return result.value.items.slice(0, MENTION_MAX_RESULTS).map((mixed: MixedItem) => {
 +        if (mixed.type === "directory") {
 +          return {
@@ -334,7 +561,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
      ui: {
        addAutocompleteProvider?: (
          factory: (current: AutocompleteProvider) => AutocompleteProvider,
-@@ -614,7 +675,9 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -614,7 +701,9 @@ export default function fffExtension(pi: ExtensionAPI) {
      if (typeof ctx.ui.addAutocompleteProvider !== "function") return;
  
      ctx.ui.addAutocompleteProvider((current) => {
@@ -345,7 +572,16 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
  
        return {
          async getSuggestions(lines, cursorLine, cursorCol, options) {
-@@ -1002,13 +1065,19 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -992,7 +1081,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+   });
+ 
+   queueTool(() => toolNames.grep, {
+-    description: `Grep file contents. Smart-case, auto-detects regex vs literal, git-aware. Results are ranked by frecency (most-accessed files first); matches within a file stay in source order. Default limit ${DEFAULT_GREP_LIMIT}.`,
++    description: `Grep file contents. Smart-case, auto-detects regex vs literal, git-aware. Results are ranked by frecency (most-accessed files first); matches within a file stay in source order. Default limit ${DEFAULT_GREP_LIMIT}. Files of 256 KiB or more are not searched; use rg in bash for them.`,
+     promptSnippet: "Grep contents",
+     promptGuidelines: (names) => [
+       `${names.grep}: prefer bare identifiers as patterns. Literal queries are most efficient.`,
+@@ -1002,13 +1091,19 @@ export default function fffExtension(pi: ExtensionAPI) {
      ],
      parameters: grepSchema,
  
@@ -353,7 +589,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
 +    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
        if (signal?.aborted) throw new Error("Operation aborted");
 +      const cwd = ctx.cwd;
-+      const search = await acquireSearch(cwd, signal);
++      const search = await acquireSearch(cwd, signal, Boolean(params.cursor));
 +      try {
  
        const pattern = params.pattern;
@@ -368,7 +604,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
        const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
        // pageSize caps TOTAL matches across all files (soft cap: the current file
        // is always finished first). maxMatchesPerFile stays decoupled at the engine
-@@ -1017,7 +1086,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1017,7 +1112,7 @@ export default function fffExtension(pi: ExtensionAPI) {
        const context = clampContext(params.context);
        const query = aux
          ? aux.query
@@ -377,7 +613,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
  
        // Auto-detect: regex if the pattern has regex metacharacters AND parses
        // as a valid regex, otherwise plain literal. The fuzzy fallback below
-@@ -1064,7 +1133,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1064,7 +1159,7 @@ export default function fffExtension(pi: ExtensionAPI) {
          smartCase,
          maxMatchesPerFile: GREP_MAX_MATCHES_PER_FILE,
          pageSize,
@@ -386,7 +622,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
          beforeContext: context,
          afterContext: context,
          classifyDefinitions: true,
-@@ -1116,7 +1185,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1116,7 +1211,7 @@ export default function fffExtension(pi: ExtensionAPI) {
          notices.push(`Invalid regex: ${result.regexFallbackError}, used literal match`);
        }
        if (result.nextCursor) {
@@ -395,7 +631,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
        }
  
        if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
-@@ -1129,6 +1198,9 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1129,6 +1224,9 @@ export default function fffExtension(pi: ExtensionAPI) {
            totalFiles: result.totalFiles,
          },
        };
@@ -405,7 +641,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
      },
  
      renderCall(args, theme, context) {
-@@ -1195,11 +1267,16 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1195,11 +1293,16 @@ export default function fffExtension(pi: ExtensionAPI) {
      ],
      parameters: findSchema,
  
@@ -413,7 +649,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
 +    async execute(_toolCallId, params, signal, _onUpdate, ctx) {
        if (signal?.aborted) throw new Error("Operation aborted");
 +      const cwd = ctx.cwd;
-+      const search = await acquireSearch(cwd, signal);
++      const search = await acquireSearch(cwd, signal, Boolean(params.cursor));
 +      try {
  
        // if resumed we use the same picker as before
@@ -424,7 +660,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
        const pool = auxPool;
        if (!pool) throw new Error("FFF auxiliary finder pool is not initialized");
        const aux = resumed
-@@ -1209,9 +1286,11 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1209,9 +1312,11 @@ export default function fffExtension(pi: ExtensionAPI) {
                root: resumed.auxRoot,
              }
            : null
@@ -438,7 +674,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
        const effectiveLimit = resumed
          ? resumed.pageSize
          : Math.max(1, params.limit ?? DEFAULT_FIND_LIMIT);
-@@ -1220,7 +1299,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1220,7 +1325,7 @@ export default function fffExtension(pi: ExtensionAPI) {
          ? resumed.query
          : aux && "query" in aux
            ? (aux as { query: string }).query
@@ -447,7 +683,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
  
        const pattern = resumed ? resumed.pattern : params.pattern;
        const pageIndex = resumed?.nextPageIndex ?? 0;
-@@ -1257,6 +1336,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1257,6 +1362,7 @@ export default function fffExtension(pi: ExtensionAPI) {
            pageSize: effectiveLimit,
            nextPageIndex: pageIndex + 1,
            auxRoot,
@@ -455,7 +691,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
          });
          notices.push(
            `${remaining} more match${remaining === 1 ? "" : "es"} available. cursor="${cursorId}" to continue`,
-@@ -1273,6 +1353,9 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1273,6 +1379,9 @@ export default function fffExtension(pi: ExtensionAPI) {
            hasMore,
          },
        };
@@ -465,7 +701,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
      },
  
      renderCall(args, theme, context) {
-@@ -1331,12 +1414,15 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1331,12 +1440,15 @@ export default function fffExtension(pi: ExtensionAPI) {
        ],
        parameters: multiGrepSchema,
  
@@ -477,13 +713,13 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
            throw new Error("patterns array must have at least 1 element");
  
 -        const f = await ensureFinder(activeCwd);
-+        const search = await acquireSearch(cwd, signal);
++        const search = await acquireSearch(cwd, signal, Boolean(params.cursor));
 +        try {
 +          const f = search.finder;
          const effectiveLimit = Math.max(1, params.limit ?? DEFAULT_GREP_LIMIT);
          const pageSize = Math.min(effectiveLimit, GREP_PAGE_SIZE_MAX);
          const context = clampContext(params.context);
-@@ -1347,7 +1433,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1347,7 +1459,7 @@ export default function fffExtension(pi: ExtensionAPI) {
            maxMatchesPerFile: GREP_MAX_MATCHES_PER_FILE,
            pageSize,
            smartCase: true,
@@ -492,7 +728,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
            beforeContext: context,
            afterContext: context,
          });
-@@ -1362,7 +1448,7 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1362,7 +1474,7 @@ export default function fffExtension(pi: ExtensionAPI) {
            notices.push(`${effectiveLimit}+ matches (refine patterns)`);
          if (result.nextCursor)
            notices.push(
@@ -501,7 +737,7 @@ index 0d0d61bc1eb000e574c369e71506bfb1b55e525f..6579f855ffb18a7d8c8f6e3b817a2f74
            );
  
          if (notices.length > 0) output += `\n\n[${notices.join(". ")}]`;
-@@ -1375,6 +1461,9 @@ export default function fffExtension(pi: ExtensionAPI) {
+@@ -1375,6 +1487,9 @@ export default function fffExtension(pi: ExtensionAPI) {
              patterns: params.patterns,
            },
          };

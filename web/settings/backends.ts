@@ -1,8 +1,9 @@
-// Remote sign-in exchanges a password once; lists and status contain no keys.
+// Remote rows open detail sheets; sign-in and status never expose keys.
 import { api } from "../api.js";
 import { lastSeen } from "../backends/tree.js";
 import { settingsSyncControl } from "./settings-sync.js";
 import { buildConnectedHomes } from "./backend-keys.js";
+import { settingsDetail } from "./layout.js";
 
 interface Backend {
   label: string;
@@ -10,46 +11,40 @@ interface Backend {
   state: string;
   reason: string | null;
   last_contact: number | null;
+  compatibility: "compatible" | "older" | "incompatible" | "unknown";
+  remote_api: number | null;
+  remote_revision: number | null;
+  remote_release: string | null;
 }
 export function buildConnectedBackends(body: HTMLElement): void {
   body.className = "remotes-settings";
-  const description = document.createElement("p");
-  description.className = "remotes-description";
-  description.textContent =
-    "A remote is another Recurse instance whose agents appear in your sidebar and can message yours. Sign in with its existing password; the password is used once and not saved.";
   const list = document.createElement("div");
+  list.className = "group";
   const message = document.createElement("p");
   message.className = "msg";
   message.setAttribute("role", "status");
   message.hidden = true;
-  const say = (text: string, error = false) => {
-    message.textContent = text;
-    message.classList.toggle("err", error);
-    message.hidden = !text;
+  const say = (text: string, error = false, target: HTMLElement = message) => {
+    target.textContent = text;
+    target.classList.toggle("err", error);
+    target.hidden = !text;
   };
-  const add = document.createElement("button");
-  add.type = "button";
-  add.className = "secondary";
-  add.textContent = "Add a remote";
-  add.setAttribute("aria-expanded", "false");
+  const add = document.createElement("div");
   const form = document.createElement("form");
   form.className = "remote-add";
-  form.hidden = true;
   form.autocomplete = "off";
-  form.id = "remote-add-form";
-  add.setAttribute("aria-controls", form.id);
-  add.onclick = () => {
-    form.hidden = !form.hidden;
-    add.setAttribute("aria-expanded", String(!form.hidden));
-    if (!form.hidden) inputs[0]!.focus();
-  };
+  const formMessage = message.cloneNode() as HTMLElement;
+  form.append(formMessage);
+  const fields = document.createElement("div");
+  fields.className = "group";
+  form.append(fields);
   const inputs = [
     "Remote name",
     "Remote address",
     "Password for that Recurse instance",
   ].map((name, index) => {
     const field = document.createElement("label");
-    field.className = "field";
+    field.className = "item field";
     field.textContent = name;
     const input = document.createElement("input");
     input.name = ["label", "url", "password"][index]!;
@@ -68,20 +63,22 @@ export function buildConnectedBackends(body: HTMLElement): void {
       input.maxLength = 4096;
     }
     field.append(input);
-    form.append(field);
+    fields.append(field);
     return input;
   });
   const submit = document.createElement("button");
   submit.type = "submit";
   submit.className = "primary";
   submit.textContent = "Connect remote";
-  const actions = document.createElement("div");
-  actions.className = "row";
-  actions.append(submit);
-  form.append(actions);
+  const connect = document.createElement("div");
+  connect.className = "item actions";
+  connect.append(submit);
+  fields.append(connect);
+  add.append(form);
+  const addDetail = settingsDetail(add, "Add a remote");
   const incoming = document.createElement("div");
   incoming.className = "remote-incoming";
-  body.append(description, list, add, form, message, incoming);
+  body.append(list, message, add, incoming);
   buildConnectedHomes(incoming);
   const result = async (response: Response) => {
     const data = await response.json();
@@ -92,11 +89,65 @@ export function buildConnectedBackends(body: HTMLElement): void {
     }
     return data;
   };
+  const statuses = new Map<
+    string,
+    { status: HTMLElement; detail: ReturnType<typeof settingsDetail> }
+  >();
+  let revision = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const active = () =>
+    body.isConnected &&
+    document.querySelector("#settings-overlay")!.classList.contains("on") &&
+    !body.closest<HTMLElement>(".settings-cat")!.hidden;
+  const showStatus = (status: HTMLElement, backend: Backend) => {
+    status.textContent =
+      backend.state === "connected"
+        ? ""
+        : backend.state === "key_revoked"
+          ? "Sign-in revoked. Disconnect and add this remote again."
+          : backend.state === "unreachable"
+            ? backend.reason === "Health check pending"
+              ? ""
+              : `Offline · ${lastSeen(backend.last_contact)}`
+            : backend.reason === "Needs sign-in"
+              ? ""
+              : backend.reason
+                ? backend.reason.charAt(0).toUpperCase() +
+                  backend.reason.slice(1)
+                : "";
+    if (
+      (backend.state === "connected" ||
+        backend.reason === "Health check pending") &&
+      backend.compatibility === "incompatible"
+    )
+      status.textContent = "Incompatible versions. Update both instances.";
+    else if (
+      (backend.state === "connected" ||
+        backend.reason === "Health check pending") &&
+      backend.compatibility === "older"
+    )
+      status.textContent = "Older version: some agent commands need an update.";
+    status.title =
+      backend.last_contact === null
+        ? ""
+        : new Date(backend.last_contact * 1000).toLocaleString();
+    status.hidden = !status.textContent;
+    status.classList.toggle(
+      "err",
+      backend.state === "key_revoked" ||
+        backend.state === "pending" ||
+        backend.compatibility === "incompatible",
+    );
+  };
   const refresh = async () => {
+    const current = ++revision;
     window.dispatchEvent(new Event("recurse:refresh-remotes"));
     try {
       const rows = (await result(await api("/api/backends"))) as Backend[];
+      if (current !== revision) return;
+      for (const { detail } of statuses.values()) detail.close();
       list.textContent = "";
+      statuses.clear();
       for (const backend of rows) {
         const row = document.createElement("div");
         row.className = "remote-entry";
@@ -104,39 +155,18 @@ export function buildConnectedBackends(body: HTMLElement): void {
         heading.className = "row";
         const info = document.createElement("div");
         info.className = "remote-info";
-        const name = document.createElement("strong");
-        name.textContent = backend.label;
         const address = document.createElement("div");
         address.textContent = backend.url;
         const status = document.createElement("p");
         status.className = "msg";
         status.setAttribute("role", "status");
-        status.textContent =
-          backend.state === "connected"
-            ? "Signed in"
-            : backend.state === "key_revoked"
-              ? "Sign-in revoked. Disconnect and add this remote again."
-              : backend.state === "unreachable"
-                ? backend.reason === "Health check pending"
-                  ? "Signed in"
-                  : `Offline · ${lastSeen(backend.last_contact)}`
-                : backend.reason === "Needs sign-in"
-                  ? ""
-                  : backend.reason
-                    ? backend.reason.charAt(0).toUpperCase() +
-                      backend.reason.slice(1)
-                    : "";
-        if (backend.last_contact !== null)
-          status.title = new Date(backend.last_contact * 1000).toLocaleString();
-        status.hidden = !status.textContent;
-        status.classList.toggle(
-          "err",
-          backend.state === "key_revoked" || backend.state === "pending",
-        );
-        info.append(name, address);
+        showStatus(status, backend);
+        info.append(address);
+        const buttons = document.createElement("span");
+        buttons.className = "remote-buttons";
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "ghost";
+        button.className = "settings-row danger";
         button.textContent =
           backend.state === "pending" ? "Dismiss" : "Disconnect";
         button.onclick = async () => {
@@ -147,17 +177,21 @@ export function buildConnectedBackends(body: HTMLElement): void {
                 method: "DELETE",
               }),
             );
+            detail.close();
             say(data.warning ?? "");
             await refresh();
           } catch (error) {
             say(
               error instanceof Error ? error.message : "Disconnect failed",
               true,
+              status,
             );
+            detail.refresh();
             button.disabled = false;
           }
         };
-        heading.append(info, button);
+        buttons.append(button);
+        heading.append(info, buttons);
         row.append(heading, status);
         if (backend.state === "pending") {
           const signIn = document.createElement("form");
@@ -205,6 +239,7 @@ export function buildConnectedBackends(body: HTMLElement): void {
                 error instanceof Error ? error.message : "Sign-in failed";
               status.classList.add("err");
               status.hidden = false;
+              detail.refresh();
               password.focus();
             } finally {
               payload.password = "";
@@ -215,8 +250,20 @@ export function buildConnectedBackends(body: HTMLElement): void {
             }
           };
           row.append(signIn);
-        } else row.append(settingsSyncControl(backend.label));
+        } else {
+          const sync = settingsSyncControl(backend.label);
+          buttons.prepend(sync.button);
+          row.append(sync.panel);
+        }
         list.append(row);
+        const detail = settingsDetail(
+          row,
+          backend.label,
+          () =>
+            status.textContent ||
+            (backend.state === "pending" ? "Needs sign-in" : "Connected"),
+        );
+        statuses.set(backend.label, { status, detail });
       }
     } catch (error) {
       say(
@@ -232,6 +279,7 @@ export function buildConnectedBackends(body: HTMLElement): void {
     submit.disabled = true;
     submit.textContent = "Connecting…";
     say("");
+    say("", false, formMessage);
     const payload = {
       label: inputs[0]!.value,
       url: inputs[1]!.value,
@@ -247,11 +295,14 @@ export function buildConnectedBackends(body: HTMLElement): void {
         }),
       );
       form.reset();
-      form.hidden = true;
-      add.setAttribute("aria-expanded", "false");
+      addDetail.close();
       await refresh();
     } catch (error) {
-      say(error instanceof Error ? error.message : "Connect failed", true);
+      say(
+        error instanceof Error ? error.message : "Connect failed",
+        true,
+        formMessage,
+      );
     } finally {
       payload.password = "";
       inputs[2]!.value = "";
@@ -259,5 +310,45 @@ export function buildConnectedBackends(body: HTMLElement): void {
       submit.textContent = "Connect remote";
     }
   };
+  const poll = async () => {
+    if (!active()) return;
+    const current = revision;
+    try {
+      const rows = (await result(await api("/api/backends"))) as Backend[];
+      if (current === revision && active())
+        for (const backend of rows) {
+          const entry = statuses.get(backend.label);
+          if (entry) {
+            showStatus(entry.status, backend);
+            entry.detail.refresh();
+          }
+        }
+    } catch {
+      // Invariant: A transient status read does not erase the last known state.
+    } finally {
+      clearTimeout(timer);
+      if (active()) timer = setTimeout(() => void poll(), 5000);
+    }
+  };
+  const observer = new MutationObserver(() => {
+    clearTimeout(timer);
+    if (!body.isConnected) observer.disconnect();
+    else if (active()) timer = setTimeout(() => void poll(), 5000);
+  });
+  queueMicrotask(() => {
+    if (!body.isConnected) return;
+    observer.observe(document.querySelector("#settings-overlay")!, {
+      attributes: true,
+      attributeFilter: ["class"],
+    });
+    observer.observe(body.closest(".settings-cat")!, {
+      attributes: true,
+      attributeFilter: ["hidden"],
+    });
+    observer.observe(document.querySelector("#settings-sections")!, {
+      childList: true,
+    });
+    if (active()) timer = setTimeout(() => void poll(), 5000);
+  });
   void refresh();
 }

@@ -17,6 +17,11 @@ import * as artifacts from "../../src/artifacts";
 import { ARTIFACT_ACTIVE_CSP } from "../../src/artifacts";
 import { registerFile } from "../../src/agents/runtime/attachments/publish";
 import { listPage } from "../../src/session_files";
+import {
+  THUMBNAIL_QUEUE,
+  THUMBNAIL_SLOTS,
+  thumbnail,
+} from "../../src/web/thumbnails";
 import { collectionSnapshot } from "../../src/agents/runtime/node_files";
 import { exchange, normalise, requestBytes } from "./http_corpus";
 import { Refs } from "./http_refs";
@@ -117,6 +122,232 @@ describe("http_files corpus", () => {
 });
 
 describe("owner scoping", () => {
+  // Feature: #2937 crop retries and cancellation remain owner-scoped and ordered.
+  test("crop uploads replay, conflict, cancel and expire under the owner lock", async () => {
+    const base = `http://127.0.0.1:${app.running.port}`;
+    const capability = await fetch(
+      `${base}/api/conversations/owner-a/attachment-crops`,
+    );
+    expect(capability.status).toBe(200);
+    const info = (await capability.json()) as {
+      idempotent: boolean;
+      now: number;
+    };
+    expect(info.idempotent).toBe(true);
+    expect(String(info.now)).toMatch(/^[0-9]{13}$/);
+    expect(
+      (await fetch(`${base}/api/conversations/missing-owner/attachment-crops`))
+        .status,
+    ).toBe(404);
+    const key = "c".repeat(32);
+    const expires = String(info.now + 3000);
+    const upload = (
+      owner: string,
+      text = "crop bytes",
+      filename = "crop.png",
+      operation = key,
+      expiry = expires,
+    ) => {
+      const form = new FormData();
+      form.set("owner", owner);
+      form.set("file", new File([text], filename));
+      form.set("crop_key", operation);
+      form.set("crop_expires", expiry);
+      return fetch(`${base}/api/attachments`, { method: "POST", body: form });
+    };
+    const cancel = (owner: string, operation = key, expiry = expires) =>
+      fetch(
+        `${base}/api/conversations/${owner}/attachment-crops/${operation}?expires=${expiry}`,
+        { method: "DELETE" },
+      );
+    const first = await upload("owner-a");
+    expect(first.status).toBe(200);
+    const saved = (await first.json()) as { id: string; url: string };
+    const replay = await upload("owner-a");
+    expect(await replay.json()).toEqual(saved);
+    expect((await upload("owner-a", "other bytes")).status).toBe(409);
+    expect((await upload("owner-a", "crop bytes", "other.png")).status).toBe(
+      409,
+    );
+    expect((await cancel("missing-owner")).status).toBe(404);
+    expect((await cancel("owner-b")).status).toBe(200);
+    expect((await fetch(`${base}${saved.url}`)).status).toBe(200);
+    expect((await upload("owner-b")).status).toBe(409);
+    const delayed = "d".repeat(32);
+    expect((await cancel("owner-a", delayed)).status).toBe(200);
+    expect(
+      (await upload("owner-a", "crop bytes", "crop.png", delayed)).status,
+    ).toBe(409);
+    expect(
+      (await upload("owner-a", "crop bytes", "crop.png", "bad")).status,
+    ).toBe(422);
+    expect(
+      (
+        await upload(
+          "owner-a",
+          "crop bytes",
+          "crop.png",
+          "e".repeat(32),
+          String(Date.now() + 7200000),
+        )
+      ).status,
+    ).toBe(422);
+    const removedKey = "1".repeat(32);
+    const removedUpload = await upload(
+      "owner-a",
+      "crop bytes",
+      "crop.png",
+      removedKey,
+    );
+    expect(removedUpload.status).toBe(200);
+    const removed = (await removedUpload.json()) as { url: string };
+    expect(
+      (await fetch(`${base}${removed.url}`, { method: "DELETE" })).status,
+    ).toBe(200);
+    expect(
+      (await upload("owner-a", "crop bytes", "crop.png", removedKey)).status,
+    ).toBe(409);
+    const damagedKey = "2".repeat(32);
+    const damagedUpload = await upload(
+      "owner-a",
+      "crop bytes",
+      "crop.png",
+      damagedKey,
+    );
+    expect(damagedUpload.status).toBe(200);
+    const damaged = (await damagedUpload.json()) as { id: string };
+    const collection = app.temp.uploadsDir("20260925-owner-a");
+    await writeFile(join(collection, `${damaged.id}.blob`), "other data");
+    expect(
+      (await upload("owner-a", "crop bytes", "crop.png", damagedKey)).status,
+    ).toBe(409);
+    await Bun.sleep(Math.max(0, Number(expires) - Date.now() + 20));
+    const expiredReplay = await upload("owner-a");
+    expect(expiredReplay.status).toBe(200);
+    expect(await expiredReplay.json()).toEqual(saved);
+    expect(
+      (await upload("owner-a", "crop bytes", "crop.png", delayed)).status,
+    ).toBe(409);
+    expect((await cancel("owner-a")).status).toBe(200);
+    expect((await fetch(`${base}${saved.url}`)).status).toBe(404);
+    expect((await upload("owner-a")).status).toBe(409);
+    expect(
+      readdirSync(collection).some((name) => name.startsWith(".crop-")),
+    ).toBe(false);
+    const nextExpiry = String(Date.now() + 60000);
+    const reused = await upload(
+      "owner-a",
+      "new bytes",
+      "crop.png",
+      key,
+      nextExpiry,
+    );
+    expect(reused.status).toBe(200);
+    const nextFile = (await reused.json()) as { url: string };
+    expect(nextFile.url).not.toBe(saved.url);
+    expect((await cancel("owner-a", key, nextExpiry)).status).toBe(200);
+    const expiredBarrier = join(collection, ".crop-barrier");
+    await writeFile(expiredBarrier, String(Date.now() - 1));
+    const freshKey = "3".repeat(32);
+    expect(
+      (await upload("owner-a", "crop bytes", "crop.png", freshKey, nextExpiry))
+        .status,
+    ).toBe(200);
+    expect(await Bun.file(expiredBarrier).exists()).toBe(false);
+    expect((await cancel("owner-a", freshKey, nextExpiry)).status).toBe(200);
+    const quotaExpiry = String(Date.now() + 60000);
+    const quotaKey = "f".repeat(32);
+    const admitted = await upload(
+      "owner-b",
+      "crop bytes",
+      "crop.png",
+      quotaKey,
+      quotaExpiry,
+    );
+    expect(admitted.status).toBe(200);
+    const quotaFile = (await admitted.json()) as { url: string; id: string };
+    const secondKey = "d".repeat(32);
+    const second = await upload(
+      "owner-b",
+      "crop bytes",
+      "crop.png",
+      secondKey,
+      quotaExpiry,
+    );
+    expect(second.status).toBe(200);
+    const thirdKey = "a".repeat(32);
+    const third = await upload(
+      "owner-b",
+      "crop bytes",
+      "crop.png",
+      thirdKey,
+      quotaExpiry,
+    );
+    expect(third.status).toBe(200);
+    const thirdFile = (await third.json()) as { url: string };
+    for (let i = 0; i < 253; i++) {
+      const operation = i.toString(16).padStart(32, "0");
+      expect((await cancel("owner-b", operation, quotaExpiry)).status).toBe(
+        200,
+      );
+    }
+    const quotaCollection = app.temp.uploadsDir("20260925-owner-b");
+    await writeFile(
+      join(quotaCollection, `.crop-${quotaFile.id}-${quotaExpiry}`),
+      "",
+    );
+    expect((await cancel("owner-b", secondKey, quotaExpiry)).status).toBe(200);
+    const overflowKey = "e".repeat(32);
+    expect((await cancel("owner-b", overflowKey, quotaExpiry)).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await upload(
+          "owner-b",
+          "crop bytes",
+          "crop.png",
+          overflowKey,
+          quotaExpiry,
+        )
+      ).status,
+    ).toBe(413);
+    expect(
+      await Bun.file(
+        join(app.temp.uploadsDir("20260925-owner-b"), ".crop-barrier"),
+      ).text(),
+    ).toBe(quotaExpiry);
+    expect(
+      (await upload("owner-b", "crop bytes", "crop.png", thirdKey, quotaExpiry))
+        .status,
+    ).toBe(200);
+    expect(
+      (await fetch(`${base}${thirdFile.url}`, { method: "DELETE" })).status,
+    ).toBe(200);
+    expect(
+      (await fetch(`${base}${quotaFile.url}`, { method: "DELETE" })).status,
+    ).toBe(200);
+    expect(
+      (await upload("owner-b", "crop bytes", "crop.png", quotaKey, quotaExpiry))
+        .status,
+    ).toBe(409);
+    const barrier = join(quotaCollection, ".crop-barrier");
+    await unlink(barrier);
+    const fifo = Bun.spawn(["mkfifo", barrier]);
+    expect(await fifo.exited).toBe(0);
+    expect(
+      (
+        await upload(
+          "owner-b",
+          "crop bytes",
+          "crop.png",
+          "b".repeat(32),
+          quotaExpiry,
+        )
+      ).status,
+    ).toBe(503);
+    await unlink(barrier);
+  }, 30000);
   test("a symlinked blob never redirects a download", async () => {
     const png = new Uint8Array(Buffer.from(seed.png, "hex"));
     const boundary = "b0undary";
@@ -228,6 +459,141 @@ describe("owner scoping", () => {
     );
     expect(normalise(restarted, "GET").status).toBe(206);
     expect(Buffer.from(restarted).toString("latin1")).toEndWith("\r\n\r\n2345");
+  });
+
+  test("thumbnails shrink large rasters and pass other previews through", async () => {
+    let seed = 1;
+    const noise = (width: number, height: number) => {
+      const bmp = new Uint8Array(54 + width * height * 3);
+      const view = new DataView(bmp.buffer);
+      bmp.set([0x42, 0x4d]);
+      view.setUint32(2, bmp.length, true);
+      view.setUint32(10, 54, true);
+      view.setUint32(14, 40, true);
+      view.setInt32(18, width, true);
+      view.setInt32(22, height, true);
+      view.setUint16(26, 1, true);
+      view.setUint16(28, 24, true);
+      for (let at = 54; at < bmp.length; at++)
+        bmp[at] = (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 24;
+      return bmp;
+    };
+    type Codec = {
+      jpeg(options: { quality: number }): Codec;
+      png(): Codec;
+      bytes(): Promise<Uint8Array<ArrayBuffer>>;
+      metadata(): Promise<{ width: number; height: number; format: string }>;
+    };
+    const Image = (Bun as unknown as { Image: new (data: Uint8Array) => Codec })
+      .Image;
+    const collection = app.temp.uploadsDir("20260925-owner-b");
+    const publish = async (name: string, data: Uint8Array | string) => {
+      const source = join(dir, name);
+      await writeFile(source, data);
+      const { id } = await registerFile(
+        collection,
+        "owner-b",
+        "b".repeat(32),
+        `call-${name}`,
+        source,
+        "/",
+      );
+      return `http://127.0.0.1:${app.running.port}/api/conversations/owner-b/attachments/${id}`;
+    };
+    const photo = await new Image(noise(2000, 1250))
+      .jpeg({ quality: 90 })
+      .bytes();
+    const large = await publish("photo.jpg", photo);
+    const thumb = await fetch(`${large}/thumbnail`);
+    expect(thumb.headers.get("content-type")).toBe("image/webp");
+    expect(thumb.headers.get("cache-control")).toBe(
+      "private, max-age=31536000, immutable",
+    );
+    const small = new Uint8Array(await thumb.arrayBuffer());
+    expect(await new Image(small).metadata()).toEqual({
+      width: 1024,
+      height: 640,
+      format: "webp",
+    });
+    expect(small.byteLength * 4).toBeLessThan(photo.byteLength);
+    const together = await Promise.all(
+      Array.from({ length: 5 }, () => fetch(`${large}/thumbnail`)),
+    );
+    for (const response of together)
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(small);
+    const head = await fetch(`${large}/thumbnail`, { method: "HEAD" });
+    expect(head.headers.get("content-type")).toBe("image/webp");
+    expect(head.headers.get("content-security-policy")).toContain("sandbox");
+    expect(await head.text()).toBe("");
+    const still = await new Image(noise(400, 300)).png().bytes();
+    const control = new Uint8Array(20);
+    control.set(new TextEncoder().encode("acTL"), 4);
+    const fields = new DataView(control.buffer);
+    fields.setUint32(0, 8);
+    fields.setUint32(8, 1);
+    fields.setUint32(16, Bun.hash.crc32(control.subarray(4, 16)));
+    const animated = new Uint8Array(still.length + control.length);
+    animated.set(still.subarray(0, 33));
+    animated.set(control, 33);
+    animated.set(still.subarray(33), 53);
+    const moving = await fetch(
+      `${await publish("moving.png", animated)}/thumbnail`,
+    );
+    expect(moving.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await moving.arrayBuffer())).toEqual(animated);
+    const chunky = new Uint8Array(33 + 12 * 20_000);
+    chunky.set(still.subarray(0, 33));
+    for (let at = 33; at < chunky.length; at += 12)
+      chunky.set(new TextEncoder().encode("tEXt"), at + 4);
+    const unscanned = await fetch(
+      `${await publish("chunky.png", chunky)}/thumbnail`,
+    );
+    expect(unscanned.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await unscanned.arrayBuffer())).toEqual(chunky);
+    const settled: string[] = [];
+    const read: string[] = [];
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const resize = (name: string, signal = new AbortController().signal) =>
+      thumbnail(async () => (read.push(name), await gate, photo), signal).then(
+        (out) => {
+          settled.push(name);
+          return out;
+        },
+      );
+    const busy = Array.from(
+      { length: THUMBNAIL_SLOTS + THUMBNAIL_QUEUE - 1 },
+      (_, index) => resize(`busy-${index}`),
+    );
+    const cancel = new AbortController();
+    const cancelled = resize("cancelled", cancel.signal);
+    expect(await resize("overflow")).toBe("busy");
+    const overloaded = await fetch(`${large}/thumbnail`);
+    expect(overloaded.headers.get("content-type")).toBe("image/jpeg");
+    expect(overloaded.headers.get("cache-control")).toBe("no-store");
+    expect(new Uint8Array(await overloaded.arrayBuffer())).toEqual(photo);
+    cancel.abort();
+    expect(await cancelled).toBe("busy");
+    expect(settled).toEqual(["overflow", "cancelled"]);
+    expect(read).toEqual(["busy-0", "busy-1"]);
+    release();
+    for (const out of await Promise.all(busy))
+      expect((out as Uint8Array).byteLength).toBe(small.byteLength);
+    expect(read.filter((name) => !name.startsWith("busy-"))).toEqual([]);
+    expect(await resize("after")).toEqual(small);
+    const original = await fetch(`${large}/preview`);
+    expect(original.headers.get("content-type")).toBe("image/jpeg");
+    expect(new Uint8Array(await original.arrayBuffer())).toEqual(photo);
+    const icon = await new Image(noise(32, 20)).png().bytes();
+    const tiny = await publish("icon.png", icon);
+    const passed = await fetch(`${tiny}/thumbnail`);
+    expect(passed.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await passed.arrayBuffer())).toEqual(icon);
+    const svg = await fetch(
+      `${await publish("chart.svg", '<svg xmlns="http://www.w3.org/2000/svg"/>')}/thumbnail`,
+    );
+    expect(svg.headers.get("content-type")).toBe("image/svg+xml");
+    expect(await svg.text()).toBe('<svg xmlns="http://www.w3.org/2000/svg"/>');
   });
 
   test("a large published file streams from its open blob", async () => {

@@ -46,7 +46,7 @@ export interface PromptsDeps {
   turnPromptDir: string;
   toolsDir: string | null;
   /** agentTools._tools_section, regenerated on every compose. */
-  toolsSection(): string;
+  toolsSection(): string | Promise<string>;
   /** agentTools.conversation_effort_line. */
   conversationEffortLine(conv: Conv): string | null;
   /** tree_view.project_statuses over detached inputs. */
@@ -157,7 +157,7 @@ export class Prompts {
     return `You are "${this.deps.displayName}", a coding assistant working with a tree of agents.
 
 - Prefer chdir and relative paths
-- For searching, use the built-in \`grep\`/\`find\` tools; for multiple OR terms, use \`multi_grep\` once; use \`rg\` when bash is required, not \`grep\`
+- For searching, use the built-in \`grep\`/\`find\` tools; use \`rg\` when bash is required, not \`grep\`
 - Read files with \`read\`, not cat/sed; use offset/limit around search hits, but read known external paths directly.
 - Combine a file's changes in one edit call; keep oldText regions minimal and unique. Use write only for new files or complete rewrites.
 - Share generated files with the native \`publish\` tool.
@@ -182,7 +182,7 @@ Only with operator authorization, edit \`$PI_CODING_AGENT_DIR/pi-safety.md\` to 
   }
 
   /** Generated Recurse CLI help and effort ladder for the current boundary. */
-  recurseToolsSection(): string {
+  async recurseToolsSection(): Promise<string> {
     return this.deps.toolsSection();
   }
 
@@ -190,7 +190,7 @@ Only with operator authorization, edit \`$PI_CODING_AGENT_DIR/pi-safety.md\` to 
     const cid = conv.id;
     return [
       "# Agent context",
-      `- Full history, including compacted parts: \`bun $RECURSE_SRC/tools/subagent.ts messages ${String(cid)}\`.`,
+      `- Full history, including compacted parts: use the native read tool on \`${join(this.deps.dataDir, "conversations", String(cid), "durable", "transcript.txt")}\` (offset and limit are line numbers). Earlier cleared histories: \`${join(this.deps.dataDir, "agent-archive", `${String(cid)}.clear-*`, "transcript.txt")}\`.`,
       "- Put disposable files in $RECURSE_AGENT_TMPDIR, your scratch space, cleared when the agent is deleted; TMPDIR/TMP/TEMP is fast local scratch that a restart may clear. Keep durable work in your worktree or memory.",
       `- Your agent id ($RECURSE_AGENT_ID): ${String(cid)}`,
     ].join("\n");
@@ -318,7 +318,7 @@ Only with operator authorization, edit \`$PI_CODING_AGENT_DIR/pi-safety.md\` to 
     const row = (c: Conv, depth: number, mark = ""): string => {
       const id = recordId(c);
       const projected = status(id);
-      const shown = projected + (truthy(c.pinned) ? ", taken over" : "");
+      const shown = projected + (truthy(c.taken_over) ? ", taken over" : "");
       const under = countUnder(id);
       const queued = inputs.live[id]?.queued ?? 0;
       return (
@@ -570,7 +570,7 @@ Only with operator authorization, edit \`$PI_CODING_AGENT_DIR/pi-safety.md\` to 
       return null;
     }
     const end = Math.min(Math.max(Math.trunc(offset), 0) + LINE_BYTES, size);
-    const [rows, , , ok] = scanSessionTurns(
+    const [rows, , , ok] = await scanSessionTurns(
       sessionId,
       sessionFile,
       sessionCwd,

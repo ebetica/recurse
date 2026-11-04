@@ -4,7 +4,6 @@
 // Cancellation propagates unparked; durable fences replay at startup.
 import { createHash } from "node:crypto";
 import { readdir, stat, unlink } from "node:fs/promises";
-import { closeSync, constants, existsSync, openSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { AGENT_TEMP_KEY_RE } from "../../config";
 import {
@@ -19,7 +18,7 @@ import {
   MAX_REPORTED_PROCESSES,
   type ProcessBlocker,
 } from "../../process_lifecycle";
-import * as trash from "../../utils/trash";
+import { retireAll } from "../../utils/trash_sweep";
 import {
   Cancelled,
   abortable,
@@ -45,6 +44,7 @@ import {
   type NodeStore,
 } from "../runtime/agent_node";
 import type { AgentNodes } from "../runtime/agent_nodes";
+import type { CropOperation } from "../runtime/attachments/crop";
 
 /** Seconds one agent-store close may take inside a reap. */
 export const STORE_CLOSE_TIMEOUT = 10.0;
@@ -132,8 +132,7 @@ export interface ReapDeps {
     hasRetainedShellsFor(cid: string): boolean;
   };
   agentStore: {
-    readonly baseDir: string;
-    dbPaths(cid: string): string[];
+    retireFiles(cid: string): Promise<boolean>;
     close(cid: string, timeout?: number): Promise<boolean>;
     forget(cid: string): void;
   };
@@ -149,7 +148,9 @@ export interface ReapDeps {
       cid: string,
       data: Uint8Array,
       filename: string,
+      options?: { crop?: CropOperation },
     ): Promise<Record<string, unknown>>;
+    cancelConversationCrop(cid: string, crop: CropOperation): Promise<void>;
   };
   /** PiSessionRetirement.retireReapedSession; never fails the reap. */
   retireLegacySession(
@@ -198,8 +199,6 @@ export interface ReapDeps {
   now(): number;
   /** Owns the idle-stop completions. */
   tasks: TaskSet;
-  /** Flush observed PR identities to surviving ancestors before retirement. */
-  drainTouchedPrs?(): Promise<void>;
   // Stop/close/retire one Durable owner; false defers reap.
   durable?: {
     retire(cid: string): Promise<boolean>;
@@ -367,46 +366,19 @@ export class SupervisorReap {
   constructor(private readonly deps: ReapDeps) {}
 
   /** Retire one quiesced agent database beside itself. */
-  retireAgentStoreFiles(cid: string): boolean {
-    let dirFd: number;
+  async retireAgentStoreFiles(cid: string): Promise<boolean> {
     try {
-      dirFd = openSync(
-        this.deps.agentStore.baseDir,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
-      );
+      return await this.deps.agentStore.retireFiles(cid);
     } catch {
       return false;
-    }
-    try {
-      let retired = true;
-      let paths: string[];
-      try {
-        paths = this.deps.agentStore.dbPaths(cid);
-      } catch {
-        return false;
-      }
-      for (const path of paths) {
-        try {
-          if (!trash.retireWithinParent(dirFd, basename(path), ".trash")) {
-            // Invariant: Already gone only if nothing live recreates it: the
-            // fence holds, so absence is final.
-            if (existsSync(path) && statSync(path).isFile()) retired = false;
-          }
-        } catch {
-          retired = false;
-        }
-      }
-      return retired;
-    } finally {
-      closeSync(dirFd);
     }
   }
 
   /** Retire only the journal selected by this validated conversation id. */
-  retireReviewerJournal(cid: string): void {
+  async retireReviewerJournal(cid: string): Promise<void> {
     if (!TEMP_ID_RE.test(cid)) return;
     const key = createHash("sha256").update(cid).digest("hex");
-    trash.retireAll(
+    await retireAll(
       [join(this.deps.paths.reviewerJournalRoot, key)],
       this.deps.paths.trashDir,
       (exc) =>
@@ -428,7 +400,7 @@ export class SupervisorReap {
       ...sortedNames(names.filter((n) => generation.test(n))),
       ...sortedNames(names.filter((n) => temp.test(n))),
     ].map((name) => join(this.deps.paths.msgDir, name));
-    trash.retireAll(paths, this.deps.paths.trashDir, (exc) =>
+    await retireAll(paths, this.deps.paths.trashDir, (exc) =>
       logException(this.deps.log, "ledger_residue_retire_failed", exc, {
         level: WARNING,
       }),
@@ -444,7 +416,7 @@ export class SupervisorReap {
   async retireOrphanFiles(d: string): Promise<void> {
     await this.deps.retireToolDetails(d);
     await this.deps.pruneArtifactOwner?.(d);
-    this.retireReviewerJournal(d);
+    await this.retireReviewerJournal(d);
     await this.deps.conversations.unbindServiceConversation(d);
     await this.retireLedgerResidue(d);
     await this.unlinkLockFiles(d);
@@ -572,11 +544,11 @@ export class SupervisorReap {
           );
           if (releaseFailure !== null)
             return [false, releaseFailure, null, tempEntry];
-          if (!this.retireAgentStoreFiles(d))
+          if (!(await this.retireAgentStoreFiles(d)))
             return [false, "agent database retirement failed", null, tempEntry];
           agentStore.forget(d);
           await this.deps.retireToolDetails(d);
-          this.retireReviewerJournal(d);
+          await this.retireReviewerJournal(d);
           await this.deps.dropTurnSystemPrompt(conv, true);
           await this.retireLedgerResidue(d);
           await this.deps.retireLegacySession(
@@ -951,7 +923,6 @@ export class SupervisorReap {
           diagnostic,
       );
     }
-    await this.deps.drainTouchedPrs?.();
     const deletedIds: string[] = [];
     const cleanup: TempEntry[] = [];
     const sessions: SessionTuple[] = [];
@@ -1025,7 +996,37 @@ export class SupervisorReap {
     owner: string | null,
     data: Uint8Array,
     filename: string,
+    crop?: CropOperation,
   ): Promise<Record<string, unknown>> {
+    const saved = await this.withFileOp(owner, () =>
+      this.deps.agentTemp.addConversationUpload(owner!, data, filename, {
+        crop,
+      }),
+    );
+    if (saved === null || typeof saved !== "object" || Array.isArray(saved))
+      throw new RuntimeError(`upload worker returned ${typeof saved}`);
+    return { ...saved };
+  }
+
+  /** Check that a live owner can accept crop operations. */
+  async checkConversationCropOwner(owner: string): Promise<void> {
+    await this.withFileOp(owner, async () => {});
+  }
+
+  /** Cancel a crop while holding the owner's file-operation lease. */
+  async cancelConversationCrop(
+    owner: string,
+    crop: CropOperation,
+  ): Promise<void> {
+    await this.withFileOp(owner, () =>
+      this.deps.agentTemp.cancelConversationCrop(owner, crop),
+    );
+  }
+
+  private async withFileOp<T>(
+    owner: string | null,
+    work: () => Promise<T>,
+  ): Promise<T> {
     if (!owner) throw new KeyError("attachment owner not found");
     let node = this.deps.nodes.existing(owner);
     if (node === null) {
@@ -1035,17 +1036,11 @@ export class SupervisorReap {
     }
     if (!node.tryAdmitFileOp())
       throw new KeyError("attachment owner not found");
-    let saved: unknown;
     try {
-      saved = await fenced(() =>
-        this.deps.agentTemp.addConversationUpload(owner, data, filename),
-      );
+      return await fenced(work);
     } finally {
       node.releaseFileOp();
     }
-    if (saved === null || typeof saved !== "object" || Array.isArray(saved))
-      throw new RuntimeError(`upload worker returned ${typeof saved}`);
-    return { ...(saved as Record<string, unknown>) };
   }
 
   /** Delete one root and every reachable child. Returns deleted ids. */
@@ -1177,7 +1172,7 @@ export class SupervisorReap {
             } catch (deliveryExc) {
               logException(
                 this.deps.log,
-                "pinned_reap_notice_failed",
+                "taken_over_reap_notice_failed",
                 deliveryExc,
                 {
                   conversation_id: cid,

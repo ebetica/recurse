@@ -12,7 +12,6 @@ const PRIMARY_KEYS: Record<string, string[]> = {
   edit: ["path", "file_path"],
   chdir: ["directory"],
   grep: ["pattern", "patterns", "path"],
-  multi_grep: ["pattern", "patterns", "path"],
   find: ["pattern", "patterns", "path"],
 };
 
@@ -27,11 +26,7 @@ const SUMMARY_SLOT_TOOLS: ReadonlySet<string> = new Set([
 ]);
 
 // Search patterns may reach details, never the summary slot.
-const DETAIL_SLOT_TOOLS: ReadonlySet<string> = new Set([
-  "grep",
-  "multi_grep",
-  "find",
-]);
+const DETAIL_SLOT_TOOLS: ReadonlySet<string> = new Set(["grep", "find"]);
 
 // Only complete key/quote prefixes decode; early JSON stays name-only.
 const KEY_SOURCE =

@@ -2,6 +2,7 @@
 // Boot sends wait for authoritative selection; draft creation happens once.
 // Own attachments/drafts/input; refuse reloads that would lose browser-only
 // work or ambiguously replay a send.
+import { hasCommentSends } from "./artifacts/comment-outbox.js";
 import { treeOf } from "./backends/tree.js";
 import {
   backendFor,
@@ -12,17 +13,22 @@ import { currentUiOwnerId, state, DRAFT, LAST_AGENT_KEY } from "./state.js";
 import { sharedTrees } from "./shared-trees.js";
 import { $, inputEl, sendEl } from "./dom.js";
 import { newClientMessageId } from "./composer/send.js";
+import { resizeTextarea } from "./composer/textarea.js";
 
 import {
   selectAgent,
   renderSidebar,
-  closeMobileSidebar,
   syncHistoryToSelection,
   asHistoryCorrection,
   refreshUpBtn,
 } from "./sidebar.js";
 import { renderDraft } from "./conversation/chrome.js";
 import { poll, waitForInitialAuthoritativeRead } from "./conversation/poll.js";
+import { pinOperatorSend } from "./conversation/thread.js";
+import {
+  deliverQueuedOperatorMessage,
+  startOperatorSend,
+} from "./conversation/operator-send.js";
 import {
   addOptimisticPending,
   newestCommittedOffset,
@@ -391,6 +397,7 @@ function restoreAfterLogin(): void {
 export function hasUnsentComposerWork(): boolean {
   return (
     !!inputEl.value ||
+    hasCommentSends() ||
     hasAnyStagedAttachments() ||
     jobs.length > 0 ||
     !!state.draft ||
@@ -712,10 +719,12 @@ export function send(): void {
       };
       d.creator = job;
     }
-    jobs.push(job);
-    (d.pending = d.pending || []).push({ role: "user", content });
-    clearComposer(composerOwner);
-    renderDraft();
+    startOperatorSend(job.convId, () => {
+      jobs.push(job);
+      (d.pending = d.pending || []).push({ role: "user", content });
+      clearComposer(composerOwner);
+      renderDraft();
+    });
   } else {
     job = {
       draft: false,
@@ -728,8 +737,10 @@ export function send(): void {
       inFlight: false,
       failed: false,
     };
-    jobs.push(job);
-    clearComposer(composerOwner);
+    startOperatorSend(job.convId, () => {
+      jobs.push(job);
+      clearComposer(composerOwner);
+    });
   }
   runJob(job);
   renderSendStatus();
@@ -834,8 +845,8 @@ async function runJob(job: SendJob): Promise<void> {
     // Invariant: Every retry reuses the job id, safely replaying an admitted
     // ack. Network errors/5xx retain retries; permanent validation errors stay
     // failed. No client timer aborts ambiguous commits.
-    r = await backendFor(job.convId || "").jpost(
-      `/api/conversations/${job.convId}/deliver`,
+    r = await deliverQueuedOperatorMessage(
+      job.convId || "",
       {
         content: job.content,
         client_message_id: job.clientId,
@@ -923,6 +934,7 @@ function jobSucceeded(job: SendJob): void {
     state.draft.creator === job
   ) {
     adoptDraftSkills(job.convId);
+    pinOperatorSend(job.convId);
     selectAgent(job.convId, true, true);
   }
   state.openConvHash = "";
@@ -957,6 +969,8 @@ export function startDraft(spec: DraftSpec): void {
   const outgoingOwner = currentUiOwnerId();
   snapshotComposerOwner(outgoingOwner);
   const outgoing = state.selectedId;
+  if (outgoing !== DRAFT)
+    window.dispatchEvent(new Event("recurse:selection-change"));
   const uiStateId = newDraftUiOwnerId();
   state.draft = {
     ...spec,
@@ -973,7 +987,6 @@ export function startDraft(spec: DraftSpec): void {
   switchComposerOwner(uiStateId, outgoing === DRAFT);
   renderDraft();
   renderSidebar();
-  closeMobileSidebar(true);
   // Invariant: A draft is its own history entry, addressed by the parent it
   // will be created under, so Back closes it and lands on that parent.
   syncHistoryToSelection();
@@ -1002,8 +1015,7 @@ sendEl.onclick = (event: MouseEvent) => {
 
 // ---------------- composer sizing
 export function autosize(): void {
-  inputEl.style.height = "auto";
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 180) + "px";
+  resizeTextarea(inputEl);
 }
 inputEl.addEventListener("input", () => {
   // Invariant: Any edit cancels a pending Stop confirmation. Clearing the text

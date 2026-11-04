@@ -36,12 +36,15 @@ export class BackendTree {
   private generation = 0;
   private retryDelay = 0;
   private retryAt = 0;
+  private serverIncompatible = false;
   private inFlight: {
     controller: AbortController;
     startedAt: number;
     done: Promise<boolean>;
   } | null = null;
   private readonly pendingCreations = new Map<string, number>();
+  /** Number of the newest applied read; reads are numbered as they start. */
+  appliedRead = 0;
 
   constructor(
     private readonly backend: Backend,
@@ -59,9 +62,31 @@ export class BackendTree {
     this.inFlight = null;
   }
 
+  /** A pushed change supersedes older snapshots and retries immediately. */
+  refreshChanged(apply: ApplyTree): Promise<boolean> {
+    this.retryAt = 0;
+    this.invalidate();
+    return this.refresh(apply);
+  }
+
+  /** A fresh compatible server verdict retries a direct version mismatch. */
+  confirmCompatible(): void {
+    if (this.status !== "incompatible version" || this.serverIncompatible)
+      return;
+    this.invalidate();
+    this.status = "loading";
+    this.retryAt = 0;
+    this.backend.apiVersion = null;
+  }
+
   /** Absence of a new row is unconfirmed until a read starts after creation. */
   noteCreation(cid: string): void {
     this.pendingCreations.set(cid, this.generation);
+  }
+
+  /** Reads started so far: a later applied read started after this call. */
+  get readsStarted(): number {
+    return this.generation;
   }
 
   canConfirmAbsence(cid: string): boolean {
@@ -70,6 +95,19 @@ export class BackendTree {
 
   /** Starts a read unless one is in flight; `force` supersedes it (wake). */
   refresh(apply: ApplyTree, force = false): Promise<boolean> {
+    if (this.backend.compatibility === "incompatible") {
+      this.serverIncompatible = true;
+      if (this.status === "incompatible version") return Promise.resolve(false);
+      this.invalidate();
+      this.status = "incompatible version";
+      return Promise.resolve(apply({ nodes: [], changed: true }));
+    }
+    if (this.serverIncompatible) {
+      this.serverIncompatible = false;
+      this.status = "loading";
+      this.retryAt = 0;
+      this.backend.apiVersion = null;
+    }
     const current = this.inFlight;
     if (
       current &&
@@ -129,6 +167,9 @@ export class BackendTree {
               ...node,
               id: conversationId(label, node.id),
               parent: node.parent ? conversationId(label, node.parent) : null,
+              // Spec: A backend older than the taken_over rename sends
+              // `pinned`; drop this one release after the rename.
+              taken_over: node.taken_over ?? node.pinned,
             }))
           : wire,
         changed: body !== this.body || this.status !== "connected",
@@ -156,6 +197,7 @@ export class BackendTree {
     this.lastContact = Date.now() / 1000;
     this.retryDelay = 0;
     this.retryAt = 0;
+    this.appliedRead = generation;
     return apply(read);
   }
 

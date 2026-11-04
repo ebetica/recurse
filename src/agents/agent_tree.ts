@@ -1,9 +1,8 @@
 // Tree moves and parked spawn/clear/compact drains hold lifecycle leases.
 // Reap revalidates topology/subtree; retries use per-slot backoff.
 // Explicit abort points bypass failure catches; interrupted receipts survive.
-// Retried delivery may repeat notices, never lose them.
-import { lstat, open, opendir, stat, unlink } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+// Empty queues await activity; startup/pending receipts and notices retry.
+import { lstat, opendir, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 import { EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL, type Config } from "../config";
 import {
@@ -15,7 +14,6 @@ import {
 } from "../observability/runtime_logging";
 import { cleanTitle } from "../title_text";
 import { Cancelled, checkAbort } from "../utils/tasks";
-import { retireWithinParent } from "../utils/trash";
 import { AgentClosed, MailboxFull, type AgentStore } from "./agent_store";
 import type { ActionRequest, ParkedActions } from "./compaction";
 import {
@@ -108,8 +106,8 @@ export interface AgentTreeDeps {
   >;
   agentStore: Pick<
     AgentStore,
-    "submit" | "retire" | "close" | "dbPaths" | "forget"
-  > & { readonly baseDir: string };
+    "submit" | "retire" | "close" | "retireFiles" | "forget"
+  >;
   lifecycle: Pick<TreeLifecycle, "guardAsync" | "withLease">;
   parked: Pick<
     ParkedActions,
@@ -251,7 +249,8 @@ export class AgentTree {
   /** Lease-busy spawns for the tick shelf. */
   readonly pendingSpawns: SpawnItem[] = [];
   private lastSpawnOutcomePass = 0.0;
-  private spawnOutcomesDue = false;
+  private spawnOutcomesDue = true;
+  private spawnOutcomesPending = true;
   private topologyEpoch = 0;
   readonly parkedActionSchedule: RetrySchedule;
 
@@ -297,13 +296,13 @@ export class AgentTree {
     return [epoch, doomed, ids, files];
   }
 
-  /** First explicitly pinned member of a doomed subtree, if any. */
+  /** First taken-over member of a doomed subtree, if any. */
   takeoverReapBlocker(
     doomed: readonly string[],
   ): [string, string | null] | null {
     for (const id of doomed) {
       const conv = this.deps.conversations.load(id, { withPending: false });
-      if (conv !== null && conv.pinned === true) {
+      if (conv !== null && conv.taken_over === true) {
         const title = conv.title;
         return [id, typeof title === "string" ? title : null];
       }
@@ -417,35 +416,9 @@ export class AgentTree {
       return false;
     }
     if (!quiesced) return false;
-    let handle;
-    try {
-      handle = await open(
-        agentStore.baseDir,
-        fsConstants.O_RDONLY |
-          fsConstants.O_DIRECTORY |
-          fsConstants.O_NOFOLLOW |
-          ((fsConstants as { O_CLOEXEC?: number }).O_CLOEXEC ?? 0),
-      );
-    } catch {
-      return false;
-    }
-    try {
-      let retired = true;
-      for (const path of agentStore.dbPaths(cid)) {
-        const name = path.slice(path.lastIndexOf("/") + 1);
-        try {
-          if (!retireWithinParent(handle.fd, name, ".trash")) {
-            if (await plainFileFollow(path)) retired = false;
-          }
-        } catch {
-          retired = false;
-        }
-      }
-      if (retired) agentStore.forget(cid);
-      return retired;
-    } finally {
-      await handle.close();
-    }
+    const retired = await agentStore.retireFiles(cid);
+    if (retired) agentStore.forget(cid);
+    return retired;
   }
 
   /** Trash one rejected spawn's orphan database when nothing published. */
@@ -564,7 +537,6 @@ export class AgentTree {
       model,
       takenOver: req.taken_over === true,
       muted: truthy(req.muted),
-      pinned: truthy(req.pinned),
       spawnRequestId: cid,
       ...extra,
     };
@@ -720,15 +692,21 @@ export class AgentTree {
     if (index >= 0) this.pendingSpawns.splice(index, 1);
   }
 
-  /** At most SPAWN_OUTCOME_MAX_ROWS receipts and observed markers. */
-  async boundedSpawnOutcomeEntries(): Promise<[string[], string[], boolean]> {
+  /** Bound receipt rows; null keeps recovery pending for an unreadable root. */
+  async boundedSpawnOutcomeEntries(): Promise<
+    [string[], string[], boolean] | null
+  > {
     const dir = this.deps.spawnOutcomeDir;
     try {
       let link = false;
       try {
         link = (await lstat(dir)).isSymbolicLink();
-      } catch {}
-      if (link || !(await isDir(dir))) return [[], [], false];
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          return [[], [], false];
+        throw error;
+      }
+      if (link || !(await isDir(dir))) return null;
       const selected: [string, string][] = [];
       const split = (overflow: boolean): [string[], string[], boolean] => [
         selected.filter(([k]) => k === "outcome").map(([, p]) => p),
@@ -759,7 +737,7 @@ export class AgentTree {
       }
       return split(false);
     } catch (error) {
-      if (isOsError(error)) return [[], [], false];
+      if (isOsError(error)) return null;
       throw error;
     }
   }
@@ -768,17 +746,22 @@ export class AgentTree {
   async processSpawnOutcomes(signal?: AbortSignal): Promise<void> {
     if (
       !this.spawnOutcomesDue &&
-      this.deps.monotonic() - this.lastSpawnOutcomePass <
-        SPAWN_OUTCOME_TICK_INTERVAL
+      (!this.spawnOutcomesPending ||
+        this.deps.monotonic() - this.lastSpawnOutcomePass <
+          SPAWN_OUTCOME_TICK_INTERVAL)
     )
       return;
     this.lastSpawnOutcomePass = this.deps.monotonic();
     this.spawnOutcomesDue = false;
+    this.spawnOutcomesPending = true;
     const now = this.deps.now();
     const dir = this.deps.spawnOutcomeDir;
-    const [outcomes, observedEntries, overflow] =
-      await this.boundedSpawnOutcomeEntries();
+    const entries = await this.boundedSpawnOutcomeEntries();
     if (signal) checkAbort(signal);
+    if (entries === null) return;
+    const [outcomes, observedEntries, overflow] = entries;
+    this.spawnOutcomesPending =
+      overflow || outcomes.length > 0 || observedEntries.length > 0;
     if (overflow)
       this.deps.logger.warning(
         "spawn outcome scan reached its bounded row limit",
@@ -1052,14 +1035,5 @@ export class AgentTree {
         supervisor.requestRun(cid);
       }
     }
-  }
-}
-
-/** Path.is_file(): follows symlinks. */
-async function plainFileFollow(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isFile();
-  } catch {
-    return false;
   }
 }

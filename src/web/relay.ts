@@ -1,8 +1,9 @@
-// Handlers enqueue/read ephemeral sends; instance tasks deliver/poll.
+// Handlers enqueue/read ephemeral sends; instance tasks deliver/poll on need.
 // Link-derived senders and one retry-stable id preserve provenance and dedup.
-// Only named local agents access outcomes; credentials stay private.
-// Offline sends fail, never queue; reads/outcomes are bounded and expire.
+// Only named local agents read outcomes; bounded waits detach on disconnect.
+// Revoked connections stop polls; sleeping instances queue sends to homes.
 import type { ConnectedBackends } from "../backends/connected";
+import type { HomeCallbacks } from "../backends/home_callbacks";
 import { requireLocalAgent } from "./backends";
 import {
   RelayInbox,
@@ -20,6 +21,7 @@ import {
 import { SERVICE_MESSAGE_MAX_CHARS } from "../auth/service";
 import { CLIENT_KEY_RE } from "../agents/supervisor/delivery";
 import { jsonDictBody } from "./login";
+import type { RelayQueue } from "./relay_queue";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 
 export function registerRelayRoutes(
@@ -28,8 +30,18 @@ export function registerRelayRoutes(
   agents: { title(cid: string): string | undefined },
   spawn: (name: string, work: (signal: AbortSignal) => Promise<void>) => void,
   delivery: SupervisorDelivery,
+  callbacks?: HomeCallbacks,
+  queue?: RelayQueue,
+  checkUrl?: string,
 ): void {
-  const inbox = new RelayInbox();
+  const inbox = new RelayInbox(
+    callbacks,
+    queue,
+    () =>
+      backends.idle() &&
+      ![...requests.values()].some((r) => r.outcome.state === "pending"),
+    checkUrl,
+  );
   inbox.register(router);
   const polls = new Map<string, AbortController>();
   spawn("relay-polls", async (signal) => {
@@ -38,7 +50,7 @@ export function registerRelayRoutes(
     };
     signal.addEventListener("abort", stop, { once: true });
     const unsubscribe = backends.subscribe(() => {
-      const labels = backends.connectedLabels();
+      const labels = backends.pollingLabels();
       for (const [label, controller] of polls)
         if (!labels.includes(label)) {
           controller.abort();
@@ -59,10 +71,15 @@ export function registerRelayRoutes(
                     backends.homeLabel,
                     ...backends.connectedLabels().filter((l) => l !== label),
                   ];
+                  const wait = await backends.pollWait(
+                    label,
+                    controller.signal,
+                  );
                   const response = await backends.poll(
                     label,
                     advertised,
                     controller.signal,
+                    wait,
                   );
                   if (response.status !== 200) throw new Error("poll failed");
                   const rows = (response.data as { requests?: unknown } | null)
@@ -148,6 +165,8 @@ export function registerRelayRoutes(
                       controller.signal,
                     );
                   }
+                  if (!wait && rows.length)
+                    backends.remoteEvent(label, "relay");
                   backoff = 5000;
                 } catch {
                   if (!controller.signal.aborted)
@@ -184,7 +203,12 @@ export function registerRelayRoutes(
   });
   const requests = new Map<
     string,
-    { owner: string; label: string; outcome: Outcome }
+    {
+      owner: string;
+      label: string;
+      outcome: Outcome;
+      wakes: Set<() => void>;
+    }
   >();
   const caller = (ex: Exchange): string => requireLocalAgent(ex, agents);
   router.get(
@@ -257,8 +281,8 @@ export function registerRelayRoutes(
         "relayed messages are text only with optional interrupt",
       );
     const direct = backends.connectedLabels().includes(label);
-    if (direct) backends.relayReady(label);
-    else inbox.route(label);
+    if (direct) backends.relayAdmit(label);
+    const route = direct ? null : await inbox.route(agent, label);
     if (
       requests.size >= 1000 ||
       [...requests.values()].filter((r) => r.label === label).length >= 100
@@ -270,7 +294,8 @@ export function registerRelayRoutes(
       reason: null,
       message_id: null,
     };
-    requests.set(id, { owner, label, outcome });
+    const wakes = new Set<() => void>();
+    requests.set(id, { owner, label, outcome, wakes });
     const payload = {
       content: body.content,
       interrupt: body.interrupt === true,
@@ -283,7 +308,7 @@ export function registerRelayRoutes(
     };
     spawn(`relay-${id}`, async (signal) => {
       try {
-        if (!direct) {
+        if (route) {
           await inbox.submit(
             {
               id,
@@ -294,6 +319,7 @@ export function registerRelayRoutes(
               content: body.content as string,
               interrupt: body.interrupt === true,
             },
+            route,
             outcome,
             signal,
           );
@@ -302,6 +328,7 @@ export function registerRelayRoutes(
         await sendRemote(label, agent, payload, outcome, signal);
       } finally {
         if (outcome.state === "pending") outcome.state = "failed";
+        for (const wake of wakes) wake();
         const timer = setTimeout(() => requests.delete(id), 5 * 60_000);
         timer.unref();
       }
@@ -315,11 +342,18 @@ export function registerRelayRoutes(
     outcome: Outcome,
     signal: AbortSignal,
   ) {
-    const deadline = performance.now() + 30_000;
+    let deadline = Infinity;
     let possiblySent = false;
+    let rechecked = false;
+    const recheck = async () => {
+      rechecked = true;
+      await backends.checkRelay(label, signal, true);
+      deadline = performance.now() + 30_000;
+    };
     try {
       try {
-        await backends.checkRelay(label, signal);
+        await backends.checkRelay(label, signal, false);
+        deadline = performance.now() + 30_000;
       } catch (error) {
         outcome.reason =
           error instanceof Error
@@ -345,6 +379,15 @@ export function registerRelayRoutes(
               return;
             }
             possiblySent = true;
+          } else if (
+            !rechecked &&
+            (response.status >= 500 ||
+              [404, 409, 426].includes(response.status))
+          ) {
+            if (response.status >= 500 && response.status !== 503)
+              possiblySent = true;
+            await recheck();
+            continue;
           } else if (
             possiblySent &&
             response.status >= 400 &&
@@ -376,6 +419,20 @@ export function registerRelayRoutes(
             outcome.reason = error.message;
             return;
           }
+          if (!rechecked) {
+            if (!(error instanceof RemoteCallError && error.unsent))
+              possiblySent = true;
+            try {
+              await recheck();
+              continue;
+            } catch {
+              outcome.state = possiblySent ? "unconfirmed" : "failed";
+              outcome.reason = possiblySent
+                ? "connection dropped during delivery"
+                : backends.offlineReason(label);
+              return;
+            }
+          }
           if (error instanceof RemoteCallError && error.unsent) {
             if (!possiblySent) {
               outcome.reason = backends.offlineReason(label);
@@ -396,13 +453,38 @@ export function registerRelayRoutes(
       if (outcome.state === "pending") outcome.state = "failed";
     }
   }
-  router.get("/api/relay/messages/{id}", async (ex) => {
-    const owner = caller(ex);
-    const id = ex.params.id!;
-    if (!CLIENT_KEY_RE.test(id)) throw new HttpError(422, "invalid message id");
-    const row = requests.get(id);
-    if (!row || row.owner !== owner)
-      throw new HttpError(404, "message not found");
-    return jsonResponse(row.outcome);
-  });
+  router.get(
+    "/api/relay/messages/{id}",
+    async (ex) => {
+      const owner = caller(ex);
+      const id = ex.params.id!;
+      if (!CLIENT_KEY_RE.test(id))
+        throw new HttpError(422, "invalid message id");
+      const row = requests.get(id);
+      if (!row || row.owner !== owner)
+        throw new HttpError(404, "message not found");
+      const wait = ex.query.wait as number;
+      if (!Number.isInteger(wait) || wait < 0 || wait > 25)
+        throw new HttpError(422, "wait must be 0–25 seconds");
+      if (wait && row.outcome.state === "pending")
+        await new Promise<void>((resolve) => {
+          const signal = ex.request.signal;
+          const done = () => {
+            clearTimeout(timer);
+            signal.removeEventListener("abort", done);
+            row.wakes.delete(done);
+            resolve();
+          };
+          const timer = setTimeout(done, wait * 1000);
+          row.wakes.add(done);
+          signal.addEventListener("abort", done, { once: true });
+          if (signal.aborted) done();
+        });
+      return jsonResponse(row.outcome);
+    },
+    {
+      query: { wait: { type: "int", default: 0 } },
+      longRunning: true,
+    },
+  );
 }

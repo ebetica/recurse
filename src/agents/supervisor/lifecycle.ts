@@ -4,6 +4,7 @@
 // Dispose the store after bounded HTTP drain; retry state stays durable.
 import { mkdir } from "node:fs/promises";
 import { backgroundWork } from "../../observability/request_timing";
+import { slowSpan } from "../../observability/slow_span";
 import { join } from "node:path";
 import {
   ERROR,
@@ -15,7 +16,7 @@ import {
 } from "../../observability/runtime_logging";
 import { STOP_GRACE_MS } from "../../process_lifecycle";
 import { HTTP_DRAIN_SECONDS } from "../../shutdown_budget";
-import { retireAll } from "../../utils/trash";
+import { retireAll } from "../../utils/trash_sweep";
 import { Cancelled, checkAbort, type TaskSet } from "../../utils/tasks";
 import type { ConversationRecord } from "../conversation_store";
 import { fenced, type HolderSnapshot } from "../mutation_guard";
@@ -62,6 +63,7 @@ export interface LifecycleDeps {
     noteProjectionStale(): void;
     noteProjectionReady(): void;
     refreshProjection(): Promise<unknown>;
+    migrateTakenOverNames(): Promise<number>;
   };
   /** conversation_store.assertNoUnimportedLegacyState over the data dir. */
   assertLegacyImported(): Promise<void>;
@@ -186,9 +188,9 @@ export class SupervisorLifecycle {
     return { ready: true, active_agents: this.activeAgentCount() };
   }
 
-  private retireResidue(names: string[], event: string): number {
+  private async retireResidue(names: string[], event: string): Promise<number> {
     const { dataDir, trashDir } = this.deps.paths;
-    const retired = retireAll(
+    const retired = await retireAll(
       names.map((name) => join(dataDir, name)),
       trashDir,
       (error) =>
@@ -204,12 +206,12 @@ export class SupervisorLifecycle {
   }
 
   /** Retire pre-log file-world residue through the trash; return the count. */
-  retireFileWorldResidue(): number {
+  retireFileWorldResidue(): Promise<number> {
     return this.retireResidue(LEGACY_FILE_WORLD_DIRS, "file_world_residue");
   }
 
   /** Retire the pre-migration on-disk process registry; return the count. */
-  retireProcessRegistryResidue(): number {
+  retireProcessRegistryResidue(): Promise<number> {
     return this.retireResidue(
       [PROCESS_REGISTRY_RESIDUE_DIR],
       "process_registry_residue",
@@ -217,7 +219,7 @@ export class SupervisorLifecycle {
   }
 
   /** Retire the BTW side-question store; return the count. */
-  retireBtwResidue(): number {
+  retireBtwResidue(): Promise<number> {
     return this.retireResidue([BTW_RESIDUE_DIR], "btw_residue");
   }
 
@@ -238,7 +240,11 @@ export class SupervisorLifecycle {
       async (signal) => {
         const started = this.deps.monotonic();
         try {
-          await backgroundWork(name, () => run(signal));
+          await backgroundWork(name, () =>
+            slowSpan(`maintenance_${name.slice(0, 64)}`, undefined, () =>
+              run(signal),
+            ),
+          );
         } catch (error) {
           rethrowCancelled(error);
           logException(this.deps.log, "maintenance_job_failed", error, {
@@ -385,11 +391,11 @@ export class SupervisorLifecycle {
       }
       checkAbort(signal);
     }
-    this.retireFileWorldResidue();
+    await this.retireFileWorldResidue();
     checkAbort(signal);
-    this.retireProcessRegistryResidue();
+    await this.retireProcessRegistryResidue();
     checkAbort(signal);
-    this.retireBtwResidue();
+    await this.retireBtwResidue();
     checkAbort(signal);
     try {
       await step("store_import", () => deps.assertLegacyImported());
@@ -414,6 +420,17 @@ export class SupervisorLifecycle {
       logEvent(log, ERROR, "projection_unestablished_no_mutations");
       return;
     }
+    try {
+      await step("migrate_taken_over_names", () =>
+        conversations.migrateTakenOverNames(),
+      );
+    } catch (error) {
+      rethrowCancelled(error);
+      logException(log, "migrate_taken_over_names_failed", error, {
+        level: WARNING,
+      });
+    }
+    checkAbort(signal);
     await step("migrate_agent_files", () =>
       fenced(() => deps.agentTemp.migrateUploads()),
     );

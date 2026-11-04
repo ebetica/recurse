@@ -93,6 +93,6 @@ export async function importPi(
       withAbortSignal(signal, context),
     );
   } finally {
-    worker.close();
+    await worker.close();
   }
 }

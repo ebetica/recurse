@@ -1,11 +1,12 @@
-// Per-agent SQLite persistence: bounded FIFO admission on the main thread;
-// batches, reads and fsyncs run in four Workers. Only the main thread enqueues.
+// Per-agent SQLite: bounded main-thread admission; four Workers own batches,
+// reads and fsyncs. Closed file sets retire through the pinned trash Worker.
 // Rejected admission never swaps projected state; flush/close/load are async.
 // Nonstandard NaN JSON is corrupt; JS normalizes integral floats and key order.
-import { existsSync, statSync } from "node:fs";
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { slowSpan } from "../observability/slow_span";
 import { pyCompactJson } from "../utils/py_compact_json";
+import { retireFileSet } from "../utils/trash_sweep";
 export { pyCompactJson } from "../utils/py_compact_json";
 
 export const MAX_PER_AGENT_OPS = 256;
@@ -66,7 +67,9 @@ class SqlitePool {
       new Worker(url),
   ) {}
   private spawn(): Slot {
-    const worker = this.createWorker(this.workerUrl);
+    const worker = slowSpan("agent_store_worker_create", undefined, () =>
+      this.createWorker(this.workerUrl),
+    );
     const slot: Slot = { worker, job: null };
     worker.onmessage = (event: MessageEvent<WorkerResponse>) => {
       const response = event.data;
@@ -168,7 +171,7 @@ export class AgentStore {
     this.now = options.now ?? (() => Date.now() / 1000);
     this.pool = new SqlitePool(
       options.workerUrl ??
-        new URL("./agent_store_worker.ts", import.meta.url).href,
+        new URL("./agent_store.worker.ts", import.meta.url).href,
       options.workerFactory,
     );
   }
@@ -180,12 +183,22 @@ export class AgentStore {
     this.checkCid(cid);
     return join(this.baseDir, `${cid}.sqlite`);
   }
-  dbPaths(cid: string): string[] {
+  async dbPaths(cid: string): Promise<string[]> {
     const path = this.dbPath(cid);
     const journal = `${path}-journal`;
-    return existsSync(journal) && statSync(journal).isFile()
-      ? [path, journal]
-      : [path];
+    try {
+      return (await stat(journal)).isFile() ? [path, journal] : [path];
+    } catch (error) {
+      if (error instanceof Error && "code" in error && error.code === "ENOENT")
+        return [path];
+      throw error;
+    }
+  }
+  /** Retire closed files while the caller keeps recreation fenced. */
+  async retireFiles(cid: string): Promise<boolean> {
+    const path = this.dbPath(cid);
+    if (!this.closed.has(cid)) return false;
+    return retireFileSet(path, [`${path}-journal`]);
   }
   async allAgentIds(): Promise<string[]> {
     try {

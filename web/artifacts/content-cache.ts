@@ -23,8 +23,9 @@ function snapshotBytes(snapshot: ArtifactContentSnapshot): number {
   return (snapshot.content?.length || 0) * 2 + 1024;
 }
 
-// Byte-bounded artifact LRU: immutable versions survive until eviction. Current
-// revisions invalidate only on mutation; rejected/oversized loads never cache.
+// Byte-bounded artifact LRU: immutable versions survive until eviction.
+// Current revisions invalidate on mutation or resumption. Failed and oversized
+// loads never cache.
 export class ArtifactContentCache {
   private readonly entries = new Map<string, CacheEntry>();
   private totalBytes = 0;

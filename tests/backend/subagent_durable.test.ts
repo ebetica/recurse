@@ -1,8 +1,8 @@
 import { afterAll, expect, test } from "bun:test";
-import { mkdtemp, rm, readdir, readFile, stat } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import * as auth from "../../src/web/request_auth";
 import { Router } from "../../src/web/router";
@@ -82,22 +82,6 @@ const exchange = [
   ["assistant", "hi there"],
 ];
 
-// Feature: #2502 reply coverage waits for the requested transcript to commit.
-test("messages prints the exchange and pages by entry-id cursors", async () => {
-  const all = await cli("messages", "c1");
-  expect(all.said).toEqual(exchange);
-  for (const row of all.rows) expect(row.ts).toBeString();
-  const [user, reply] = all.rows.map((row: any) => row.off);
-  expect(all.err).toBe(`prev: 0\nnext: ${reply + 1}\n`);
-  for (const [cursor, said, err] of [
-    ["--before", [exchange[0]], `prev: ${user}\nnext: ${reply}\n`],
-    ["--after", [exchange[1]], `prev: ${reply}\nnext: ${reply + 1}\n`],
-  ] as const) {
-    const page = await cli("messages", "c1", "--limit=1", cursor, `${reply}`);
-    expect([page.said, page.err]).toEqual([said, err]);
-  }
-});
-
 // Regression: #2837 wait must not treat a held Durable turn as idle.
 test("tail and wait print the latest exchange and wait for a running turn", async () => {
   for (const args of [["tail"], ["wait", "--timeout", "5"]]) {
@@ -129,99 +113,4 @@ test("tail and wait print the latest exchange and wait for a running turn", asyn
     ["user", "hold this turn"],
     ["assistant", "finished"],
   ]);
-});
-
-// Regression: #2863 reaped history stays readable without truncation.
-test("messages reads reaped history read-only with full entries and stable cursors", async () => {
-  world.records.c1!.tmp_key = "archive-test";
-  world.records.c1!.title = "Archived exchange";
-  const answer = "long archived answer\n".repeat(1000);
-  world.faux.setResponses([
-    fauxAssistantMessage(
-      fauxToolCall("write", { path: "archive-note.txt", content: answer }),
-      { stopReason: "toolUse" },
-    ),
-    fauxAssistantMessage(answer),
-  ]);
-  await world.host.send("c1", "archive this", "r3");
-  await (await world.host.open("c1")).conversation.waitForIdle(context);
-  world.records.side = {
-    id: "side",
-    backend: "durable",
-    side_of: "c1",
-    workdir: world.work,
-  };
-  world.faux.setResponses([fauxAssistantMessage("side-only reply")]);
-  await world.host.send("side", "side-only question", "r-side");
-  await (await world.host.open("side")).conversation.waitForIdle(context);
-  expect(
-    JSON.stringify(await world.host.transcript("side", { limit: 20 })),
-  ).toContain("side-only reply");
-  const live = await cli("messages", "c1");
-  expect(JSON.stringify(live)).not.toContain("side-only");
-  const reply = live.rows.at(-1).off;
-  const older = await cli(
-    "messages",
-    "c1",
-    "--before",
-    String(reply),
-    "--limit",
-    "1",
-  );
-  const tool = live.rows.find((row: any) => row.tool === "write" && row.args);
-  expect(await readFile(join(world.work, "archive-note.txt"), "utf8")).toBe(
-    answer,
-  );
-  expect(await world.host.retire("c1")).toBe(true);
-  conversations.discardConvProjection("c1");
-  const dir = join(
-    data,
-    "agent-archive",
-    (await world.host.archive.get("c1"))!.archive_id,
-  );
-  const snapshot = async () =>
-    Promise.all(
-      (await readdir(dir)).sort().map(async (name) => {
-        const path = join(dir, name);
-        return [
-          name,
-          (await stat(path)).mtimeMs,
-          (await readFile(path)).toString("base64"),
-        ];
-      }),
-    );
-  const before = await snapshot();
-  const archived = await cli("messages", "c1");
-  expect(archived).toEqual(live);
-  expect(
-    await cli("messages", "c1", "--before", String(reply), "--limit", "1"),
-  ).toEqual(older);
-  expect(await cli("messages", "Archived exchange")).toEqual(live);
-  expect(await cli("messages", "1")).toEqual(live);
-  expect(await cli("messages", "archexch")).toEqual(live);
-  const fullTool = await cli(
-    "messages",
-    "c1",
-    "--full",
-    "--after",
-    String(tool.off),
-    "--limit",
-    "1",
-  );
-  expect(JSON.parse(fullTool.rows[0].args)).toEqual({
-    path: "archive-note.txt",
-    content: answer,
-  });
-  const full = await cli(
-    "messages",
-    "c1",
-    "--full",
-    "--after",
-    String(reply),
-    "--limit",
-    "1",
-  );
-  expect(full.said).toEqual([["assistant", answer]]);
-  expect(full.err).toBe(`prev: ${reply}\nnext: ${reply + 1}\n`);
-  expect(await snapshot()).toEqual(before);
 });

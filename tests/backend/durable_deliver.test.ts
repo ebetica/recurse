@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, setDefaultTimeout, test } from "bun:test";
+import { Database } from "bun:sqlite";
 
 setDefaultTimeout(20_000);
 import {
@@ -7,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -27,6 +29,8 @@ import {
   SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker.ts";
 import { held, idle, testDeps, until } from "./fixtures/durable_host/host.ts";
+import { openDescriptors as descriptors } from "./fixtures/durable_sqlite/descriptors.ts";
+import { holdStoragePage } from "./fixtures/durable_sqlite/held_page.ts";
 
 type Rec = Record<string, unknown>;
 
@@ -94,18 +98,68 @@ async function requestUsers(host: DurableHost): Promise<string[]> {
     );
 }
 
+// Regression: #3055 cold page connections close before clear and shutdown.
 test("view session identity follows Durable storage across clear", async () => {
-  const { host } = hostOn(world(), [
+  let { host } = hostOn(world(), [
     fauxAssistantMessage("before clear"),
     fauxAssistantMessage("after clear"),
   ]);
+  let heldPage: ReturnType<typeof holdStoragePage> | undefined;
+  const move = Promise.withResolvers<void>();
+  let foreign: Database | undefined;
   try {
     await host.send("c1", "first", "r1");
     await until(idle(host));
     const before = await host.view("c1");
     expect((await host.view("c1")).session).toBe(before.session);
-    await host.clear("c1");
+    const deps = host.deps;
+    await host.close();
+    const identity = statSync(host.storagePath("c1"));
+    const waiting = Promise.withResolvers<void>();
+    const searchWaiting = Promise.withResolvers<void>();
+    const archiving = Promise.withResolvers<void>();
+    const waits: Record<string, unknown>[] = [];
+    host = new DurableHost({
+      ...deps,
+      log: (event, fields, level) => {
+        deps.log(event, fields, level);
+        if (event.startsWith("durable_storage_read_wait")) waits.push(fields);
+        if (event === "durable_storage_read_wait") waiting.resolve();
+        if (event === "search_rotation_wait") searchWaiting.resolve();
+      },
+    });
+    const keep = host.archive.keep.bind(host.archive);
+    host.archive.keep = async (...args) => {
+      expect(descriptors(identity)).toEqual([]);
+      archiving.resolve();
+      await move.promise;
+      const kept = await keep(...args);
+      expect(descriptors(identity)).toEqual([]);
+      return kept;
+    };
+    heldPage = holdStoragePage(host);
+    const pending = host.view("c1").then(
+      (value) => value,
+      (error) => error,
+    );
+    await heldPage.reached;
+    expect(descriptors(identity).length).toBeGreaterThan(0);
+    const clearing = host.clear("c1");
+    await waiting.promise;
+    expect(waits[0]).toMatchObject({
+      cid: "c1",
+      holders: [{ cid: "c1", page: "latest", held_ms: expect.any(Number) }],
+    });
+    heldPage.release();
+    expect((await pending).session).toBe(before.session);
+    await archiving.promise;
+    const searching = host.messageSearch.sync(host.searchTarget("c1"));
+    await searchWaiting.promise;
+    move.resolve();
+    await clearing;
+    await searching;
     await until(() => host.metadata("c1").pending_actions.length === 0);
+    expect(waits[1]).toMatchObject({ cid: "c1", wait_ms: expect.any(Number) });
     const cleared = await host.view("c1");
     expect(cleared.session).not.toBe(before.session);
     expect(cleared.blocks).toEqual([]);
@@ -113,7 +167,37 @@ test("view session identity follows Durable storage across clear", async () => {
     await until(idle(host));
     expect((await host.view("c1")).session).toBe(cleared.session);
     expect(await assistantTexts(host)).toEqual(["after clear"]);
+    const coldDeps = host.deps;
+    await host.close();
+    host = new DurableHost(coldDeps);
+    const path = host.storagePath("c1");
+    const current = statSync(path);
+    foreign = new Database(path);
+    foreign.exec("BEGIN IMMEDIATE");
+    const existing = descriptors(current).length;
+    const finishing = host.view("c1").then(
+      (value) => value,
+      (error) => error,
+    );
+    await until(() => descriptors(current).length > existing);
+    const waitsBeforeClose = waits.length;
+    let closed = false;
+    const closing = host.close().then(() => {
+      closed = true;
+    });
+    void closing.catch(() => undefined);
+    await until(() => closed || waits.length > waitsBeforeClose);
+    expect(closed).toBe(false);
+    foreign.exec("ROLLBACK");
+    foreign.close();
+    foreign = undefined;
+    expect((await finishing).session).toBe(cleared.session);
+    await closing;
+    expect(descriptors(current)).toEqual([]);
   } finally {
+    foreign?.close();
+    heldPage?.release();
+    move.resolve();
     await host.close();
   }
 });
@@ -310,7 +394,7 @@ describe("Stop", () => {
       ["r2", "queued"],
     ]);
     await raw.close(context);
-    worker.close();
+    await worker.close();
     const b = hostOn(w, [fauxAssistantMessage("second answer")]);
     try {
       await b.host.open("c1");
@@ -599,6 +683,16 @@ describe("model changes apply when no run is going (D2)", () => {
       expect(seen.join(" ")).toBe(models);
       await until(idle(host));
       settings.value = ["meta/muse-1", "off"];
+      const { conversation } = await host.open("c1");
+      await conversation.submit(
+        {
+          type: "write",
+          requestId: "trigger-model-sync",
+          entry: { kind: "recurse.note", model: [] },
+        },
+        context,
+      );
+      await until(() => logs.some((e) => e.endsWith("sync_failed")));
       const refused = await host.send("c1", "sixth", "r6").catch((e) => e);
       expect(String(refused)).toContain(
         "Model meta/muse-1 is unavailable. Pick another effort level in the model picker, or fix its model in Settings > Effort ladder.",

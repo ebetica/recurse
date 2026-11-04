@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { EventEmitter, once } from "node:events";
 import { join } from "node:path";
+import { mkdir } from "node:fs/promises";
 import type { Page, Route } from "playwright";
 import {
   captureErrors,
@@ -11,6 +12,7 @@ import {
   rootAgentId,
   runBrowserTests,
   type BrowserTest,
+  startNewAgent,
 } from "./common";
 
 async function waitValue(
@@ -158,6 +160,9 @@ export const tests: BrowserTest[] = [
     await page
       .locator(".msg.assistant .content", { hasText: "Parent ready" })
       .waitFor();
+    await page
+      .getByRole("button", { name: /^View activity token usage:/ })
+      .waitFor();
     await input.fill("/btw Reply only Side answer");
     await input.press("Enter");
     const pane = page.locator('.pane-col[data-pane="side"]');
@@ -166,11 +171,11 @@ export const tests: BrowserTest[] = [
     await side
       .locator(".msg.assistant .content", { hasText: "Side answer" })
       .waitFor();
-    expect(
-      await side
-        .locator(".msg.assistant .content", { hasText: "Parent ready" })
-        .count(),
-    ).toBe(1);
+    const parentReply = side.locator(".msg.assistant .content", {
+      hasText: "Parent ready",
+    });
+    await parentReply.waitFor();
+    expect(await parentReply.count()).toBe(1);
     expect(await side.locator("#sidebar").isVisible()).toBe(false);
     expect(await frames.count()).toBe(1);
     expect(boots).toHaveLength(1);
@@ -298,6 +303,9 @@ export const tests: BrowserTest[] = [
     await phoneSide
       .locator(".msg.assistant .content", { hasText: "Second side answer" })
       .waitFor();
+    expect(await phoneSide.locator("#input").isVisible()).toBeTrue();
+    expect(await phoneSide.locator("#menu-btn").isVisible()).toBeFalse();
+    expect(await phoneSide.locator("#pane-fab").isVisible()).toBeFalse();
     await phoneSide
       .locator("#scroll")
       .evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
@@ -719,7 +727,7 @@ export const tests: BrowserTest[] = [
     expect(await staleRow(bulk).count()).toBe(0);
     viewMode = "pass";
     const eventsResponse = page.waitForResponse(
-      `${base}api/conversations/${cid}/events`,
+      `${base}api/conversations/${cid}/events?*`,
     );
     const focusedRead = page.waitForResponse(
       (r) =>
@@ -809,6 +817,78 @@ export const tests: BrowserTest[] = [
     ).toBeTrue();
     expect(errors).toEqual([]);
     await context.close();
+  },
+  async function test_phone_list_is_root_and_conversations_replace(
+    browser,
+    base,
+  ) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 915 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    await routeLinkTree(page, base, () => linkNodes("main", "branch", "leaf"));
+    await page.goto(`${base}?before-phone`);
+    await page.locator("#sidebar.open .agent").first().waitFor();
+    await page.goto(base);
+    await page.locator("#sidebar.open .agent").first().waitFor();
+    expect(page.url()).toBe(base);
+    expect(await page.locator("#input").isVisible()).toBeFalse();
+    expect(await page.locator("#new-list").isVisible()).toBeTrue();
+    expect(await page.locator("#settings-btn").isVisible()).toBeTrue();
+    const shots = process.env.RECURSE_SCREENSHOT_DIR;
+    if (shots) {
+      await mkdir(shots, { recursive: true });
+      await page.screenshot({ path: join(shots, "phone-list.png") });
+    }
+    await page.locator('.agent[data-id="main"]').click();
+    await page.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
+    expect(await page.locator("#new-top").isVisible()).toBeTrue();
+    expect(await page.locator("#phone-nav").count()).toBe(0);
+    if (shots)
+      await page.screenshot({ path: join(shots, "phone-conversation.png") });
+    await page.locator("#pane-fab").click();
+    if (shots) await page.screenshot({ path: join(shots, "phone-more.png") });
+    expect(
+      await page.locator("#settings-menu-btn, #new-agent-menu-btn").count(),
+    ).toBe(0);
+    await page.goBack();
+    await page.locator("#sidebar.open").waitFor();
+    expect(await page.locator("#pane-menu.on").count()).toBe(0);
+    expect(page.url()).toBe(base);
+    await page.locator('.agent[data-id="main"]').click();
+    await page.locator("#menu-btn").click();
+    await page.locator("#sidebar.open").waitFor();
+    await page.goBack();
+    expect(page.url()).toBe(`${base}?before-phone`);
+    await page.goto(`${base}#agent=leaf`);
+    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
+    await page.locator("#up-top").click();
+    await page.locator("#conv-title", { hasText: "Branch agent" }).waitFor();
+    await page.locator("#up-top").click();
+    await page.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
+    await page.goBack();
+    await page.locator("#sidebar.open").waitFor();
+    expect(page.url()).toBe(base);
+    await page.goto(`${base}#agent=leaf`);
+    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
+    await page.reload();
+    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
+    await page.goBack();
+    await page.locator("#sidebar.open").waitFor();
+    expect(page.url()).toBe(base);
+    await page.locator('.agent[data-id="main"]').click();
+    await page.setViewportSize({ width: 1280, height: 915 });
+    await page.locator('.agent[data-id="branch"]').click();
+    await page.locator('.agent[data-id="leaf"]').click();
+    await page.setViewportSize({ width: 412, height: 915 });
+    await page.locator("#menu-btn").click();
+    await page.locator("#sidebar.open").waitFor();
+    expect(page.url()).toBe(base);
+    expect(errors).toEqual([]);
+    await closeWithRoutes(context);
   },
   async function test_agent_link_opens_that_agent_and_follows_the_selection(
     browser,
@@ -1044,7 +1124,7 @@ export const tests: BrowserTest[] = [
     });
     await treeHeld;
     expect(gate.held.length).toBeGreaterThan(0);
-    await page2.locator("#new-top").click();
+    await startNewAgent(page2);
     await page2.waitForFunction("location.hash === ''");
     expect((await page2.evaluate("document.activeElement.id")) as string).toBe(
       "input",
@@ -1059,11 +1139,10 @@ export const tests: BrowserTest[] = [
       .locator('.agent[data-id="main"]')
       .waitFor({ state: "attached" });
     await page2.locator(".agent.draft-row").waitFor({ state: "attached" });
+    await page2.locator("#input").blur();
     await page2.locator("#menu-btn").click();
     await page2.locator('.agent[data-id="main"]').waitFor();
-    await page2.waitForFunction(
-      "document.activeElement === document.querySelector('#shortcut-pane > summary')",
-    );
+    await page2.locator("#sidebar.open").waitFor();
     expect(
       await page2
         .locator('.agent[data-id="main"]')
@@ -1072,16 +1151,14 @@ export const tests: BrowserTest[] = [
     expect(await page2.locator('.agent[data-id="branch"]').count()).toBe(0);
     expect(await page2.locator(".agent.draft-row").count()).toBe(1);
     expect(
-      await page2.evaluate(
-        "document.activeElement === document.querySelector('#shortcut-pane > summary')",
-      ),
+      await page2.locator("#main").evaluate((el) => (el as any).inert),
     ).toBeTrue();
     expect(page2.url()).toBe(prefixed);
+    await page2.locator('.agent[data-id="main"]').click();
+    await page2.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
     await page2.goBack();
-    await page2
-      .locator("#messages", { hasText: "Leaf agent thread body" })
-      .waitFor();
-    expect(page2.url()).toBe(`${prefixed}#agent=leaf`);
+    await page2.locator("#sidebar.open").waitFor();
+    expect(page2.url()).toBe(prefixed);
     expect(errors).toEqual([]);
     await closeWithRoutes(context);
   },

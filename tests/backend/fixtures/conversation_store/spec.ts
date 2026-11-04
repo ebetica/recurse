@@ -16,8 +16,8 @@ export interface ConversationCase {
   cid?: string;
   title?: string;
   title_order?: string;
-  pinned_update?: ConversationRecord;
-  stale_pinned?: ConversationRecord;
+  taken_over_update?: ConversationRecord;
+  stale_taken_over?: ConversationRecord;
   model_update?: ConversationRecord;
   volatile?: ConversationRecord;
   pending_update?: ConversationRecord;

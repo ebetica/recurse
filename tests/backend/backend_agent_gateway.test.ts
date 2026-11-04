@@ -25,11 +25,12 @@ test("local agents cannot change operator settings or authentication", async () 
   );
   const request = (path: string, init: RequestInit = {}) =>
     fetch(server.url + path, { redirect: "manual", ...init });
+  let sessionCookie = "";
   const operator = (path: string, init: RequestInit = {}) =>
     request(path, {
       ...init,
       headers: {
-        "x-loopback-token": token,
+        cookie: sessionCookie,
         "content-type": "application/json",
         ...init.headers,
       },
@@ -37,15 +38,33 @@ test("local agents cannot change operator settings or authentication", async () 
   const snapshot = async () =>
     Promise.all(
       ["/api/settings/theme", "/api/settings/mcp-servers", "/api/pi/auth"].map(
-        async (path) => (await operator(path)).text(),
+        async (path) => {
+          const response = await operator(path);
+          expect(response.status).toBe(200);
+          return response.text();
+        },
       ),
     );
   try {
     await until(() => app.instance.lifecycle.readinessSnapshot().ready);
+    const session = await request("/login", {
+      method: "POST",
+      body: new URLSearchParams({ password: PASSWORD }),
+    });
+    expect(session.status).toBe(303);
+    sessionCookie = session.headers.get("set-cookie")!.split(";")[0]!;
     const caller = String(
       (await app.instance.create.create({ title: "Caller" })).id,
     );
     const before = await snapshot();
+    expect(
+      (
+        await request("/api/settings/theme", {
+          headers: { "x-loopback-token": token },
+        })
+      ).status,
+    ).toBe(403);
+    expect(await snapshot()).toEqual(before);
     for (const markers of [
       [caller],
       [""],
@@ -201,34 +220,17 @@ test("agent CLI creates and manages a connected remote agent", async () => {
   }
   const servers = await Promise.all(apps.map((app) => app.serve({ port: 0 })));
   let offlineTrap: ReturnType<typeof Bun.serve> | undefined;
-  let holdStreams = false;
   const ingress = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     async fetch(request) {
       const url = new URL(request.url);
-      const response = await fetch(
-        servers[1]!.url + url.pathname + url.search,
-        {
-          method: request.method,
-          headers: request.headers,
-          body: request.body ? await request.arrayBuffer() : undefined,
-          signal: request.signal,
-        },
-      ).catch(() => new Response(null, { status: 502 }));
-      if (!holdStreams || !url.pathname.endsWith("/events") || !response.ok)
-        return response;
-      const bytes = new Uint8Array(await response.arrayBuffer());
-      const headers = new Headers(response.headers);
-      headers.delete("content-length");
-      return new Response(
-        new ReadableStream({
-          start(controller) {
-            controller.enqueue(bytes);
-          },
-        }),
-        { headers },
-      );
+      return fetch(servers[1]!.url + url.pathname + url.search, {
+        method: request.method,
+        headers: request.headers,
+        body: request.body ? await request.arrayBuffer() : undefined,
+        signal: request.signal,
+      }).catch(() => new Response(null, { status: 502 }));
     },
   });
   const token = await publishLoopbackToken(
@@ -245,6 +247,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       headers: {
         "x-loopback-token": token,
         "x-recurse-agent": caller,
+        "x-recurse-bundled-tool": "subagent",
         ...init?.headers,
       },
     });
@@ -288,8 +291,12 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       "not-an-agent",
     );
     const rejectedCallers: Record<string, string>[] = [
-      { "x-loopback-token": token },
-      { "x-loopback-token": token, "x-recurse-agent": "missing-agent" },
+      { "x-loopback-token": token, "x-recurse-bundled-tool": "subagent" },
+      {
+        "x-loopback-token": token,
+        "x-recurse-agent": "missing-agent",
+        "x-recurse-bundled-tool": "subagent",
+      },
       { authorization: `Bearer ${homeKey.key}`, "x-recurse-agent": caller },
     ];
     for (const rejected of rejectedCallers) {
@@ -368,9 +375,9 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     const heldId = takenOver.stdout.match(/[a-f0-9]{12}/)![0];
     expect(home.conversations.load(heldId)).toMatchObject({
       parent: caller,
-      pinned: true,
+      taken_over: true,
       muted: true,
-      pinned_order: expect.any(String),
+      taken_over_order: expect.any(String),
     });
     const opened = await home.durable.open(heldId);
     await until(
@@ -394,47 +401,64 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       "User has taken control",
     );
     const heldState = home.conversations.load(heldId)!;
+    const takeOverCalls = [
+      ["take-over", "taken_over", false],
+      ["pin", "pinned", true],
+    ] as const;
     for (const markers of [
       [caller],
       ["invalid,marker"],
       [""],
       [caller, caller],
     ]) {
-      for (const pinned of [false, true]) {
+      for (const [route, key, value] of takeOverCalls) {
         const headers = new Headers({
           "x-loopback-token": token,
           "content-type": "application/json",
         });
         for (const marker of markers) headers.append("x-recurse-agent", marker);
         const denied = await fetch(
-          `${homeUrl}/api/conversations/${heldId}/pin`,
+          `${homeUrl}/api/conversations/${heldId}/${route}`,
           {
             method: "POST",
             headers,
-            body: JSON.stringify({ pinned }),
+            body: JSON.stringify({ [key]: value }),
           },
         );
         expect(denied.status).toBe(403);
         expect(home.conversations.load(heldId)).toMatchObject({
-          pinned: heldState.pinned,
+          taken_over: heldState.taken_over,
           muted: heldState.muted,
-          pinned_order: heldState.pinned_order,
+          taken_over_order: heldState.taken_over_order,
         });
       }
     }
-    for (const pinned of [false, true]) {
+    for (const [route, key, value] of takeOverCalls) {
       const allowed = await fetch(
-        `${homeUrl}/api/conversations/${heldId}/pin`,
+        `${homeUrl}/api/conversations/${heldId}/${route}`,
         {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pinned }),
+          body: JSON.stringify({ [key]: value }),
         },
       );
       expect(allowed.status).toBe(200);
+      expect(await allowed.json()).toEqual({ id: heldId, [key]: value });
       expect(home.conversations.load(heldId)).toMatchObject({
-        pinned,
-        muted: pinned,
+        taken_over: value,
+        muted: value,
+      });
+      const read = await fetch(`${homeUrl}/api/conversations/${heldId}`);
+      expect(await read.json()).toMatchObject({
+        taken_over: value,
+        pinned: value,
+      });
+      const tree = (await (await fetch(`${homeUrl}/api/tree`)).json()) as {
+        id: string;
+      }[];
+      expect(tree.find((row) => row.id === heldId)).toMatchObject({
+        taken_over: value,
+        pinned: value,
       });
     }
     fixture.faux.setResponses([
@@ -457,9 +481,9 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     );
     expect(home.conversations.load(siblingId)).toMatchObject({
       parent: null,
-      pinned: true,
+      taken_over: true,
       muted: true,
-      pinned_order: expect.any(String),
+      taken_over_order: expect.any(String),
     });
     fixture.faux.setResponses([fauxAssistantMessage("Remote gateway reply")]);
     const created = await cli(
@@ -481,6 +505,75 @@ test("agent CLI creates and manages a connected remote agent", async () => {
         "Remote gateway reply",
       ),
     );
+    const v1 = `v1/agents/${cid}`;
+    for (const path of [
+      "v1/version",
+      "v1/schema",
+      "v1/agents",
+      v1,
+      `${v1}/idle`,
+      `${v1}/messages`,
+    ])
+      expect((await gateway(path)).status).toBe(200);
+    for (const path of [
+      "v1extra/version",
+      "v1/agents/anything/safety",
+      "v1/agents/anything/messages/extra",
+    ])
+      expect((await gateway(path)).status).toBe(403);
+    expect((await gateway(`${v1}/messages`, { method: "DELETE" })).status).toBe(
+      403,
+    );
+    expect(
+      (
+        await fetch(`${servers[1]!.url}/api/v1extra/version`, {
+          headers: { authorization: `Bearer ${remoteKey.key}` },
+        })
+      ).status,
+    ).toBe(403);
+    for (const [text, headers, expected] of [
+      ["proxied v1", null, `${caller}@`],
+      [
+        "marked v1",
+        {
+          authorization: `Bearer ${remoteKey.key}`,
+          "x-recurse-agent-caller": caller,
+          "x-recurse-agent": cid,
+        },
+        `${caller}@home-agent`,
+      ],
+      [
+        "unmarked v1",
+        { authorization: `Bearer ${remoteKey.key}`, "x-recurse-agent": cid },
+        null,
+      ],
+    ] as const) {
+      await until(() => remote.durable.metadata(cid).status === "idle");
+      fixture.faux.setResponses([fauxAssistantMessage(`reply to ${text}`)]);
+      const init = {
+        method: "POST",
+        headers: { "content-type": "application/json", ...headers },
+        body: JSON.stringify({ text }),
+      };
+      const sent = headers
+        ? await fetch(`${servers[1]!.url}/api/${v1}/messages`, init)
+        : await gateway(`${v1}/messages`, init);
+      expect(sent.status).toBe(200);
+      await until(async () =>
+        JSON.stringify(await remote.durable.view(cid)).includes(
+          `reply to ${text}`,
+        ),
+      );
+      const page = (await (
+        await gateway(`${v1}/messages?full=true`)
+      ).json()) as { messages: { kind: string; text: string | null }[] };
+      const message = page.messages.find(
+        (m) => m.kind === "user" && m.text?.includes(text),
+      )!;
+      expect(message).toBeDefined();
+      if (expected) expect(message.text).toContain(expected);
+      else expect(message.text).not.toContain(cid);
+    }
     const stored = remote.conversations.load(cid)!;
     expect(stored.parent).toBeNull();
     expect(stored.workdir).toBe(worlds[1]!.env.CHAT_REPO_URL);
@@ -493,7 +586,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     ]) {
       const result = await cli(...args);
       expect(result).toMatchObject({ code: 0 });
-      expect(result.stdout).toContain("Remote gateway reply");
+      expect(result.stdout).toContain("reply to unmarked v1");
       expect(result.stdout + result.stderr).not.toContain("recurse-link_");
     }
     const local = await cli("tail", caller);
@@ -525,7 +618,6 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       controller: AbortController;
       reader: Pick<ReadableStreamDefaultReader<Uint8Array>, "read" | "cancel">;
     }[] = [];
-    holdStreams = true;
     try {
       for (let i = 0; i < 16; i++) {
         const controller = new AbortController();
@@ -546,7 +638,6 @@ test("agent CLI creates and manages a connected remote agent", async () => {
         return response.status === 200;
       });
     } finally {
-      holdStreams = false;
       for (const { controller, reader } of streams) {
         controller.abort();
         await reader.cancel().catch(() => {});
@@ -566,28 +657,28 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     expect(JSON.stringify(await remote.durable.view(cid))).not.toContain(
       "Must be interrupted",
     );
-    await remote.create.setPinned(cid, true);
+    await remote.create.setTakenOver(cid, true);
     expect((await cli("rm", target!)).code).not.toBe(0);
-    expect(remote.conversations.load(cid)!.pinned).toBe(true);
+    expect(remote.conversations.load(cid)!.taken_over).toBe(true);
     expect(
       (
-        await gateway(`conversations/${cid}/pin`, {
+        await gateway(`conversations/${cid}/take-over`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ pinned: false }),
+          body: JSON.stringify({ taken_over: false }),
         })
       ).status,
     ).toBe(403);
-    await remote.create.setPinned(cid, false);
+    await remote.create.setTakenOver(cid, false);
     const child = await remote.create.create({
       parent: cid,
       title: "Operator child",
     });
-    await remote.create.setPinned(String(child.id), true);
+    await remote.create.setTakenOver(String(child.id), true);
     expect((await cli("rm", target!)).code).not.toBe(0);
     expect(remote.conversations.load(cid)!.status).not.toBe("deleting");
-    expect(remote.conversations.load(String(child.id))!.pinned).toBe(true);
-    await remote.create.setPinned(String(child.id), false);
+    expect(remote.conversations.load(String(child.id))!.taken_over).toBe(true);
+    await remote.create.setTakenOver(String(child.id), false);
     const removed = await cli("rm", target!);
     expect(removed.code).toBe(0);
     await until(() => !remote.conversations.load(cid));
@@ -601,7 +692,11 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     expect(operatorOpen.status).toBe(200);
     await operatorOpen.body?.cancel();
     const open = await fetch(homeUrl + "/api/backends/Open/tree", {
-      headers: { "x-loopback-token": token, "x-recurse-agent": caller },
+      headers: {
+        "x-loopback-token": token,
+        "x-recurse-agent": caller,
+        "x-recurse-bundled-tool": "subagent",
+      },
     });
     expect(open.status).toBe(403);
     expect(await open.text()).toContain("requires a backend key");

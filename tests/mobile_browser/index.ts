@@ -6,7 +6,6 @@ import { tests as themes } from "./test_themes";
 import { tests as layoutWait } from "./test_layout_wait";
 import { tests as changes } from "./test_changes_expand";
 import { tests as header } from "./test_header";
-import { tests as interactionTiming } from "./test_interaction_timing";
 import { tests as activeAgents } from "./test_active_agents";
 import { tests as paneChrome } from "./test_pane_chrome";
 import { tests as paneHotkeys } from "./test_pane_hotkeys";
@@ -45,6 +44,7 @@ import { tests as threadFocus } from "./test_thread_focus";
 import { tests as messageMarkdown } from "./test_message_markdown";
 import { tests as imageDrawing } from "./test_image_drawing";
 import { tests as imageBoxCrops } from "./test_image_box_crops";
+import { tests as http } from "./test_http";
 import { tests as modelResponse } from "./test_model_response";
 import { tests as providerReplay } from "./test_provider_replay";
 import { tests as imageSwipe } from "./test_image_swipe";
@@ -58,7 +58,6 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["remote-sidebar", remoteSidebar],
   ["themes", themes],
   ["layout-wait", layoutWait],
-  ["interaction-timing", interactionTiming],
   ["header", header],
   ["active-agents", activeAgents],
   ["pane-chrome", paneChrome],
@@ -97,6 +96,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["message-markdown", messageMarkdown],
   ["image-drawing", imageDrawing],
   ["image-box-crops", imageBoxCrops],
+  ["http", http],
   ["image-swipe", imageSwipe],
   ["thread-edges", threadEdges],
   ["durable", durable],

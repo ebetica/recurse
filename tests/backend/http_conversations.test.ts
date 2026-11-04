@@ -1,14 +1,18 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { Database } from "bun:sqlite";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { fauxHost, until } from "./fixtures/durable_host/host";
+import { DurableHost } from "../../src/agents/durable/host";
+import { DurableViews } from "../../src/agents/durable/durable_rows";
 import { captureFixture } from "./fixture_subprocess";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { ExternalKeyConflict } from "../../src/agents/conversation_store";
 import { TreeLifecycleBusy } from "../../src/agents/mutation_guard";
 import { CreateSlots } from "../../src/web/conversations";
+import { logger } from "../../src/observability/runtime_logging";
 import { exchange, normalise, requestBytes } from "./http_corpus";
 
 import {
@@ -98,6 +102,153 @@ test("diff follows an agent chdir into another worktree", async () => {
       expect(JSON.stringify(got.body)).toContain("chdir-only.txt");
       expect(JSON.stringify(got.body)).toContain("target worktree change");
     }
+  } finally {
+    await built.running.close();
+    await host.close();
+  }
+});
+
+test("idle history loads over HTTP without opening a runtime, then a message runs", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "http-cold-view-"));
+  dirs.push(dir);
+  const seeded = fauxHost(dir);
+  const conv = { ...seeded.records.c1, id: "conv-a" };
+  seeded.records["conv-a"] = conv;
+  const path = seeded.host.storagePath("conv-a");
+  await mkdir(dirname(path), { recursive: true });
+  new Database(path, { create: true }).close();
+  expect((await seeded.host.view("conv-a")).blocks).toEqual([]);
+  seeded.faux.setResponses([fauxAssistantMessage("stored reply")]);
+  await seeded.host.send("conv-a", "old question", "old-message");
+  await until(
+    async () =>
+      seeded.host.runningCount() === 0 &&
+      seeded.host.metadata("conv-a").pending.length === 0 &&
+      JSON.stringify(await seeded.host.view("conv-a")).includes("stored reply"),
+  );
+  await seeded.host.close();
+  const events: string[] = [];
+  const reached = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  let environments = 0;
+  const host = new DurableHost({
+    ...seeded.host.deps,
+    agentEnv: async (record) => {
+      environments += 1;
+      reached.resolve();
+      await release.promise;
+      return seeded.host.deps.agentEnv(record);
+    },
+    log: (event) => events.push(event),
+  });
+  const built = await app({
+    patch: (deps, world) => {
+      world.convs.set("conv-a", conv);
+      Object.assign(deps, { durable: host });
+      deps.reads.readViewWindow = (cid, options) => host.view(cid, options);
+      deps.delivery.deliver = (cid, content) =>
+        host.send(cid, content, "new-message");
+    },
+  });
+  try {
+    const first = await send(
+      built.running.port,
+      "GET",
+      "/api/conversations/conv-a/view",
+    );
+    expect(first.status).toBe(200);
+    expect(JSON.stringify(first.body)).toContain("stored reply");
+    expect(host.opened.has("conv-a")).toBe(false);
+    expect(environments).toBe(0);
+    expect(events).toEqual(["durable_view_storage"]);
+    seeded.faux.setResponses([fauxAssistantMessage("new reply")]);
+    const delivered = send(
+      built.running.port,
+      "POST",
+      "/api/conversations/conv-a/deliver",
+      [["Content-Type", "application/json"]],
+      JSON.stringify({ content: "new question" }),
+    );
+    await reached.promise;
+    const during = await send(
+      built.running.port,
+      "GET",
+      "/api/conversations/conv-a/view",
+    );
+    expect(during.status).toBe(200);
+    expect(JSON.stringify(during.body)).toContain("stored reply");
+    expect(events).not.toContain("durable_open");
+    release.resolve();
+    expect((await delivered).status).toBe(200);
+    await until(async () =>
+      JSON.stringify(await host.view("conv-a")).includes("new reply"),
+    );
+    expect(host.opened.has("conv-a")).toBe(true);
+    expect(environments).toBe(1);
+    expect(events).toContain("durable_open");
+  } finally {
+    release.resolve();
+    await built.running.close();
+    await host.close();
+  }
+});
+
+// Regression: #3005 paging older rows must not turn the next live poll into a reset.
+test("view polls exclude paged history and still deliver live rows", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "view-history-"));
+  dirs.push(dir);
+  const { host, faux, records } = fauxHost(dir);
+  const pageSize = 2;
+  const historyTurns = 4;
+  host.views = new DurableViews(undefined, pageSize);
+  const built = await app({
+    patch: (deps, world) => {
+      records["conv-a"] = { ...world.load("conv-a")!, backend: "durable" };
+      deps.reads.readViewWindow = (cid, options) => host.view(cid, options);
+    },
+  });
+  const read = async (query: string) => {
+    const response = await fetch(
+      `http://127.0.0.1:${built.running.port}/api/conversations/conv-a/view?limit=${pageSize}&${query}`,
+    );
+    expect(response.status).toBe(200);
+    return (await response.json()) as {
+      revision: number;
+      instance_id: string;
+      blocks: { id: string; text: string }[];
+      older: boolean;
+      reset: boolean;
+    };
+  };
+  const say = async (n: number) => {
+    faux.setResponses([fauxAssistantMessage(`Answer ${n}`)]);
+    await host.send("conv-a", `Question ${n}`, `history-${n}`);
+    await until(
+      () =>
+        host.runningCount() === 0 &&
+        host.metadata("conv-a").pending.length === 0,
+    );
+  };
+  try {
+    for (let n = 0; n < historyTurns; n++) await say(n);
+    const initial = await read("");
+    let older = initial;
+    for (let n = 0; n < 2; n++) {
+      expect(older.older).toBe(true);
+      older = await read(`before=${encodeURIComponent(older.blocks[0].id)}`);
+    }
+    const query = `since=${initial.revision}&instance=${initial.instance_id}`;
+    const quiet = await read(query);
+    expect(quiet.reset).toBe(false);
+    expect(quiet.revision).toBe(initial.revision);
+    expect(quiet.blocks).toEqual([]);
+    await say(historyTurns);
+    const live = await read(query);
+    expect(live.reset).toBe(false);
+    expect(live.blocks.map((row) => row.text)).toEqual([
+      `Question ${historyTurns}`,
+      `Answer ${historyTurns}`,
+    ]);
   } finally {
     await built.running.close();
     await host.close();
@@ -271,7 +422,7 @@ describe("service create bind phase", () => {
 });
 
 describe("events", () => {
-  test("SSE is never compressed and lifts the idle timeout", async () => {
+  test("SSE is gzip-compressed and lifts the idle timeout", async () => {
     const built = await app();
     try {
       const got = await send(
@@ -283,7 +434,7 @@ describe("events", () => {
           ["Last-Event-ID", "big"],
         ],
       );
-      expect(got.headers["content-encoding"]).toBeUndefined();
+      expect(got.headers["content-encoding"]).toBe("gzip");
       expect(got.headers["content-type"]).toBe(
         "text/event-stream; charset=utf-8",
       );
@@ -291,6 +442,49 @@ describe("events", () => {
       await built.running.close();
     }
   });
+});
+
+// Regression: #2989 a per-switch query string made every revisit a full read.
+test("a timed switch read logs its trace and revalidates on a revisit", async () => {
+  const messages: string[] = [];
+  const built = await app({
+    patch: (deps) =>
+      Object.assign(deps, {
+        log: logger("web", {
+          write: (record) => messages.push(record.message),
+        }),
+      }),
+  });
+  try {
+    const url = `http://127.0.0.1:${built.running.port}/api/conversations/conv-a?focused=1`;
+    const trace = "0123456789abcdef0123456789abcdef";
+    const timed = {
+      "x-recurse-trace": trace,
+      "x-recurse-client-dispatch-ms": "4.500",
+    };
+    const first = await fetch(url, { headers: timed });
+    expect(first.status).toBe(200);
+    expect(first.headers.get("x-recurse-switch-trace")).toBe(trace);
+    await first.arrayBuffer();
+    const revisit = await fetch(url, {
+      headers: { ...timed, "if-none-match": first.headers.get("etag")! },
+    });
+    expect(revisit.status).toBe(304);
+    const untimed = await fetch(url, {
+      headers: { "x-recurse-trace": trace },
+    });
+    expect(untimed.headers.get("x-recurse-switch-trace")).toBeNull();
+    await untimed.arrayBuffer();
+    expect(
+      messages.filter((m) => m.includes("switch_request_started")),
+    ).toEqual(
+      Array(2).fill(
+        `event=conversation_switch_request_started client_dispatch_ms=4.500 trace_id=${trace}`,
+      ),
+    );
+  } finally {
+    await built.running.close();
+  }
 });
 
 test("the safety toggle leaves the running turn's state alone", async () => {

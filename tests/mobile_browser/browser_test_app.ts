@@ -1,3 +1,4 @@
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import { SET_MODEL_MARKER } from "../../src/agents/conversation_store";
 import { randomUUID } from "node:crypto";
 import { deflateSync } from "node:zlib";
@@ -60,12 +61,19 @@ const imageBytes = (value: Uint8Array): ImageBytes =>
 function navigationPng(
   background: [number, number, number],
   digit: number,
+  noisy = false,
 ): ImageBytes {
   const width = 800;
   const height = 500;
   const pixels = new Uint8Array(width * height * 3);
+  let seed = digit;
+  const jitter = () =>
+    (seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 26;
   for (let offset = 0; offset < pixels.length; offset += 3)
-    pixels.set(background, offset);
+    pixels.set(
+      noisy ? background.map((value) => value + jitter()) : background,
+      offset,
+    );
   const segments: Record<string, [number, number, number, number]> = {
     a: [280, 80, 520, 125],
     b: [480, 110, 525, 240],
@@ -81,15 +89,6 @@ function navigationPng(
     for (let y = y1; y < y2; y++)
       pixels.fill(255, (y * width + x1) * 3, (y * width + x2) * 3);
   }
-  const crc32 = (bytes: Uint8Array): number => {
-    let crc = 0xffffffff;
-    for (const byte of bytes) {
-      crc ^= byte;
-      for (let bit = 0; bit < 8; bit++)
-        crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
-    }
-    return (crc ^ 0xffffffff) >>> 0;
-  };
   const concatBytes = (...parts: Uint8Array[]): ImageBytes => {
     const result = new Uint8Array(
       parts.reduce((total, part) => total + part.length, 0),
@@ -115,7 +114,7 @@ function navigationPng(
     };
     writeU32(0, data.length);
     result.set(body, 4);
-    writeU32(body.length + 4, crc32(body));
+    writeU32(body.length + 4, Bun.hash.crc32(body));
     return imageBytes(result);
   };
   const scanlines = new Uint8Array((width * 3 + 1) * height);
@@ -306,6 +305,9 @@ const recordedRuns = new Map<
   };
 }
 let durableGate: () => void = () => undefined;
+const scrollPinGates: Array<() => void> = [];
+let releaseLivePublication: () => Promise<void> = async () => undefined;
+let advanceLivePublication: () => Promise<void> = async () => undefined;
 
 async function createDurable(cid: string, title: string, model: string) {
   durableModel.set(cid, model);
@@ -669,6 +671,12 @@ let imageNavigationFixture: Json | null = null;
 let autoOpenDraft = 0;
 
 const routes: Record<string, (request: Request) => Promise<Json>> = {
+  "subscription-token-urls": async (request) => {
+    const urls = (await request.json()) as { claude: string; chatgpt: string };
+    instance.anthropic.options.tokenUrl = urls.claude;
+    instance.codex.options.tokenUrl = urls.chatgpt;
+    return {};
+  },
   "seed-shared-trees": async () => {
     const ids = Array.from({ length: 6 }, () => hex(12));
     for (const [index, id] of ids.entries())
@@ -725,6 +733,43 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     }
     return { operator_message_at: operatorAt };
   },
+  "seed-sidebar-sections": async () => {
+    const now = Date.now() / 1000;
+    const rows = {
+      fresh: ["Fresh idle", now - 60, "idle"],
+      stale: ["Stale idle", now - 3 * 86400, "idle"],
+      busy: ["Busy worker", now - 5, "running"],
+      archived: ["Archived earlier", now - 7200, "idle"],
+    } as const;
+    const ids: Record<string, string> = {};
+    for (const [key, [title, updated, status]] of Object.entries(rows)) {
+      ids[key] = `sections-${key}-${hex(6)}`;
+      await create(ids[key], title, null);
+      await save({ ...load(ids[key])!, updated, status });
+    }
+    const child = `sections-child-${hex(6)}`;
+    await create(child, "PR child", ids.fresh);
+    await conversations.updatePrs(child, () => [
+      {
+        repo: "ebetica/recurse-dev",
+        number: 42,
+        url: "https://github.com/ebetica/recurse-dev/pull/42",
+        title: "Sidebar fixture",
+        state: "open",
+        checks: "pass",
+        source: "created",
+        detected_at: now,
+      },
+    ]);
+    ids.child = child;
+    ids.grandchild = `sections-grandchild-${hex(6)}`;
+    await create(ids.grandchild, "PR grandchild", child);
+    return ids;
+  },
+  "save-sidebar-script": async (request) => {
+    const { script, by } = (await request.json()) as Record<string, string>;
+    return { sections: await instance.sidebarScript.set(script!, by!) };
+  },
   "seed-pane-reading": async () => {
     const context = {
       artifactsDir: instance.config.paths.ARTIFACTS_DIR,
@@ -743,14 +788,11 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     await Bun.write(join(String(item.repo_path), "index.md"), content);
     await artifacts.publish(context, rootAgentId(), String(item.id));
     const conv = load(rootAgentId())!;
-    await seedPiSession(conv, [
-      piAssistant(
-        "reading-link",
-        `[Reading document](#artifact=${item.id})`,
-        null,
-      ),
-    ]);
-    await save(conv);
+    await appendNative(
+      conv,
+      "Show the reading document.",
+      `[Reading document](#artifact=${item.id})`,
+    );
     const demo = "pane-reading-files";
     if (!load(demo)) await create(demo, "Reading files", rootAgentId());
     for (const draft of [1, 2, 3])
@@ -797,13 +839,11 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     await seedPiSession(conv, [
       piAssistant("artifact-link", `[Browser app](#artifact=${item.id})`, null),
     ]);
-    await save(conv);
     const sourceId = "artifact-link-source";
     if (!load(sourceId)) await create(sourceId, "Artifact links", owner);
     const source = load(sourceId)!;
     const shared = `[Shared](#agent=${owner}&artifact=${item.id})`;
     await seedPiSession(source, [piAssistant("shared-link", shared, null)]);
-    await save(source);
     return { ...published, cwd: repo };
   },
   "revise-artifact-app": async (request) => {
@@ -850,6 +890,143 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     }
     return { checkout: "pr-checkout", plain: "pr-plain" };
   },
+  "seed-pr-links": async () => {
+    const bin = await mkdtemp(join(tmpdir(), "pr-links-bin-"));
+    const calls = join(bin, "calls");
+    const pr = {
+      number: 7,
+      title: "Link branch pull requests",
+      url: "https://github.com/Owner/Repo/pull/7",
+      state: "OPEN",
+      baseRefName: "main",
+      statusCheckRollup: [{ status: "COMPLETED", conclusion: "SUCCESS" }],
+      headRepository: { name: "Repo" },
+      headRepositoryOwner: { login: "Owner" },
+    };
+    const created = {
+      number: 8,
+      title: "Record created pull requests",
+      url: "https://github.com/Owner/Repo/pull/8",
+      state: "OPEN",
+      createdAt: new Date().toISOString(),
+    };
+    const older = {
+      ...created,
+      number: 9,
+      url: "https://github.com/Owner/Repo/pull/9",
+      createdAt: "2020-01-01T00:00:00Z",
+    };
+    const view =
+      "--repo owner/repo --json number,title,url,state,baseRefName,statusCheckRollup,createdAt";
+    await writeFile(
+      join(bin, "pr8.diff"),
+      "diff --git a/created.ts b/created.ts\n--- a/created.ts\n+++ b/created.ts\n@@ -1 +1 @@\n-old link\n+created link\n",
+    );
+    await writeFile(
+      join(bin, "gh"),
+      `#!/bin/sh\necho "$*" >> ${calls}\ncase "$*" in\n"pr list --repo Owner/Repo --head feature --state all --limit 5 --json number,title,url,state,baseRefName,statusCheckRollup,headRepository,headRepositoryOwner") printf '%s\\n' '${JSON.stringify([pr])}' ;;\n"pr create --title Record created pull requests") echo Creating; echo ${created.url} ;;\n"pr view 8 ${view}") printf '%s\\n' '${JSON.stringify(created)}' ;;\n"pr view 9 ${view}") printf '%s\\n' '${JSON.stringify(older)}' ;;\n"pr view 9 --json url -q .url") echo ${older.url} ;;\n"pr diff 8 --repo owner/repo --color never") cat ${bin}/pr8.diff ;;\n"pr view 8 --repo owner/repo --json body") echo '{"body":"Created from a child."}' ;;\n*) exit 1 ;;\nesac\n`,
+      { mode: 0o755 },
+    );
+    process.env.PATH = `${bin}:${process.env.PATH}`;
+    const links: Record<string, Json> = {};
+    let notes = "";
+    for (const [cid, checkout] of [
+      ["pr-branch", ["checkout", "-qb", "feature"]],
+      ["pr-detached", ["checkout", "-q", "--detach"]],
+    ] as const) {
+      const cwd = await mkdtemp(join(tmpdir(), `${cid}-`));
+      for (const args of [
+        ["init", "-q", "-b", "main"],
+        ["remote", "add", "origin", "https://github.com/Owner/Repo"],
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=f@example.invalid",
+        ].concat(["commit", "-q", "--allow-empty", "-m", "base"]),
+        ["update-ref", "refs/remotes/origin/feature", "HEAD"],
+        checkout,
+        ["branch", "-q", "--set-upstream-to", "origin/feature"],
+      ])
+        await Bun.spawn(["git", ...args], { cwd, stdout: "ignore" }).exited;
+      durableModel.set(cid, "fauxfast/faux-1");
+      await instance.create.create({
+        cid,
+        title: cid,
+        parent: rootAgentId(),
+        workdir: cwd,
+      });
+      for (const turn of ["Push the branch.", "Check it again."])
+        await sayDurable(cid, turn, "Done.");
+      for (let i = 0; i < 100 && cid === "pr-branch" && !load(cid)!.prs; i++)
+        await Bun.sleep(100);
+      links[cid] = load(cid)!.prs as Json;
+      if (cid === "pr-branch") {
+        notes = join(cwd, "notes.txt");
+        await writeFile(notes, "uncommitted note\n");
+        await Bun.spawn(["git", "add", "notes.txt"], { cwd }).exited;
+      }
+    }
+    const branchCalls = (await readFile(calls, "utf8")).trim().split("\n");
+    durableModel.set("pr-child", "fauxfast/faux-1");
+    await instance.create.create({
+      cid: "pr-child",
+      title: "pr-child",
+      parent: "pr-branch",
+      workdir: bin,
+    });
+    const commands = [
+      "gh pr create --title Older || gh pr view 9 --json url -q .url",
+      "gh pr create --title Record created pull requests",
+    ];
+    await sayDurable("pr-child", "Open the pull request.", "Opened.", [
+      fauxAssistantMessage(
+        commands.map((command) => fauxToolCall("bash", { command })),
+        { stopReason: "toolUse" },
+      ),
+    ]);
+    const saved = () => (load("pr-child")!.prs ?? []) as { title: string }[];
+    for (let i = 0; i < 100; i++) {
+      if (saved().length === 1 && saved()[0]!.title) break;
+      await Bun.sleep(100);
+    }
+    links["pr-child"] = load("pr-child")!.prs as Json;
+    return {
+      root: rootAgentId(),
+      notes,
+      links,
+      calls: branchCalls,
+      createdCalls: (await readFile(calls, "utf8"))
+        .trim()
+        .split("\n")
+        .slice(branchCalls.length)
+        .sort(),
+    };
+  },
+  "retitle-pr-link": async () => {
+    for (const cid of ["pr-branch", "pr-child"])
+      await conversations.updatePrs(cid, (prs) =>
+        (prs as Json[]).map((pr) => ({ ...pr, title: `Renamed ${pr.number}` })),
+      );
+    await save({ ...load("pr-child")!, title: "Child renamed" });
+    return {};
+  },
+  "newer-pr-link": async () => {
+    await conversations.updatePrs("pr-child", (prs) => [
+      ...(prs as Json[]),
+      {
+        repo: "owner/repo",
+        number: 10,
+        url: "https://github.com/owner/repo/pull/10",
+        title: "Newer pull request",
+        state: "open",
+        checks: null,
+        source: "created",
+        detected_at: Date.now() / 1000 + 60,
+      },
+    ]);
+    return {};
+  },
   "seed-files-pane": async () => {
     if (filesFixture !== null) return filesFixture;
     if (load("files-empty") === null)
@@ -879,7 +1056,6 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         null,
       ),
     ]);
-    await save(conv);
     filesFixture = {
       text: text.id,
       image: image.id,
@@ -904,7 +1080,6 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         "theme-user",
       ),
     ]);
-    await save(conv);
     return { demo: cid };
   },
   "seed-published-markdown": async () => {
@@ -1000,7 +1175,15 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         { stopReason: "toolUse" },
       ),
       fauxAssistantMessage("Quadrants published."),
-      fauxAssistantMessage("Acknowledged."),
+      (context) => {
+        const user = context.messages.findLast(
+          (message) => message.role === "user",
+        );
+        const parts = Array.isArray(user?.content) ? user.content : [];
+        return fauxAssistantMessage(
+          `Acknowledged. Images: ${parts.filter((part) => part.type === "image").length}`,
+        );
+      },
     ]);
     await submitDurable(cid, "Publish the quadrant image.");
     return { demo: cid };
@@ -1100,6 +1283,16 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     }
     return { demo: cid };
   },
+  "seed-large-photo": async () => {
+    const cid = "large-photo";
+    if (load(cid) === null) {
+      await createDurable(cid, "Large photo", "fauxfast/faux-1");
+      await publishDraftsTurn(cid, {
+        "photo.png": navigationPng([120, 90, 60], 1, true),
+      });
+    }
+    return { demo: cid };
+  },
   "seed-image-navigation": async () => {
     if (imageNavigationFixture !== null) return imageNavigationFixture;
     const cid = "files-image-navigation";
@@ -1123,7 +1316,6 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         null,
       ),
     ]);
-    await save(conv);
     imageNavigationFixture = {
       demo: cid,
       image_ids: images.map((image) => image.id),
@@ -1405,6 +1597,56 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     await submitDurable(agent, "Publish the Python diff.");
     return { demo: agent };
   },
+  "seed-live-publication": async () => {
+    const agent = "live-publication";
+    await createDurable(agent, "Live publication", "fauxfast/faux-1");
+    await seedUpload(agent, new Uint8Array([1]), "existing.txt");
+    const cwd = await mkdtemp(join(tmpdir(), "live-publication-"));
+    const paths = Array.from({ length: 5 }, (_, i) =>
+      join(cwd, `live-report-${i}.txt`),
+    );
+    const nested = Array.from({ length: 5 }, (_, i) =>
+      join(cwd, `nested-report-${i}.txt`),
+    );
+    const recovered = join(cwd, "recovered-report.txt");
+    for (const path of [...paths, ...nested, recovered])
+      await writeFile(path, "Published while the turn is running.\n");
+    const gate = join(cwd, "advance");
+    const finish = join(cwd, "release");
+    const started = join(cwd, "started");
+    advanceLivePublication = async () =>
+      void (await writeFile(gate, "advance"));
+    releaseLivePublication = async () => {
+      await advanceLivePublication();
+      await writeFile(finish, "release");
+    };
+    const wait = (path: string) =>
+      `while [ ! -e ${JSON.stringify(path)} ]; do sleep 0.05; done`;
+    durableFast.setResponses([
+      fauxAssistantMessage([fauxToolCall("publish", { paths })], {
+        stopReason: "toolUse",
+      }),
+      fauxAssistantMessage(
+        [
+          fauxToolCall("codemode", {
+            code: `const held = tools.bash({command:${JSON.stringify(`touch ${JSON.stringify(started)}; ${wait(gate)}`)}}); await tools.bash({command:${JSON.stringify(wait(started))}}); await tools.publish({paths:${JSON.stringify(nested)}}); await held; await tools.publish({paths:[${JSON.stringify(recovered)}]}); await tools.bash({command:${JSON.stringify(wait(finish))}});`,
+          }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("Publication finished."),
+    ]);
+    await instance.durable.setSafetyReviewOff(agent, true);
+    return { agent };
+  },
+  "advance-live-publication": async () => {
+    await advanceLivePublication();
+    return { ok: true };
+  },
+  "release-live-publication": async () => {
+    await releaseLivePublication();
+    return { ok: true };
+  },
   "seed-visible-attachments": async () => {
     const agent = "visible-attachments";
     await createDurable(agent, "Visible attachments", "fauxfast/faux-1");
@@ -1524,13 +1766,12 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     const body = (await request.json()) as {
       name: RecordingName;
       copies?: number;
+      headers?: Record<string, string>;
     };
-    if (
-      !recordingNames.includes(body.name) ||
-      ![1, 2].includes(body.copies ?? 1)
-    )
+    const copies = body.copies ?? 1;
+    if (!recordingNames.includes(body.name) || ![1, 2].includes(copies))
       throw new Error("Invalid recording");
-    const replay = await recordedModels(body.name, body.copies ?? 1);
+    const replay = await recordedModels(body.name, copies, body.headers);
     durableModels.setProvider(replay.provider);
     const cid = `provider-replay-${hex(4)}`;
     recordedRuns.set(cid, replay);
@@ -1779,39 +2020,102 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     return { ok: true };
   },
   "seed-live-tools": async (request) => {
-    const { mode = "long" } = (await request.json()) as { mode?: string };
+    const { mode = "long", thinking } = (await request.json()) as {
+      mode?: string;
+      thinking?: "claude" | "claude-redacted" | "chatgpt" | "chatgpt-encrypted";
+    };
     const agent = `live-tools-${mode}-${hex(4)}`;
     await createDurable(agent, "Live tools", "fauxfast/faux-1");
-    const outputGate = mode.includes("output")
-      ? join(
-          await agentTemp.agentTempPath(conversations.load(agent)!),
-          "live-output-ready",
-        )
-      : undefined;
-    const commands = mode.includes("output")
-      ? Array.from(
-          {
-            length:
-              mode === "many-output" ? 3 : mode === "background-output" ? 2 : 1,
-          },
-          (_, i) =>
-            `printf '%020000d\\n' 0; printf 'line-%s\\n' 1 2 3 4 5 6 7 8 9; while [ ! -f '${outputGate!.replaceAll("'", "'\\''")}' ]; do sleep 0.05; done; printf '${mode === "secret-output" ? "token=sk-example123456789" : `latest-${i}`}\\n'; sleep 30 # ${"safe ".repeat(430)}END_OF_COMMAND`,
-        )
-      : ["sleep 30"];
-    const held = new Promise<void>((resolve) => (durableGate = resolve));
+    const outputGate =
+      thinking || mode.includes("output")
+        ? join(
+            await agentTemp.agentTempPath(conversations.load(agent)!),
+            "live-output-ready",
+          )
+        : undefined;
+    const commands = thinking
+      ? ["sleep 30", `while [ ! -f '${outputGate}' ]; do sleep 0.05; done`]
+      : mode.includes("output")
+        ? Array.from(
+            {
+              length:
+                mode === "many-output"
+                  ? 3
+                  : mode === "background-output"
+                    ? 2
+                    : 1,
+            },
+            (_, i) =>
+              `printf '%020000d\\n' 0; printf 'line-%s\\n' 1 2 3 4 5 6 7 8 9; while [ ! -f '${outputGate!.replaceAll("'", "'\\''")}' ]; do sleep 0.05; done; printf '${mode === "secret-output" ? "token=sk-example123456789" : `latest-${i}`}\\n'; sleep 30 # ${"safe ".repeat(430)}END_OF_COMMAND`,
+          )
+        : ["sleep 30"];
+    let releaseFinal = () => {};
+    const finished = new Promise<void>((resolve) => (releaseFinal = resolve));
+    const held = new Promise<void>((resolve) => {
+      durableGate = () => {
+        resolve();
+        durableGate = releaseFinal;
+      };
+    });
     durableFast.setResponses([
       fauxAssistantMessage(
-        commands.map((command, i) =>
-          fauxToolCall("bash", {
-            command,
-            ...(mode === "background-output" && i === 0
-              ? { background: true }
-              : {}),
-          }),
-        ),
+        [
+          ...(thinking
+            ? [
+                {
+                  ...fauxThinking(
+                    thinking.includes("redacted") ||
+                      thinking.includes("encrypted")
+                      ? ""
+                      : "**Checking the background work**\nI am waiting for the command to finish before checking its result.",
+                  ),
+                  ...(thinking.startsWith("chatgpt")
+                    ? {
+                        thinkingSignature: JSON.stringify({
+                          type: "reasoning",
+                          id: "rs_last_thinking",
+                          encrypted_content: "test-encrypted-reasoning",
+                          summary: [],
+                        }),
+                      }
+                    : {
+                        thinkingSignature: "test-claude-signature",
+                        ...(thinking === "claude-redacted"
+                          ? { redacted: true }
+                          : {}),
+                      }),
+                },
+              ]
+            : []),
+          ...commands.map((command, i) =>
+            fauxToolCall("bash", {
+              command,
+              ...((thinking || mode === "background-output") && i === 0
+                ? { background: true }
+                : {}),
+            }),
+          ),
+        ],
         { stopReason: "toolUse" },
       ),
-      () => held.then(() => fauxAssistantMessage("Live tools finished.")),
+      () =>
+        held.then(() =>
+          thinking
+            ? fauxAssistantMessage(
+                [
+                  fauxThinking(
+                    "**Reviewing the command result**\nThe command finished; I am checking the result.",
+                  ),
+                  fauxToolCall("bash", {
+                    command: "sleep 30",
+                    background: true,
+                  }),
+                ],
+                { stopReason: "toolUse" },
+              )
+            : fauxAssistantMessage("Live tools finished."),
+        ),
+      () => finished.then(() => fauxAssistantMessage("Live tools finished.")),
     ]);
     return { agent, outputGate };
   },
@@ -1821,11 +2125,86 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     await createDurable(agent, "Durable stop", "fauxfast/faux-1");
     const call = fauxToolCall("bash", { command: "sleep 31.25" });
     const toolUse = { stopReason: "toolUse" } as const;
-    durableFast.setResponses([fauxAssistantMessage([call], toolUse)]);
+    durableFast.setResponses([
+      fauxAssistantMessage([call], toolUse),
+      (_context, options) => {
+        const signal = options?.signal;
+        if (!signal) throw new Error("Stop fixture requires an abort signal");
+        return new Promise<ReturnType<typeof fauxAssistantMessage>>(
+          (resolve) => {
+            const aborted = () =>
+              resolve(fauxAssistantMessage("", { stopReason: "aborted" }));
+            if (signal.aborted) aborted();
+            else signal.addEventListener("abort", aborted, { once: true });
+          },
+        );
+      },
+    ]);
     return { agent };
   },
   "durable-release": async () => {
     durableGate();
+    return { ok: true };
+  },
+  "seed-scroll-pin": async (request) => {
+    const body = (await request.json().catch(() => ({}))) as {
+      tokensPerSecond?: number;
+      history?: boolean;
+    };
+    const agent = `scroll-pin-${hex(4)}`;
+    await createDurable(agent, "Scroll pin", "fauxordinary/faux-1");
+    for (let n = 0; n < (body.history === false ? 0 : 6); n += 1)
+      await appendNative(
+        load(agent)!,
+        `History question ${n}`,
+        `History answer ${n}. ${"Earlier context fills the thread. ".repeat(24)}`,
+      );
+    const faux = fauxProvider({
+      provider: agent,
+      tokensPerSecond: body.tokensPerSecond ?? 20_000,
+    });
+    durableModels.setProvider(faux.provider);
+    scrollPinGates.length = 0;
+    const gates = [0, 1, 2, 3, 4].map(
+      () => new Promise<void>((resolve) => scrollPinGates.push(resolve)),
+    );
+    const reply = (label: string) =>
+      Array.from(
+        { length: 10 },
+        (_, n) =>
+          `${label} paragraph ${n + 1}. ${"The reply keeps streaming below the message. ".repeat(5)}`,
+      ).join("\n\n");
+    const part = (label: string, gate?: Promise<void>) => async () => {
+      await gate;
+      return fauxAssistantMessage(
+        [fauxText(reply(label)), fauxToolCall("bash", { command: "true" })],
+        { stopReason: "toolUse" },
+      );
+    };
+    faux.setResponses([
+      fauxAssistantMessage(
+        [fauxText("Short reply."), fauxToolCall("bash", { command: "true" })],
+        { stopReason: "toolUse" },
+      ),
+      part("First", gates[0]),
+      part("Second", gates[1]),
+      part("Third", gates[2]),
+      async () => {
+        await gates[3];
+        return fauxAssistantMessage("Scroll pin finished.");
+      },
+      ...Array.from({ length: 6 }, () => async (context: any) => {
+        if (!JSON.stringify(context.messages.at(-1)).includes("Continue."))
+          return fauxAssistantMessage("Answered.");
+        await gates[4];
+        return fauxAssistantMessage(reply("Handoff"));
+      }),
+    ]);
+    durableModel.set(agent, `${agent}/faux-1`);
+    return { agent };
+  },
+  "scroll-pin-release": async () => {
+    scrollPinGates.shift()?.();
     return { ok: true };
   },
   "seed-pi-twin": async () => {
@@ -1849,7 +2228,6 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     }
     const conv = load(cid)!;
     await seedPiSession(conv, entries, `pi-twin-${hex()}`);
-    await save(conv);
     reads.viewCache.drop(cid);
     await readoptBinding(cid, conv);
     return { agent: cid };
@@ -1883,7 +2261,8 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     durableModels.setProvider(faux.provider);
     await createDurable(cid, "Recorded Durable context", model);
     const { storage } = await instance.durable.open(cid);
-    await storage.commit(
+    await commitWrites(
+      storage,
       contextEntries.map((value) => ({ type: "entry" as const, value })),
       BACKGROUND_CONTEXT,
     );
@@ -1974,7 +2353,6 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         "browser-context-user",
       ),
     ]);
-    await save(conv);
     return { ok: true };
   },
 };

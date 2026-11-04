@@ -1,4 +1,4 @@
-// Durable search shares one host Worker with per-conversation native
+// Durable search shares one host child process with per-conversation native
 // connections. Init/index/search/format stay off the server thread. Close
 // bundles after Harness.close and the shared service at host shutdown;
 // registration alone does not wire server tools.

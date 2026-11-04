@@ -1,6 +1,7 @@
 // Deferred Artifact discovery and creation reuse the Git-backed Artifact store.
+import { Type } from "typebox";
 import { resolve } from "node:path";
-import { Type } from "@earendil-works/pi-ai";
+import {} from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { ArtifactContext } from "../../../artifacts";
 import { create, listArtifacts, rename } from "../../../artifacts";
@@ -14,11 +15,11 @@ export function createArtifact(context: ArtifactContext, owner: string) {
         name: "artifact",
         deferred: true,
         description:
-          "Create an Artifact only when the operator explicitly asks for one. List or rename existing Artifacts; update an existing requested Artifact instead of making duplicates. " +
-          "create requires title and optionally from_file (.md or .html); list defaults to this agent's Artifacts, or all=true for everyone's. Results include id, title and the local working path. " +
-          "Edit files at that path with read/edit/write or bash, then git commit: every commit publishes automatically. Use git log or git restore --source=<sha> for older versions, then commit to publish the restored files. " +
-          "$CHAT_DATA_DIR in paths expands in read/edit/write and bash. Documents use index.md; apps use index.html and local imports. Apps are bundled by Bun, run without network or browser storage, and inherit Recurse theme CSS variables (var(--bg), var(--text), var(--accent), var(--chart-1)…). " +
-          "The commit hook prints publication and app-check results; fix reported problems and commit again. Read its wide/narrow screenshots to inspect the app. Link results with [Title](#artifact=ID).",
+          "Create only on explicit operator request; update requested Artifacts instead of duplicating them. List or rename existing Artifacts. " +
+          "Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. " +
+          "File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. " +
+          "Apps have no network/browser storage; use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). " +
+          "Commit output reports publication/app checks; fix problems and recommit. Read wide/narrow screenshots. Link [Title](#artifact=ID).",
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("create"),
@@ -26,21 +27,17 @@ export function createArtifact(context: ArtifactContext, owner: string) {
             Type.Literal("rename"),
           ]),
           title: Type.Optional(
-            Type.String({ description: "Title for create or rename." }),
+            Type.String({ description: "For create/rename." }),
           ),
           from_file: Type.Optional(
             Type.String({
-              description:
-                "Optional Markdown or HTML source file for create; relative to current cwd.",
+              description: "Source .md/.html for create; relative to cwd.",
             }),
           ),
-          id: Type.Optional(
-            Type.String({ description: "Artifact id for rename." }),
-          ),
+          id: Type.Optional(Type.String({ description: "For rename." })),
           all: Type.Optional(
             Type.Boolean({
-              description:
-                "List everyone's Artifacts instead of only this agent's.",
+              description: "List all Artifacts (default: this agent only).",
             }),
           ),
         }),

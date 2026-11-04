@@ -1,12 +1,11 @@
 // Thin lifecycle/message/view routes over owner services.
-// Gate view/events before existence checks; SSE is one-shot/no-store.
+// Gate views before existence checks; focused SSE follows durable commits.
 // Bind service creates under lease; roll back lost races.
 // Relayed text is always agent input; audit its forwarding key separately.
 
 import { createHash } from "node:crypto";
-import { deliverRelayed } from "../agents/supervisor/delivery";
 import { validBackendKeyName } from "../auth/backend_keys";
-
+import { keyedLabel } from "../backends/label";
 import { pyStrip } from "../auth/provider_store";
 import {
   SERVICE_CREATE_MAX_ACTIVE,
@@ -22,6 +21,7 @@ import {
   stripPendingKeys,
   validateExternalKey,
 } from "../agents/conversation_store";
+import { linkedPrList } from "../agents/conversation_prs";
 import { TreeLifecycleBusy } from "../agents/mutation_guard";
 import { AttachmentError } from "../agents/runtime/attachments/base";
 import { pyTruthy } from "../agents/runtime/turn_prep";
@@ -45,7 +45,10 @@ import {
 } from "../observability/runtime_logging";
 import { cleanTitle } from "../title_text";
 import { conditionalJson } from "./caching";
-import { parsePythonJson } from "../utils/py_compact_json";
+import { compactConversation } from "./compact";
+import { conversationEvents } from "./conversation_events";
+import { createMessageSender } from "./deliver_message";
+import { jsonObjectBody } from "./request_body";
 import {
   agentMarked,
   serviceOwnsRequest,
@@ -101,12 +104,15 @@ export interface ConversationsRoutesDeps {
   /** 503 `service_storage_unavailable` + Retry-After: 2 until action-ready. */
   requireActionReady(): void;
   readonly serviceCreateSlots: CreateSlots;
+  readonly notifications?: { addViewer(cid: string): () => void };
   readonly log: RuntimeLogger;
   /** Monotonic milliseconds. */
   monotonicMs(): number;
   readonly store: {
     load(cid: string, options?: { withPending?: boolean }): Rec | null;
     metadataSnapshot(cid: string): Rec | null;
+    /** Copies of the live descendant conversations, parents first. */
+    subtree(cid: string): Rec[];
     save(conv: Rec): Promise<unknown>;
     effectiveWorkdir(conv: Rec): string;
     lookupExternalKey(principal: string, key: string): Promise<Rec | null>;
@@ -154,11 +160,13 @@ export interface ConversationsRoutesDeps {
         limit: number;
         since: number | null;
         instance: string | null;
+        textDeltas: boolean;
       },
     ): Promise<unknown>;
     readViewEvents(
       cid: string,
       lastEventId: string | null,
+      textDeltas: boolean,
     ): Promise<readonly [number, Uint8Array]>;
     composeFilePage(
       cid: string,
@@ -174,11 +182,6 @@ export interface ConversationsRoutesDeps {
     ): Promise<Status<unknown>>;
     readTurnPrompt(cid: string, offset: number): Promise<unknown>;
     readThinkingText(cid: string, offset: number): Promise<unknown>;
-    readMarkerSummary(
-      cid: string,
-      offset: number,
-      generation: number | null,
-    ): Promise<unknown>;
     readContextUsage(cid: string): Promise<unknown>;
     readBasePrompt(cid: string): Promise<unknown>;
     fileSnapshot(cid: string): { collection: string; owner: string } | null;
@@ -204,7 +207,7 @@ export interface ConversationsRoutesDeps {
       externalKey: string | null;
       allowedModels: readonly string[] | null;
     }): Promise<Rec>;
-    setPinned(cid: string, pinned: boolean): Promise<Rec>;
+    setTakenOver(cid: string, takenOver: boolean): Promise<Rec>;
   };
   readonly reap: {
     requestReap(cid: string, requestedBy: string | null): Promise<Rec>;
@@ -234,8 +237,6 @@ export interface ConversationsRoutesDeps {
       effort: string | null,
       level: number | null,
     ): Promise<Rec | null>;
-    requestMute(cid: string, muted: boolean): Promise<Rec | null>;
-    toggleMute(cid: string): Promise<Rec | null>;
   };
   readonly compaction: {
     requestCompact(cid: string): Promise<unknown>;
@@ -256,6 +257,7 @@ export interface ConversationsRoutesDeps {
   /** Durable conversations (src/agents/durable/host.ts). */
   readonly durable?: {
     owns(conv: Rec | null | undefined): boolean;
+    subscribeView?(cid: string, listener: () => void): () => void;
     stop(cid: string): Promise<boolean>;
     clear(cid: string): Promise<Rec | null>;
     compact(cid: string): Promise<Rec | null>;
@@ -278,6 +280,8 @@ export interface ConversationsRoutesDeps {
     read(cid: string): Promise<Rec | null>;
     observe(cid: string): Promise<void>;
   };
+  /** Starts a background branch PR lookup (agents/conversation_prs.ts). */
+  readonly prs: { refresh(cid: string, reason: string): void };
   readonly git: {
     /** agent_temp.workdir_file; throws for an unsafe key. */
     workdirFile(tempKey: string): string;
@@ -298,9 +302,12 @@ export interface ConversationsRoutesDeps {
       base: string | null,
       includeContents: boolean,
     ): Promise<unknown>;
-    pullRequestDiff(url: string, path?: string | null): Promise<unknown>;
+    pullRequestDiff(
+      url: string,
+      path: string | null,
+      queue: string,
+    ): Promise<unknown>;
     diffCandidates(cwd: string): Promise<unknown>;
-    pullRequests(cwd: string | null, urls: readonly string[]): unknown;
     githubRepoUrl(
       stored: string,
       workdirFile: string | null,
@@ -317,62 +324,13 @@ const validLevel = (value: unknown): value is number =>
   isInt(value) && value >= EFFORT_MIN_LEVEL && value <= EFFORT_MAX_LEVEL;
 const codePoints = (text: string) => Array.from(text).length;
 
-// Parse only application/json or +json bodies; other bodies fail dict_type.
-// Empty/null means absent, preserving required/optional object validation.
+/** Conversation bodies strip the UTF-8 BOM even when not parsed as JSON. */
 async function dictBody(ex: Exchange, required: false): Promise<Rec | null>;
 async function dictBody(ex: Exchange, required?: true): Promise<Rec>;
 async function dictBody(ex: Exchange, required = true): Promise<Rec | null> {
-  const bytes = new Uint8Array(await ex.request.arrayBuffer());
-  let body: unknown = null;
-  if (bytes.length) {
-    const header = ex.request.headers.get("content-type");
-    const type = header ? pyStrip(header.split(";")[0]!).toLowerCase() : "";
-    // Invariant: Exactly two type parts, as web/login.ts jsonDictBody.
-    const parts = type.split("/");
-    const [main, sub] = parts;
-    if (
-      parts.length === 2 &&
-      main === "application" &&
-      sub &&
-      (sub === "json" || sub.endsWith("+json"))
-    ) {
-      let text: string;
-      try {
-        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        throw new HttpError(400, "There was an error parsing the body");
-      }
-      try {
-        body = parsePythonJson(text);
-      } catch {
-        throw new HttpError(422, [
-          {
-            type: "json_invalid",
-            loc: ["body", 0],
-            msg: "JSON decode error",
-            input: {},
-            ctx: { error: "Expecting value" },
-          },
-        ]);
-      }
-    } else body = new TextDecoder().decode(bytes);
-  }
-  if (body === null) {
-    if (!required) return null;
-    throw new HttpError(422, [
-      { type: "missing", loc: ["body"], msg: "Field required", input: null },
-    ]);
-  }
-  if (typeof body !== "object" || Array.isArray(body))
-    throw new HttpError(422, [
-      {
-        type: "dict_type",
-        loc: ["body"],
-        msg: "Input should be a valid dictionary",
-        input: body,
-      },
-    ]);
-  return body as Rec;
+  return jsonObjectBody(ex, required, (bytes) =>
+    new TextDecoder().decode(bytes),
+  );
 }
 
 const noStore = { "cache-control": "no-store" };
@@ -385,7 +343,7 @@ const queryStr = (ex: Exchange, name: string) => {
 export function registerConversationRoutes(
   router: Router,
   deps: ConversationsRoutesDeps,
-): void {
+): ReturnType<typeof createMessageSender> {
   const { store } = deps;
 
   const messageIsLiveSteer = (cid: string): boolean => {
@@ -414,6 +372,11 @@ export function registerConversationRoutes(
     }
     return true;
   };
+  const sendMessage = createMessageSender(
+    deps,
+    uploadsAvailable,
+    messageIsLiveSteer,
+  );
 
   const requireServicePrincipal = (ex: Exchange): [string, ServicePolicy] => {
     const principal = servicePrincipalOf(ex);
@@ -704,11 +667,21 @@ export function registerConversationRoutes(
     async (ex) => {
       const cid = ex.params.cid!;
       const focused = ex.query.focused === true;
-      const rawTrace = queryStr(ex, "switch_trace");
+      // Invariant: Switch timing travels in headers so the URL stays stable
+      // and a revisit revalidates with If-None-Match instead of a full read.
+      // Only a read carrying the dispatch time is a switch; other interaction
+      // reads (such as Stop's) also carry x-recurse-trace.
+      const rawTrace = ex.request.headers.get("x-recurse-trace");
+      const rawDispatch = ex.request.headers.get(
+        "x-recurse-client-dispatch-ms",
+      );
       const traceId =
-        rawTrace !== null && SWITCH_TRACE_RE.test(rawTrace) ? rawTrace : null;
+        rawDispatch !== null &&
+        rawTrace !== null &&
+        SWITCH_TRACE_RE.test(rawTrace)
+          ? rawTrace
+          : null;
       let dispatchMs: number | null = null;
-      const rawDispatch = queryStr(ex, "client_dispatch_ms");
       if (traceId && rawDispatch !== null && pyFloatText(rawDispatch)) {
         const value = Number(rawDispatch.trim().replaceAll("_", ""));
         dispatchMs =
@@ -754,6 +727,8 @@ export function registerConversationRoutes(
         throw new HttpError(404);
       }
       const record = conv!;
+      const runStateClock = record.run_state_clock;
+      delete record.run_state_clock;
       record.github_repo_url = null;
       try {
         record.github_repo_url = await deps.git.githubRepoUrl(
@@ -789,6 +764,9 @@ export function registerConversationRoutes(
       for (const key of ["session_id", "session_file", "session_cwd"])
         delete record[key];
       const extra: Record<string, string> = {};
+      if (Array.isArray(runStateClock) && runStateClock.length === 2)
+        extra["x-recurse-run-state-clock"] =
+          `${runStateClock[0]}:${runStateClock[1]}`;
       if (focused)
         extra["server-timing"] =
           `conversation-storage;dur=${storageMs.toFixed(3)}, ` +
@@ -803,8 +781,6 @@ export function registerConversationRoutes(
     {
       query: {
         focused: { type: "bool", default: false },
-        switch_trace: { type: "str" },
-        client_dispatch_ms: { type: "str" },
       },
     },
   );
@@ -870,32 +846,6 @@ export function registerConversationRoutes(
   router.get(
     "/api/conversations/{cid}/tool-details/{artifact_id}",
     async (ex) => jsonResponse(await readToolDetail(ex), 200, noStore),
-  );
-  router.get(
-    "/api/conversations/{cid}/tool-details/{artifact_id}/events",
-    async (ex) => {
-      const artifact = await readToolDetail(ex);
-      const cursor = Number(ex.query.cursor);
-      const limit = Number(ex.query.limit);
-      if (cursor < 0 || limit < 1 || limit > 100) throw new HttpError(422);
-      const events = artifactEvents(artifact);
-      return jsonResponse(
-        {
-          artifact_id: artifact.artifact_id,
-          events: events.slice(cursor, cursor + limit),
-          next_cursor: Math.min(events.length, cursor + limit),
-          has_more: cursor + limit < events.length,
-        },
-        200,
-        noStore,
-      );
-    },
-    {
-      query: {
-        cursor: { type: "int", default: 0 },
-        limit: { type: "int", default: 50 },
-      },
-    },
   );
   router.get(
     "/api/conversations/{cid}/tool-details/{artifact_id}/raw",
@@ -977,25 +927,6 @@ export function registerConversationRoutes(
       return jsonResponse(view, 200, noStore);
     },
     { query: { offset: { type: "int", required: true } } },
-  );
-
-  router.get(
-    "/api/conversations/{cid}/marker-summary",
-    async (ex) => {
-      const view = await deps.reads.readMarkerSummary(
-        ex.params.cid!,
-        ex.query.offset as number,
-        ex.query.generation as number,
-      );
-      if (view == null) throw new HttpError(404);
-      return jsonResponse(view, 200, noStore);
-    },
-    {
-      query: {
-        offset: { type: "int", required: true },
-        generation: { type: "int", required: true },
-      },
-    },
   );
 
   router.post("/api/conversations/{cid}/model", async (ex) => {
@@ -1088,69 +1019,39 @@ export function registerConversationRoutes(
     return jsonResponse({ id: cid, ...applied });
   });
 
-  router.post("/api/conversations/{cid}/pin", async (ex) => {
-    if (agentMarked(ex))
-      throw new HttpError(403, "only the operator can change Take over");
-    const cid = ex.params.cid!;
-    const body = await dictBody(ex);
-    const pinned = body.pinned;
-    if (typeof pinned !== "boolean")
-      throw new HttpError(422, "pinned must be a boolean");
-    let conv: Rec;
-    try {
-      conv = await deps.create.setPinned(cid, pinned);
-    } catch (error) {
-      if (error instanceof TreeLifecycleBusy)
-        throw new HttpError(
-          503,
-          "Take-over change is busy. Try again shortly.",
-        );
-      if (errorName(error) === "KeyError")
-        throw new HttpError(404, "conversation not found");
-      throw error;
-    }
-    return jsonResponse({ id: cid, pinned: pyTruthy(conv.pinned) });
-  });
+  // Spec: `/pin` with `{pinned}` is the name before the `taken_over` rename,
+  // kept for one release so tabs opened before a deploy keep working.
+  for (const [route, key] of [
+    ["take-over", "taken_over"],
+    ["pin", "pinned"],
+  ] as const)
+    router.post(`/api/conversations/{cid}/${route}`, async (ex) => {
+      if (agentMarked(ex))
+        throw new HttpError(403, "only the operator can change Take over");
+      const cid = ex.params.cid!;
+      const body = await dictBody(ex);
+      const takenOver = body[key];
+      if (typeof takenOver !== "boolean")
+        throw new HttpError(422, `${key} must be a boolean`);
+      let conv: Rec;
+      try {
+        conv = await deps.create.setTakenOver(cid, takenOver);
+      } catch (error) {
+        if (error instanceof TreeLifecycleBusy)
+          throw new HttpError(
+            503,
+            "Take-over change is busy. Try again shortly.",
+          );
+        if (errorName(error) === "KeyError")
+          throw new HttpError(404, "conversation not found");
+        throw error;
+      }
+      return jsonResponse({ id: cid, [key]: pyTruthy(conv.taken_over) });
+    });
 
-  const requireChild = (cid: string) => {
-    const conv = store.load(cid);
-    if (!pyTruthy(conv)) throw new HttpError(404);
-    if (!pyTruthy(conv!.parent))
-      throw new HttpError(403, "a top-level agent has no parent to mute");
-  };
-
-  router.post("/api/conversations/{cid}/mute", async (ex) => {
-    const cid = ex.params.cid!;
-    const body = await dictBody(ex);
-    requireChild(cid);
-    const muted = body.muted;
-    if (typeof muted !== "boolean")
-      throw new HttpError(422, "muted must be a boolean");
-    const applied = await deps.configActions.requestMute(cid, muted);
-    if (applied === null) throw new HttpError(404);
-    return jsonResponse(applied);
-  });
-
-  router.post("/api/conversations/{cid}/mute-toggle", async (ex) => {
-    // Invariant: The /mute composer command: a platform action, never a model
-    // prompt.
-    const cid = ex.params.cid!;
-    requireChild(cid);
-    const applied = await deps.configActions.toggleMute(cid);
-    if (applied === null) throw new HttpError(404);
-    return jsonResponse({ ...applied, action: "mute" });
-  });
-
-  router.post("/api/conversations/{cid}/compact", async (ex) => {
-    const cid = ex.params.cid!;
-    const conv = store.load(cid);
-    if (!pyTruthy(conv)) throw new HttpError(404);
-    const applied = deps.durable?.owns(conv)
-      ? await deps.durable.compact(cid)
-      : await deps.compaction.requestCompact(cid);
-    if (applied == null) throw new HttpError(404);
-    return jsonResponse(applied);
-  });
+  router.post("/api/conversations/{cid}/compact", async (ex) =>
+    jsonResponse(await compactConversation(deps, ex.params.cid!)),
+  );
 
   router.post("/api/conversations/{cid}/clear", async (ex) => {
     const cid = ex.params.cid!;
@@ -1196,6 +1097,7 @@ export function registerConversationRoutes(
         limit: ex.query.limit as number,
         since: (ex.query.since ?? null) as number | null,
         instance: queryStr(ex, "instance"),
+        textDeltas: ex.query.text_deltas === true,
       });
       return conditionalJson(ex.request, window);
     },
@@ -1206,6 +1108,7 @@ export function registerConversationRoutes(
         limit: { type: "int", default: 50 },
         since: { type: "int" },
         instance: { type: "str" },
+        text_deltas: { type: "bool", default: false },
       },
     },
   );
@@ -1213,27 +1116,38 @@ export function registerConversationRoutes(
   router.get(
     "/api/conversations/{cid}/events",
     async (ex) => {
-      // Invariant: One-shot SSE: a snapshot frame, or a rows delta when
-      // Last-Event-ID still fits; the transport reconnects at the retry
-      // cadence.
       deps.requireActionReady();
       const cid = ex.params.cid!;
-      if (store.metadataSnapshot(cid) === null) throw new HttpError(404);
-      const [status, body] = await deps.reads.readViewEvents(
-        cid,
+      const conv = store.metadataSnapshot(cid);
+      if (conv === null) throw new HttpError(404);
+      const durable = deps.durable;
+      return conversationEvents(
         header(ex, "last-event-id"),
+        (cursor) =>
+          deps.reads.readViewEvents(cid, cursor, ex.query.text_deltas === true),
+        durable?.owns(conv) && durable.subscribeView
+          ? (wake) => {
+              const unsubscribe = durable.subscribeView!(cid, wake);
+              const stopViewing =
+                ex.query.viewing === true
+                  ? deps.notifications?.addViewer(cid)
+                  : undefined;
+              return () => {
+                stopViewing?.();
+                unsubscribe();
+              };
+            }
+          : null,
+        ex.request.signal,
       );
-      if (status !== 200) throw new HttpError(status);
-      return new Response(body as Uint8Array<ArrayBuffer>, {
-        headers: {
-          "cache-control": "no-store",
-          "x-accel-buffering": "no",
-          "content-length": String(body.byteLength),
-          "content-type": "text/event-stream; charset=utf-8",
-        },
-      });
     },
-    { longRunning: true },
+    {
+      longRunning: true,
+      query: {
+        text_deltas: { type: "bool", default: false },
+        viewing: { type: "bool", default: false },
+      },
+    },
   );
 
   router.get(
@@ -1375,7 +1289,7 @@ export function registerConversationRoutes(
         typeof from.agent !== "string" ||
         !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(from.agent) ||
         !validBackendKeyName(label) ||
-        (from.title !== undefined && typeof from.title !== "string")
+        (from.title != null && typeof from.title !== "string")
       )
         throw new HttpError(422, "invalid relayed_from");
       if (typeof body.content !== "string" || !body.content.trim())
@@ -1395,11 +1309,10 @@ export function registerConversationRoutes(
           },
         });
       relayed = {
-        sender: `${from.agent}@${label}`,
+        sender: `${from.agent}@${method === "backend-key" ? keyedLabel(label, String(ex.state.backend_key_id)) : label}`,
         title: cleanTitle(from.title),
       };
     }
-    const durable = deps.durable?.owns(store.load(cid)) ? deps.durable : null;
     if (typeof body.content !== "string" || !pyStrip(body.content)) {
       if (pyTruthy(body.interrupt))
         throw new HttpError(
@@ -1408,90 +1321,9 @@ export function registerConversationRoutes(
         );
       return deps.deliverStop(cid, body);
     }
-    const conv = store.load(cid);
-    if (!pyTruthy(conv)) throw new HttpError(404);
-    const content = pyStrip(body.content);
-    const rawIds = body.attachment_ids ?? [];
-    if (
-      !Array.isArray(rawIds) ||
-      rawIds.length > 50_000 ||
-      rawIds.some((value) => typeof value !== "string")
-    )
-      throw new HttpError(422, "invalid attachment references");
-    const attachmentIds = [...new Set(rawIds as string[])];
-    if (attachmentIds.length && !(await uploadsAvailable(cid, attachmentIds)))
-      throw new HttpError(422, "attachment is unavailable");
-    // Invariant: One idempotency key per composer job: a retry replays the
-    // first ack.
-    const clientMessageId = body.client_message_id ?? null;
-    if (
-      clientMessageId !== null &&
-      (typeof clientMessageId !== "string" ||
-        !CLIENT_MESSAGE_ID_RE.test(clientMessageId))
-    )
-      throw new HttpError(422, "invalid client_message_id");
-    const statusOf = () => (store.load(cid) ?? conv!).status;
-    // Invariant: A local tool announcing its identity sends as that agent, so
-    // the reply routes back to it; otherwise this is trusted direct-operator
-    // input.
-    const sender = header(ex, "x-recurse-agent");
-
-    const send = () =>
-      relayed
-        ? deliverRelayed(
-            deps.delivery,
-            cid,
-            content,
-            relayed,
-            clientMessageId as string | null,
-            pyTruthy(body.interrupt),
-          )
-        : deps.delivery.deliver(
-            cid,
-            content,
-            sender && store.load(sender) !== null
-              ? {
-                  start: false,
-                  source: "spawn",
-                  sender,
-                  attachmentIds,
-                  clientMessageId: clientMessageId as string | null,
-                }
-              : {
-                  start: false,
-                  origin: "operator",
-                  attachmentIds,
-                  clientMessageId: clientMessageId as string | null,
-                },
-          );
-    if (pyTruthy(body.interrupt)) {
-      // Invariant: Fence first: the replacement then defers to the new run
-      // instead of racing the abort. Legacy sessions are read-only; only
-      // Durable can own a live turn.
-      const interrupted = relayed
-        ? false
-        : ((await durable?.stop(cid)) ?? false);
-      const mid = await send();
-      if (mid === null) throw new HttpError(404);
-      deps.delivery.requestRun(cid);
-      return jsonResponse({
-        ok: true,
-        status: statusOf(),
-        message_id: mid,
-        ...(!relayed ? { interrupted } : {}),
-      });
-    }
-
-    const steer = messageIsLiveSteer(cid);
-    const messageId = await send();
-    if (messageId === null) throw new HttpError(404);
-    deps.delivery.requestRun(cid);
-    return jsonResponse({
-      ok: true,
-      status: statusOf(),
-      message_id: messageId,
-      steer,
-    });
+    return jsonResponse(
+      await sendMessage(cid, body, header(ex, "x-recurse-agent"), relayed),
+    );
   });
 
   router.delete("/api/conversations/{cid}/messages/{mid}", async (ex) => {
@@ -1537,16 +1369,16 @@ export function registerConversationRoutes(
 
   router.get("/api/conversations/{cid}/prs", async (ex) => {
     const conv = loadOr404(ex.params.cid!);
-    let cwd: string | null = null;
-    try {
-      [cwd] = await diffScope(conv);
-    } catch {}
-    const urls = Array.isArray(conv.touched_prs)
-      ? conv.touched_prs
-          .filter((url): url is string => typeof url === "string")
-          .slice(-50)
-      : [];
-    return jsonResponse(deps.git.pullRequests(cwd, urls));
+    const cid = String(conv.id);
+    const prs = linkedPrList(conv, store.subtree(cid));
+    // Spec: Opening Changes also refreshes the owners of the newest few PRs.
+    if (queryStr(ex, "refresh") === "1")
+      for (const id of new Set([
+        cid,
+        ...prs.slice(0, 5).map((pr) => pr.agent?.id ?? cid),
+      ]))
+        deps.prs.refresh(id, "changes_pane_open");
+    return jsonResponse({ prs });
   });
 
   router.get(
@@ -1557,7 +1389,9 @@ export function registerConversationRoutes(
       if (pr !== null) {
         if (!prIdentity(pr))
           throw new HttpError(422, "invalid pull request URL");
-        return jsonResponse(await deps.git.pullRequestDiff(pr));
+        return jsonResponse(
+          await deps.git.pullRequestDiff(pr, null, ex.params.cid!),
+        );
       }
       const base = queryStr(ex, "base");
       if (base !== null && cleanBaseRef(base) === null)
@@ -1634,7 +1468,9 @@ export function registerConversationRoutes(
       if (pr !== null) {
         if (!prIdentity(pr))
           throw new HttpError(422, "invalid pull request URL");
-        return jsonResponse(await deps.git.pullRequestDiff(pr, path));
+        return jsonResponse(
+          await deps.git.pullRequestDiff(pr, path, ex.params.cid!),
+        );
       }
       const base = queryStr(ex, "base");
       if (base !== null && cleanBaseRef(base) === null)
@@ -1677,6 +1513,7 @@ export function registerConversationRoutes(
     },
     { longRunning: true },
   );
+  return sendMessage;
 }
 
 /** A named refusal inside a service create. */

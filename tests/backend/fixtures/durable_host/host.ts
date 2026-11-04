@@ -63,8 +63,9 @@ export function testDeps(
       lifecycle.stopGroup(group),
     ownProcess: async (
       proc: Parameters<ProcessLifecycle["registerProcess"]>[0],
-      cid: string,
-    ) => void (await lifecycle.registerProcess(proc, "mcp", cid)),
+      cid: string | null,
+      kind = "mcp",
+    ) => void (await lifecycle.registerProcess(proc, kind, cid)),
     releaseProcess: async (
       proc: Parameters<ProcessLifecycle["cleanupProcessObject"]>[0],
     ) => (await lifecycle.cleanupProcessObject(proc)) !== false,

@@ -5,6 +5,7 @@ import {
   gotoRoot,
   runBrowserTests,
   type BrowserTest,
+  openSettingsPanel,
 } from "./common";
 import { startOAuthMcpServer } from "../backend/fixtures/mcp_oauth_server";
 
@@ -46,6 +47,9 @@ export const tests: BrowserTest[] = [
       const agents = await page.locator(".agent").count();
       await page.locator("#settings-btn").click();
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page
+        .getByRole("region", { name: "MCP servers", exact: true })
+        .waitFor();
       const section = page.locator(".settings-section").filter({
         has: page.getByRole("heading", { name: "MCP servers", exact: true }),
       });
@@ -119,6 +123,9 @@ export const tests: BrowserTest[] = [
       await page.locator(".agent").first().waitFor();
       await page.locator("#settings-btn").click();
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page
+        .getByRole("region", { name: "MCP servers", exact: true })
+        .waitFor();
       await row("tracker").getByText("Connected", { exact: true }).waitFor();
       expect(await row("tracker").innerText()).toContain("1 tools");
       await row("tracker")
@@ -137,22 +144,17 @@ export const tests: BrowserTest[] = [
       expect(await status.innerText()).not.toContain("http://");
       expect(await status.innerText()).not.toContain("private-url-token");
       expect(await status.innerText()).not.toContain(process.execPath);
-      expect(
-        await section
-          .locator(".hint")
-          .evaluate((el) => (globalThis as any).getComputedStyle(el).color),
-      ).toBe(
-        await row("healthy")
-          .locator("strong")
-          .evaluate((el) => (globalThis as any).getComputedStyle(el).color),
-      );
       await page.setViewportSize({ width: 412, height: 915 });
+      await page.getByRole("button", { name: /^MCP servers/ }).click();
       await row("healthy").scrollIntoViewIfNeeded();
       const box = await row("healthy").boundingBox();
       expect(box!.x).toBeGreaterThanOrEqual(0);
       expect(box!.x + box!.width).toBeLessThanOrEqual(412);
       await row("healthy")
         .getByRole("button", { name: "Check healthy", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Close MCP servers", exact: true })
         .click();
       await page.locator("#settings-close").click();
       await page.waitForFunction(async () => {
@@ -214,9 +216,9 @@ export const tests: BrowserTest[] = [
           () => (globalThis as any).matchMedia("(pointer: coarse)").matches,
         ),
       ).toBe(true);
-      await page.locator("#menu-btn").tap();
-      await page.locator("#settings-btn").tap();
+      await openSettingsPanel(page);
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page.getByRole("button", { name: /^MCP servers/ }).click();
       expect(
         await page
           .getByRole("textbox", { name: "OAuth callback URL" })

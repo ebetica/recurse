@@ -167,6 +167,11 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       const livePill = page.locator(".live-panel-box");
       await livePill.waitFor();
       expect(await livePill.innerText()).toContain("Drafting");
+      expect(
+        (await livePill.locator(".live-thinking-head").innerText()).startsWith(
+          "Thinking ·",
+        ),
+      ).toBeTrue();
       thread.rows.at(-1)!.thinking_title = "Analyzing settings and artifacts";
       await page.reload();
       await livePill.waitFor();
@@ -199,7 +204,7 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       await livePill.locator(".live-thinking-copy").click();
       const liveSummary = page.locator(".live-thinking-summary");
       await liveSummary.waitFor();
-      expect(await liveSummary.innerText()).toBe(liveThinkingText);
+      expect(await liveSummary.innerText()).toBe("first live thought");
       await livePill.locator(".live-thinking-copy").click();
       liveThinkingText =
         "**Drafting**\nThe model is gathering the latest repository context before it chooses the smallest safe change. This long paragraph has no internal newlines and should keep its newest sentence visible.\n\nIt then compares the focused browser behavior with the settled thread and records the latest checkpoint so the operator can read what is happening now.";
@@ -210,7 +215,9 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       const longSummary = await liveSummary.innerText();
       expect(longSummary).toContain("checkpoint");
       expect(longSummary).toContain("happening now.");
-      expect(longSummary).toBe(liveThinkingText);
+      expect(longSummary).toBe(
+        liveThinkingText.split("\n").slice(1).join("\n"),
+      );
       expect(
         await liveSummary.evaluate(
           (element) => element.scrollHeight <= element.clientHeight,

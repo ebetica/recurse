@@ -7,6 +7,21 @@ redeploy keeps them. Everything Modal-specific lives in
 Recurse itself knows nothing about Modal. `python3 playground/modal/deploy.py
 deploy --help` lists every option.
 
+## Connect as a remote
+
+After deploying, add the web URL on your home Recurse under the label `modal`
+and sign in with the deployment's password. Its agents appear in the sidebar;
+home agents can send to `id@modal`, and remote agents can reply to the full home
+address in their received message header. See [remote connections](../../src/backends/remotes.md).
+
+## Tests
+
+From the checkout root, install the pinned SDK with `python3 -m pip install modal==1.5.1`,
+then run `python3 playground/modal/test_deploy.py`. Tests use a local fake transport
+and make no Modal API calls; SDK upgrades must pass the task-identity and native
+image-version checks. Run this command separately from the core suite; the
+playground workflow runs it on main when playground files change.
+
 ## Before you start
 
 Install Git and Python, run `pip install modal==1.5.1`, then `modal setup`.
@@ -65,13 +80,24 @@ to a private file, filling in the repository URL, display name and existing
 web-only Secret names (`null` means unset):
 
 ```json
-{ "version": 1, "repoUrl": null, "displayName": null, "webExtraSecrets": [] }
+{ "version": 1, "repoUrl": null, "displayName": null, "webExtraSecrets": [],
+  "aptPackages": [], "pipPackages": [] }
 ```
 
 Then run `python3 playground/modal/deploy.py settings-save NAME --file PATH --volume EXISTING_VOLUME`.
 This only writes the Volume (`NAME-data` by default) and never deploys. It
 refuses to replace a saved record unless you pass `--replace`; changes apply on
-the next deployment.
+the next deployment. The settings record lives on the app's Volume, where the
+separate deployer reads it; it is not stored in git. Keep the JSON file outside
+git too. `aptPackages` and `pipPackages` are optional lists of up to 32 distinct
+plain Debian and PyPI package names respectively, each 1–128 characters. Apt
+names use lowercase letters, digits, plus signs, dots and hyphens; they start
+and end with a letter or digit and cannot contain `..`. Apt names are passed to
+`apt-get install` as written. Pip names use letters, digits, dots, underscores and hyphens,
+starting and ending with a letter or digit. Neither list accepts versions,
+options, URLs or shell syntax. The packages are
+installed in additional image layers after the base layers; omitted or empty
+lists add nothing. Existing records without these fields remain valid.
 
 ## When a deployment fails
 

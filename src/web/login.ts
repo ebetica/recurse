@@ -1,7 +1,7 @@
-// Login throttle: per-IP lockout plus 0.5s delay; no oversized password echo.
-// Password change requires current credential and 12-char floor, rotates hash
-// then reissues caller cookie. Audit cookie fingerprint only, never plaintext.
-// Strict JSON content type prevents cross-site simple-request password changes.
+// Login: IP lockout, 0.5s delay, bounded echo; audit fingerprints only.
+// Password change requires current credential, 12-char floor and strict JSON;
+// rotates hash and reissues cookie. Only direct browser HTTP omits Secure;
+// forwarding hints, missing origins and Serve keep it and all other flags.
 
 import {
   COOKIE_DAYS,
@@ -9,13 +9,12 @@ import {
   sessionFingerprint,
   type OperatorAuth,
 } from "../auth/session";
-import { pyStrip } from "../auth/provider_store";
 import {
   INFO,
   logEvent,
   type RuntimeLogger,
 } from "../observability/runtime_logging";
-import { parsePythonJson } from "../utils/py_compact_json";
+import { jsonObjectBody } from "./request_body";
 import {
   clientIp,
   htmlResponse,
@@ -115,60 +114,7 @@ export async function jsonDictBody(
   ex: Exchange,
   required = true,
 ): Promise<Record<string, unknown> | null> {
-  const bytes = new Uint8Array(await ex.request.arrayBuffer());
-  let body: unknown = null;
-  if (bytes.length) {
-    // Invariant: FastAPI 0.139 strict_content_type: only application/json or
-    // +json is parsed; a missing or other type is raw text (dict_type 422).
-    // This also refuses cross-site text/plain simple requests.
-    const header = ex.request.headers.get("content-type");
-    const parts = (
-      header ? pyStrip(header.split(";")[0]!).toLowerCase() : ""
-    ).split("/");
-    const [main, sub] = parts;
-    const isJson =
-      parts.length === 2 &&
-      main === "application" &&
-      !!sub &&
-      (sub === "json" || sub.endsWith("+json"));
-    if (isJson) {
-      let text: string;
-      try {
-        text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-      } catch {
-        throw new HttpError(400, "There was an error parsing the body");
-      }
-      try {
-        body = parsePythonJson(text);
-      } catch {
-        throw new HttpError(422, [
-          {
-            type: "json_invalid",
-            loc: ["body", 0],
-            msg: "JSON decode error",
-            input: {},
-            ctx: { error: "Expecting value" },
-          },
-        ]);
-      }
-    } else body = Buffer.from(bytes).toString("utf8");
-  }
-  if (body === null) {
-    if (!required) return null;
-    throw new HttpError(422, [
-      { type: "missing", loc: ["body"], msg: "Field required", input: null },
-    ]);
-  }
-  if (typeof body !== "object" || Array.isArray(body))
-    throw new HttpError(422, [
-      {
-        type: "dict_type",
-        loc: ["body"],
-        msg: "Input should be a valid dictionary",
-        input: body,
-      },
-    ]);
-  return body as Record<string, unknown>;
+  return jsonObjectBody(ex, required);
 }
 
 /** Python truthiness of a parsed JSON value. */
@@ -195,13 +141,31 @@ function requireStr(value: unknown): string {
   return value;
 }
 
-export function sessionCookieHeader(token: string): string {
-  return `${COOKIE_NAME}=${token}; HttpOnly; Max-Age=${COOKIE_DAYS * 86400}; Path=/; SameSite=lax; Secure`;
+function secureCookie(ex: Exchange): boolean {
+  return (
+    ex.tailscaleSocket === true ||
+    ex.scheme !== "http" ||
+    !ex.request.headers.get("origin")?.startsWith("http://") ||
+    [...ex.request.headers.keys()].some(
+      (name) =>
+        name === "forwarded" ||
+        name.startsWith("x-forwarded-") ||
+        name === "front-end-https" ||
+        name === "x-url-scheme",
+    )
+  );
+}
+
+export function sessionCookieHeader(token: string, secure = true): string {
+  return `${COOKIE_NAME}=${token}; HttpOnly; Max-Age=${COOKIE_DAYS * 86400}; Path=/; SameSite=lax${secure ? "; Secure" : ""}`;
 }
 
 /** Starlette's delete_cookie: `expires=0` renders as the current time. */
-export function clearCookieHeader(now: Date = new Date()): string {
-  return `${COOKIE_NAME}=""; expires=${now.toUTCString()}; HttpOnly; Max-Age=0; Path=/; SameSite=lax; Secure`;
+export function clearCookieHeader(
+  now: Date = new Date(),
+  secure = true,
+): string {
+  return `${COOKIE_NAME}=""; expires=${now.toUTCString()}; HttpOnly; Max-Age=0; Path=/; SameSite=lax${secure ? "; Secure" : ""}`;
 }
 
 function redirectHome(extra: Record<string, string> = {}): Response {
@@ -239,15 +203,21 @@ export function registerLoginRoutes(router: Router, deps: LoginDeps): void {
     }
     throttle.recordSuccess(ip);
     return redirectHome({
-      "set-cookie": sessionCookieHeader(await operator.makeToken()),
+      "set-cookie": sessionCookieHeader(
+        await operator.makeToken(),
+        secureCookie(ex),
+      ),
     });
   });
 
-  router.post("/logout", async () => {
+  router.post("/logout", async (ex) => {
     // Invariant: The middleware already required a valid cookie; tell the
     // browser to drop it.
     const response = jsonResponse({ ok: true });
-    response.headers.append("set-cookie", clearCookieHeader());
+    response.headers.append(
+      "set-cookie",
+      clearCookieHeader(new Date(), secureCookie(ex)),
+    );
     return response;
   });
 
@@ -292,7 +262,7 @@ export function registerLoginRoutes(router: Router, deps: LoginDeps): void {
       const response = jsonResponse({ ok: true });
       response.headers.append(
         "set-cookie",
-        sessionCookieHeader(await operator.makeToken()),
+        sessionCookieHeader(await operator.makeToken(), secureCookie(ex)),
       );
       return response;
     };

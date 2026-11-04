@@ -1,8 +1,8 @@
 /** The app's font stacks, read once from web/theme.css for server pages. */
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const THEME_CSS = readFileSync(
+const THEME_CSS = await readFile(
   join(import.meta.dir, "..", "..", "web", "theme.css"),
   "utf8",
 );

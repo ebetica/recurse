@@ -10,8 +10,8 @@ const ACTIVE_STATUSES: ReadonlySet<TreeNode["status"]> = new Set([
   "interrupting",
 ]);
 
-export function isTakenOver(node: { pinned?: boolean | null }): boolean {
-  return node.pinned === true;
+export function isTakenOver(node: { taken_over?: boolean | null }): boolean {
+  return node.taken_over === true;
 }
 
 export interface ActiveDescendant {

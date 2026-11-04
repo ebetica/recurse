@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -54,6 +57,7 @@ test("historical SQLite files cross-open in AgentStore", async () => {
   }
 }, 30000);
 
+// Regression: #3102 Closed database files retire without admitting a replacement.
 test("retire never passes a queued insert; close gates admission before drain", async () => {
   const dir = temp();
   const store = new AgentStore(dir);
@@ -68,9 +72,31 @@ test("retire never passes a queued insert; close gates admission before drain", 
       AgentClosed,
     );
     expect(store.pendingClosures()).toBe(1);
-    expect(store.dbPaths("ordering")).toEqual([store.dbPath("ordering")]);
+    const path = store.dbPath("ordering");
+    expect(await store.dbPaths("ordering")).toEqual([path]);
+    const journal = `${path}-journal`;
+    writeFileSync(journal, "closed journal");
+    const originals = [path, journal].map((entry) => statSync(entry).ino);
+    expect(await store.retireFiles("ordering")).toBe(true);
+    const trash = join(dir, ".trash");
+    expect(
+      readdirSync(trash)
+        .map((name) => statSync(join(trash, name)).ino)
+        .sort(),
+    ).toEqual([...originals].sort());
+    expect([path, journal].map((entry) => existsSync(entry))).toEqual([
+      false,
+      false,
+    ]);
+    expect(store.pendingClosures()).toBe(1);
     store.forget("ordering");
     expect(store.pendingClosures()).toBe(0);
+    store.enqueueMetadata("ordering", { reopened: true });
+    expect(await store.flush("ordering")).toBe(true);
+    expect(await store.retireFiles("ordering")).toBe(false);
+    expect((await store.loadPersistedAgent("ordering"))[0]).toEqual({
+      reopened: true,
+    });
   } finally {
     await store.dispose();
     rmSync(dir, { recursive: true, force: true });

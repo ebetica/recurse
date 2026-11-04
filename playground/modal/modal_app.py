@@ -2,14 +2,20 @@
 
 Secrets and the Volume must already exist; image builds never change data.
 deploy.py (beside it) deploys this file with `--strategy recreate`. On exit the
-web container stops Bun's whole process group before committing the Volume."""
+web container stops Bun's whole process group before committing the Volume.
+`sleep_check` answers sleeping homes' hourly check-ins from a Dict, without
+starting the web container."""
 
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
+import hmac
 import json
 from itertools import islice
 import os
 import re
+import secrets
 import shlex
 import signal
 import sqlite3
@@ -147,6 +153,20 @@ _TOOL_BUILD = " ".join(
     ]
 )
 
+def _packages(variable: str, pattern: str) -> list[str]:
+    """Accept only bounded lists of plain package names from deploy settings."""
+    names = json.loads(os.environ.get(variable, "[]"))
+    if (not isinstance(names, list) or len(names) > 32
+            or any(not isinstance(name, str) or not re.fullmatch(pattern, name)
+                   or (variable == "RECURSE_MODAL_APT_PACKAGES" and ".." in name) for name in names)
+            or len(names) != len(set(names))):
+        raise SystemExit(f"{variable} must contain at most 32 distinct plain package names")
+    return names
+
+
+apt_packages = _packages("RECURSE_MODAL_APT_PACKAGES", r"[a-z0-9](?:[a-z0-9+.-]{0,126}[a-z0-9])?")
+pip_packages = _packages("RECURSE_MODAL_PIP_PACKAGES", r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?")
+
 image = (
     modal.Image.debian_slim(python_version="3.12")
     .apt_install(
@@ -195,26 +215,39 @@ image = (
             "RTK_NO_TOML": "1",
         }
     )
-    .run_commands(_TOOL_BUILD, secrets=GITHUB_SECRET)
-    .env(
-        {
-            "RECURSE_TEMP_IN_DATA_DIR": "1",
-            "RECURSE_MODAL_PIN": IMAGE_PIN,
-            "RECURSE_MODAL_IMAGE_PIN": IMAGE_PIN,
-            "RECURSE_MODAL_APP": APP_NAME,
-            "RECURSE_MODAL_VOLUME": VOLUME_NAME,
-            "RECURSE_MODAL_AUTH_SECRET": AUTH_SECRET,
-            "RECURSE_MODAL_GITHUB_SECRET": GITHUB_SECRET_NAME,
-            "RECURSE_MODAL_CONFIRMED_VOLUME": VOLUME_NAME,
-            "RECURSE_MODAL_REPO_URL": APP_REPO_URL,
-            "RECURSE_MODAL_WEB_EXTRA_SECRETS": json.dumps(_web_extra_secret_names()),
-            **{key: os.environ[key] for key in ("CHAT_REPO_URL", "CHAT_APP_NAME") if key in os.environ},
-        }
-    )
 )
+if apt_packages:
+    image = image.apt_install(*apt_packages)
+if pip_packages:
+    image = image.pip_install(*pip_packages)
+
+# What importing this file inside a container needs.
+_WRAPPER_ENV = {
+    "RECURSE_MODAL_PIN": IMAGE_PIN,
+    "RECURSE_MODAL_IMAGE_PIN": IMAGE_PIN,
+    "RECURSE_MODAL_APP": APP_NAME,
+    "RECURSE_MODAL_VOLUME": VOLUME_NAME,
+    "RECURSE_MODAL_AUTH_SECRET": AUTH_SECRET,
+    "RECURSE_MODAL_GITHUB_SECRET": GITHUB_SECRET_NAME,
+    "RECURSE_MODAL_CONFIRMED_VOLUME": VOLUME_NAME,
+    "RECURSE_MODAL_REPO_URL": APP_REPO_URL,
+    "RECURSE_MODAL_WEB_EXTRA_SECRETS": json.dumps(_web_extra_secret_names()),
+    **{key: os.environ[key] for key in ("CHAT_REPO_URL", "CHAT_APP_NAME") if key in os.environ},
+}
+image = (
+    image.run_commands(_TOOL_BUILD, secrets=GITHUB_SECRET)
+    .env({"RECURSE_TEMP_IN_DATA_DIR": "1", **_WRAPPER_ENV})
+)
+# The check-in needs no tools, Volume or secrets: only this file and the Dict.
+sleep_check_image = modal.Image.debian_slim(python_version="3.12").env(_WRAPPER_ENV)
 
 app = modal.App(APP_NAME)
 volume = modal.Volume.from_name(VOLUME_NAME, create_if_missing=False)
+# "awake": the running web container's token; "asleep": what its exit hook
+# saw, {"token", "keys": {key id: {"sha256", "waiting"}}}. No message content.
+sleep_dict = modal.Dict.from_name(f"{APP_NAME}-sleep-check", create_if_missing=True)
+SLEEP_CHECK_SECONDS = 3600
+_MAX_SLEEP_KEYS = 1000
 
 _PI_CLI = f"{SNAPSHOT}/node_modules/@earendil-works/pi-coding-agent/dist/cli.js"
 _CHROMIUM_CHECK = (
@@ -299,6 +332,12 @@ def status() -> dict:
         "warm": _warm_reason(),
     }
 
+def _start_sleep_check(token: str) -> str:
+    """Mark this container awake in the Dict; return the check-in's URL."""
+    sleep_dict.put("awake", token)
+    return modal.Function.from_name(APP_NAME, "sleep_check").get_web_url()
+
+
 def _stop_web(child) -> bool:
     """Wait for process group exit; return false if a forced kill was needed."""
     for termination, seconds in ((signal.SIGTERM, 15), (signal.SIGKILL, 3)):
@@ -336,9 +375,20 @@ class Web:
         """Start Bun in its own process group on the latest committed Volume."""
         volume.reload()
         print(f"[web] supervisor start pin={IMAGE_PIN} time={time.time()}", flush=True)
+        extra = {"RECURSE_SLEEP_WHEN_IDLE": "1"}
+        self.sleep_token = secrets.token_hex(16)
+        pool = ThreadPoolExecutor(1)
+        try:
+            # Before Bun starts, so check-ins send homes here while it runs.
+            extra["RECURSE_SLEEP_CHECK_URL"] = pool.submit(
+                _start_sleep_check, self.sleep_token).result(timeout=5)
+        except Exception as exc:
+            print(f"[web] sleep check-in unavailable: {exc!r}", flush=True)
+        finally:
+            pool.shutdown(wait=False)
         self.child = subprocess.Popen(
             [BUN, f"{SNAPSHOT}/src/local.ts", "--prebuilt"],
-            cwd=SNAPSHOT, env=_env(), start_new_session=True)
+            cwd=SNAPSHOT, env=_env(extra), start_new_session=True)
 
     @modal.exit()
     async def stop(self) -> None:
@@ -352,6 +402,13 @@ class Web:
             raise RuntimeError("Bun did not exit cleanly; Volume not committed")
         await asyncio.wait_for(volume.commit.aio(), timeout=8)
         print("[web] process group stopped; Volume commit complete", flush=True)
+        keys = sleep_state_for(DATA_DIR)
+        if keys is not None and getattr(self, "sleep_token", None):
+            try:
+                await asyncio.wait_for(sleep_dict.put.aio(
+                    "asleep", {"token": self.sleep_token, "keys": keys}), timeout=3)
+            except Exception as exc:
+                print(f"[web] sleep check-in state not saved: {exc!r}", flush=True)
 
 _WARM_TURN_MAX_AGE_SECONDS = 15 * 60
 _SCAN_CAP = 2000
@@ -380,7 +437,7 @@ def _pending_intents(agents: Path) -> str | None:
             except Exception:
                 continue
             if row is not None:
-                return f"pending intent ({db.stem})"
+                return f"pending intent: {db}"
         finally:
             try:
                 conn.close()
@@ -438,7 +495,7 @@ def _running_shell(state: Path) -> str | None:
             except (OSError, ValueError):
                 continue
             if isinstance(data, dict) and data.get("status") == "running":
-                return "detached shell running"
+                return f"detached shell running: {record}"
     return None
 
 def _durable_work(conversations: Path) -> str | None:
@@ -463,7 +520,7 @@ def _durable_work(conversations: Path) -> str | None:
                         and session.is_file()
                         and now - session.stat().st_mtime <= _WARM_TURN_MAX_AGE_SECONDS
                     ):
-                        return "durable session active"
+                        return f"durable session active: {session}"
                 except OSError:
                     continue
             shells = durable / "shells"
@@ -526,3 +583,90 @@ def keepalive() -> str | None:
         return reason
     print(f"[keepalive] poked {url} ({code}) because {reason}")
     return reason
+
+
+_HEX16 = re.compile(r"[a-f0-9]{16}")
+_HEX64 = re.compile(r"[a-f0-9]{64}")
+_KEY = re.compile(r"Bearer recurse-link_([a-f0-9]{16})_([a-f0-9]{64})")
+
+
+def _json_file(path: Path, missing):
+    """Parsed JSON, `missing` if the file is absent, None if unreadable."""
+    try:
+        return json.loads(path.read_text())
+    except FileNotFoundError:
+        return missing
+    except (OSError, ValueError):
+        return None
+
+
+def sleep_state_for(data_dir: str | Path) -> dict | None:
+    """Per backend key: its stored digest and whether Recurse queued relay
+    messages for the home using it (relay-queue.json routes labels to keys).
+    None if a file is unreadable or holds more than _MAX_SLEEP_KEYS keys."""
+    root = Path(data_dir)
+    keys = _json_file(root / "backend-keys.json", [])
+    queue = _json_file(root / "relay-queue.json", {"labels": {}, "requests": []})
+    if (not isinstance(keys, list) or len(keys) > _MAX_SLEEP_KEYS or not isinstance(queue, dict)
+            or not isinstance(queue.get("labels"), dict) or not isinstance(queue.get("requests"), list)):
+        return None
+    routes = {label: route.get("key") for label, route in queue["labels"].items() if isinstance(route, dict)}
+    waiting = {routes.get(request.get("label")) for request in queue["requests"]
+               if isinstance(request, dict) and isinstance(request.get("label"), str)}
+    state = {}
+    for key in keys:
+        if (not isinstance(key, dict) or not isinstance(key.get("id"), str) or not isinstance(key.get("sha256"), str)
+                or not _HEX16.fullmatch(key["id"]) or not _HEX64.fullmatch(key["sha256"])):
+            return None
+        state[key["id"]] = {"sha256": key["sha256"], "waiting": key["id"] in waiting}
+    return state
+
+
+def sleep_check_answer(authorization: str, awake, asleep) -> tuple[int, dict]:
+    """401 unless `authorization` is a backend key whose digest matches; then
+    keep sleeping only if the web container stopped after the last start and
+    nothing is queued for that key. Reveals nothing about other keys."""
+    match = _KEY.fullmatch(authorization or "")
+    keys = asleep.get("keys") if isinstance(asleep, dict) else None
+    record = keys.get(match[1]) if match and isinstance(keys, dict) else None
+    expected = record.get("sha256") if isinstance(record, dict) else None
+    candidate = hashlib.sha256(match[2].encode()).hexdigest() if match else ""
+    if not hmac.compare_digest(candidate, expected if isinstance(expected, str) else "0" * 64) or not expected:
+        return 401, {"detail": "backend key required"}
+    if not isinstance(awake, str) or asleep.get("token") != awake or record.get("waiting") is not False:
+        return 200, {"requests": []}
+    return 200, {"requests": [], "sleep_seconds": SLEEP_CHECK_SECONDS}
+
+
+async def sleep_check_asgi(scope, receive, send) -> None:
+    """GET /api/relay/requests answered from the Dict; anything else is 404."""
+    if scope["type"] == "lifespan":
+        while (await receive())["type"] == "lifespan.startup":
+            await send({"type": "lifespan.startup.complete"})
+        await send({"type": "lifespan.shutdown.complete"})
+        return
+    status, body = 404, {"detail": "not found"}
+    if scope.get("method") == "GET" and scope.get("path") == "/api/relay/requests":
+        authorization = dict(scope.get("headers", [])).get(b"authorization", b"").decode("latin-1")
+        status, body = 401, {"detail": "backend key required"}
+        try:
+            if _KEY.fullmatch(authorization):
+                awake = await sleep_dict.get.aio("awake")
+                asleep = await sleep_dict.get.aio("asleep")
+                status, body = sleep_check_answer(authorization, awake, asleep)
+        except Exception:
+            status, body = 503, {"detail": "check-in unavailable"}
+    payload = json.dumps(body).encode()
+    await send({"type": "http.response.start", "status": status,
+                "headers": [(b"content-type", b"application/json"),
+                            (b"content-length", str(len(payload)).encode())]})
+    await send({"type": "http.response.body", "body": payload})
+
+
+@app.function(image=sleep_check_image, cpu=0.125, memory=256, scaledown_window=2,
+              min_containers=0, timeout=30)
+@modal.concurrent(max_inputs=100)
+@modal.asgi_app(label=f"{APP_NAME}-sleep-check")
+def sleep_check():
+    """Answer a sleeping home's check-in without starting the web container."""
+    return sleep_check_asgi

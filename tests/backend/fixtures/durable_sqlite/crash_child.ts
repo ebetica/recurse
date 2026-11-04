@@ -16,6 +16,7 @@ let transactions = 0;
 const dying: SqliteDatabase = {
   exec: database.exec.bind(database),
   run: database.run.bind(database),
+  runCounted: database.runCounted.bind(database),
   get: database.get.bind(database),
   all: database.all.bind(database),
   close: database.close.bind(database),

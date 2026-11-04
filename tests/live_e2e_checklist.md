@@ -25,7 +25,7 @@ Run `bun tests/live_e2e.ts --verify-live`. Inspect the retained `session.jsonl`,
 
 - Conversation: one committed prompt runs in four consecutive turns under one conversation/session id, ending with `LIVE_E2E_OK_47`.
 - Foreground Bash: the model runs a short command and observes `LIVE_FOREGROUND_OK`.
-- Search and read: native find, read, grep, and multi_grep inspect the synthetic seed and both search terms appear.
+- Search and read: native find, read, and grep inspect the synthetic seed and both search terms appear.
 - Write/edit: native write creates two old lines; one native edit call replaces both; native read sees both new lines.
 - Image: native write saves the base64 fixture; Bash decodes a valid PNG; native read opens that PNG.
 - Publish and UI: native `publish` with `paths: ["live-pixel.png"]` attaches that PNG and a phase screenshot visibly renders it inline.
@@ -34,7 +34,7 @@ Run `bun tests/live_e2e.ts --verify-live`. Inspect the retained `session.jsonl`,
 - Monitored Bash: monitor=true prints READY and a PGID; the model kills that exact process group before DONE, then native wait shows termination.
 - Directory and environment: native chdir enters and restores the synthetic workdir; native `env` set/list/unset and Bash checks observe present then absent.
 - Artifact: native write creates V1; native `artifact` creates one Artifact, lists all, and renames it. Native read verifies V1 at the returned path; Git log records its SHA. Native write and Git commit publish V2 through the hook; Git restore from the first SHA and another commit publish V1 again. Inspect hook results and read the final V1 bytes.
-- Child: CLI creates a sibling in a managed worktree, sends/messages/tails/waits/reaps; that child locates the test Artifact by id through native `artifact` list, uses Git show for its first version, reads V1, computes its SHA-256, and its digest reaches the creator as an agent message.
+- Child: CLI creates a sibling in a managed worktree, sends/reads-transcripts/tails/waits/reaps; that child locates the test Artifact by id through native `artifact` list, uses Git show for its first version, reads V1, computes its SHA-256, and its digest reaches the creator as an agent message.
 - Managed worktree and Pi compact: model enters a second named worktree with the CLI and calls native compact.
 - View/browser: all bounded /view pages are retained; one nonempty main-screen screenshot exists after each of the four turns.
 - Stop: as verifier, start a separate private turn through the API/UI, record its test-owned Pi process-group id, stop with its scoped active run (and use the idle second Stop if needed), then check terminal status and that `killpg(pgid, 0)` reports the group gone before launcher cleanup. Inspect only own-UID private processes, never another agent's session or `/proc/*/environ`.

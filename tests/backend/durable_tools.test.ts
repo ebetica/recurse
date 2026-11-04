@@ -57,7 +57,7 @@ afterAll(() => searchWorker.close());
 
 async function createFffExtension(cwd: string, flags: FffFlags) {
   const previous = process.env.PI_FFF_MULTIGREP;
-  process.env.PI_FFF_MULTIGREP = "1";
+  process.env.PI_FFF_MULTIGREP = "0";
   let native: Awaited<ReturnType<typeof loadFffTools>>;
   try {
     native = await loadFffTools(cwd, flags);
@@ -578,23 +578,14 @@ test(
         expect(fff.definitions.map((tool) => tool.name).sort()).toEqual([
           "find",
           "grep",
-          "multi_grep",
         ]);
-        expect(fff.durableNames).toEqual(["find", "grep", "multi_grep"]);
+        expect(fff.durableNames).toEqual(["find", "grep"]);
         const calls: Call[] = [
           {
             name: "grep",
             args: { pattern: "Alpha", path: "src/", context: 1 },
           },
           { name: "find", args: { pattern: "alpha", path: "src/" } },
-          {
-            name: "multi_grep",
-            args: {
-              patterns: ["Alpha", "beta"],
-              constraints: "src/",
-              context: 1,
-            },
-          },
           { name: "grep", args: { pattern: ".*" } },
         ];
         for (const root of [cwd, other]) {

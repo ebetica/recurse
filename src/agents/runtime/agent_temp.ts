@@ -21,15 +21,16 @@ import {
 } from "../../config";
 import * as runtimeLogging from "../../observability/runtime_logging";
 import * as startupMetrics from "../../observability/startup_metrics";
+import { slowSpan } from "../../observability/slow_span";
 import { flockExclusive } from "../../utils/flock";
-import * as trash from "../../utils/trash";
-import { sweepTrash } from "../../utils/trash_sweep";
+import { retireAll, retirePath, sweepTrash } from "../../utils/trash_sweep";
 import type {
   ConversationRecord,
   ConversationStore,
 } from "../conversation_store";
 import type { AttachmentDrafts, DraftDirs } from "./attachment_drafts";
 import { AttachmentError, type Manifest } from "./attachments/base";
+import type { CropOperation } from "./attachments/crop";
 import * as publish from "./attachments/publish";
 import * as store from "./attachments/store";
 
@@ -79,9 +80,9 @@ async function listNames(path: string): Promise<string[] | null> {
     throw error;
   }
 }
-function retireOrFalse(path: string, root: string): boolean {
+async function retireOrFalse(path: string, root: string): Promise<boolean> {
   try {
-    return trash.retire(path, root);
+    return await retirePath(path, root);
   } catch (error) {
     if (isSystemError(error)) return false;
     throw error;
@@ -219,10 +220,16 @@ export class AgentTemp implements DraftDirs {
 
   // Create a temp root and its instance scope, both 0700; parents keep modes.
   private async ensureScope(root: string, scope: string): Promise<string> {
-    await mkdir(root, { recursive: true });
-    await chmod(root, 0o700);
+    await slowSpan("agent_scope_mkdir_call", undefined, () =>
+      mkdir(root, { recursive: true }),
+    );
+    await slowSpan("agent_scope_chmod_call", undefined, () =>
+      chmod(root, 0o700),
+    );
     await mkdirExistOk(scope);
-    await chmod(scope, 0o700);
+    await slowSpan("agent_scope_chmod_call", undefined, () =>
+      chmod(scope, 0o700),
+    );
     return scope;
   }
 
@@ -231,7 +238,7 @@ export class AgentTemp implements DraftDirs {
       throw new TempValueError("unsafe temporary-directory key");
     const path = join(scope, name);
     await mkdirExistOk(path);
-    await chmod(path, 0o700);
+    await slowSpan("agent_key_chmod_call", undefined, () => chmod(path, 0o700));
     return path;
   }
 
@@ -295,7 +302,9 @@ export class AgentTemp implements DraftDirs {
     const leaf = await this.ensureKeyDir(scope, this.tempLeaf(tempKey));
     const uploads = join(leaf, "uploads");
     await mkdirExistOk(uploads);
-    await chmod(uploads, 0o700);
+    await slowSpan("agent_uploads_chmod_call", undefined, () =>
+      chmod(uploads, 0o700),
+    );
     return this.uploadsDir(tempKey);
   }
 
@@ -316,7 +325,7 @@ export class AgentTemp implements DraftDirs {
     cid: string,
     data: Uint8Array,
     filename: string,
-    options: { now?: number } = {},
+    options: { now?: number; crop?: CropOperation } = {},
   ): Promise<Manifest> {
     const conv = this.deps.conversations.load(cid);
     if (!conv || !this.deps.hasCollection(conv))
@@ -325,7 +334,20 @@ export class AgentTemp implements DraftDirs {
     return publish.addUpload(collection, cid, data, filename, {
       ...(this.deps.ids === undefined ? {} : { ids: this.deps.ids }),
       ...(options.now === undefined ? {} : { now: options.now }),
+      ...(options.crop === undefined ? {} : { crop: options.crop }),
     });
+  }
+
+  /** Cancel a crop under the same owner admission fence as uploads. */
+  async cancelConversationCrop(
+    cid: string,
+    crop: CropOperation,
+  ): Promise<void> {
+    const conv = this.deps.conversations.load(cid);
+    if (!conv || !this.deps.hasCollection(conv))
+      throw new TempKeyError("attachment owner not found");
+    const collection = await this.admitUploadsDir(cid, String(conv.tmp_key));
+    await publish.cancelCrop(collection, cid, crop);
   }
 
   /** Fast local scratch and generated files Pi may read while idle. */
@@ -516,12 +538,12 @@ export class AgentTemp implements DraftDirs {
     const names = await listNames(scope);
     if (names === null) return [0, 0];
     startupMetrics.count("temp_entries_scanned", names.length);
-    let removed = 0;
-    for (const name of names) {
-      if (name === this.paths.AGENT_TEMP_TRASH_NAME || live.has(name)) continue;
-      if (retireOrFalse(join(scope, name), trashDir)) removed += 1;
-    }
-    return [names.length, removed];
+    const paths = names
+      .filter(
+        (name) => name !== this.paths.AGENT_TEMP_TRASH_NAME && !live.has(name),
+      )
+      .map((name) => join(scope, name));
+    return [names.length, await retireAll(paths, trashDir)];
   }
 
   /** Retire temp entries and sidecars no live conversation owns. */
@@ -579,7 +601,7 @@ export class AgentTemp implements DraftDirs {
     const live = new Set(
       conversations.flatMap((c) => (typeof c.id === "string" ? [c.id] : [])),
     );
-    let removed = 0;
+    const paths: string[] = [];
     for (const directory of [
       this.paths.MUTE_LOCK_DIR,
       this.paths.TITLE_LOCK_DIR,
@@ -588,13 +610,10 @@ export class AgentTemp implements DraftDirs {
         if (!name.endsWith(".lock")) continue;
         const cid = name.slice(0, -5);
         if (TEMP_ID_RE.test(cid) && !live.has(cid))
-          removed += +retireOrFalse(
-            join(directory, name),
-            this.paths.TRASH_DIR,
-          );
+          paths.push(join(directory, name));
       }
     }
-    return removed;
+    return retireAll(paths, this.paths.TRASH_DIR);
   }
 
   private async sweepPromptSidecars(
@@ -605,17 +624,16 @@ export class AgentTemp implements DraftDirs {
       for (const name of this.deps.promptSidecarNames(conv)) keep.add(name);
     const names = await listNames(this.paths.TURN_PROMPT_DIR);
     if (names === null) return 0;
-    let removed = 0;
-    for (const name of names)
-      if (
-        !keep.has(name) &&
-        !(name.startsWith("static-") && name.endsWith(".rpc.txt"))
-      )
-        removed += +retireOrFalse(
-          join(this.paths.TURN_PROMPT_DIR, name),
-          this.paths.TRASH_DIR,
-        );
-    return removed;
+    return retireAll(
+      names
+        .filter(
+          (name) =>
+            !keep.has(name) &&
+            !(name.startsWith("static-") && name.endsWith(".rpc.txt")),
+        )
+        .map((name) => join(this.paths.TURN_PROMPT_DIR, name)),
+      this.paths.TRASH_DIR,
+    );
   }
 
   /** Move surviving legacy collections once, before any startup file writes. */
@@ -642,7 +660,7 @@ export class AgentTemp implements DraftDirs {
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EXDEV") throw error;
           const staging = join(this.paths.AGENT_FILES_DIR, `.migrate-${leaf}`);
-          trash.retire(staging, this.paths.TRASH_DIR);
+          await retirePath(staging, this.paths.TRASH_DIR);
           await cp(source, staging, {
             recursive: true,
             errorOnExist: true,
@@ -652,7 +670,7 @@ export class AgentTemp implements DraftDirs {
           await rename(staging, destination);
         }
       }
-      trash.retire(source, this.paths.AGENT_TEMP_TRASH_DIR);
+      await retirePath(source, this.paths.AGENT_TEMP_TRASH_DIR);
     }
     await writeFile(marker, "1\n", { mode: 0o600 });
   }
@@ -736,10 +754,13 @@ export class AgentTemp implements DraftDirs {
 
 async function mkdirExistOk(path: string): Promise<void> {
   try {
-    await mkdir(path);
+    await slowSpan("agent_dir_mkdir_call", undefined, () => mkdir(path));
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    if (!(await stat(path)).isDirectory()) throw error;
+    const info = await slowSpan("agent_dir_stat_call", undefined, () =>
+      stat(path),
+    );
+    if (!info.isDirectory()) throw error;
   }
 }
 async function pathExists(path: string): Promise<boolean> {

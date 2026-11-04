@@ -36,8 +36,8 @@ import {
 
 const root = realpathSync(mkdtempSync(join(tmpdir(), "pi-bg-shell-durable-")));
 const worker = new SqliteWorker();
-afterAll(() => {
-  worker.close();
+afterAll(async () => {
+  await worker.close();
   rmSync(root, { recursive: true, force: true });
 });
 let dirs = 0;
@@ -133,11 +133,24 @@ const shellTasks = async (harness: Harness) =>
     (task) => task.record.kind === SHELL_TASK,
   );
 
+// Regression: #3037 Record commits must retain immediate shell completions.
 test("a background completion wakes the idle conversation exactly once", async () => {
   const { harness, conversation, shells } = await openShellHarness(
     new MemoryStorage(),
-    { cwd: root, config: config() },
+    { cwd: root, config: { ...config(), foregroundWaitMs: 5 } },
   );
+  const drained: { id: string; marker: string }[] = [];
+  for (let i = 0; i < 8; i++) {
+    const marker = `drained-${i}`;
+    const output = await run(
+      conversation,
+      { command: `printf ${marker}` },
+      marker,
+    );
+    const background = /backgrounded as shell `([^`]+)`/.exec(output);
+    if (background) drained.push({ id: background[1]!, marker });
+    else expect(output).toBe(marker);
+  }
   const started = await run(
     conversation,
     { command: "sleep 0.5; echo finished", background: true },
@@ -145,6 +158,12 @@ test("a background completion wakes the idle conversation exactly once", async (
   );
   const id = /shell `([^`]+)`/.exec(started)![1];
   expect(started).toContain("in the background");
+  const immediate = await run(
+    conversation,
+    { command: "echo immediate", background: true },
+    "immediate",
+  );
+  const immediateId = /shell `([^`]+)`/.exec(immediate)![1];
   const late = await run(
     conversation,
     { command: "sleep 1; echo late" },
@@ -154,7 +173,7 @@ test("a background completion wakes the idle conversation exactly once", async (
   const lateId = /shell `([^`]+)`/.exec(late)![1];
   await until(
     async () => (await shellTasks(harness)).length === 0,
-    "both shell tasks to finish",
+    "all shell tasks to finish",
   );
   await until(async () => {
     const texts = await userTexts(conversation);
@@ -166,9 +185,14 @@ test("a background completion wakes the idle conversation exactly once", async (
       texts.some(
         (text) => text.includes(`Shell \`${lateId}\``) && text.includes("late"),
       ) &&
+      texts.some(
+        (text) =>
+          text.includes(`Shell \`${immediateId}\``) &&
+          text.includes("immediate"),
+      ) &&
       last?.role === "assistant"
     );
-  }, "both completions delivered and answered");
+  }, "all completions delivered and answered");
   await harness.waitForIdle(context);
   const texts = await userTexts(conversation);
   const done = texts.filter(
@@ -176,6 +200,19 @@ test("a background completion wakes the idle conversation exactly once", async (
   );
   expect(done).toHaveLength(1);
   expect(done[0]).toContain("finished");
+  for (const { id: drainedId, marker } of drained) {
+    const notices = texts.filter((text) =>
+      text.startsWith(`Shell \`${drainedId}\``),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(`\n${marker}`);
+  }
+  expect(
+    texts.filter(
+      (text) =>
+        text.includes(`Shell \`${immediateId}\``) && text.includes("immediate"),
+    ),
+  ).toHaveLength(1);
   expect(
     texts.filter(
       (text) => text.includes(`Shell \`${lateId}\``) && text.includes("late"),
@@ -193,13 +230,13 @@ test("a monitor delivers output lines, then its completion", async () => {
   const finish = join(root, "monitor-finish");
   const { harness, conversation, shells } = await openShellHarness(
     new MemoryStorage(),
-    { cwd: root, config: config() },
+    { cwd: root, config: { ...config(), monitorFlushMs: 1 } },
   );
   try {
     const started = await run(
       conversation,
       {
-        command: `echo first; while [ ! -f ${JSON.stringify(second)} ]; do sleep 0.01; done; echo second; while [ ! -f ${JSON.stringify(finish)} ]; do sleep 0.01; done`,
+        command: `echo first; while [ ! -f ${JSON.stringify(second)} ]; do sleep 0.01; done; echo second-λ; while [ ! -f ${JSON.stringify(finish)} ]; do sleep 0.01; done; echo final-λ`,
         monitor: true,
       },
       "mon",
@@ -207,11 +244,12 @@ test("a monitor delivers output lines, then its completion", async () => {
     const id = /shell `([^`]+)`/.exec(started)![1];
     const delivered = async (line: string) =>
       (await userTexts(conversation)).some(
-        (text) => text.startsWith(`[monitor ${id}]`) && text.includes(line),
+        (text) =>
+          text.startsWith(`[monitor ${id}]`) && text.split("\n").includes(line),
       );
     await until(() => delivered("first"), "the first monitor batch");
     writeFileSync(second, "");
-    await until(() => delivered("second"), "the second monitor batch");
+    await until(() => delivered("second-λ"), "the second monitor batch");
     writeFileSync(finish, "");
     await until(
       async () => (await shellTasks(harness)).length === 0,
@@ -222,9 +260,14 @@ test("a monitor delivers output lines, then its completion", async () => {
     const batches = texts.filter((text) => text.startsWith(`[monitor ${id}]`));
     expect(batches.join("\n")).toContain("first");
     expect(batches.join("\n")).toContain("second");
-    expect(
-      texts.filter((text) => text.startsWith(`Shell \`${id}\``)),
-    ).toHaveLength(1);
+    const lines = batches.flatMap((batch) => batch.split("\n"));
+    expect(lines.filter((line) => line === "first")).toHaveLength(1);
+    expect(lines.filter((line) => line === "second-λ")).toHaveLength(1);
+    const completed = texts.filter((text) =>
+      text.startsWith(`Shell \`${id}\``),
+    );
+    expect(completed).toHaveLength(1);
+    expect(completed[0]).toContain("\nfinal-λ");
   } finally {
     writeFileSync(second, "");
     writeFileSync(finish, "");

@@ -35,7 +35,7 @@ test("provider auth errors do not carry secret markers", async () => {
     });
     const muse = new MuseAuth({
       store,
-      config: { upsertCustomProvider: () => true },
+      config: { upsertCustomProvider: async () => true },
       env: { MUSE_CODE_API_KEY: "MARKER-env" },
       userAgent: "test",
       timeoutMs: 5000,

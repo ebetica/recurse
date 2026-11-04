@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import type { Route } from "playwright";
+import type { Page, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   generateTheme,
@@ -15,9 +15,25 @@ import {
   runBrowserTests,
   themeColors,
   type BrowserTest,
+  openSettingsPanel,
 } from "./common";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+
+async function openDetail(page: Page, label: string) {
+  await page
+    .locator(".settings-row")
+    .filter({ hasText: new RegExp(`^${label}`) })
+    .click();
+  return page.getByRole("dialog", { name: label, exact: true });
+}
+
+async function closeDetail(page: Page, label: string) {
+  await page
+    .getByRole("dialog", { name: label, exact: true })
+    .getByRole("button", { name: `Close ${label}`, exact: true })
+    .click();
+}
 
 export const tests: BrowserTest[] = [
   // Feature: #2426 one checked family and a prominent selected appearance, with unavailable controls visibly disabled.
@@ -46,22 +62,28 @@ export const tests: BrowserTest[] = [
       await page.locator(".agent").first().waitFor();
       const appearanceButtons = page.locator(".theme-appearance button");
       const open = async () => {
-        await page.locator("#menu-btn").click();
-        await page.locator("#settings-btn").click();
+        await openSettingsPanel(page);
         await page
           .getByRole("button", { name: "Appearance", exact: true })
           .click();
+        await browserExpect(page.locator(".theme-cards")).not.toBeVisible();
+        await browserExpect(
+          page.locator(".theme-appearance"),
+        ).not.toBeVisible();
+        await openDetail(page, "Appearance");
       };
       await page.route(`${base}api/settings/theme`, (route) => route.abort());
       await open();
       await browserExpect(appearanceButtons).toHaveCount(3);
       await page
+        .getByRole("dialog", { name: "Appearance", exact: true })
         .getByText("Couldn't load themes. Reopen Settings to try again.", {
           exact: true,
         })
         .waitFor();
       for (const button of await appearanceButtons.all())
         await browserExpect(button).toBeDisabled();
+      await closeDetail(page, "Appearance");
       await page.locator("#settings-close").click();
       await page.unroute(`${base}api/settings/theme`);
       let release!: () => void;
@@ -75,9 +97,9 @@ export const tests: BrowserTest[] = [
       for (const button of await appearanceButtons.all())
         await browserExpect(button).toBeDisabled();
       release();
-      await page
-        .locator('.theme-cards button[data-theme="Tokyo Night"]')
-        .waitFor();
+      await browserExpect(
+        page.locator('.theme-cards button[data-theme="Tokyo Night"]'),
+      ).toHaveCount(1);
       await page.unroute(`${base}api/settings/theme`);
       const selected = page.locator('.theme-cards button[aria-pressed="true"]');
       await browserExpect(selected).toHaveCount(1);
@@ -121,8 +143,15 @@ export const tests: BrowserTest[] = [
       await page.emulateMedia({ colorScheme: "dark" });
       await bg("Tokyo Night");
       for (const name of ["Dracula", "GitHub Light", custom.name]) {
+        await closeDetail(page, "Appearance");
+        await openDetail(page, "Theme");
         await page.locator(`.theme-cards button[data-theme="${name}"]`).click();
         await bg(name);
+        await closeDetail(page, "Theme");
+        await browserExpect(
+          page.locator(".settings-row").filter({ hasText: /^Theme/ }),
+        ).toContainText(name);
+        await openDetail(page, "Appearance");
         await browserExpect(selected).toHaveCount(1);
         await browserExpect(page.locator(".theme-appearance")).toHaveAttribute(
           "aria-disabled",
@@ -173,6 +202,8 @@ export const tests: BrowserTest[] = [
           )[0],
         );
       }
+      await closeDetail(page, "Appearance");
+      await openDetail(page, "Theme");
       await page.locator('.theme-cards button[data-theme="Dracula"]').click();
       await bg("Dracula");
       expect(
@@ -211,16 +242,27 @@ export const tests: BrowserTest[] = [
       await gotoRoot(page, base);
       const open = async () => {
         await page.locator(".agent").first().waitFor();
-        await page.locator("#menu-btn").click();
-        await page.locator("#settings-btn").click();
+        await openSettingsPanel(page);
         for (const tab of await page.locator("#settings-nav button").all()) {
-          await tab.scrollIntoViewIfNeeded();
           await tab.click();
           expect(await tab.getAttribute("class")).toContain("on");
+          await page
+            .locator(".settings-cat:not([hidden]) .settings-back")
+            .click();
         }
         await page
           .getByRole("button", { name: "Appearance", exact: true })
           .click();
+        await openDetail(page, "Sidebar");
+        await page
+          .getByRole("dialog", { name: "Sidebar", exact: true })
+          .getByText("Built-in script", { exact: true })
+          .waitFor();
+        await browserExpect(
+          page.locator(".settings-section:has(.sidebar-script) [role=status]"),
+        ).toHaveCount(0);
+        await closeDetail(page, "Sidebar");
+        await openDetail(page, "Theme");
         await page
           .locator('.theme-cards button[data-theme="Material Dark"]')
           .waitFor();
@@ -248,7 +290,10 @@ export const tests: BrowserTest[] = [
         await page.request.get(`${base}api/settings/theme`)
       ).json();
       expect(state.problems.length).toBeGreaterThan(0);
-      await page.getByText(state.problems[0], { exact: true }).waitFor();
+      await page
+        .getByRole("dialog", { name: "Theme", exact: true })
+        .getByText(state.problems[0], { exact: true })
+        .waitFor();
       expect(
         await page
           .locator(".settings-section:has(.theme-cards) select")
@@ -334,11 +379,15 @@ export const tests: BrowserTest[] = [
       );
       await pick("Nord").click();
       await pick("Solarized Light").click();
+      await closeDetail(page, "Theme");
+      await openDetail(page, "Appearance");
       await browserExpect(
         page
           .getByRole("group", { name: "Appearance", exact: true })
           .getByRole("button", { name: "Light", exact: true }),
       ).toHaveAttribute("aria-pressed", "true");
+      await closeDetail(page, "Appearance");
+      await openDetail(page, "Theme");
       release();
       const lightSaved = await waitForSavedTheme(
         { theme: "Solarized Dark", appearance: "light" },
@@ -357,6 +406,8 @@ export const tests: BrowserTest[] = [
         "true",
       );
       await pick("Solarized Dark").click();
+      await closeDetail(page, "Theme");
+      await openDetail(page, "Appearance");
       const appearance = page.getByRole("group", {
         name: "Appearance",
         exact: true,
@@ -401,6 +452,7 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator('.theme-cards button[aria-pressed="true"]').count(),
       ).toBe(1);
+      await closeDetail(page, "Appearance");
       await page.locator("#settings-close").click();
       await writeFile(
         path,
@@ -486,11 +538,15 @@ export const tests: BrowserTest[] = [
         } else await route.continue();
       });
       await pick("Nord").click();
+      await closeDetail(page, "Theme");
       await page.locator("#settings-close").click();
       await open();
       expect(await pick("Nord").getAttribute("aria-pressed")).toBe("true");
       rejectSave();
-      await page.getByText("Theme rejected", { exact: true }).waitFor();
+      await page
+        .getByRole("dialog", { name: "Theme", exact: true })
+        .getByText("Theme rejected", { exact: true })
+        .waitFor();
       expect(await pick("Material Dark").getAttribute("aria-pressed")).toBe(
         "true",
       );
@@ -499,7 +555,10 @@ export const tests: BrowserTest[] = [
         route.request().method() === "POST" ? route.abort() : route.continue(),
       );
       await pick("Nord").click();
-      await page.locator(".msg.err:not([hidden])").waitFor();
+      await page
+        .getByRole("dialog", { name: "Theme", exact: true })
+        .locator(".msg.err:not([hidden])")
+        .waitFor();
       expect(await pick("Nord").getAttribute("aria-pressed")).toBe("true");
       expect(await pick("GitHub Light").isEnabled()).toBe(true);
     } finally {

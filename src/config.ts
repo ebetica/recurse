@@ -1,19 +1,12 @@
-// Shared Config: bounded fail-safe atomic Settings; injected auth snapshots.
-// Pi alone supplies built-ins; custom providers follow. Unlisted stored IDs
-// stay stored and fail turns, never fallback (no refusal before first list).
-// Settings/effort reads cache up to 1s; own writes and auth apply immediately.
+// Bounded atomic Settings; injected auth snapshots.
+// Pi built-ins first; unlisted stored ids fail turns, never fall back.
+// Server snapshots refresh asynchronously; writes publish only after commit.
+// Zero-window CLI reads stay synchronous; no refusal before the first list.
 import { createHash } from "node:crypto";
-import {
-  chmodSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  rmSync,
-  realpathSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { ConfigFiles } from "./config_files";
+import fs from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
 export const Thinking = {
@@ -58,7 +51,7 @@ export interface ConfigOptions {
   readonly toolsDir?: string | null;
   // Logged-in provider prefixes; omission means no providers.
   readonly authenticatedProviders?: () => Iterable<string>;
-  // Settings read freshness in ms; 0 reads each time, server uses 1s.
+  // Refresh window in ms; 0 reads synchronously, server preloads then uses 1s.
   readonly settingsRecheckMs?: number;
   /** Monotonic milliseconds for that window; defaults to performance.now. */
   readonly now?: () => number;
@@ -440,7 +433,8 @@ function pythonPathJoin(base: string, ...parts: string[]): string {
 function pythonResolvePath(path: string, cwd: string): string {
   let candidate = isAbsolute(path) ? "/" : resolve(cwd);
   try {
-    candidate = realpathSync(candidate);
+    // oxlint-disable-next-line no-restricted-properties -- known: Config filesystem path validation
+    candidate = fs.realpathSync(candidate);
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
     if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
@@ -453,7 +447,8 @@ function pythonResolvePath(path: string, cwd: string): string {
     }
     const next = pythonPathJoin(candidate, part);
     try {
-      candidate = realpathSync(next);
+      // oxlint-disable-next-line no-restricted-properties -- known: Config filesystem path validation
+      candidate = fs.realpathSync(next);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code !== "ENOENT" && code !== "ENOTDIR") throw error;
@@ -560,7 +555,8 @@ function buildPaths(
       ? explicitToolsDir
       : ([resolve(sourceDir, "../tools"), "/root/tools"].find((candidate) => {
           try {
-            return statSync(candidate).isDirectory();
+            // oxlint-disable-next-line no-restricted-properties -- known: Config filesystem path validation
+            return fs.statSync(candidate).isDirectory();
           } catch {
             return false;
           }
@@ -715,7 +711,6 @@ export class Config {
   readonly displayName: string;
   readonly repoUrl: string;
   readonly CHAT_MODEL: string;
-  readonly CHAT_EFFORT: string;
   private readonly chatEffortOverride: string | undefined;
   private readonly authenticatedProviderSource: () => Iterable<string>;
   private readonly storedCustomProviderSource: () => Iterable<string>;
@@ -728,10 +723,7 @@ export class Config {
     providers: string;
     levels: Ladder;
   } | null = null;
-  private readonly settingsFiles = new Map<
-    string,
-    { checkedAt: number; value: unknown }
-  >();
+  private readonly settingsFiles: ConfigFiles;
   private readonly now: () => number;
   private readonly settingsRecheckMs: number;
 
@@ -742,6 +734,13 @@ export class Config {
     const cwd = resolve(options.cwd ?? process.cwd());
     const resolved = buildPaths(this.env, cwd, options.toolsDir);
     this.paths = resolved.paths;
+    this.settingsFiles = new ConfigFiles(
+      this.settingsRecheckMs,
+      this.now,
+      (path) => {
+        if (path !== this.paths.AVAILABLE_MODELS_FILE) this.catalogCache = null;
+      },
+    );
     this.displayName = resolved.displayName;
     this.repoUrl = resolved.repoUrl;
     this.authenticatedProviderSource =
@@ -752,7 +751,33 @@ export class Config {
       this.env.CHAT_MODEL ?? "anthropic/claude-opus-5-5",
     );
     this.chatEffortOverride = this.env.CHAT_EFFORT;
-    this.CHAT_EFFORT = String(this.defaultEffort(this.CHAT_MODEL));
+    if (this.chatEffortOverride !== undefined)
+      parseThinking(this.chatEffortOverride);
+  }
+
+  get CHAT_EFFORT(): string {
+    return String(this.defaultEffort(this.CHAT_MODEL));
+  }
+
+  /** Load server settings before use, or explicitly await external edits. */
+  async refreshSettings(): Promise<void> {
+    await Promise.all(
+      [
+        this.paths.MODEL_PROVIDERS_FILE,
+        this.paths.DEFAULT_EFFORTS_FILE,
+        this.paths.PI_MODEL_LIST_FILE,
+        this.paths.EFFORT_LEVELS_FILE,
+        this.paths.AVAILABLE_MODELS_FILE,
+        this.paths.DELETED_AGENT_HISTORY_FILE,
+        this.paths.MAXIMUM_CONTEXT_WINDOW_FILE,
+        join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
+      ].map((path) => this.settingsFiles.refresh(path)),
+    );
+  }
+
+  /** Stop background reads and drain writes when the server closes. */
+  close(): Promise<void> {
+    return this.settingsFiles.close();
   }
 
   credentialRevision(): number {
@@ -796,7 +821,8 @@ export class Config {
 
   ensureDir(path: string): string {
     const normalized = pythonPath(path);
-    mkdirSync(normalized, { recursive: true });
+    // oxlint-disable-next-line no-restricted-properties -- known: Config directory creation
+    fs.mkdirSync(normalized, { recursive: true });
     return normalized;
   }
 
@@ -922,12 +948,7 @@ export class Config {
   }
 
   private readDefaultEfforts(): Record<string, Thinking> {
-    let data: unknown;
-    try {
-      data = JSON.parse(readFileSync(this.paths.DEFAULT_EFFORTS_FILE, "utf8"));
-    } catch {
-      return {};
-    }
+    const data = this.settingsJson(this.paths.DEFAULT_EFFORTS_FILE);
     if (!isObject(data)) return {};
     const parsed: [string, Thinking][] = [];
     for (const [model, level] of Object.entries(data)) {
@@ -957,24 +978,15 @@ export class Config {
     );
   }
 
-  private catalogStat(path: string): [string, number] | null {
-    try {
-      const info = statSync(path, { bigint: true });
-      return [String(info.mtimeNs), Number(info.size)];
-    } catch {
-      return null;
-    }
-  }
-
   private readProvidersDocument(): [
     Record<string, ProviderSpec>,
     string,
     [string, ProviderSpec][],
   ] {
-    let text: string;
+    const text = this.settingsFiles.text(this.paths.MODEL_PROVIDERS_FILE);
+    if (text === undefined) return [{}, "", []];
     let data: unknown;
     try {
-      text = readFileSync(this.paths.MODEL_PROVIDERS_FILE, "utf8");
       data = JSON.parse(text);
     } catch {
       return [{}, "", []];
@@ -1063,22 +1075,22 @@ export class Config {
     const cached = this.catalogCache;
     if (cached !== null && now - cached.checkedAt < this.settingsRecheckMs)
       return cached.value;
-    const providersStat = this.catalogStat(this.paths.MODEL_PROVIDERS_FILE);
-    const effortsStat = this.catalogStat(this.paths.DEFAULT_EFFORTS_FILE);
-    const piStat = this.catalogStat(this.paths.PI_MODEL_LIST_FILE);
-    const key = JSON.stringify([providersStat, effortsStat, piStat]);
+    const providers = this.settingsFiles.text(this.paths.MODEL_PROVIDERS_FILE);
+    const efforts = this.settingsFiles.text(this.paths.DEFAULT_EFFORTS_FILE);
+    const pi = this.settingsFiles.text(this.paths.PI_MODEL_LIST_FILE);
+    const key = JSON.stringify([providers, efforts, pi]);
     if (cached?.key === key) {
       cached.checkedAt = now;
       return cached.value;
     }
-    const [providers, defaultRaw, providerEntries] =
+    const [parsedProviders, defaultRaw, providerEntries] =
       this.readProvidersDocument();
     const value = {
-      providers,
+      providers: parsedProviders,
       providerEntries,
       default_raw: defaultRaw,
       efforts: this.readDefaultEfforts(),
-      ...(piStat === null
+      ...(pi === undefined
         ? { pi: null, piUpdatedAt: null }
         : this.readPiModelList()),
     };
@@ -1086,39 +1098,16 @@ export class Config {
     return value;
   }
 
-  /** Forget every cached Settings read: the next read checks the files. */
-  private dropCatalogCache(): void {
-    this.catalogCache = null;
-    this.settingsFiles.clear();
-  }
-
-  /** A Settings file's parsed JSON (undefined when unreadable), read again
-   * at most once per settingsRecheckMs. Callers must not mutate it. */
+  /** Parsed Settings snapshot (undefined when unreadable); never mutate it. */
   private settingsJson(path: string): unknown {
-    const now = this.now();
-    const cached = this.settingsFiles.get(path);
-    if (cached !== undefined && now - cached.checkedAt < this.settingsRecheckMs)
-      return cached.value;
-    let value: unknown;
-    try {
-      value = JSON.parse(readFileSync(path, "utf8"));
-    } catch {
-      value = undefined;
-    }
-    this.settingsFiles.set(path, { checkedAt: now, value });
-    return value;
+    return this.settingsFiles.json(path);
   }
 
   /** The stored Pi model list per route (unreadable reads as not listed) and
    * when Settings last updated Pi's catalogs from pi.dev, if ever. */
   private readPiModelList(): Pick<CatalogInputs, "pi" | "piUpdatedAt"> {
     const none = { pi: null, piUpdatedAt: null };
-    let data: unknown;
-    try {
-      data = JSON.parse(readFileSync(this.paths.PI_MODEL_LIST_FILE, "utf8"));
-    } catch {
-      return none;
-    }
+    const data = this.settingsJson(this.paths.PI_MODEL_LIST_FILE);
     if (
       !isObject(data) ||
       data.version !== PI_MODEL_LIST_VERSION ||
@@ -1182,24 +1171,25 @@ export class Config {
   }
 
   /** Replace the stored Pi model list; returns how many models it holds. */
-  setPiModelList(entries: unknown, updatedAt?: number): number {
+  async setPiModelList(entries: unknown, updatedAt?: number): Promise<number> {
     if (!Array.isArray(entries)) throw valueError("invalid Pi model list");
     const listed = this.checkPiModels(entries);
     const models = PI_MODEL_ROUTES.flatMap(([provider]) =>
       (listed[provider] ?? []).map((model) => ({ provider, ...model })),
     );
     // Invariant: A plain relist keeps the time of the last update from pi.dev.
-    const updated = updatedAt ?? this.catalogInputs().piUpdatedAt;
-    this.writePrivateJson(
+    await this.writePrivateJson(
       this.paths.PI_MODEL_LIST_FILE,
-      {
-        version: PI_MODEL_LIST_VERSION,
-        ...(updated === null ? {} : { updated_at: updated }),
-        models,
+      () => {
+        const updated = updatedAt ?? this.catalogInputs().piUpdatedAt;
+        return {
+          version: PI_MODEL_LIST_VERSION,
+          ...(updated === null ? {} : { updated_at: updated }),
+          models,
+        };
       },
       false,
     );
-    this.dropCatalogCache();
     return models.length;
   }
 
@@ -1244,7 +1234,7 @@ export class Config {
     return this.catalogInputs().providers;
   }
 
-  upsertCustomProvider(name: string, spec: Dict): boolean {
+  async upsertCustomProvider(name: string, spec: Dict): Promise<boolean> {
     if (!name || name.startsWith("_") || !validModelScopeKey(name))
       throw valueError(`invalid custom provider name: '${name}'`);
     if (!isObject(spec))
@@ -1289,49 +1279,35 @@ export class Config {
       models.push(entry);
     }
     const path = this.paths.MODEL_PROVIDERS_FILE;
-    let document: Dict;
-    try {
-      const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (!isObject(parsed)) throw new Error("invalid");
-      document = parsed;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") document = {};
-      else throw new Error(`cannot seed '${name}': ${path} is invalid`);
-    }
-    let providers = document.providers;
-    if (providers === undefined || providers === null) {
-      providers = {};
-      document.providers = providers;
-    }
-    if (!isObject(providers))
-      throw new Error(`cannot seed '${name}': ${path} is invalid`);
-    if (Object.hasOwn(providers, name)) return false;
-    providers[name] = {
-      base_url: baseUrl,
-      env_key: envKey,
-      wire_api: wireApi,
-      models,
-    };
-    let mode = 0o600;
-    try {
-      mode = statSync(path).mode & 0o777;
-    } catch {}
-    this.ensureDir(dirname(path));
-    const tmp = join(
-      dirname(path),
-      `.${path.slice(dirname(path).length + 1)}.${process.pid}.tmp`,
-    );
-    try {
-      writeFileSync(tmp, `${pythonJsonIndented(document)}\n`);
-      chmodSync(tmp, mode);
-      renameSync(tmp, path);
-    } finally {
+    return this.settingsFiles.write<boolean>(path, async () => {
+      let document: Dict;
       try {
-        rmSync(tmp);
-      } catch {}
-    }
-    this.dropCatalogCache();
-    return true;
+        const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+        if (!isObject(parsed)) throw new Error("invalid");
+        document = parsed;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") document = {};
+        else throw new Error(`cannot seed '${name}': ${path} is invalid`);
+      }
+      let providers = document.providers;
+      if (providers === undefined || providers === null) {
+        providers = {};
+        document.providers = providers;
+      }
+      if (!isObject(providers))
+        throw new Error(`cannot seed '${name}': ${path} is invalid`);
+      if (Object.hasOwn(providers, name)) return { value: false };
+      providers[name] = {
+        base_url: baseUrl,
+        env_key: envKey,
+        wire_api: wireApi,
+        models,
+      };
+      const mode = await stat(path)
+        .then((info) => info.mode & 0o777)
+        .catch(() => 0o600);
+      return { text: `${pythonJsonIndented(document)}\n`, mode, value: true };
+    });
   }
 
   customDefaultModel(): string {
@@ -1469,7 +1445,13 @@ export class Config {
       : this.paths.AGENT_HISTORY_RETENTION_DAYS;
   }
 
-  setDeletedAgentHistoryDays(value: unknown): number {
+  /** Await the retention policy before a destructive expiry pass. */
+  async refreshDeletedAgentHistoryDays(): Promise<number> {
+    await this.settingsFiles.refresh(this.paths.DELETED_AGENT_HISTORY_FILE);
+    return this.deletedAgentHistoryDays();
+  }
+
+  async setDeletedAgentHistoryDays(value: unknown): Promise<number> {
     if (
       typeof value !== "number" ||
       !Number.isInteger(value) ||
@@ -1479,9 +1461,26 @@ export class Config {
       throw valueError(
         "deleted agents' history must be kept for between 1 and 36500 days",
       );
-    this.writePrivateJson(this.paths.DELETED_AGENT_HISTORY_FILE, {
+    await this.writePrivateJson(this.paths.DELETED_AGENT_HISTORY_FILE, {
       days: value,
     });
+    return value;
+  }
+
+  keepPromptCacheWarm(): boolean {
+    const data = this.settingsJson(
+      join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
+    );
+    return !isObject(data) || data.enabled !== false;
+  }
+
+  async setKeepPromptCacheWarm(value: unknown): Promise<boolean> {
+    if (typeof value !== "boolean")
+      throw valueError("Keep prompt cache warm must be a boolean");
+    await this.writePrivateJson(
+      join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
+      { enabled: value },
+    );
     return value;
   }
 
@@ -1510,9 +1509,9 @@ export class Config {
     return value;
   }
 
-  setMaximumContextWindow(value: unknown): number {
+  async setMaximumContextWindow(value: unknown): Promise<number> {
     const checked = this.validateMaximumContextWindow(value);
-    this.writePrivateJson(this.paths.MAXIMUM_CONTEXT_WINDOW_FILE, {
+    await this.writePrivateJson(this.paths.MAXIMUM_CONTEXT_WINDOW_FILE, {
       maximum_context_window: checked,
     });
     return checked;
@@ -1538,15 +1537,14 @@ export class Config {
     return resolved;
   }
 
-  setDefaultEfforts(value: unknown): Record<string, string> {
+  async setDefaultEfforts(value: unknown): Promise<Record<string, string>> {
     const resolved = this.validateDefaultEfforts(value);
     const sorted = Object.fromEntries(
       Object.keys(resolved)
         .sort()
         .map((model) => [model, resolved[model]]),
     );
-    this.writePrivateJson(this.paths.DEFAULT_EFFORTS_FILE, sorted, false);
-    this.dropCatalogCache();
+    await this.writePrivateJson(this.paths.DEFAULT_EFFORTS_FILE, sorted, false);
     return this.defaultEfforts();
   }
 
@@ -1630,24 +1628,24 @@ export class Config {
 
   private defaultLadder(authed: Set<string>): Ladder {
     const anthro: [string, Thinking][] = [
-      ["anthropic/claude-haiku-5-5", "high"],
+      ["anthropic/claude-haiku-5-5", "medium"],
+      ["anthropic/claude-haiku-5-5", "xhigh"],
       ["anthropic/claude-sonnet-5-5", "medium"],
       ["anthropic/claude-opus-5-5", "medium"],
-      ["anthropic/claude-opus-5-5", "high"],
       ["anthropic/claude-fable-5-1", "medium"],
     ];
     const codex: [string, Thinking][] = [
-      ["openai-codex/gpt-5.6-luna", "xhigh"],
-      ["openai-codex/gpt-6-luna", "max"],
+      ["openai-codex/gpt-6-luna", "xhigh"],
+      ["openai-codex/gpt-5.6-terra", "xhigh"],
       ["openai-codex/gpt-6.1-sol", "medium"],
       ["openai-codex/gpt-6.1-sol", "xhigh"],
-      ["openai-codex/gpt-6-astra", "medium"],
+      ["openai-codex/gpt-6-astra", "high"],
     ];
     const mixed: [string, Thinking][] = [
-      ["openai-codex/gpt-5.6-luna", "xhigh"],
-      ["openai-codex/gpt-6.1-sol", "low"],
+      ["anthropic/claude-haiku-5-5", "medium"],
+      ["openai-codex/gpt-5.6-terra", "xhigh"],
       ["openai-codex/gpt-6.1-sol", "high"],
-      ["anthropic/claude-opus-5-5", "high"],
+      ["anthropic/claude-opus-5-5", "medium"],
       ["anthropic/claude-fable-5-1", "medium"],
     ];
     let entries: [string, Thinking][];
@@ -1908,14 +1906,39 @@ export class Config {
     };
   }
 
-  setEffortLevels(value: unknown): Dict {
+  async setEffortLevels(value: unknown): Promise<Dict> {
     const resolved = this.validateEffortLevels(value);
-    this.writePrivateJson(
+    await this.writePrivateJson(
       this.paths.EFFORT_LEVELS_FILE,
       this.sortKeysRecursive(resolved),
       false,
     );
     return resolved;
+  }
+
+  /** Update one ladder entry against the latest committed Settings. */
+  async setEffortLevel(
+    level: unknown,
+    model: unknown,
+    reasoning: unknown,
+  ): Promise<Dict> {
+    if (
+      typeof level !== "number" ||
+      !Number.isInteger(level) ||
+      level < EFFORT_MIN_LEVEL ||
+      level > EFFORT_MAX_LEVEL
+    )
+      throw valueError("level must be 1-5");
+    return this.settingsFiles.write(this.paths.EFFORT_LEVELS_FILE, () => {
+      const value = this.validateEffortLevels({
+        default_level: this.defaultEffortLevel(),
+        levels: {
+          ...this.effortLevels(),
+          [String(level)]: { model, reasoning },
+        },
+      });
+      return { text: pythonJson(this.sortKeysRecursive(value), false), value };
+    });
   }
 
   private sortKeysRecursive(value: unknown): unknown {
@@ -1955,21 +1978,18 @@ export class Config {
     return { version: AVAILABLE_MODELS_VERSION, providers };
   }
 
-  writeAvailableModels(): Dict {
+  async writeAvailableModels(): Promise<Dict> {
     const snapshot = this.availableModelsSnapshot();
-    this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, snapshot, true);
+    await this.writePrivateJson(
+      this.paths.AVAILABLE_MODELS_FILE,
+      snapshot,
+      true,
+    );
     return snapshot;
   }
 
   private readTurnMarks(): Record<string, { model: string; reason: string }> {
-    let value: unknown;
-    try {
-      value = JSON.parse(
-        readFileSync(this.paths.AVAILABLE_MODELS_FILE, "utf8"),
-      );
-    } catch {
-      return {};
-    }
+    const value = this.settingsFiles.json(this.paths.AVAILABLE_MODELS_FILE);
     if (!isObject(value) || !isObject(value.turn_marks)) return {};
     const out: Record<string, { model: string; reason: string }> = {};
     for (const [level, mark] of Object.entries(value.turn_marks)) {
@@ -1983,17 +2003,7 @@ export class Config {
     return out;
   }
 
-  private writeTurnMarks(
-    marks: Record<string, { model: string; reason: string }>,
-  ): void {
-    this.writePrivateJson(
-      this.paths.AVAILABLE_MODELS_FILE,
-      { ...this.availableModelsSnapshot(), turn_marks: marks },
-      true,
-    );
-  }
-
-  noteLevelTurnFailure(level: unknown, reason: unknown): void {
+  async noteLevelTurnFailure(level: unknown, reason: unknown): Promise<void> {
     if (
       typeof level !== "number" ||
       !Number.isInteger(level) ||
@@ -2003,15 +2013,18 @@ export class Config {
       !reason
     )
       return;
-    const marks = this.readTurnMarks();
-    marks[String(level)] = {
-      model: this.effortLevels()[level]!.model,
-      reason: Array.from(reason).slice(0, 300).join(""),
-    };
-    this.writeTurnMarks(marks);
+    const model = this.effortLevels()[level]!.model;
+    await this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, () => {
+      const marks = this.readTurnMarks();
+      marks[String(level)] = {
+        model,
+        reason: Array.from(reason).slice(0, 300).join(""),
+      };
+      return { ...this.availableModelsSnapshot(), turn_marks: marks };
+    });
   }
 
-  noteLevelTurnSuccess(level: unknown): void {
+  async noteLevelTurnSuccess(level: unknown): Promise<void> {
     if (
       typeof level !== "number" ||
       !Number.isInteger(level) ||
@@ -2019,11 +2032,12 @@ export class Config {
       level > 5
     )
       return;
-    const marks = this.readTurnMarks();
-    if (Object.hasOwn(marks, String(level))) {
+    await this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, () => {
+      const marks = this.readTurnMarks();
+      if (!Object.hasOwn(marks, String(level))) return;
       delete marks[String(level)];
-      this.writeTurnMarks(marks);
-    }
+      return { ...this.availableModelsSnapshot(), turn_marks: marks };
+    });
   }
 
   effortLevelReachability(): Record<
@@ -2065,205 +2079,22 @@ export class Config {
     return out;
   }
 
-  private writePrivateJson(path: string, value: unknown, sort = true): void {
-    // Invariant: Any write through this Config applies to its next read. No
-    // cached read uses available-models.json (the catalog's output), so writing
-    // it keeps the catalog: the server writes it right after listening.
-    if (path !== this.paths.AVAILABLE_MODELS_FILE) this.dropCatalogCache();
-    this.ensureDir(dirname(path));
-    const tmp = join(
-      dirname(path),
-      `.${path.slice(dirname(path).length + 1)}.${process.pid}.tmp`,
-    );
-    try {
-      const text = pythonJson(value, sort);
-      writeFileSync(tmp, text);
-      chmodSync(tmp, 0o600);
-      renameSync(tmp, path);
-    } finally {
-      try {
-        rmSync(tmp);
-      } catch {}
-    }
+  private writePrivateJson(
+    path: string,
+    value: unknown | (() => unknown),
+    sort = true,
+  ): Promise<void> {
+    return this.settingsFiles.write<void>(path, () => {
+      const next = typeof value === "function" ? value() : value;
+      return {
+        value: undefined,
+        ...(next === undefined ? {} : { text: pythonJson(next, sort) }),
+      };
+    });
   }
 }
 
 /** Construct settings against an explicit environment and state root. */
 export function createConfig(options: ConfigOptions = {}): Config {
   return new Config(options);
-}
-
-let processConfig: Config | undefined;
-function currentConfig(value?: Config): Config {
-  return value ?? (processConfig ??= createConfig());
-}
-
-export function credentialRevision(config?: Config): number {
-  return currentConfig(config).credentialRevision();
-}
-export function noteCredentialsUpdated(config?: Config): void {
-  currentConfig(config).noteCredentialsUpdated();
-}
-export function agentTempLeaf(key: string, config?: Config): string {
-  return currentConfig(config).agentTempLeaf(key);
-}
-export function ensureDir(path: string, config?: Config): string {
-  return currentConfig(config).ensureDir(path);
-}
-export function canonicalModelId(model: string, config?: Config): string {
-  return currentConfig(config).canonicalModelId(model);
-}
-export function modelPolicy(model: string, config?: Config): ModelPolicy {
-  return currentConfig(config).modelPolicy(model);
-}
-export function trustedModelPolicy(model: string, config?: Config): string {
-  return currentConfig(config).trustedModelPolicy(model);
-}
-export function defaultEfforts(config?: Config): Record<string, string> {
-  return currentConfig(config).defaultEfforts();
-}
-export function suggestedEffort(model: string, config?: Config): Thinking {
-  return currentConfig(config).suggestedEffort(model);
-}
-export function defaultEffort(model: string, config?: Config): Thinking {
-  return currentConfig(config).defaultEffort(model);
-}
-export function customModelProviders(
-  config?: Config,
-): Record<string, ProviderSpec> {
-  return currentConfig(config).customModelProviders();
-}
-export function upsertCustomProvider(
-  name: string,
-  spec: Dict,
-  config?: Config,
-): boolean {
-  return currentConfig(config).upsertCustomProvider(name, spec);
-}
-export function customDefaultModel(config?: Config): string {
-  return currentConfig(config).customDefaultModel();
-}
-export function chatModels(config?: Config): ModelOption[] {
-  return currentConfig(config).chatModels();
-}
-export function defaultChatModel(config?: Config): string {
-  return currentConfig(config).defaultChatModel();
-}
-export function maximumContextWindow(config?: Config): number {
-  return currentConfig(config).maximumContextWindow();
-}
-export function validateMaximumContextWindow(
-  value: unknown,
-  config?: Config,
-): number {
-  return currentConfig(config).validateMaximumContextWindow(value);
-}
-export function setMaximumContextWindow(
-  value: unknown,
-  config?: Config,
-): number {
-  return currentConfig(config).setMaximumContextWindow(value);
-}
-export function validateDefaultEfforts(
-  value: unknown,
-  config?: Config,
-): Record<string, string> {
-  return currentConfig(config).validateDefaultEfforts(value);
-}
-export function setDefaultEfforts(
-  value: unknown,
-  config?: Config,
-): Record<string, string> {
-  return currentConfig(config).setDefaultEfforts(value);
-}
-export function modelContextWindow(
-  modelId: string,
-  config?: Config,
-): number | null {
-  return currentConfig(config).modelContextWindow(modelId);
-}
-export function contextBarWindow(
-  modelId: string,
-  config?: Config,
-): number | null {
-  return currentConfig(config).contextBarWindow(modelId);
-}
-export function providerOf(modelId: string, config?: Config): string {
-  return currentConfig(config).providerOf(modelId);
-}
-export function configuredCustomProviders(config?: Config): Set<string> {
-  return currentConfig(config).configuredCustomProviders();
-}
-export function authedModelProviders(config?: Config): Set<string> {
-  return currentConfig(config).authedModelProviders();
-}
-export function authedChatModels(config?: Config): ModelOption[] {
-  return currentConfig(config).authedChatModels();
-}
-export function chatModel(model?: string | null, config?: Config): ModelOption {
-  return currentConfig(config).chatModel(model);
-}
-export function chatSettings(
-  model?: string | null,
-  config?: Config,
-): [string, string] {
-  return currentConfig(config).chatSettings(model);
-}
-export function effortLevels(
-  config?: Config,
-): Record<number, { model: string; reasoning: string }> {
-  return currentConfig(config).effortLevels();
-}
-export function defaultEffortLevel(config?: Config): number {
-  return currentConfig(config).defaultEffortLevel();
-}
-export function resolveEffortLevel(
-  level: unknown,
-  config?: Config,
-): [string, string] {
-  return currentConfig(config).resolveEffortLevel(level);
-}
-export function ladderHome(
-  model: unknown,
-  reasoning?: unknown,
-  config?: Config,
-): [number, string, string] | null {
-  return currentConfig(config).ladderHome(model, reasoning);
-}
-export function nearestEffortLevel(
-  model?: unknown,
-  reasoning?: unknown,
-  config?: Config,
-): number {
-  return currentConfig(config).nearestEffortLevel(model, reasoning);
-}
-export function validateEffortLevels(value: unknown, config?: Config): Dict {
-  return currentConfig(config).validateEffortLevels(value);
-}
-export function setEffortLevels(value: unknown, config?: Config): Dict {
-  return currentConfig(config).setEffortLevels(value);
-}
-export function availableModelsSnapshot(config?: Config): Dict {
-  return currentConfig(config).availableModelsSnapshot();
-}
-export function writeAvailableModels(config?: Config): Dict {
-  return currentConfig(config).writeAvailableModels();
-}
-export function noteLevelTurnFailure(
-  level: unknown,
-  reason: unknown,
-  config?: Config,
-): void {
-  currentConfig(config).noteLevelTurnFailure(level, reason);
-}
-export function noteLevelTurnSuccess(level: unknown, config?: Config): void {
-  currentConfig(config).noteLevelTurnSuccess(level);
-}
-export function effortLevelReachability(
-  config?: Config,
-): Record<
-  number,
-  { reachable: boolean; model: string; reasoning: string; reason: string }
-> {
-  return currentConfig(config).effortLevelReachability();
 }

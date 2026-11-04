@@ -18,9 +18,9 @@ import { createServer, connect, Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
-import * as buildStamp from "../../src/build_stamp";
+import * as buildStamp from "../../src/build_stamp.cli";
 import { STRICT_ISOLATED_PATH_ENV } from "../../src/local_roots";
-import { buildFrontend } from "../../src/launcher/build";
+import { buildFrontend } from "../../src/launcher/build.cli";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { appWorld, PASSWORD } from "./web_app_support";
 import {
@@ -32,21 +32,21 @@ import {
   acquireSupervisorLock,
   LOCK_FD_ENV,
   LOCK_NAME,
-} from "../../src/launcher/lock";
+} from "../../src/launcher/lock.cli";
 import {
   execUpdatedSupervisor,
   spawnServer,
   terminate,
   type ServerChild,
   type TerminateDeps,
-} from "../../src/launcher/server_process";
+} from "../../src/launcher/server_process.cli";
 import {
   queryAppStatus,
   sleepInterruptible,
   Supervisor,
   finishSupervisorShutdown,
   type SupervisorDeps,
-} from "../../src/launcher/supervisor";
+} from "../../src/launcher/supervisor.cli";
 import { closeOnExec, run, TimeoutExpired } from "../../src/launcher/system";
 import { gitEnv } from "../../src/workdir_git";
 import * as local from "../../src/local";
@@ -124,7 +124,7 @@ function moduleEnv(): Record<string, string> {
   return env;
 }
 
-const LOCK_MODULE = join(ROOT, "src/launcher/lock.ts");
+const LOCK_MODULE = join(ROOT, "src/launcher/lock.cli.ts");
 const CONTEND = `
 const { acquireSupervisorLock } = await import(${JSON.stringify(LOCK_MODULE)});
 try { await acquireSupervisorLock(process.argv[1]); }
@@ -243,7 +243,7 @@ test("test_server_orphan_retains_lock_until_it_exits", async () => {
   chmodSync(fakeBun, 0o755);
   const probe = `
 const { acquireSupervisorLock } = await import(${JSON.stringify(LOCK_MODULE)});
-const { spawnServer } = await import(${JSON.stringify(join(ROOT, "src/launcher/server_process.ts"))});
+const { spawnServer } = await import(${JSON.stringify(join(ROOT, "src/launcher/server_process.cli.ts"))});
 const held = await acquireSupervisorLock(process.argv[1]);
 const child = await spawnServer(process.cwd(), "127.0.0.1", 1, process.argv[1], null,
   { lockFd: held.fd, bun: process.argv[2] });
@@ -395,13 +395,7 @@ test("test_self_deploy_env_flag_spellings", () => {
     ]).toEqual([value, expected]);
 });
 
-// Feature: #2539 native frontend builds publish nested stylesheets.
-test("native frontend build publishes all HTML and bundle assets", async () => {
-  const dependencies = realpathSync(join(ROOT, "node_modules"));
-  const sourceRoot = temp("native-assets-source-");
-  const dependencyEntries = readdirSync(dependencies).sort();
-  const packagePath = join(dependencies, "typescript/package.json");
-  const packageMtime = statSync(packagePath).mtimeMs;
+async function copyCheckout(sourceRoot: string): Promise<void> {
   const tracked = await captureFixture(["git", "ls-files", "-z"], {
     cwd: ROOT,
   });
@@ -411,7 +405,21 @@ test("native frontend build publishes all HTML and bundle assets", async () => {
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(join(ROOT, path), target);
   }
-  symlinkSync(dependencies, join(sourceRoot, "node_modules"), "dir");
+  symlinkSync(
+    realpathSync(join(ROOT, "node_modules")),
+    join(sourceRoot, "node_modules"),
+    "dir",
+  );
+}
+
+// Feature: #2539 native frontend builds publish nested stylesheets.
+test("native frontend build publishes all HTML and bundle assets", async () => {
+  const dependencies = realpathSync(join(ROOT, "node_modules"));
+  const sourceRoot = temp("native-assets-source-");
+  const dependencyEntries = readdirSync(dependencies).sort();
+  const packagePath = join(dependencies, "typescript/package.json");
+  const packageMtime = statSync(packagePath).mtimeMs;
+  await copyCheckout(sourceRoot);
   expect(await buildFrontend(sourceRoot, { force: true })).toBe(true);
   expect(readdirSync(dependencies).sort()).toEqual(dependencyEntries);
   expect(statSync(packagePath).mtimeMs).toBe(packageMtime);
@@ -482,6 +490,8 @@ function fakeVendorAssets(root: string): void {
     writeFileSync(join(pdfjs, name, "LICENSE"), name);
   }
   writeFileSync(join(pdfjs, "wasm/quickjs-eval.wasm"), "scripting");
+  mkdirSync(join(root, "node_modules/quickjs-wasi"));
+  writeFileSync(join(root, "node_modules/quickjs-wasi/quickjs.wasm"), "engine");
   const excalidraw = join(
     root,
     "node_modules/@excalidraw/excalidraw/dist/prod",
@@ -541,6 +551,9 @@ test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
     "wasm",
   ]);
   expect(readdirSync(join(root, "web/dist/pdfjs/wasm"))).toEqual(["LICENSE"]);
+  expect(readFileSync(join(root, "web/dist/quickjs.wasm"), "utf8")).toBe(
+    "engine",
+  );
   expect(
     readFileSync(join(root, "web/dist/excalidraw/index.css"), "utf8"),
   ).toBe(".excalidraw {}");
@@ -560,17 +573,10 @@ test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
 // Regression: #2901 local updates built by an older supervisor must repair missing brand assets.
 test("local launch repairs a stamped frontend without brand assets", async () => {
   const checkout = temp("recurse-brand-checkout-");
-  await git(checkout, "clone", "--shared", "--quiet", ROOT, ".");
-  for (const name of ["src/build_stamp.ts", "src/launcher/server_process.ts"])
-    copyFileSync(join(ROOT, name), join(checkout, name));
-  symlinkSync(join(ROOT, "node_modules"), join(checkout, "node_modules"));
-  await git(
-    checkout,
-    "add",
-    "src/build_stamp.ts",
-    "src/launcher/server_process.ts",
-  );
-  await git(checkout, "commit", "--allow-empty", "-qm", "test generation");
+  await copyCheckout(checkout);
+  await git(checkout, "init", "-b", "main");
+  await git(checkout, "add", ".");
+  await git(checkout, "commit", "-qm", "test generation");
   for (const previousBuild of [false, true]) {
     if (previousBuild) {
       rmSync(join(checkout, "web/dist/brand"), { recursive: true });
@@ -603,7 +609,7 @@ test("local launch repairs a stamped frontend without brand assets", async () =>
       }`,
       );
       const driver = `
-        const runtime = await import("./src/launcher/server_process.ts");
+        const runtime = await import("./src/launcher/server_process.cli.ts");
         const { copyFileSync } = await import("node:fs");
         copyFileSync(${JSON.stringify(updatedCopier)}, ${JSON.stringify(copier)});
         if (!await runtime.prepareUpdateRuntime(process.cwd(), ${JSON.stringify(await headSha(checkout))}))

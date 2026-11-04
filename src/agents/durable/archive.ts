@@ -1,10 +1,10 @@
-// Closed Durable stores archive by same-filesystem rename after Harness close.
-// Retry never overwrites stored files; the Worker index upsert publishes last.
-// External sources copy through staging; no live store opens or startup scans.
+// Closed stores archive by same-filesystem rename; index upsert publishes last.
+// Reader fences protect revive/expiry moves; retry never overwrites stores.
+// External sources copy through staging; no live opens or startup scans.
 // Search/expiry use the index; revived metadata stays for provenance.
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { retire } from "../../utils/trash";
+import { retirePath } from "../../utils/trash_sweep";
 import type { WorkerSqliteDatabase } from "./sqlite_worker.ts";
 
 export type ArchiveReason = "reap" | "clear" | "import";
@@ -34,6 +34,9 @@ const STORE_FILES = [
   "session.sqlite",
   "session.sqlite-wal",
   "session.sqlite-shm",
+  "transcript.txt",
+  "message-search.tsv",
+  "message-search-state.json",
 ];
 const ARCHIVE_ID_RE =
   /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.[A-Za-z0-9][A-Za-z0-9_-]{0,170}$/;
@@ -81,10 +84,11 @@ async function exists(path: string): Promise<boolean> {
 
 // Move each store file not already at its destination; true if `to` holds a
 // store.
-export async function moveStore(from: string, to: string): Promise<boolean> {
+async function moveStore(from: string, to: string): Promise<boolean> {
   await mkdir(to, { recursive: true, mode: 0o700 });
   for (const name of STORE_FILES) {
     if (await exists(join(to, name))) continue;
+    // Spec: @tla rename tlaMove(from,to)
     await rename(join(from, name), join(to, name)).catch((error: unknown) => {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     });
@@ -101,7 +105,19 @@ export class AgentArchive {
     private readonly openDatabase: (
       path: string,
     ) => Promise<WorkerSqliteDatabase>,
+    private readonly withStores: <T>(
+      paths: string[],
+      operation: () => Promise<T>,
+    ) => Promise<T>,
   ) {}
+
+  /** Move a store only after readers at both paths have closed. */
+  move(from: string, to: string): Promise<boolean> {
+    return this.withStores(
+      [join(from, STORE_FILES[0]!), join(to, STORE_FILES[0]!)],
+      () => moveStore(from, to),
+    );
+  }
 
   private db(): Promise<WorkerSqliteDatabase> {
     this.index ??= (async () => {
@@ -166,6 +182,30 @@ export class AgentArchive {
     return rows.map(fromRow);
   }
 
+  /** Bounded keyset traversal of retained stores, without directory scans. */
+  async page(after = "", limit = PAGE_LIMIT): Promise<ArchivedAgent[]> {
+    const rows = await (
+      await this.db()
+    ).all<Row>(
+      `SELECT data, revived_as FROM archived_agents
+       WHERE revived_as IS NULL AND archive_id > ? ORDER BY archive_id LIMIT ?`,
+      after,
+      Math.min(Math.max(Math.trunc(limit), 1), PAGE_LIMIT),
+    );
+    return rows.map(fromRow);
+  }
+
+  /** Remaining retained stores for background migration progress. */
+  async count(after = ""): Promise<number> {
+    const row = await (
+      await this.db()
+    ).get<{ count: number }>(
+      "SELECT count(*) AS count FROM archived_agents WHERE revived_as IS NULL AND archive_id > ?",
+      after,
+    );
+    return row?.count ?? 0;
+  }
+
   /** The archive with this id, or the newest unrevived archive of this cid. */
   async get(target: string): Promise<ArchivedAgent | null> {
     const db = await this.db();
@@ -206,12 +246,19 @@ export class AgentArchive {
       if (this.held.has(archive_id)) continue;
       if (!validArchiveId(archive_id))
         throw new Error("invalid archive id in index");
-      retire(join(this.root, archive_id), trashDir);
-      await db.run(
-        "DELETE FROM archived_agents WHERE archive_id = ? AND revived_as IS NULL",
-        archive_id,
+      await this.withStores(
+        [join(this.root, archive_id, STORE_FILES[0]!)],
+        async () => {
+          if (this.held.has(archive_id)) return;
+          // Spec: @tla rename tlaMove(join(this.root,archive_id))
+          await retirePath(join(this.root, archive_id), trashDir);
+          await db.run(
+            "DELETE FROM archived_agents WHERE archive_id = ? AND revived_as IS NULL",
+            archive_id,
+          );
+          expired++;
+        },
       );
-      expired++;
     }
     return expired;
   }

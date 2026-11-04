@@ -1,11 +1,123 @@
 import { expect, test } from "bun:test";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { BackendKeys } from "../../src/auth/backend_keys";
+import { OperatorAuth } from "../../src/auth/session";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
 import { appWorld } from "./web_app_support";
 import { fauxHost, switchoverWorld, until } from "./fixtures/durable_host/host";
+
+// Regression: #2912 conversation operator actions reject agent and loopback credentials.
+test("operator conversation actions require operator authentication", async () => {
+  const { root, env } = appWorld({ password: true });
+  const app = await buildApp({ env, sink: new WebLogSink(() => {}) });
+  const running = await app.serve({ port: 0 });
+  const operator = new OperatorAuth({
+    authFile: join(env.CHAT_DATA_DIR!, "auth.json"),
+    env,
+    displayName: "Recurse",
+  });
+  const cookie = `chat_auth=${await operator.makeToken()}`;
+  const token = JSON.parse(
+    readFileSync(join(env.CHAT_DATA_DIR!, "server.json"), "utf8"),
+  ).token as string;
+  const key = await new BackendKeys(env.CHAT_DATA_DIR!).mint("home");
+  const call = (
+    path: string,
+    body: object,
+    headers: Record<string, string> | [string, string][],
+  ) =>
+    fetch(`${running.url}${path}`, {
+      method: "POST",
+      headers: new Headers([
+        ["content-type", "application/json"],
+        ...(Array.isArray(headers) ? headers : Object.entries(headers)),
+      ]),
+      body: JSON.stringify(body),
+    });
+  try {
+    await until(
+      async () =>
+        (
+          (await (
+            await fetch(`${running.url}/api/status`, { headers: { cookie } })
+          ).json()) as { ready: boolean }
+        ).ready,
+    );
+    const created = await call("/api/conversations", {}, { cookie });
+    expect(created.status).toBe(200);
+    const cid = String(((await created.json()) as { id: string }).id);
+    const path = `/api/conversations/${cid}/safety`;
+    const loopback = { "x-loopback-token": token };
+    const bearer = { authorization: `Bearer ${key.key}` };
+    const settingsPath = "/api/settings/effort-levels";
+    const readSettings = async (headers: Record<string, string>) => {
+      const response = await fetch(`${running.url}${settingsPath}`, {
+        headers,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        default_level: number;
+        levels: object;
+      };
+    };
+    const settings = await readSettings({ cookie });
+    const changed = {
+      ...settings,
+      default_level: settings.default_level === 1 ? 2 : 1,
+    };
+    expect((await call(settingsPath, changed, loopback)).status).toBe(403);
+    expect(await readSettings({ cookie })).toEqual(settings);
+    expect(await readSettings({ cookie, ...loopback })).toEqual(settings);
+    for (const target of ["/api/pi/auth", "/api/password"])
+      expect((await call(target, {}, loopback)).status).toBe(403);
+    for (const headers of [
+      loopback,
+      { ...loopback, "x-recurse-agent": cid },
+      { cookie, "x-recurse-agent": "" },
+      { ...bearer, "x-recurse-agent-caller": "" },
+      { ...bearer, "x-recurse-agent": cid },
+      { cookie, "x-recurse-agent-caller": cid },
+      [
+        ["cookie", cookie],
+        ["x-recurse-agent", ""],
+        ["x-recurse-agent", cid],
+      ],
+    ] as (Record<string, string> | [string, string][])[]) {
+      expect((await call(path, { off: true }, headers)).status).toBe(403);
+      expect(app.instance.conversations.load(cid)?.safety_off).not.toBe(true);
+    }
+    for (const action of ["take-over", "pin", "promote"]) {
+      const target = `/api/conversations/${cid}/${action}`;
+      for (const headers of [
+        loopback,
+        { ...loopback, "x-recurse-agent": cid },
+        { ...bearer, "x-recurse-agent-caller": cid },
+      ])
+        expect((await call(target, {}, headers)).status).toBe(403);
+    }
+    expect(
+      (
+        await call(
+          path,
+          { off: true },
+          { cookie, origin: "https://evil.example" },
+        )
+      ).status,
+    ).toBe(403);
+    expect((await call(path, { off: true }, { cookie })).status).toBe(200);
+    expect(app.instance.durable.safetyReviewOff(cid)).toBe(true);
+    expect((await call(path, { off: false }, bearer)).status).toBe(200);
+    expect(app.instance.durable.safetyReviewOff(cid)).toBe(false);
+  } finally {
+    await running.close();
+    await app.instance.shutdown();
+    await Promise.all(app.detached);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);
 
 test("the operator safety route controls the next Durable bash review", async () => {
   const { root, env } = appWorld();

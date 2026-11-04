@@ -51,7 +51,7 @@ export const tests: BrowserTest[] = [
       const actions = page.locator("#pane-rail > button");
       expect(
         await actions.evaluateAll((els) => els.map((el) => el.id)),
-      ).toEqual(["trash-btn", "takeover-btn"]);
+      ).toEqual(["trash-btn", "takeover-btn", "share-link-btn"]);
       const first = page.locator("#pane-rail [data-pane]").first();
       const childTop = (await first.boundingBox())!.y;
       expect((await page.locator("#trash-btn").boundingBox())!.height).toBe(44);
@@ -162,20 +162,22 @@ export const tests: BrowserTest[] = [
       });
       const page = await context.newPage();
       let parent: string | null = "parent";
-      let pinned = false;
+      let takenOver = false;
       const pins: boolean[] = [];
       await page.route(`${base}api/tree*`, (route) =>
-        route.fulfill({ json: [{ ...tree()[0], parent, pinned }] }),
+        route.fulfill({
+          json: [{ ...tree()[0], parent, taken_over: takenOver }],
+        }),
       );
       await mockConversation(page, base, "main", () => ({
         ...idleConv(),
         parent,
-        pinned,
+        taken_over: takenOver,
       }));
-      await page.route(`${base}api/conversations/main/pin`, (route) => {
-        pinned = route.request().postDataJSON().pinned;
-        pins.push(pinned);
-        return route.fulfill({ json: { pinned } });
+      await page.route(`${base}api/conversations/main/take-over`, (route) => {
+        takenOver = route.request().postDataJSON().taken_over;
+        pins.push(takenOver);
+        return route.fulfill({ json: { taken_over: takenOver } });
       });
       await gotoRoot(page, base);
       await page.locator("#pane-fab").click();
@@ -208,7 +210,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#pane-fab").tap();
       await page.mouse.move(0, 900);
       const styles = await page.evaluate(() => {
-        const ids = ["trash-btn", "takeover-btn", "new-top", "pane-fab"];
+        const ids = ["trash-btn", "takeover-btn", "share-link-btn", "pane-fab"];
         return ids.map((id) => {
           const el = (globalThis as any).document.getElementById(id);
           const css = (globalThis as any).getComputedStyle(el);
@@ -226,22 +228,31 @@ export const tests: BrowserTest[] = [
       expect(styles[0].color).toBe(styles[2].color);
       expect(styles[1].color).toBe(styles[0].color);
       expect(styles[1].background).toBe(styles[0].background);
-      expect(styles[3].border).toBe(styles[2].border);
-      expect(styles[3].x - styles[2].x - styles[2].width).toBeLessThanOrEqual(
-        2,
-      );
       for (const style of styles)
         expect(style.height).toBeGreaterThanOrEqual(44);
       expect(
         await page.locator("#takeover-btn svg [stroke-dasharray]").count(),
       ).toBe(0);
       expect(
-        await page
-          .locator("#pane-menu-panels")
-          .evaluate(
-            (el) => (globalThis as any).getComputedStyle(el).borderTopWidth,
-          ),
-      ).toBe("1px");
+        await page.evaluate(() =>
+          [...(globalThis as any).document.querySelectorAll("#pane-menu > *")]
+            .filter((el: any) => el.getBoundingClientRect().height > 0)
+            .sort(
+              (a: any, b: any) =>
+                a.getBoundingClientRect().top - b.getBoundingClientRect().top,
+            )
+            .map((el: any) => {
+              const css = (globalThis as any).getComputedStyle(el);
+              return `${el.id} ${css.borderTopWidth} ${css.borderBottomWidth}`;
+            }),
+        ),
+      ).toEqual([
+        "trash-btn 0px 0px",
+        "takeover-btn 0px 0px",
+        "pane-menu-divider 1px 0px",
+        "share-link-btn 0px 0px",
+        "pane-menu-panels 1px 0px",
+      ]);
       parent = null;
       await page.reload();
       await page.locator("#conv-title").waitFor();
@@ -271,9 +282,9 @@ export const tests: BrowserTest[] = [
       deletes++;
       return route.fulfill({ json: { ok: true } });
     });
-    await page.route(`${base}api/conversations/main/pin`, (route) => {
+    await page.route(`${base}api/conversations/main/take-over`, (route) => {
       pins++;
-      return route.fulfill({ json: { pinned: true } });
+      return route.fulfill({ json: { taken_over: true } });
     });
     await gotoRoot(page, base);
     const cdp = await context.newCDPSession(page);
@@ -455,15 +466,17 @@ export const tests: BrowserTest[] = [
         });
       };
       const boxes = await Promise.all(
-        [
-          "#menu-btn",
-          "#up-top",
-          "#conv-status",
-          "#conv-title",
-          "#chip-kids",
-          "#new-top",
-          ...(width === 412 ? ["#pane-fab"] : []),
-        ].map((id) => page.locator(id).boundingBox()),
+        (width === 412
+          ? ["#up-top", "#conv-status", "#conv-title"]
+          : [
+              "#menu-btn",
+              "#up-top",
+              "#conv-status",
+              "#conv-title",
+              "#chip-kids",
+              "#new-top",
+            ]
+        ).map((id) => page.locator(id).boundingBox()),
       );
       const header = (await page.locator("#topbar").boundingBox())!;
       expect(header.height).toBe(48);
@@ -488,8 +501,7 @@ export const tests: BrowserTest[] = [
         "#menu-btn",
         "#up-top",
         "#conv-title",
-        "#new-top",
-        ...(width === 412 ? ["#pane-fab"] : []),
+        ...(width === 412 ? ["#pane-fab"] : ["#new-top"]),
       ]) {
         const box = (await page.locator(id).boundingBox())!;
         expect(box.width).toBeGreaterThanOrEqual(44);
@@ -497,15 +509,24 @@ export const tests: BrowserTest[] = [
       }
       await shot("closed");
       if (width === 1280) {
+        expect(
+          await page.locator("#menu-btn").getAttribute("aria-expanded"),
+        ).toBe("true");
         const sidebarHeader = await page.locator("#brand").boundingBox();
         await page.locator("#menu-btn").click();
         expect(await page.locator("#sidebar").isVisible()).toBe(false);
+        expect(
+          await page.locator("#menu-btn").getAttribute("aria-expanded"),
+        ).toBe("false");
         expect((await page.locator("#topbar").boundingBox())!.height).toBe(48);
         await shot("sidebar-collapsed");
         await page.locator("#menu-btn").click();
         expect(await page.locator("#brand").boundingBox()).toEqual(
           sidebarHeader,
         );
+        expect(
+          await page.locator("#menu-btn").getAttribute("aria-expanded"),
+        ).toBe("true");
         expect(await page.locator("#pane-fab").isVisible()).toBe(false);
         expect(await page.locator("#pane-rail #trash-btn").isVisible()).toBe(
           true,
@@ -529,26 +550,16 @@ export const tests: BrowserTest[] = [
         expect(box.x).toBe(iconBoxes[0].x);
       }
       const labels = await items.allTextContents();
-      expect(labels.slice(0, 2).map((s) => s.trim())).toEqual([
+      expect(labels.slice(0, 3).map((s) => s.trim())).toEqual([
         "Delete",
         "Take control",
+        "Share link",
       ]);
       expect(
         await page
           .locator("#pane-menu-panels .pane-menu-item")
           .allTextContents(),
-      ).toEqual(labels.slice(2, -1));
-      expect(labels.at(-1)?.trim()).toBe("Up to parent agent");
-      expect(await page.locator("#up-btn").isEnabled()).toBe(true);
-      expect(
-        await page
-          .locator("#up-btn")
-          .evaluate((el) => (globalThis as any).getComputedStyle(el).color),
-      ).toBe(
-        await page
-          .locator("#trash-btn")
-          .evaluate((el) => (globalThis as any).getComputedStyle(el).color),
-      );
+      ).toEqual(labels.slice(3));
       await shot("menu");
       await page.locator("#trash-btn").click();
       expect(deletes).toBe(0);
@@ -673,10 +684,12 @@ export const tests: BrowserTest[] = [
       expect((await state.innerText()).trim()).toBe("");
       expect(await state.locator("svg[aria-hidden=true]").count()).toBe(1);
       const box = (await state.boundingBox())!;
-      const kids = (await page.locator("#chip-kids").boundingBox())!;
       expect(box.width).toBe(box.height);
-      expect(box.height).toBe(kids.height);
-      expect(box.y).toBe(kids.y);
+      const kids = (await page
+        .locator(width === 412 ? "#conv-title" : "#chip-kids")
+        .boundingBox())!;
+      if (width !== 412) expect(box.height).toBe(kids.height);
+      expect(box.y + box.height / 2).toBeCloseTo(kids.y + kids.height / 2, 0);
       const [warn] = await themeColors(page, "var(--warn)");
       expect(
         await state.evaluate(
@@ -720,7 +733,7 @@ export const tests: BrowserTest[] = [
     await page.locator(".content pre").waitFor();
     await page.locator("#menu-btn").tap();
     expect(await page.locator("#up-top.on").count()).toBe(1);
-    await page.locator("#backdrop").tap({ position: { x: 400, y: 400 } });
+    await page.locator("#sidebar .agent.selected").tap();
     await page.locator("#up-top").tap();
     await page.waitForFunction(
       "document.querySelector('#conv-title')?.textContent === 'Parent'",

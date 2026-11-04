@@ -38,6 +38,7 @@ export const ReviveDoc = defineDoc<ReviveState>({
   history: "latest",
   fork: "initial",
   initial: () => ({ archive: "", queued: [], oldCwd: null, settled: false }),
+  checkpointWhen: () => false,
 });
 
 // Only the initial imported open resets foreign settings; later operator

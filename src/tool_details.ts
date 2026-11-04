@@ -2,19 +2,17 @@
 // Durable records tool details itself (src/agents/durable/tool_details.ts),
 // and the Pi tool-capture channel left with the Pi process runtime.
 import { createHash } from "node:crypto";
-import { lstatSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { retire } from "./utils/trash";
+import { retireAll, retireDirectory } from "./utils/trash_sweep";
 
-// Retire legacy detached artifacts by rename only; no new owner dirs are
-// written.
-// Await-free check/rename prevents a race during synchronous retirement.
-export function retireConversationDetails(
+// Retire legacy owner directories off-thread; no new owner dirs are written.
+// The Worker's check and rename stay await-free.
+export async function retireConversationDetails(
   cid: string,
   toolDetailsDir: string,
   trashDir: string,
-): void {
+): Promise<void> {
   if (typeof cid !== "string" || !cid || Buffer.byteLength(cid, "utf8") > 512)
     return;
   const path = join(
@@ -22,12 +20,7 @@ export function retireConversationDetails(
     createHash("sha256").update(cid, "utf8").digest("hex"),
   );
   try {
-    if (!lstatSync(path).isDirectory()) return;
-  } catch {
-    return;
-  }
-  try {
-    retire(path, trashDir);
+    await retireDirectory(path, trashDir);
   } catch {}
 }
 
@@ -46,15 +39,12 @@ export async function retireDetached(
     if (!isOsError(error)) throw error;
     return false;
   }
-  let changed = false;
-  for (const name of names) {
-    try {
-      changed = retire(join(toolDetailsDir, name), trashDir) || changed;
-    } catch (error) {
-      if (!isOsError(error)) throw error;
-    }
-  }
-  return changed;
+  return (
+    (await retireAll(
+      names.map((name) => join(toolDetailsDir, name)),
+      trashDir,
+    )) > 0
+  );
 }
 
 /** Python's OSError: a Node system error carrying an errno code. */

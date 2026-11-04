@@ -1,13 +1,7 @@
 // Core CLI help and external Pi skills for every agent.
-import { realpathSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import {
-  type Config,
-  EFFORT_MAX_LEVEL,
-  EFFORT_MIN_LEVEL,
-  RECURSE_REPO_URL,
-} from "../config";
-import { skillHelp, pythonStrip, type SkillContext } from "../skill_context";
+import { join } from "node:path";
+import { type Config, EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL } from "../config";
+import { skillHelp, type SkillContext } from "../skill_context";
 const CORE_TOOLS = ["subagent", "worktree"] as const;
 
 type Conv = Record<string, unknown>;
@@ -16,8 +10,8 @@ export interface AgentToolsDeps {
   config: Config;
   skills: SkillContext;
   /** workdir_git.ready() and workdir_git.target_is_git_repo(). */
-  gitReady(): boolean;
-  targetIsGitRepo(): boolean;
+  gitReady(): Promise<boolean> | boolean;
+  targetIsGitRepo(): Promise<boolean> | boolean;
   /** conversation_store.load / effective_workdir. */
   loadConversation(cid: string): Promise<Conv | null>;
   effectiveWorkdir(conv: Conv): string;
@@ -30,46 +24,6 @@ export interface AgentToolsDeps {
     agentTmpdir: string;
     skillPaths: readonly string[];
   }): Promise<unknown[]>;
-}
-
-const errorCode = (error: unknown): string | undefined =>
-  error instanceof Error && "code" in error
-    ? (error as { code?: string }).code
-    : undefined;
-
-// Canonical repo URL/path for identity: trimmed, no trailing `/` or `.git`,
-// lower.
-export function normRepoUrl(url: string): string {
-  let u = pythonStrip(url).replace(/\/+$/u, "");
-  if (u.endsWith(".git")) u = u.slice(0, -4);
-  return u.toLowerCase();
-}
-
-// pathlib.Path.resolve(strict=False): resolve the existing prefix, keep the
-// rest.
-function pyResolve(path: string): string {
-  let head = resolve(path);
-  const tail: string[] = [];
-  for (;;) {
-    try {
-      return join(realpathSync(head), ...tail.reverse());
-    } catch (error) {
-      if (errorCode(error) !== "ENOENT" && errorCode(error) !== "ENOTDIR")
-        throw error;
-      const parent = resolve(head, "..");
-      if (parent === head) return resolve(path);
-      tail.push(head.slice(parent.length).replace(/^\//u, ""));
-      head = parent;
-    }
-  }
-}
-
-function isFile(path: string): boolean {
-  try {
-    return statSync(path).isFile();
-  } catch {
-    return false;
-  }
 }
 
 export class AgentTools {
@@ -112,31 +66,6 @@ export class AgentTools {
     return [skills, context];
   }
 
-  /** True when the canonical target repo is Recurse itself. */
-  targetsRecurse(): boolean {
-    const { repoUrl } = this.config;
-    const { TOOLS_DIR, AGENTS_MD } = this.config.paths;
-    if (normRepoUrl(repoUrl) === normRepoUrl(RECURSE_REPO_URL)) return true;
-    const install = TOOLS_DIR === null ? null : dirname(TOOLS_DIR);
-    if (install !== null) {
-      try {
-        if (repoUrl && pyResolve(repoUrl) === pyResolve(install)) return true;
-        if (pyResolve(AGENTS_MD) === pyResolve(join(install, "AGENTS.md")))
-          return true;
-      } catch {
-        // Invariant: OSError: fall through to the marker-file check.
-      }
-    }
-    const target = dirname(AGENTS_MD);
-    const rel = (...parts: string[]) => isFile(join(target, ...parts));
-    return (
-      isFile(AGENTS_MD) &&
-      rel("src/local.ts") &&
-      rel("src", "web", "app.ts") &&
-      rel("src", "agents", "instance.ts")
-    );
-  }
-
   /** Display name for a model id, failing safe to the id itself. */
   modelLabel(modelId: string, labels?: Record<string, unknown>): string {
     if (labels !== undefined) {
@@ -162,13 +91,13 @@ export class AgentTools {
   }
 
   effortBlockLines(): string[] {
-    let reachability: Record<number, Record<string, unknown>>;
+    let ladder: Record<number, Record<string, unknown>>;
     let defaultLevel: number;
     try {
-      reachability = this.config.effortLevelReachability();
+      ladder = this.config.effortLevels();
       defaultLevel = this.config.defaultEffortLevel();
     } catch {
-      reachability = {};
+      ladder = {};
       defaultLevel = 0;
     }
     let labels: Record<string, unknown>;
@@ -180,39 +109,25 @@ export class AgentTools {
       labels = {};
     }
     const lines = [
-      `Effort levels (model · reasoning); default for new conversations: ${defaultLevel}.`,
-      "Use lower levels for mechanical/checking work, higher for design/debugging; " +
-        "1 is fastest/cheapest, 5 most capable/costly.",
+      `Effort levels (model · reasoning); new conversations use ${defaultLevel}. Lower for mechanical`,
+      "work, higher for design and debugging. Subagents inherit yours unless given --effort.",
     ];
-    if (Object.keys(reachability).length === 0) {
+    if (Object.keys(ladder).length === 0) {
       lines.push(
         "  (no levels available — configure them in Settings to enable subagents)",
       );
     } else {
       for (let level = EFFORT_MIN_LEVEL; level <= EFFORT_MAX_LEVEL; level++) {
-        const entry = reachability[level];
+        const entry = ladder[level];
         if (typeof entry !== "object" || entry === null) continue;
         const { model, reasoning } = entry;
         if (typeof model !== "string" || typeof reasoning !== "string")
           continue;
-        let row = `  ${level} — ${this.modelLabel(model, labels)} · ${reasoning}`;
-        if (level === defaultLevel) row += " · new conversations start here";
-        if (!entry.reachable) {
-          const reason = entry.reason;
-          const detail =
-            typeof reason === "string" && reason
-              ? `: ${Array.from(reason).slice(0, 200).join("")}`
-              : "";
-          row += ` · unreachable${detail}`;
-        }
-        lines.push(row);
+        lines.push(
+          `  ${level} — ${this.modelLabel(model, labels)} · ${reasoning}`,
+        );
       }
     }
-    lines.push("Subagents inherit your level/model unless given --effort N.");
-    lines.push(
-      "View/change the ladder in Settings or discover recurse_settings with codemode searchTools; " +
-        "never guess model ids.",
-    );
     return lines;
   }
 
@@ -248,7 +163,7 @@ export class AgentTools {
   }
 
   // The generated "Recurse tools available" section ("" without a tools dir).
-  toolsSection(): string {
+  async toolsSection(): Promise<string> {
     const toolsDir = this.config.paths.TOOLS_DIR;
     if (toolsDir === null) return "";
     const out = ["Run Recurse tools from `$RECURSE_SRC`, not your cwd.", ""];
@@ -258,30 +173,24 @@ export class AgentTools {
       out.push("");
     };
     item("$RECURSE_SRC/tools/subagent.ts …", this.help.get("subagent")!);
-    out.push("Keep agent titles short; put task details in the prompt.");
-    out.push("");
-    out.push(...this.effortBlockLines());
-    out.push("");
-    if (this.deps.gitReady() && this.deps.targetIsGitRepo())
-      item(
-        "$RECURSE_SRC/tools/worktree.ts enter <name>",
-        this.help.get("worktree")!,
-      );
+    out.push(
+      "Name agents in short kebab-case; put task details in the prompt.",
+    );
     out.push("");
     out.push(
-      "If Git reports no author identity, ask the operator for the name and email to use, and never make one up.",
+      "Settings: read the recurse-settings skill, then use recurse_settings.",
+      "",
+      ...this.effortBlockLines(),
+    );
+    out.push("");
+    if ((await this.deps.gitReady()) && (await this.deps.targetIsGitRepo()))
+      item("$RECURSE_SRC/tools/worktree.ts", this.help.get("worktree")!);
+    out.push("");
+    out.push(
+      "If Git reports no author identity, ask the operator; never make one up.",
     );
     out.push("");
     out.push("Read `$RECURSE_SRC/AGENTS.md` before working on Recurse itself.");
-    if (
-      !this.targetsRecurse() &&
-      isFile(join(dirname(toolsDir), "AGENTS.md"))
-    ) {
-      out.push("");
-      out.push(
-        "When editing the installed Recurse source, commit directly; no PR needed.",
-      );
-    }
     return out.join("\n").replace(/\s+$/u, "");
   }
 }

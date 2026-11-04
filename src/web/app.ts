@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 
 import { buildInstance, type Instance } from "../agents/instance";
+import type { TranscriptQuery } from "../agents/durable/transcript";
 import { activeRunId } from "../agents/conversation_store";
 import { fenced, cleanupRetiredToolDetails } from "../agents/mutation_guard";
 import * as artifacts from "../artifacts";
@@ -46,6 +47,11 @@ import { readRelease } from "../release";
 import { RecurseUpdates } from "../recurse_update";
 import { retireDetached } from "../tool_details";
 import { registerSideRoutes } from "./side_conversations";
+import { registerTagRoutes } from "./tags";
+import { registerSidebarScriptRoutes } from "./sidebar_script";
+import { agentContext } from "./api_v1/context";
+import { registerApiV1 } from "./api_v1/routes";
+import { compactConversation } from "./compact";
 import { CreateSlots, registerConversationRoutes } from "./conversations";
 import {
   finishArtifactDeletion,
@@ -54,6 +60,8 @@ import {
 } from "./files";
 import { registerLoginRoutes } from "./login";
 import { registerUiTiming } from "./ui_timing";
+import { registerMessageSearch } from "./message_search";
+import { backfillMessageSearch } from "../search/backfill";
 import {
   LoginThrottle,
   loopbackAuthenticated,
@@ -65,9 +73,12 @@ import { registerSettingsRoutes } from "./settings";
 import { registerNotificationRoutes } from "./notifications";
 import { registerSettingsSyncRoutes } from "./settings_sync";
 import { ConnectedBackends } from "../backends/connected";
+import { API_MAJOR, API_REVISION } from "./api_v1/schema";
+import { HomeCallbacks } from "../backends/home_callbacks";
 import { registerBackendRoutes } from "./backends";
 import { registerBackendProxy } from "./backend_proxy";
 import { registerRelayRoutes } from "./relay";
+import { RelayQueue } from "./relay_queue";
 import { listPiModels, PiModelUpdater } from "../pi_model_list";
 import { displayCommand } from "../pi_bg_shell";
 import {
@@ -76,6 +87,7 @@ import {
   frontendGeneration,
   registerStaticRoutes,
 } from "./static";
+import { registerTreeEvents } from "./tree_events";
 import {
   defaultTokenHex,
   deliverStop,
@@ -127,6 +139,8 @@ export interface App {
   }): Promise<RunningServer>;
   /** The detached post-listen chain, for tests (settles when it finishes). */
   readonly detached: Promise<void>[];
+  /** Connections to remotes, for tests that shorten the idle period. */
+  readonly connectedBackends: ConnectedBackends;
 }
 
 type Mutate = <T>(
@@ -143,11 +157,20 @@ export async function buildApp(options: AppOptions): Promise<App> {
     storedCustomProviders: () => snapshot?.storedCustomProviders() ?? [],
     settingsRecheckMs: SETTINGS_RECHECK_MS,
   });
+  await config.refreshSettings();
   const paths = config.paths;
   const instance = await buildInstance({
     config,
     sink,
+  }).catch(async (error) => {
+    await config.close();
+    throw error;
   });
+  instance.shutdownController.signal.addEventListener(
+    "abort",
+    () => void config.close(),
+    { once: true },
+  );
   const muse = new MuseAuth({
     store: instance.oauth,
     config,
@@ -223,6 +246,10 @@ export async function buildApp(options: AppOptions): Promise<App> {
       origin: "platform",
     });
   const durable = instance.durable;
+  const transcript = async (cid: string, options: TranscriptQuery) =>
+    durable.owns(conversations.load(cid, { withPending: false }))
+      ? durable.transcript(cid, options)
+      : null;
 
   const shellView = (cid: string) => {
     const view = durable.shells(cid);
@@ -259,8 +286,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
     requireActionReady,
     drafts: instance.drafts,
     files: {
-      admitConversationUpload: (owner, data, filename) =>
-        instance.reap.admitConversationUpload(owner, data, filename),
+      admitConversationUpload: (owner, data, filename, crop) =>
+        instance.reap.admitConversationUpload(owner, data, filename, crop),
+      cancelConversationCrop: (owner, crop) =>
+        instance.reap.cancelConversationCrop(owner, crop),
+      checkConversationCropOwner: (owner) =>
+        instance.reap.checkConversationCropOwner(owner),
       composeFileDownload: (cid, aid) => reads.composeFileDownload(cid, aid),
       composeFileDelete: (cid, aid) => reads.composeFileDelete(cid, aid),
     },
@@ -281,9 +312,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
     backendKeys,
   };
   registerLoginRoutes(router, loginDeps);
-  registerBackendKeyRoutes(router, loginDeps);
+  const credentialRoots = resolveRoots(config.env);
+  const credentialDir = await piAgentDir(credentialRoots, preparePiAgentDir);
+  const homeCallbacks = await HomeCallbacks.load(credentialDir, backendKeys);
+  registerBackendKeyRoutes(router, { ...loginDeps, homeCallbacks });
   const connectedBackends = await ConnectedBackends.load(
-    await piAgentDir(resolveRoots(config.env), preparePiAgentDir),
+    credentialDir,
     config.displayName,
     (path, reason) =>
       logEvent(web, WARNING, "connected_backends_unavailable", {
@@ -291,7 +325,16 @@ export async function buildApp(options: AppOptions): Promise<App> {
       }),
     (fields) => logEvent(web, INFO, "backend_sign_in_stage", { fields }),
     (fields) => logEvent(web, INFO, "remote_connection", { fields }),
+    (fields) => logEvent(web, INFO, "remote_call", { fields: { ...fields } }),
   );
+  durable.remoteSettings = connectedBackends;
+  connectedBackends.busy = () =>
+    [...durable.liveRows.keys()].some(
+      (cid) =>
+        durable.isRunning(cid) ||
+        durable.metadata(cid).pending.length > 0 ||
+        durable.shells(cid).items.some((shell) => shell.mode === "background"),
+    );
   registerBackendRoutes(router, connectedBackends, {
     title: (cid) => {
       const row = conversations.metadataSnapshot(cid);
@@ -326,6 +369,18 @@ export async function buildApp(options: AppOptions): Promise<App> {
         .catch(() => {});
     },
     instance.delivery,
+    homeCallbacks,
+    options.env.RECURSE_SLEEP_WHEN_IDLE === "1"
+      ? new RelayQueue(
+          join(paths.DATA_DIR, "relay-queue.json"),
+          backendKeys,
+          (reason) =>
+            logEvent(web, WARNING, "relay_queue_unreadable", {
+              fields: { reason },
+            }),
+        )
+      : undefined,
+    options.env.RECURSE_SLEEP_CHECK_URL || undefined,
   );
   const release = await readRelease();
   registerStaticRoutes(router, {
@@ -340,7 +395,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     ...stopDeps,
     requireActionReady,
     tree: async () => {
-      const rows = instance.treeView.serve();
+      const rows = instance.sidebarRows();
       const revisions = await artifactRevisions.snapshot(
         rows.map((row) => String(row.id)),
       );
@@ -356,14 +411,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
       conversations
         .cliIndex()
         .map((row) => ({ ...row, shells: shellView(String(row.id)).items })),
-    transcript: async (cid, options) =>
-      durable.owns(conversations.load(cid, { withPending: false }))
-        ? durable.transcript(cid, options)
-        : null,
-    changeEnvironment: async (cid, change) =>
-      durable.owns(conversations.load(cid, { withPending: false }))
-        ? durable.changeEnvironment(cid, change)
-        : null,
+    transcript,
     stopDiagnostics: new StopDiagnosticBuckets(),
     revive: {
       search: (query, offset, limit) =>
@@ -371,6 +419,30 @@ export async function buildApp(options: AppOptions): Promise<App> {
       revive: (target, parent) => instance.revive.revive(target, parent),
       reviveFrom: (path, parent) => instance.revive.reviveFrom(path, parent),
     },
+  });
+  registerTreeEvents(
+    router,
+    instance.treeView,
+    connectedBackends,
+    requireActionReady,
+  );
+  const searchable = () =>
+    conversations
+      .allConvs({ withPending: false })
+      .filter((row) => durable.owns(row) && row.service_principal == null)
+      .map((row) => ({
+        id: String(row.id),
+        title: row.title,
+        parent: row.parent,
+        side_of: row.side_of,
+      }));
+  registerMessageSearch(router, {
+    requireReady: requireActionReady,
+    loopbackAuthenticated: loopback,
+    live: searchable,
+    target: (cid) => durable.searchTarget(cid),
+    archive: durable.archive,
+    search: durable.messageSearch,
   });
   const warnModelList = (event: string, fields: Record<string, string>) =>
     logEvent(web, WARNING, event, { fields });
@@ -382,7 +454,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     spawn: (name, work) =>
       instance.tasks.spawn(name, work, instance.shutdownController.signal),
     afterUpdate: async () => {
-      config.writeAvailableModels();
+      await config.writeAvailableModels();
     },
   });
   const send = process.send?.bind(process);
@@ -401,13 +473,15 @@ export async function buildApp(options: AppOptions): Promise<App> {
     modelUpdates,
     recurseUpdates,
     mcpChecks: instance.mcpChecks,
+    promptCacheWarmingChanged: () => instance.durable.reconcileCacheWarmers(),
     anthropic: instance.anthropic,
     codex: instance.codex,
     muse,
     openrouter: instance.openrouter,
     credentials: instance.oauth,
     providers: snapshot,
-    piAgentDir: () => piAgentDir(resolveRoots(config.env), preparePiAgentDir),
+    usageLimits: instance.usageLimits,
+    piAgentDir: () => piAgentDir(credentialRoots, preparePiAgentDir),
     mutateExternalStorage: (work) => mutate(work),
   });
   registerNotificationRoutes(router, instance.notifications, {
@@ -415,6 +489,14 @@ export async function buildApp(options: AppOptions): Promise<App> {
     displayName: config.displayName,
     brandingFile: join(paths.CONFIG_DIR, "branding.json"),
   });
+  const changeSidebarTags = registerTagRoutes(router, {
+    requireActionReady,
+    changeTags: (cids, change, by, now) =>
+      conversations.changeTags(cids, change, by, now),
+    title: (cid) => (conversations.convRowExists(cid) ? cid : undefined),
+    now: () => Date.now() / 1000,
+  });
+  registerSidebarScriptRoutes(router, instance.sidebarScript);
   registerSideRoutes(router, {
     requireActionReady,
     load: (cid) => conversations.load(cid, { withPending: false }),
@@ -436,9 +518,10 @@ export async function buildApp(options: AppOptions): Promise<App> {
     promote: (cid) => instance.durable.promotions.request(cid),
     log: (event, fields) => logEvent(web, INFO, event, { fields }),
   });
-  registerConversationRoutes(router, {
+  const sendMessage = registerConversationRoutes(router, {
     requireActionReady,
     serviceCreateSlots: new CreateSlots(),
+    notifications: instance.notifications,
     log: web,
     monotonicMs: () => performance.now(),
     store: conversations,
@@ -457,7 +540,8 @@ export async function buildApp(options: AppOptions): Promise<App> {
       },
       createOrRejoinServiceConversation: (o) =>
         instance.create.createOrRejoinServiceConversation(o),
-      setPinned: (cid, pinned) => instance.create.setPinned(cid, pinned),
+      setTakenOver: (cid, takenOver) =>
+        instance.create.setTakenOver(cid, takenOver),
     },
     reap: instance.reap,
     lifecycle,
@@ -490,6 +574,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
       read: (cid) => instance.reconciler.readSpawnOutcome(cid),
       observe: (cid) => instance.reconciler.observeSpawnOutcome(cid),
     },
+    prs: instance.conversationPrs,
     git: {
       workdirFile: (key) => instance.agentTemp.workdirFile(key),
       resolveDiffCwd: (stored, persisted, signal) =>
@@ -498,13 +583,32 @@ export async function buildApp(options: AppOptions): Promise<App> {
         instance.workdirGit.worktreeDiff(cwd, base, source, signal),
       diffFile: (cwd, path, base, contents) =>
         instance.workdirGit.diffFile(cwd, path, base, contents),
-      pullRequestDiff: (url, path) =>
-        instance.workdirGit.pullRequestDiff(url, path),
+      pullRequestDiff: (url, path, queue) =>
+        instance.workdirGit.pullRequestDiff(url, path, queue),
       diffCandidates: (cwd) => instance.workdirGit.diffCandidates(cwd),
-      pullRequests: (cwd, urls) => instance.workdirGit.pullRequests(cwd, urls),
       githubRepoUrl: (stored, file) =>
         instance.workdirGit.githubRepoUrl(stored, file),
     },
+  });
+  registerApiV1(router, {
+    compact: (cid) =>
+      compactConversation(
+        { store: conversations, durable, compaction: instance.parked },
+        cid,
+      ),
+    changeSidebarTags,
+    tree: () => instance.treeView.serveBase(),
+    shells: shellView,
+    queued: (cid) => durable.metadata(cid).pending.length,
+    context: (row) =>
+      agentContext(row, durable.cachedContextUsage(String(row.id)), config),
+    requireReady: requireActionReady,
+    treeReady: () => instance.treeView.ready(),
+    themesFile: config.paths.THEMES_FILE,
+    displayName: config.displayName,
+    release,
+    sendMessage,
+    transcript,
   });
   registerFileRoutes(router, filesDeps);
 
@@ -515,7 +619,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
 
     jobs: () => instance.tasks.names().filter((name) => name !== "watcher"),
   });
-  const handler = composeApp({
+  const composed = composeApp({
     router,
     loopLag,
     logger: logger("http", sink),
@@ -533,8 +637,23 @@ export async function buildApp(options: AppOptions): Promise<App> {
       serviceOwns: async (principal, cid) =>
         conversations.serviceOwnsConversation(principal, cid),
       logger: web,
+      remoteEventLabel: (authorization) =>
+        connectedBackends.callbackLabel(authorization),
+      operatorSeen: (origin) => connectedBackends.noteOperator(origin),
+      homeSeen: () => connectedBackends.noteHome(),
     }),
   });
+
+  const handler: Handler = async (ex) => {
+    const started = performance.now();
+    const response = await composed(ex);
+    response.headers.append(
+      "server-timing",
+      `recurse;dur=${(performance.now() - started).toFixed(3)}`,
+    );
+    response.headers.set("x-recurse-api", `${API_MAJOR}.${API_REVISION}`);
+    return response;
+  };
 
   const step = async (event: string, work: () => Promise<unknown>) => {
     try {
@@ -646,14 +765,14 @@ export async function buildApp(options: AppOptions): Promise<App> {
           // Invariant: Requests served during the drain may queue agent-store
           // writes: the store is disposed only once the drain ends or hits its
           // bound.
-          await instance.shutdown(drained);
+          await instance.shutdown(drained).finally(() => config.close());
           await sink.file?.close().catch(() => undefined);
         },
       });
     } catch (error) {
       // Invariant: The watcher is already running: stop it before failing (port
       // in use).
-      await instance.shutdown();
+      await instance.shutdown().finally(() => config.close());
       throw error;
     }
     loopLag.start();
@@ -669,16 +788,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
             logException(web, `${name}_failed`, error, { level: ERROR });
         }),
       );
-    instance.tasks
-      .spawn(
-        "connected-backend-health",
-        (signal) => connectedBackends.run(signal),
-        signal,
-      )
-      .catch(() => {
-        if (!signal.aborted)
-          logEvent(web, ERROR, "connected_backend_health_failed");
-      });
     track("git-identity", async () => {
       if (
         (await instance.workdirGit.targetIsGitRepo()) &&
@@ -708,6 +817,20 @@ export async function buildApp(options: AppOptions): Promise<App> {
         config.writeAvailableModels(),
       );
     });
+    track("message-search-backfill", (signal) =>
+      backfillMessageSearch({
+        processes: instance.processes,
+        search: durable.messageSearch,
+        archive: durable.archive,
+        live: () =>
+          searchable()
+            .filter((row) => !row.side_of)
+            .map((row) => durable.searchTarget(String(row.id))),
+        yieldToFocus: () => durable.yieldToFocus(),
+        signal,
+        log: (event, fields) => logEvent(web, INFO, event, { fields }),
+      }),
+    );
     track("post-listen-maintenance", async () => {
       await step("cleanup_retired_tool_details", () =>
         cleanupRetiredToolDetails({
@@ -722,5 +845,13 @@ export async function buildApp(options: AppOptions): Promise<App> {
     return running;
   };
 
-  return { instance, router, handler, sink, serve, detached };
+  return {
+    instance,
+    router,
+    handler,
+    sink,
+    serve,
+    detached,
+    connectedBackends,
+  };
 }

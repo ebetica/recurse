@@ -18,7 +18,7 @@ import { pruneOptimistic } from "./pending-queue.js";
 import { cancelRevealTimer } from "./conversation/disclosure.js";
 import { fillViewport } from "./conversation/navigation.js";
 import { paint } from "./conversation/thread.js";
-import { noteRowsRead, noteTurns } from "./files.js";
+import { invalidateFiles, noteRowsRead, noteTurns } from "./files.js";
 import type { Conversation, Turn } from "./types.js";
 
 export let loaded: Turn[] = [];
@@ -84,6 +84,27 @@ function pruneRowCaches(except?: string): void {
   );
 }
 
+function invalidatePublishedFiles(
+  id: string,
+  page: ViewPage,
+  previous: RowThread | undefined,
+  changed: boolean,
+): void {
+  if (!changed || !Array.isArray(page.blocks)) return;
+  const prior = new Map(previous?.rows.map((row) => [row.id, row]) ?? []);
+  if (
+    page.blocks.some((block) => {
+      if (!block?.attachment && !block?.files?.length) return false;
+      const old = prior.get(block.id);
+      return (
+        JSON.stringify([old?.attachment, old?.files]) !==
+        JSON.stringify([block.attachment, block.files])
+      );
+    })
+  )
+    invalidateFiles(id);
+}
+
 // One SSE delta folded through the same thread-level rules as the row poll:
 // stale pages keep held rows, instance changes rebuild, and only a changed
 // thread repaints the open conversation.
@@ -96,9 +117,16 @@ export function applyFocusedEventPage(id: string, page: ViewPage): void {
   const status = page?.status === "ready" ? "ready" : "unavailable";
   rowReadStatus.set(id, status);
   if (!page) return;
-  const fold = foldRowThread(rowThreads.get(id), page);
+  const previous = rowThreads.get(id);
+  const fold = foldRowThread(previous, page);
+  if (fold.gap) {
+    if (fold.state) rowThreads.set(id, fold.state);
+    catchUpRowThread(id);
+    return;
+  }
   if (!fold.state) return;
   rememberRowThread(id, fold.state, fold.reset, page.older === true);
+  invalidatePublishedFiles(id, page, previous, fold.changed);
   const conv = state.currentConv;
   if (
     conv?.id === id &&
@@ -178,11 +206,36 @@ export function catchUpRowThread(id: string): void {
 let rowThreadInst: string | null = null;
 export let loadingOlder = false;
 
+const coldReads = new Map<
+  string,
+  { epoch: number | undefined; at: number; read: Promise<boolean> }
+>();
+// Below the poll wedge escape: a stalled first read never blocks recovery.
+const COLD_READ_SHARE_MS = 10_000;
+
 // Extends rows when unsubscribed, after a failed stream, or when a metadata
 // read settles a run. The same page feeds settled tools. Unavailable/stale
-// pages retain rows; instance
-// changes rebuild instead of blanking the thread.
-export async function refreshRowThread(id: string): Promise<boolean> {
+// pages retain rows; instance changes rebuild instead of blanking the thread.
+// Overlapping first reads of one thread share a request.
+export function refreshRowThread(id: string): Promise<boolean> {
+  if (rowThreads.has(id)) return readRowThread(id);
+  const epoch = rowThreadEpoch.get(id);
+  const pending = coldReads.get(id);
+  const at = performance.now();
+  if (
+    pending &&
+    pending.epoch === epoch &&
+    at - pending.at < COLD_READ_SHARE_MS
+  )
+    return pending.read;
+  const read = readRowThread(id).finally(() => {
+    if (coldReads.get(id)?.read === read) coldReads.delete(id);
+  });
+  coldReads.set(id, { epoch, at, read });
+  return read;
+}
+
+async function readRowThread(id: string): Promise<boolean> {
   const held = rowThreads.get(id);
   // Invariant: Per-request identity (row-thread.readSerialApplies, unit-tested
   // there): apply only on exact serial match. A drop stores a fresh
@@ -190,7 +243,7 @@ export async function refreshRowThread(id: string): Promise<boolean> {
   const epoch = rowThreadEpoch.get(id);
   const read = async (): Promise<ViewPage | null> => {
     const query = held
-      ? `since=${held.revision}&instance=${encodeURIComponent(held.instanceId)}&limit=100`
+      ? `since=${held.revision}&instance=${encodeURIComponent(held.instanceId)}&limit=100&text_deltas=true`
       : "limit=100";
     try {
       const response = await backendFor(id).api(
@@ -214,10 +267,17 @@ export async function refreshRowThread(id: string): Promise<boolean> {
   rowReadStatus.set(id, status);
   if (!page) return priorStatus !== status;
   if (held && rowThreads.get(id)?.instanceId !== held.instanceId) return false;
-  const fold = foldRowThread(rowThreads.get(id), page);
+  const previous = rowThreads.get(id);
+  const fold = foldRowThread(previous, page);
+  if (fold.gap) {
+    if (!fold.state || held?.revision === -1) return false;
+    rowThreads.set(id, fold.state);
+    return refreshRowThread(id);
+  }
   const thread = fold.state;
   if (!thread) return priorStatus !== status;
   rememberRowThread(id, thread, fold.reset, page.older === true);
+  invalidatePublishedFiles(id, page, previous, fold.changed);
   return fold.changed || priorStatus !== status;
 }
 

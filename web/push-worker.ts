@@ -1,7 +1,7 @@
 // Service worker for agent-finished notifications, served as /push-worker.js
 // at root scope. Only push and notificationclick: no fetch handler, so it never
-// changes how pages load. A focused, visible tab showing the agent suppresses
-// the notification; a tap opens the agent in an open tab, else a new one.
+// changes how pages load. Every received push shows a notification; visible
+// conversation suppression happens before sending. A tap opens the agent.
 (() => {
   interface Notice {
     cid: string;
@@ -10,8 +10,6 @@
   }
   interface Tab {
     url: string;
-    focused: boolean;
-    visibilityState: string;
     frameType: string;
     focus(): Promise<Tab>;
     postMessage(message: unknown): void;
@@ -63,24 +61,12 @@
     const notice = event.data?.json() as Notice | undefined;
     if (!notice || typeof notice.cid !== "string") return;
     event.waitUntil(
-      (async () => {
-        const open = await tabs();
-        if (
-          open.some(
-            (tab) =>
-              tab.focused &&
-              tab.visibilityState === "visible" &&
-              showing(tab, notice.cid),
-          )
-        )
-          return;
-        await worker.registration.showNotification(notice.title, {
-          body: notice.body,
-          icon: "/static/brand/app-icon-192.png",
-          tag: `agent-${notice.cid}`,
-          data: { cid: notice.cid },
-        });
-      })(),
+      worker.registration.showNotification(notice.title, {
+        body: notice.body,
+        icon: "/static/brand/app-icon-192.png",
+        tag: `agent-${notice.cid}`,
+        data: { cid: notice.cid },
+      }),
     );
   });
 

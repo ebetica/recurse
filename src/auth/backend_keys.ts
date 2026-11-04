@@ -27,6 +27,8 @@ export class BackendKeys {
   readonly path: string;
   private queue: Promise<unknown> = Promise.resolve();
   private readonly pending = new Set<string>();
+  /** Client address of each key's latest request since this start. */
+  private readonly clients = new Map<string, string>();
   private passwords: Promise<unknown> = Promise.resolve();
 
   /** Keep old-password minting from completing after password revocation. */
@@ -96,18 +98,21 @@ export class BackendKeys {
     return task;
   }
 
+  /** Ids start with six hex digits no other key shares (keyedLabel). */
   async mint(name: string) {
-    const id = randomBytes(8).toString("hex");
+    let id = "";
     const secret = randomBytes(32).toString("hex");
-    await this.mutate((rows) =>
+    await this.mutate((rows) => {
+      do id = randomBytes(8).toString("hex");
+      while (rows.some((r) => r.id.slice(0, 6) === id.slice(0, 6)));
       rows.push({
         id,
         name,
         created: Date.now() / 1000,
         last_used: null,
         sha256: createHash("sha256").update(secret).digest("hex"),
-      }),
-    );
+      });
+    });
     return { id, name, key: `${BACKEND_KEY_PREFIX}${id}_${secret}` };
   }
 
@@ -117,6 +122,7 @@ export class BackendKeys {
       name,
       created,
       last_used,
+      last_client: this.clients.get(id) ?? null,
     }));
   }
 
@@ -132,6 +138,7 @@ export class BackendKeys {
 
   async verify(
     authorization: string,
+    client?: string,
   ): Promise<{ id: string; name: string } | null> {
     const match = /^Bearer recurse-link_([a-f0-9]{16})_([a-f0-9]{64})$/i.exec(
       authorization,
@@ -153,6 +160,12 @@ export class BackendKeys {
       !record
     )
       return null;
+    if (client) {
+      this.clients.delete(record.id);
+      this.clients.set(record.id, client);
+      if (this.clients.size > 1000)
+        this.clients.delete(this.clients.keys().next().value!);
+    }
     if (
       (record.last_used === null ||
         Date.now() / 1000 - record.last_used >= 60) &&
@@ -174,21 +187,36 @@ export class BackendKeys {
   }
 }
 
+/** Published v1 reads, message admission and compaction for agents. */
+function backendV1Allowed(method: string, path: string): boolean {
+  return (
+    (["GET", "HEAD"].includes(method) &&
+      /^\/api\/v1\/(version|schema|agents(?:\/[^/]+(?:\/(?:idle|messages))?)?)$/.test(
+        path,
+      )) ||
+    (method === "POST" &&
+      /^\/api\/v1\/agents\/[^/]+\/(messages|compact)$/.test(path))
+  );
+}
+
 /** Narrow operator keys to agent routes when provenance is present. */
 export function backendAgentAllowed(method: string, path: string): boolean {
   if (
     method === "POST" &&
-    /^\/api\/conversations\/[^/]+\/(safety|pin)\/?$/.test(path)
+    /^\/api\/conversations\/[^/]+\/(safety|pin|promote)\/?$/.test(path)
   )
     return false;
   return (
+    backendV1Allowed(method, path) ||
     /^\/api\/(conversations|attachments|attachment-drafts|artifacts)(\/|$)/.test(
       path,
     ) ||
     (["GET", "HEAD"].includes(method) &&
       /^\/api\/(tree|version|status|models)$/.test(path)) ||
     (method === "GET" &&
-      /^\/api\/subagent-tool\/conversations\/[^/]+\/transcript$/.test(path))
+      (path === "/api/subagent-tool/search" ||
+        path === "/api/subagent-tool/read" ||
+        /^\/api\/subagent-tool\/conversations\/[^/]+\/transcript$/.test(path)))
   );
 }
 
@@ -208,14 +236,23 @@ export function remoteSettingsRoute(path: string): boolean {
 
 /** Receiving key permissions; narrow agent-marked requests first. */
 export function backendKeyAllowed(method: string, path: string): boolean {
-  if (remoteSettingsRoute(path)) return true;
+  if (
+    backendV1Allowed(method, path) ||
+    (method === "POST" && path === "/api/v1/agents/tags") ||
+    remoteSettingsRoute(path)
+  )
+    return true;
   if (["GET", "POST"].includes(method) && SYNC_PATHS.some((p) => p === path))
     return true;
   if (method === "DELETE" && path === "/api/backend-keys/self") return true;
+  if (method === "PUT" && path === "/api/backend-keys/self/callback")
+    return true;
   if (method === "GET" && path === "/api/relay/requests") return true;
   if (
     method === "GET" &&
-    /^\/api\/subagent-tool\/conversations\/[^/]+\/transcript$/.test(path)
+    (path === "/api/subagent-tool/search" ||
+      path === "/api/subagent-tool/read" ||
+      /^\/api\/subagent-tool\/conversations\/[^/]+\/transcript$/.test(path))
   )
     return true;
   if (
@@ -225,7 +262,9 @@ export function backendKeyAllowed(method: string, path: string): boolean {
     return true;
   if (
     method === "GET" &&
-    ["tree", "version", "status", "models"].some((p) => path === `/api/${p}`)
+    ["tree", "tree/events", "version", "status", "models"].some(
+      (p) => path === `/api/${p}`,
+    )
   )
     return true;
   return /^\/api\/(conversations|attachments|attachment-drafts|artifacts)(\/|$)/.test(

@@ -1,10 +1,11 @@
-// Pure immutable row projection reconciles history by stable entry identity.
-// No I/O, Pi launch or state writes; durable history remains source of truth.
-// Live drafts replace the tail and persisted entries promote rows in place.
+// Stable entry identities reconcile bounded history with live row projections.
+// No I/O or state writes; durable history remains the source of truth.
+// Backfill is not a live change; edits to held rows remain observable.
 // Offsets beyond Number.MAX_SAFE_INTEGER are unsupported.
 
 import { randomUUID } from "node:crypto";
 import { modelResponse } from "./model_response";
+import { textHash } from "./text_hash";
 import { performance } from "node:perf_hooks";
 import {
   describeTurnFailure,
@@ -71,6 +72,33 @@ export interface Block {
   readonly meta: JsonObject | null;
   /** Codemode nested calls from the result's details.calls, bounded. */
   readonly calls?: readonly JsonObject[];
+  /** On a text-delta change page: text follows this many held characters. */
+  readonly text_from?: number;
+  /** With `text_from`: `textHash` of the held text it follows. */
+  readonly text_hash?: number;
+}
+
+interface TextMark {
+  readonly length: number;
+  readonly hash: number;
+}
+
+/** Streaming assistant text grows by appends; other rows are sent whole. */
+function appendable(row: Block | undefined): row is Block {
+  return row?.kind === "text" && row.role === "assistant";
+}
+
+/** The row with only its text after `held`, or whole if that is no prefix. */
+function textDelta(row: Block, held: TextMark | null | undefined): Block {
+  if (!held?.length || !appendable(row) || row.text.length < held.length)
+    return row;
+  if (textHash(row.text.slice(0, held.length)) !== held.hash) return row;
+  return {
+    ...row,
+    text: row.text.slice(held.length),
+    text_from: held.length,
+    text_hash: held.hash,
+  };
 }
 
 export interface Snapshot {
@@ -139,9 +167,9 @@ export function thinkingInfo(content: unknown): ThinkingInfo {
     if ((block as JsonObject).type !== "thinking") continue;
     const thinking = (block as JsonObject).thinking;
     if (typeof thinking !== "string") continue;
+    hasThinking = true;
     const text = thinking.trim();
     if (!text || REDACTED_THINKING.test(text)) continue;
-    hasThinking = true;
     for (const match of thinking.matchAll(/\*\*(.+?)\*\*/gu)) {
       const heading = match[1]?.trim();
       if (heading)
@@ -178,13 +206,18 @@ const PYTHON_TRIM_RE = new RegExp(
 );
 const PYTHON_LINES_GLOBAL_RE = /\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/gu;
 
-// Native publish rows and historical publication calls look up owned files.
+// Native, nested and historical publication calls look up owned files.
 export function publishesFiles(row: {
   name: string | null;
   args: string;
   input: string | null;
+  calls?: readonly JsonObject[] | null;
 }): boolean {
   if (row.name === "publish" || row.name === "publish_attachment") return true;
+  if (row.name === "codemode")
+    return !!row.calls?.some(
+      (call) => call.name === "publish" || call.status === "omitted",
+    );
   return (
     row.name === "bash" &&
     `${row.args}\n${row.input ?? ""}`.includes("tools/publish.ts")
@@ -541,15 +574,7 @@ export function codemodeCalls(details: unknown): JsonObject[] | null {
     for (const call of details.calls.slice(CODEMODE_CALLS_MAX)) {
       if (!object(call)) continue;
       const stat = toolStat(text(call.name), call.args, null);
-      const name = [
-        "chdir",
-        "clear",
-        "compact",
-        "wait",
-        "publish_attachment",
-      ].includes(text(call.name))
-        ? text(call.name)
-        : "tool";
+      const name = text(call.name) || "tool";
       const key = JSON.stringify([name, stat.kind, stat.action]);
       const counted = summary.get(key) ?? {
         name,
@@ -981,9 +1006,13 @@ export class ConversationView {
   // Legacy notices get pointId from adjacent compact-applied, in either order.
   private legacyNotices = new Map<string, number | null>();
   private appliedParents = new Map<string, [string, number | null]>();
-  private changesLog: Array<[number, string]> = [];
+  /** Each change, with the row's text mark from before it. */
+  private changesLog: Array<[number, string, TextMark | null]> = [];
+  private backfillExisting: ReadonlySet<string> | null = null;
+  /** Each assistant row's text mark as of its latest change. */
+  private textMarks = new Map<string, TextMark>();
   /** Published files per tool call, oldest first. */
-  attachments: Record<string, JsonObject[]> = {};
+  attachments: Record<string, JsonObject[]> = Object.create(null);
 
   constructor(
     cid: string,
@@ -1018,7 +1047,8 @@ export class ConversationView {
     this.legacyNotices.clear();
     this.appliedParents.clear();
     this.changesLog = [];
-    this.attachments = {};
+    this.textMarks.clear();
+    this.attachments = Object.create(null);
     this.touch();
   }
 
@@ -1026,15 +1056,17 @@ export class ConversationView {
     return this.index.has(id);
   }
 
-  unresolvedAttachments(): string[] {
+  unresolvedAttachments(force: ReadonlySet<string> = new Set()): string[] {
     const unresolved: string[] = [];
     const seen = new Set<string>();
     for (const row of this.blocks) {
       if (
-        publishesFiles(row) &&
         row.result !== null &&
         row.call_id !== null &&
-        !Object.hasOwn(this.attachments, row.call_id) &&
+        (force.has(row.call_id) ||
+          (!row.running &&
+            publishesFiles(row) &&
+            !Object.hasOwn(this.attachments, row.call_id))) &&
         !seen.has(row.call_id)
       ) {
         seen.add(row.call_id);
@@ -1045,7 +1077,7 @@ export class ConversationView {
   }
 
   attachFiles(attachments: Record<string, JsonObject[]>): void {
-    const additions: Record<string, JsonObject[]> = {};
+    const additions: Record<string, JsonObject[]> = Object.create(null);
     for (const [key, value] of Object.entries(attachments)) {
       if (
         !Object.hasOwn(this.attachments, key) ||
@@ -1061,12 +1093,30 @@ export class ConversationView {
   }
 
   private changed(identity: string): void {
-    this.revision += 1;
-    this.changesLog.push([this.revision, identity]);
-    if (this.changesLog.length > 512) this.changesLog.shift();
+    const position = this.index.get(identity);
+    const row = position === undefined ? undefined : this.blocks[position];
+    if (this.backfillExisting === null || this.backfillExisting.has(identity)) {
+      this.revision += 1;
+      this.changesLog.push([
+        this.revision,
+        identity,
+        this.textMarks.get(identity) ?? null,
+      ]);
+      if (this.changesLog.length > 512) this.changesLog.shift();
+    }
+    if (appendable(row) && row.id === identity)
+      this.textMarks.set(identity, {
+        length: row.text.length,
+        hash: textHash(row.text),
+      });
+    else this.textMarks.delete(identity);
   }
 
-  changes(since: number, limit: number): Snapshot {
+  /**
+   * Rows changed after `since`; with `textDeltas`, assistant rows still
+   * extending their text at `since` carry only the rest and `text_from`.
+   */
+  changes(since: number, limit: number, textDeltas = false): Snapshot {
     if (
       since > this.revision ||
       since < 0 ||
@@ -1074,14 +1124,15 @@ export class ConversationView {
     ) {
       return Object.freeze({ ...this.window({ limit }), reset: true });
     }
-    const changed = new Set(
-      this.changesLog
-        .filter(([revision]) => revision > since)
-        .map(([, identity]) => identity),
-    );
+    const held = new Map<string, TextMark | null>();
+    for (const [revision, identity, mark] of this.changesLog)
+      if (revision > since && !held.has(identity)) held.set(identity, mark);
+    const changed = new Set(held.keys());
     if (changed.size > limit)
       return Object.freeze({ ...this.window({ limit }), reset: true });
-    const rows = this.blocks.filter((row) => changed.has(row.id));
+    const rows = this.blocks
+      .filter((row) => changed.has(row.id))
+      .map((row) => (textDeltas ? textDelta(row, held.get(row.id)) : row));
     const removed = [...changed]
       .filter((identity) => !this.index.has(identity))
       .sort();
@@ -1124,23 +1175,29 @@ export class ConversationView {
     // remove a displayed row (a compaction hides its notice), shifting every
     // position.
     const existing = new Set(this.blocks.map((row) => row.id));
-    const latestCalls = new Map(this.callRows);
-    for (const entry of entries) this.ingestOne(entry, false, true);
-    for (const [callId, rowId] of latestCalls) this.callRows.set(callId, rowId);
-    const prefix = this.blocks.filter((row) => !existing.has(row.id));
-    this.firstOrder -= prefix.length;
-    const orderedPrefix = prefix.map((row, index) =>
-      Object.freeze({ ...row, order: this.firstOrder + index }),
-    );
-    this.blocks = [
-      ...orderedPrefix,
-      ...this.blocks.filter((row) => existing.has(row.id)),
-    ];
-    this.rebuildIndex();
-    this.resolvePending();
-    this.resolveCompactionTargets();
-    this.seatCompactionCuts();
-    this.demoteRetriedErrors();
+    this.backfillExisting = existing;
+    try {
+      const latestCalls = new Map(this.callRows);
+      for (const entry of entries) this.ingestOne(entry, false, true);
+      for (const [callId, rowId] of latestCalls)
+        this.callRows.set(callId, rowId);
+      const prefix = this.blocks.filter((row) => !existing.has(row.id));
+      this.firstOrder -= prefix.length;
+      const orderedPrefix = prefix.map((row, index) =>
+        Object.freeze({ ...row, order: this.firstOrder + index }),
+      );
+      this.blocks = [
+        ...orderedPrefix,
+        ...this.blocks.filter((row) => existing.has(row.id)),
+      ];
+      this.rebuildIndex();
+      this.resolvePending();
+      this.resolveCompactionTargets();
+      this.seatCompactionCuts();
+      this.demoteRetriedErrors();
+    } finally {
+      this.backfillExisting = null;
+    }
   }
 
   private sameTurn(first: string, second: string): boolean {

@@ -5,7 +5,7 @@ describe("focusedEventsUrl", () => {
   // test-check-allow: T9 Encoded owner id cannot inject path/query.
   test("encodes the conversation id", () => {
     expect(focusedEventsUrl("a?b&c")).toBe(
-      "/api/conversations/a%3Fb%26c/events",
+      "/api/conversations/a%3Fb%26c/events?text_deltas=true",
     );
   });
 });

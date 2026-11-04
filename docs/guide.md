@@ -37,7 +37,7 @@ Node.js or Python.
 
 ```bash
 curl -fsSL https://bun.sh/install | bash
-curl -fsSL https://raw.githubusercontent.com/ebetica/recurse/main/install.sh | bash
+curl -fsSL https://github.com/ebetica/recurse/releases/latest/download/install.sh | bash
 ```
 
 The installer puts a `recurse` command on your path.

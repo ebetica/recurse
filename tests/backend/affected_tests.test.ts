@@ -95,7 +95,7 @@ test("a change to one browser test file runs only its group", async () => {
   expect(lines).not.toContain("bun run test:browser");
 });
 
-// Regression: #2273 changed src/pi_auth_worker.mjs, which src/auth/oauth.ts starts by joining its file name to a directory.
+// Regression: #2273 changed src/pi_auth.worker.mjs, which src/auth/oauth.ts starts by joining its file name to a directory.
 test("a worker a module starts by file name reaches that module's tests", async () => {
   const backend = (await affected("pr2273-worker.diff")).find((line) =>
     line.startsWith("bun test --timeout 30000 "),

@@ -47,7 +47,6 @@ import {
   applyBatch,
   completedReplyPage,
   CompletedReplyStorageUnavailable,
-  markerSummary,
   thinkingText,
   needsOlder,
   parseEventCursor,
@@ -168,7 +167,6 @@ export interface ReadsDeps {
     ): Promise<JsonObject>;
     thinking(cid: string, offset: number): Promise<JsonObject | null>;
     turnPrompt(cid: string, offset: number): Promise<JsonObject | null>;
-    markerSummary(cid: string, offset: number): Promise<JsonObject | null>;
     metadata(cid: string): JsonObject;
     contextUsage(cid: string): Promise<JsonObject>;
     prompt(cid: string): Promise<JsonObject>;
@@ -560,7 +558,8 @@ export class SupervisorReads {
       }
     }
     const files = collection
-      ? await this.files.publishedCallFiles(collection[0], collection[1])
+      ? (await this.files.publishedCallFiles(collection[0], collection[1]))
+          .files
       : {};
     const picked: Record<string, unknown> = {};
     for (const key of callIds)
@@ -577,6 +576,7 @@ export class SupervisorReads {
       limit?: number;
       since?: number | null;
       instance?: string | null;
+      textDeltas?: boolean;
     } = {},
   ): Promise<JsonObject> {
     const before = options.before ?? null;
@@ -641,6 +641,7 @@ export class SupervisorReads {
         limit,
         since: options.since ?? null,
         instance: options.instance ?? null,
+        textDeltas: options.textDeltas,
       });
     }
     return unavailable(); // Invariant: Unreachable: acquire always yields once.
@@ -650,12 +651,14 @@ export class SupervisorReads {
   async readViewEvents(
     cid: string,
     lastEventId: string | null,
+    textDeltas = false,
   ): Promise<[number, Uint8Array]> {
     const [instance, since] = parseEventCursor(lastEventId);
     const page = await this.readViewWindow(cid, {
       limit: SSE_PAGE_LIMIT,
       since,
       instance,
+      textDeltas,
     });
     if (page.status !== "ready") return [503, new Uint8Array()];
     const snapshot =
@@ -718,32 +721,6 @@ export class SupervisorReads {
       if (!this.alive(claim)) throw new CompletedReplyStorageUnavailable();
       current = typeof page.next_cursor === "string" ? page.next_cursor : null;
     }
-  }
-
-  /** One compaction-marker summary over a supervisor-resolved binding. */
-  async readMarkerSummary(
-    cid: string,
-    offset: number,
-    generation: number | null = null,
-  ): Promise<JsonObject | null> {
-    const claim = this.claim(cid);
-    if (claim !== null && this.deps.durable?.owns(claim.conv))
-      return this.deps.durable.markerSummary(cid, offset);
-    if (claim === null || claim.binding === null) return null;
-    const binding = claim.binding;
-    if (
-      generation !== null &&
-      generation !== historyGeneration(binding.sessionId)
-    )
-      return null;
-    const path = await this.deps.boundSessionFile(
-      binding.sessionId,
-      binding.sessionFile,
-      binding.cwd,
-    );
-    const view = path === null ? null : await markerSummary(path, offset);
-    if (view === null || !this.alive(claim)) return null;
-    return view;
   }
 
   /** One bounded thinking read over a supervisor-resolved binding. */
@@ -854,6 +831,9 @@ export class SupervisorReads {
         ? { muteDesired: node.muteDesired, safetyDesired: node.safetyDesired }
         : null;
     conv.muted = readMuted(conv, desires);
+    // Spec: Tabs opened before the taken_over rename read `pinned`; keep it
+    // for one release.
+    conv.pinned = conv.taken_over === true;
     conv.safety_off = readSafetyOff(conv, desires);
     conv.safety_off_active = readSafetyEffectiveOff(conv, desires);
     delete conv.external_key;

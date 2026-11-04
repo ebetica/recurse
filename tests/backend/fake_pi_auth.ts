@@ -27,7 +27,7 @@ function write(path, value) { mkdirSync(dirname(path), { recursive: true }); wri
 const PI = `
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
-export const VERSION = "1.3.0";
+export const VERSION = "1.5.0";
 const backendUrl = new URL("./dist/core/auth-storage.js", import.meta.url).href;
 const { FileAuthStorageBackend } = await import(backendUrl);
 function read(path) { try { return readFileSync(path, "utf8"); }
@@ -81,7 +81,7 @@ export function fakePiPackage(root: string): string {
     join(packageRoot, "package.json"),
     JSON.stringify({
       name: "@earendil-works/pi-coding-agent",
-      version: "1.3.0",
+      version: "1.5.0",
       type: "module",
       exports: { ".": { import: "./index.mjs" } },
     }),

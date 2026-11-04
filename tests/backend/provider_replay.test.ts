@@ -121,7 +121,11 @@ for (const name of ["openai-codex-sse", "openai-codex-auto", "anthropic-sse"]) {
         expect(replay.requests[2]!.previous_response_id).toEqual(
           expect.any(String),
         );
-        expect((replay.requests[1]!.input as unknown[]).length).toBe(3);
+        expect(
+          (replay.requests[1]!.input as Record<string, unknown>[]).map(
+            (item) => item.role ?? item.type,
+          ),
+        ).toEqual(["developer", "user", "assistant", "user"]);
         expect((replay.requests[2]!.input as unknown[]).length).toBe(1);
       }
       replay.assertComplete();

@@ -98,7 +98,7 @@ test("host imports legacy env.sh with logged protected-name drops", async () => 
         .join(""),
       { mode: 0o600 },
     );
-    const scope = loadTrustedPathScope({
+    const scope = await loadTrustedPathScope({
       ...env,
       RECURSE_WORKSPACE_ROOT: root,
     });
@@ -416,7 +416,7 @@ test("real host tools and safety retain trusted scope even with a poisoned store
     expect(await Bun.file(join(root, "state", "denied.txt")).exists()).toBe(
       false,
     );
-    const scope = loadTrustedPathScope(seen);
+    const scope = await loadTrustedPathScope(seen);
     expect(
       allowedByPathScope(
         "write",

@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import {
   gotoRoot,
@@ -58,7 +59,9 @@ export const tests: BrowserTest[] = [
         console.log(await page.locator("body").innerText());
         throw error;
       });
-    await page.locator('#send[aria-label="Send message"]').waitFor();
+    await page
+      .locator('#send[aria-label="Send message"]')
+      .waitFor({ state: "attached" });
     await content.locator("p .turn-tail").waitFor();
     if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR) {
       await mkdir(process.env.RECURSE_BROWSER_SCREENSHOT_DIR, {
@@ -83,7 +86,7 @@ export const tests: BrowserTest[] = [
     ]);
     const vetted = content.locator("img");
     expect(await vetted.count()).toBe(1);
-    expect(await vetted.getAttribute("src")).toBe(`${safeImage}/preview`);
+    expect(await vetted.getAttribute("src")).toBe(`${safeImage}/thumbnail`);
     expect(await vetted.getAttribute("title")).toBe('" onerror=alert(3)');
     expect(
       await content.locator("[onerror], [onload], [onclick]").count(),
@@ -111,6 +114,14 @@ export const tests: BrowserTest[] = [
         "(() => { const width = document.querySelector('#conv-controls').clientWidth; return document.querySelector('#context-indicator').classList.contains('mini-hidden') === (width < 620); })()",
       );
     }
+    await browserExpect(content.locator(".image-filename")).toHaveText(
+      "browser-image.png",
+    );
+    expect(
+      await content
+        .locator(".image-filename")
+        .evaluate((caption: any) => caption.scrollWidth <= caption.clientWidth),
+    ).toBeTrue();
     const markup = await content.innerHTML();
     await page.request.post(
       `${base}__browser-test/seed-model-selection-error`,
@@ -118,12 +129,16 @@ export const tests: BrowserTest[] = [
         data: { agent: "markdown-other", model: "fauxordinary/faux-1" },
       },
     );
+    await page.locator("#input").blur();
     await page.locator("#menu-btn").click();
     await page.locator('.agent[data-id="markdown-other"]').click();
     await page.waitForFunction("!document.querySelector('.msg.assistant')");
     await page.locator("#menu-btn").click();
     await page.locator('.agent[data-id="tilde-reply"]').click();
     await content.locator("p .turn-tail").waitFor();
+    await browserExpect(content.locator(".image-filename")).toHaveText(
+      "browser-image.png",
+    );
     expect(await content.innerHTML()).toBe(markup);
     await page.close();
   },

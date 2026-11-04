@@ -10,7 +10,7 @@ import {
   requestBytes,
   type CaseRequest,
 } from "./http_corpus";
-import { buildAuthApp, type AuthApp } from "./http_auth_app";
+import { buildAuthApp, PASSWORD, type AuthApp } from "./http_auth_app";
 import fixture from "./fixtures/http_auth/cases.json";
 
 interface AuthCase {
@@ -47,7 +47,11 @@ let now: number;
 beforeAll(async () => {
   now = Date.now() / 1000;
   dir = await mkdtemp(join(tmpdir(), "http-auth-"));
-  app = await buildAuthApp(dir, { sleep: async () => {}, now: () => now });
+  app = await buildAuthApp(dir, {
+    sleep: async () => {},
+    now: () => now,
+    port: 0,
+  });
 });
 afterAll(async () => {
   await app.running.close();
@@ -124,6 +128,7 @@ describe("http_auth corpus", () => {
           "sec-fetch-site cross-site",
           "duplicate sec-fetch-site cross-site first",
           "open mode csrf still applies",
+          "loopback token",
         ].includes(item.name)
       )
         expect(response.status, item.name).toBe(403);
@@ -131,7 +136,6 @@ describe("http_auth corpus", () => {
         [
           "api with valid cookie",
           "issued cookie authenticates",
-          "loopback token",
           "reissued cookie works",
         ].includes(item.name)
       )
@@ -199,11 +203,157 @@ describe("http_auth corpus", () => {
     expect(CASES).toHaveLength(114);
     expect(CASES.filter((c) => c.current.body)).toHaveLength(82);
     expect(CASES.filter((c) => c.current.cookie)).toHaveLength(8);
-    expect(CASES.filter((c) => c.current.calls === 1)).toHaveLength(24);
+    expect(CASES.filter((c) => c.current.calls === 1)).toHaveLength(20);
     expect(CASES.filter((c) => c.current.cookie === "issue")).toHaveLength(6);
     expect(CASES.filter((c) => c.current.validation)).toHaveLength(5);
     expect(
       CASES.filter((c) => c.current.password_value !== undefined),
     ).toHaveLength(4);
   }, 120_000);
+
+  // Regression: #3020 HTTP login cookies must work without weakening HTTPS cookies.
+  test("login, password rotation and logout omit Secure only for explicit HTTP", async () => {
+    const socket = join(dir, "s");
+    const isolated = await buildAuthApp(join(dir, "cookie-schemes"), {
+      sleep: async () => {},
+      port: 0,
+      tailscaleSocket: socket,
+      tailscaleLogin: "operator@example.test",
+    });
+    const untrusted = await buildAuthApp(join(dir, "untrusted-proxy"), {
+      sleep: async () => {},
+      port: 0,
+      forwardedAllowIps: [],
+    });
+    const cases: {
+      app: AuthApp;
+      secure: boolean;
+      origin?: "http" | "https";
+      forwardedProto?: string;
+      forwarded?: Record<string, string>;
+      unix?: string;
+    }[] = [
+      { app: isolated, secure: false, origin: "http" },
+      {
+        app: isolated,
+        secure: true,
+        origin: "http",
+        forwardedProto: "https",
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "https",
+        forwardedProto: "http",
+      },
+      { app: untrusted, secure: true, forwardedProto: "http" },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwardedProto: "https",
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwardedProto: "http",
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwardedProto: "http, https",
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwarded: { forwarded: "for=203.0.113.1;proto=https" },
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwarded: { forwarded: 'for=203.0.113.1;proto="http"' },
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwarded: { forwarded: "for=203.0.113.1" },
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwarded: { forwarded: 'for=203.0.113.1;ext="x;proto=http;y"' },
+      },
+      {
+        app: untrusted,
+        secure: true,
+        origin: "http",
+        forwarded: { "x-forwarded-ssl": "on" },
+      },
+      { app: isolated, secure: true, origin: "http", unix: socket },
+    ];
+    try {
+      for (const {
+        app: current,
+        secure,
+        unix,
+        origin,
+        forwardedProto,
+        forwarded,
+      } of cases) {
+        await current.operator.setPassword(PASSWORD);
+        const base = `http://127.0.0.1:${current.running.port}`;
+        const transport: RequestInit & { unix?: string } = { unix };
+        const headers: Record<string, string> = { ...forwarded };
+        if (origin)
+          headers.origin = `${origin}://127.0.0.1:${current.running.port}`;
+        if (forwardedProto) headers["x-forwarded-proto"] = forwardedProto;
+        if (unix) headers["tailscale-user-login"] = "operator@example.test";
+        const login = await fetch(base + "/login", {
+          ...transport,
+          method: "POST",
+          redirect: "manual",
+          headers,
+          body: new URLSearchParams({ password: PASSWORD }),
+        });
+        expect(login.status).toBe(303);
+        const issued = login.headers.get("set-cookie")!;
+        expect(issued.includes("; Secure")).toBe(secure);
+        for (const flag of ["HttpOnly", "SameSite=lax", "Path=/"])
+          expect(issued).toContain("; " + flag);
+        const changed = await fetch(base + "/api/password", {
+          ...transport,
+          method: "POST",
+          headers: {
+            ...headers,
+            cookie: issued.split(";")[0]!,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            current: PASSWORD,
+            new: PASSWORD + "-changed",
+          }),
+        });
+        expect(changed.status).toBe(200);
+        const rotated = changed.headers.get("set-cookie")!;
+        expect(rotated.includes("; Secure")).toBe(secure);
+        const logout = await fetch(base + "/logout", {
+          ...transport,
+          method: "POST",
+          headers: { ...headers, cookie: rotated.split(";")[0]! },
+        });
+        expect(logout.status).toBe(200);
+        const cleared = logout.headers.get("set-cookie")!;
+        expect(cleared.includes("; Secure")).toBe(secure);
+        expect(cleared).toContain("; Max-Age=0;");
+      }
+    } finally {
+      await Promise.all([isolated.running.close(), untrusted.running.close()]);
+    }
+  }, 30_000);
 });

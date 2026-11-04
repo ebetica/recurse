@@ -40,8 +40,9 @@ one second, including missing owners. Expiry observes native-tool and post-commi
 changes across processes without filesystem watchers; tree ETags include the
 refreshed revisions. Colours come from the app theme when the page is served.
 
-The native tool offers only create, list and rename. Create and compact list
-rows show `$CHAT_DATA_DIR/artifact_repos/<owner>/<id>`; operator comment messages
+The native tool offers only create, list and rename. Agents create only on explicit
+operator request and update requested Artifacts instead of duplicating them.
+Create and compact list rows show `$CHAT_DATA_DIR/artifact_repos/<owner>/<id>`; operator comment messages
 carry the same working path. Agents edit those files and commit. Existing file
 tools and Bash expand `$CHAT_DATA_DIR`; old versions are ordinary Git history
 (`git log`, `git restore --source=<sha>`, then commit to publish).
@@ -58,7 +59,8 @@ uncertain trees are preserved. A short directory-inode admission lock fences
 owner/repository creation against retirement; retirement runs after unlocking.
 External retirement markers prevent new admission during that gap and startup
 recovers only markers left by dead processes, rechecking directory identity and
-contents before retirement. No lock spans Git or trash retirement.
+contents before retirement. No lock spans Git or trash retirement. Retirement
+awaits the descriptor-pinned trash Worker before removing its admission marker.
 
 Metadata snapshots key on HEAD/current/published refs and config contents, plus
 packed-refs size/mtime, so unchanged metadata survives remounts. Older version
@@ -67,6 +69,11 @@ and external history rewrites do not redefine an established creation date.
 Packed refs avoid history reads; same-size rewrites preserving mtime are outside
 cache invalidation. Oversized config/refs bypass caching. App builds live at
 builds/version refs.
+
+Versioned Artifact file and page responses use private browser caching with
+revalidation; their validators cover the served bytes, including the current
+page theme. Unversioned responses remain no-store. Owner and version remain in
+the request URL, and authorization precedes every revalidation.
 
 Artifact HTTP response logs include bounded, request-local phase durations and
 counts for repository admission, hook checks, metadata/cache waits, directory

@@ -1,0 +1,43 @@
+[
+  {
+    "name": "bash",
+    "description": "Run a shell command; long calls auto-background. Output: 2000 lines/50 KiB; read full logs with read. Monitor batches cost turns: print state changes, not heartbeats; identical lines are suppressed. For reminders, use a monitored sleep loop with dated output; for goals, print only while unmet. Stop unneeded process groups with kill -- -<pgid>. At the live-shell limit, wait, read logs or stop a group; don't launch polling shells.",
+    "parameters": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "command": {
+          "type": "string"
+        },
+        "monitor": {
+          "type": "boolean",
+          "description": "Stream progress batches; set at launch."
+        },
+        "background": {
+          "type": "boolean",
+          "description": "Return immediately with a shell id."
+        },
+        "inactivityReminderSeconds": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 86400,
+          "description": "No-output reminder delay in seconds (default 1800); 0 disables."
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2000,
+          "description": "Max output lines (default 2000)."
+        }
+      }
+    }
+  },
+  {
+    "name": "wait",
+    "description": "Wait for background shells; wait/notice intervals: 5m, 10m, 30m, 1h, 3h, then 6h.",
+    "parameters": {
+      "type": "object",
+      "properties": {}
+    }
+  }
+]

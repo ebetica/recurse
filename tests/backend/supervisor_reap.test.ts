@@ -107,7 +107,7 @@ function setup(spec: Json, overrides: Partial<ReapDeps> = {}) {
       takeoverReapBlocker: (doomed) => {
         for (const d of doomed) {
           const conv = world.conversations.load(d, { withPending: false });
-          if (conv !== null && conv.pinned === true)
+          if (conv !== null && conv.taken_over === true)
             return [d, typeof conv.title === "string" ? conv.title : null];
         }
         return null;
@@ -143,8 +143,7 @@ function setup(spec: Json, overrides: Partial<ReapDeps> = {}) {
       hasRetainedShellsFor: () => false,
     },
     agentStore: {
-      baseDir: world.agentStore.baseDir,
-      dbPaths: (cid) => world.agentStore.dbPaths(cid),
+      retireFiles: (cid) => world.agentStore.retireFiles(cid),
       close: async (cid, timeout) => {
         if ((spec.close_fail ?? []).includes(cid)) {
           calls.push(["close", cid, false]);
@@ -170,6 +169,7 @@ function setup(spec: Json, overrides: Partial<ReapDeps> = {}) {
         void calls.push(["cleanup_temps", owners.map((o) => [...o])]),
       markTrashDrainDue: () => void calls.push(["drain_due"]),
       addConversationUpload: async () => ({}),
+      cancelConversationCrop: async () => {},
     },
     retireLegacySession: async (conv) => (legacy.push(String(conv.id)), false),
     archiveLiveRecord: (cid, _conv, paths, date, key) => {
@@ -311,8 +311,11 @@ test("an unexpected failure parks the root once and re-raises", async () => {
   );
 });
 
-test("a failed pinned-deletion notice is logged, the intent dropped", async () => {
-  const rows = [{ id: "held", parent: "boss", pinned: true }, { id: "boss" }];
+test("a failed taken-over deletion notice is logged, the intent dropped", async () => {
+  const rows = [
+    { id: "held", parent: "boss", taken_over: true },
+    { id: "boss" },
+  ];
   const env = setup({ rows });
   await seed(env, { rows });
   env.deps.deliver = async () => {
@@ -321,9 +324,9 @@ test("a failed pinned-deletion notice is logged, the intent dropped", async () =
   env.deferred.queueDeferredReap("held", { requestedBy: "boss" });
   await env.reap.applyReaps();
   expect(env.deferred.snapshot()).toEqual([]);
-  expect(env.logs.some((l) => l[1].includes("pinned_reap_notice_failed"))).toBe(
-    true,
-  );
+  expect(
+    env.logs.some((l) => l[1].includes("taken_over_reap_notice_failed")),
+  ).toBe(true);
 });
 
 test("member lock files are unlinked after retire", async () => {
@@ -443,9 +446,9 @@ test("groups: concurrent subtree reaps stop every member group", async () => {
   expect(env.life.rows.size).toBe(0);
 });
 
-test("groups: a pinned descendant refuses an agent reap and keeps its group", async () => {
+test("groups: a taken-over descendant refuses an agent reap and keeps its group", async () => {
   const rows = GROUP_TREE.map((r) =>
-    r.id === "a1" ? { ...r, pinned: true } : r,
+    r.id === "a1" ? { ...r, taken_over: true } : r,
   );
   const spec = { rows };
   const env = groupWorld(spec);
@@ -507,3 +510,35 @@ test("groups: a reap cut off mid-way retries from the durable intent", async () 
   expect(env.world.conversations.load("a1")).toBeNull();
   expect(env.deferred.snapshot()).toEqual([]);
 });
+
+// Regression: #3102 Pinned database retirement must not block the main thread.
+test("a replied agent retires its database off-thread without copying it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "reap-store-trace-"));
+  roots.push(root);
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      "--preload",
+      join(import.meta.dir, "../dev/blocking_trace_preload.ts"),
+      join(import.meta.dir, "fixtures/agent-store-retirement-trace.ts"),
+    ],
+    {
+      env: { ...process.env, RECURSE_BLOCKING_TRACE: join(root, "trace.json") },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const [output, error, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ code, error }).toEqual({ code: 0, error: "" });
+  const result = JSON.parse(output);
+  expect(result.answered).toBe(true);
+  expect(result.requests).toBeGreaterThan(0);
+  expect(result.moved).toBe(true);
+  expect(result.absent).toBe(true);
+  expect(result.blocking).toEqual([]);
+  expect(result.retirementBlocking).toEqual([]);
+}, 30_000);

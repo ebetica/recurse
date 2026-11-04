@@ -50,7 +50,8 @@ const threadEdges: BrowserTest = async (browser, base) => {
       );
       const gap = await page.evaluate(`(() => {
         const items = [...document.querySelector("#messages").children].filter((e) => e.getBoundingClientRect().height > 0);
-        return Math.round(document.querySelector("#safety-row").getBoundingClientRect().top - items[items.length - 1].getBoundingClientRect().bottom);
+        const below = document.querySelector("#live-bar:not([hidden])") ?? document.querySelector("#safety-row");
+        return Math.round(below.getBoundingClientRect().top - items[items.length - 1].getBoundingClientRect().bottom);
       })()`);
       expect(gap as number).toBeGreaterThanOrEqual(12);
       expect(gap as number).toBeLessThanOrEqual(16);

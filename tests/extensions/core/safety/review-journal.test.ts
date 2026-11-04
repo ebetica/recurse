@@ -115,7 +115,6 @@ test("a later duplicate call id retracts previously materialized result evidence
   const rebuilt = update(session);
   expect(rebuilt.journalEvidence).not.toContain("must-be-retracted");
   expect(rebuilt.journalEvidence).not.toContain('"evidence_role":"tool"');
-  expect(rebuilt.evidenceBlocks).toHaveLength(1);
 });
 
 for (const fromHook of [false, true]) {

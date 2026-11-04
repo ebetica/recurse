@@ -4,7 +4,14 @@
 
 import { html, render, nothing, type TemplateResult } from "lit";
 import { state } from "../state.js";
-import { inputEl, msgsEl, scrollEl, shellOverlayEl, titleEl } from "../dom.js";
+import {
+  inputEl,
+  liveBarEl,
+  msgsEl,
+  scrollEl,
+  shellOverlayEl,
+  titleEl,
+} from "../dom.js";
 import {
   formatShellElapsed,
   formatShellStarted,
@@ -18,11 +25,7 @@ import { rowThreads } from "../row-thread-state.js";
 import { paint } from "./thread.js";
 import { activeDescendants, activeAgentSummary } from "../active-agents.js";
 import { guardLeaveComments } from "../comments.js";
-import {
-  activeAgentRowT,
-  closeMobileSidebar,
-  selectAgent,
-} from "../sidebar.js";
+import { activeAgentRowT, selectAgent } from "../sidebar.js";
 import type { Conversation } from "../types.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { CLOSE_ICON } from "../icons.js";
@@ -59,6 +62,9 @@ function positionSurface(): void {
   const anchor = button.closest<HTMLElement>(".live-panel-box") || button;
   const anchorRect = anchor.getBoundingClientRect();
   const scrollRect = scrollEl.getBoundingClientRect();
+  // Invariant: The live bar sits above the composer, below the thread; its
+  // surface opens upward from the thread's bottom edge.
+  const anchorTop = Math.min(anchorRect.top, scrollRect.bottom);
   const viewportWidth =
     document.documentElement.clientWidth || window.innerWidth;
   const viewportHeight =
@@ -91,13 +97,13 @@ function positionSurface(): void {
     panel.scrollHeight,
     panel.getBoundingClientRect().height,
   );
-  const above = Math.max(0, anchorRect.top - topBound - SURFACE_GAP_PX);
+  const above = Math.max(0, anchorTop - topBound - SURFACE_GAP_PX);
   const below = Math.max(0, bottomBound - anchorRect.bottom - SURFACE_GAP_PX);
   const placeAbove = above >= naturalHeight || above >= below;
   const available = placeAbove ? above : below;
   const height = Math.max(1, Math.min(naturalHeight, available));
   const top = placeAbove
-    ? Math.max(topBound, anchorRect.top - SURFACE_GAP_PX - height)
+    ? Math.max(topBound, anchorTop - SURFACE_GAP_PX - height)
     : Math.min(bottomBound - height, anchorRect.bottom + SURFACE_GAP_PX);
   panel.style.maxHeight = `${Math.round(height)}px`;
   panel.style.top = `${Math.round(top)}px`;
@@ -120,8 +126,10 @@ export function agentSurfaceOpen(): boolean {
 }
 
 function agentSurfaceButton(cid: string): HTMLButtonElement | null {
-  return msgsEl.querySelector<HTMLButtonElement>(
-    `[data-agent-chip][data-agent-id="${CSS.escape(cid)}"]`,
+  const chip = `[data-agent-chip][data-agent-id="${CSS.escape(cid)}"]`;
+  return (
+    liveBarEl.querySelector<HTMLButtonElement>(chip) ??
+    msgsEl.querySelector<HTMLButtonElement>(chip)
   );
 }
 
@@ -169,8 +177,10 @@ export function shellSurfaceOpen(): boolean {
 }
 
 function shellSurfaceButton(cid: string): HTMLButtonElement | null {
-  return msgsEl.querySelector<HTMLButtonElement>(
-    `[data-shell-chip][data-agent-id="${CSS.escape(cid)}"]`,
+  const chip = `[data-shell-chip][data-agent-id="${CSS.escape(cid)}"]`;
+  return (
+    liveBarEl.querySelector<HTMLButtonElement>(chip) ??
+    msgsEl.querySelector<HTMLButtonElement>(chip)
   );
 }
 
@@ -299,7 +309,6 @@ function agentSurfaceT(conv: Conversation): TemplateResult | typeof nothing {
     closeAgentSurface(false);
     state.cursorId = id;
     selectAgent(id);
-    closeMobileSidebar();
   };
   return html`<section
     class="dialog shell-surface agent-surface"

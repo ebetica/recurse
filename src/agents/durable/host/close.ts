@@ -18,6 +18,7 @@ export async function closeHarness(
   opened: Promise<Opened> | undefined,
   failed = false,
 ): Promise<void> {
+  host.invalidatePromptCache(cid);
   const naming = host.titleTasks.get(cid);
   naming?.scope.abort();
   // Invariant: Without an open Harness (never opened, or a failed open), stop
@@ -83,7 +84,9 @@ async function stopRecordedShells(
   const harness =
     liveHarness ??
     (await rt.Harness.open(
-      await rt.openWorkerSqliteStorage(host.sqlite(rt), path),
+      await host.messageSearch.withStores([path], () =>
+        rt.openWorkerSqliteStorage(host.sqlite(rt), path),
+      ),
       { models: await host.models(), registry },
       context,
     ));
@@ -114,6 +117,7 @@ async function stopRecordedShells(
 export async function closeAll(host: DurableHost): Promise<string[]> {
   host.idle.close();
   host.closing = true;
+  for (const warmer of host.cacheWarmers) warmer.close();
   for (const task of host.titleTasks.values()) task.scope.abort();
   const naming = Promise.allSettled(
     [...host.titleTasks.values()].map((task) => task.done),

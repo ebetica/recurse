@@ -49,7 +49,7 @@ const LISTED = [
   },
 ];
 
-function world(authed: string[]) {
+async function world(authed: string[]) {
   const root = mkdtempSync(join(tmpdir(), "settings-model-list-"));
   roots.push(root);
   const data = join(root, "data");
@@ -75,7 +75,7 @@ function world(authed: string[]) {
     },
     authenticatedProviders: () => authed,
   });
-  config.setPiModelList(LISTED);
+  await config.setPiModelList(LISTED);
   return { root, data, config };
 }
 
@@ -88,7 +88,7 @@ async function serve(config: Config, root: string) {
 }
 
 test("the Settings list holds only logged-in routes and custom providers, in route order", async () => {
-  const { config, root } = world(["openrouter", "anthropic", "openai"]);
+  const { config, root } = await world(["openrouter", "anthropic", "openai"]);
   const running = await serve(config, root);
   try {
     const url = `${running.url}/api/settings/model-list`;
@@ -145,9 +145,13 @@ test("the Settings list holds only logged-in routes and custom providers, in rou
 });
 
 test("effort-levels carries only the ladder's own models", async () => {
-  const { config, root } = world(["anthropic", "openai-codex", "openrouter"]);
+  const { config, root } = await world([
+    "anthropic",
+    "openai-codex",
+    "openrouter",
+  ]);
   const entry = (model: string) => ({ model, reasoning: "high" });
-  config.setEffortLevels({
+  await config.setEffortLevels({
     levels: {
       1: entry("anthropic/claude-sonnet-5"),
       2: entry("openai-codex/gpt-6-sol"),

@@ -1,7 +1,7 @@
-// Provider usage, text/image-estimated split; bounded reads, no text escapes.
-// No-follow reads require regular single-link files, unchanged dev/ino/size/
-// mtime/ctime; tail usage follows links. Exact BigInt largest-remainder splits
-// prefer earlier keys on ties; JS normalizes integral floats.
+// Shared UI/API occupancy and text/image-estimated split, with bounded reads.
+// Status projects committed live usage without opening stores or history.
+// No-follow reads require stable single-link files; tail usage follows links.
+// BigInt largest-remainder splits prefer earlier ties; floats normalize in JS.
 import { constants } from "node:fs";
 import type { Message, SystemMessage } from "@earendil-works/pi-ai";
 import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
@@ -126,6 +126,37 @@ export function promptTokens(usage: unknown): number | null {
     total += value;
   }
   return total <= MAX_SAFE_INTEGER ? total : null;
+}
+
+/** Provider usage with the model selector used by the UI and agent status. */
+export function assistantContextUsage(
+  message: JsonObject | undefined,
+): JsonObject | null {
+  const usage = message?.usage;
+  return isDict(usage)
+    ? {
+        ...usage,
+        selectors: [`${message?.provider}/${message?.model}`],
+        selectorPartial: false,
+      }
+    : null;
+}
+
+/** Measured prompt occupancy; the window is unknown for a different model. */
+export function contextOccupancy(
+  usage: unknown,
+  model: string,
+  config: Pick<Config, "contextBarWindow">,
+): { tokens: number | null; window: number | null } {
+  const capacity =
+    usageSelector(usage) === model ? config.contextBarWindow(model) : null;
+  return {
+    tokens: promptTokens(usage),
+    window:
+      isInt(capacity) && capacity > 0 && capacity <= MAX_SAFE_INTEGER
+        ? capacity
+        : null,
+  };
 }
 
 export function usageSelector(usage: unknown): string | null {
@@ -470,10 +501,7 @@ export class ContextUsage {
       }
     }
     const usageModel = usageSelector(usage);
-    let capacity: number | null =
-      usageModel === model ? config.contextBarWindow(model) : null;
-    if (!isInt(capacity) || capacity <= 0 || capacity > MAX_SAFE_INTEGER)
-      capacity = null;
+    const { window: capacity } = contextOccupancy(usage, model, config);
     return {
       model,
       model_label: config.modelPolicy(model).label,

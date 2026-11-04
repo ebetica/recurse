@@ -178,9 +178,9 @@ test("a side conversation forks its parent's exact prompt and tools, refuses non
           await (await api(`/api/conversations/${parent}/view`)).text()
         ).includes("main answer"),
     );
-    const parentView = await (
+    const parentView = (await (
       await api(`/api/conversations/${parent}/view`)
-    ).text();
+    ).json()) as Rec;
     const parentRequest = (
       (await (await api(`/api/conversations/${parent}/prompt`)).json()) as Rec
     ).request;
@@ -248,9 +248,12 @@ test("a side conversation forks its parent's exact prompt and tools, refuses non
         .request,
     ).toEqual(prompt.request);
 
-    expect(await (await api(`/api/conversations/${parent}/view`)).text()).toBe(
-      parentView,
-    );
+    expect(
+      await (await api(`/api/conversations/${parent}/view`)).json(),
+    ).toEqual({
+      ...parentView,
+      run_state_clock: [expect.any(String), expect.any(Number)],
+    });
     expect(
       ((await (await api(`/api/conversations/${parent}/prompt`)).json()) as Rec)
         .request,

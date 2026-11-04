@@ -23,7 +23,7 @@ import {
   assertNoUnimportedLegacyState,
   TITLE_ORDER_RE,
   cleanTitleOrder,
-  freshPinnedOrder,
+  freshTakenOverOrder,
   validateExternalKey,
   LEGACY_BACKEND,
 } from "../../src/agents/conversation_store";
@@ -73,7 +73,7 @@ test("external keys and title orders enforce current input policy", () => {
 });
 
 describe("metadata policy", () => {
-  test("external key and title/pin order validation", () => {
+  test("external key and title/take-over order validation", () => {
     expect(validateExternalKey(null)).toBeNull();
     for (const key of [
       "",
@@ -92,7 +92,7 @@ describe("metadata policy", () => {
       "00000000000000000001-abc",
     );
     expect(
-      freshPinnedOrder(
+      freshTakenOverOrder(
         () => 2n,
         () => "a".repeat(32),
       ),
@@ -103,7 +103,7 @@ describe("metadata policy", () => {
     expect(cleanTitleOrder(`${"١".repeat(20)}-abc`, () => "new-order")).toBe(
       `${"١".repeat(20)}-abc`,
     );
-    const stamps = Array.from({ length: 32 }, () => freshPinnedOrder());
+    const stamps = Array.from({ length: 32 }, () => freshTakenOverOrder());
     for (let i = 1; i < stamps.length; i++)
       expect(stamps[i]! > stamps[i - 1]!).toBe(true);
   });
@@ -393,8 +393,8 @@ function currentRow(cid: string) {
     effort: "high",
     title: "first",
     title_order: "00000000000000000001-a",
-    pinned: false,
-    pinned_order: `00000000000000000001-${"a".repeat(32)}`,
+    taken_over: false,
+    taken_over_order: `00000000000000000001-${"a".repeat(32)}`,
   };
 }
 
@@ -475,15 +475,15 @@ test("failed durable admission leaves projection intact and next save retries", 
     expect(
       store.publishTitle(choiceId, choices.title!, choices.title_order!),
     ).toBe(true);
-    await store.save({ ...stale, ...choices.pinned_update });
-    await store.save({ ...stale, ...choices.stale_pinned });
+    await store.save({ ...stale, ...choices.taken_over_update });
+    await store.save({ ...stale, ...choices.stale_taken_over });
     await store.save({ ...stale, ...choices.model_update });
     expect(await store.agentStore.flush(choiceId)).toBe(true);
     expect(await store.loadCanonicalMetadata(choiceId)).toMatchObject({
       title: choices.title,
       title_order: choices.title_order,
-      pinned: choices.pinned_update!.pinned,
-      pinned_order: choices.pinned_update!.pinned_order,
+      taken_over: choices.taken_over_update!.taken_over,
+      taken_over_order: choices.taken_over_update!.taken_over_order,
       model: choices.model_update!.model,
       effort: choices.model_update!.effort,
       level: choices.model_update!.level,
@@ -516,8 +516,8 @@ test("failed durable admission leaves projection intact and next save retries", 
     expect(store.load(choiceId, { withPending: false })).toMatchObject({
       title: choices.title,
       title_order: choices.title_order,
-      pinned: choices.pinned_update!.pinned,
-      pinned_order: choices.pinned_update!.pinned_order,
+      taken_over: choices.taken_over_update!.taken_over,
+      taken_over_order: choices.taken_over_update!.taken_over_order,
       model: choices.model_update!.model,
       effort: choices.model_update!.effort,
       level: choices.model_update!.level,
@@ -748,4 +748,66 @@ test("a record without a backend retains its legacy provenance", async () => {
   await store.save(row);
   expect(store.load("legacy")!.backend).toBe(LEGACY_BACKEND);
   expect(store.load("legacy")!.session_id).toBe("claude-session");
+});
+
+// Feature: #2934 stored pinned rows load and are rewritten once as taken_over.
+test("rows stored before the taken_over rename are read and rewritten once", async () => {
+  const root = await temp();
+  const store = fixtureStore(root);
+  try {
+    expect(await store.refreshProjection()).toEqual({});
+    expect(await store.migrateTakenOverNames()).toBe(0);
+    const legacy: Record<string, unknown> = { ...currentRow("held") };
+    delete legacy.taken_over;
+    delete legacy.taken_over_order;
+    legacy.pinned = true;
+    legacy.pinned_order = `00000000000000000003-${"c".repeat(32)}`;
+    store.agentStore.enqueueMetadata("held", legacy);
+    store.agentStore.enqueueMetadata("other", { ...currentRow("other") });
+    expect(await store.agentStore.flush("held")).toBe(true);
+    expect(await store.agentStore.flush("other")).toBe(true);
+    const read = store.agentStore.loadPersistedAgent.bind(store.agentStore);
+    store.agentStore.loadPersistedAgent = async (cid) => {
+      if (cid === "other") throw new Error("unreadable");
+      return read(cid);
+    };
+    expect(await store.refreshProjection()).not.toBeNull();
+    const skipped = await store.migrateTakenOverNames().catch(String);
+    expect(skipped).toContain("incomplete");
+    expect(
+      await readFile(join(root, "taken-over-rename.json")).catch(() => null),
+    ).toBeNull();
+    store.agentStore.loadPersistedAgent = read;
+    store.agentStore.enqueueMetadata("held", legacy);
+    expect(await store.agentStore.flush("held")).toBe(true);
+    expect(await store.refreshProjection()).not.toBeNull();
+    expect(store.load("held", { withPending: false })).toMatchObject({
+      taken_over: true,
+      taken_over_order: legacy.pinned_order,
+    });
+    expect(store.load("held", { withPending: false })).not.toHaveProperty(
+      "pinned",
+    );
+    expect(await store.migrateTakenOverNames()).toBe(1);
+    const stored = await store.loadCanonicalMetadata("held");
+    expect(stored).toMatchObject({
+      taken_over: true,
+      taken_over_order: legacy.pinned_order,
+    });
+    expect(stored).not.toHaveProperty("pinned");
+    expect(
+      JSON.parse(await readFile(join(root, "taken-over-rename.json"), "utf8")),
+    ).toEqual({
+      version: 1,
+      rewritten: 1,
+    });
+    store.agentStore.enqueueMetadata("held", legacy);
+    expect(await store.agentStore.flush("held")).toBe(true);
+    expect(await store.refreshProjection()).not.toBeNull();
+    expect(await store.migrateTakenOverNames()).toBe(0);
+    expect(await store.loadCanonicalMetadata("held")).toHaveProperty("pinned");
+    expect(store.load("held", { withPending: false })?.taken_over).toBe(true);
+  } finally {
+    await store.agentStore.dispose();
+  }
 });

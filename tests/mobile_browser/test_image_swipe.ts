@@ -73,11 +73,17 @@ export const tests: BrowserTest[] = [
     await page.keyboard.press("Escape");
     await viewer.waitFor({ state: "detached" });
     expect(page.url()).toBe(url);
+    await page.setViewportSize({ width: 320, height: 844 });
+    await pane.locator(".files-thumb").first().click();
+    await viewer
+      .getByRole("button", { name: "Close image", exact: true })
+      .click();
+    await viewer.waitFor({ state: "detached" });
     expect(await pane.locator(".files-card").first().isVisible()).toBeTrue();
     expect(errors).toEqual([]);
     await context.close();
   },
-  // Regression: #2862 keeps phone comment drafts and lists over a fixed canvas; preserves #2858 gestures and #2859 standalone uploads.
+  // Regression: #3103 keeps submitted comments in view; preserves #2966 downloads, #2862 drafts, #2858 gestures, #2859 standalone uploads and #2978 compact labels.
   async function test_published_images_touch_gallery(browser, base) {
     const fixture = (await postFixture(
       base,
@@ -90,6 +96,12 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
+    await page.addInitScript(() => {
+      Object.defineProperty((globalThis as any).navigator, "share", {
+        configurable: true,
+        value: undefined,
+      });
+    });
     await page.goto(`${base}#agent=${fixture.demo}`, {
       waitUntil: "domcontentloaded",
     });
@@ -133,8 +145,58 @@ export const tests: BrowserTest[] = [
     expect(await position.textContent()).toBe(`${start + 1} of 6`);
     await detail.locator("img[src]").waitFor();
     expect(await detail.locator("img").getAttribute("src")).toBe(
-      originalSource,
+      originalSource!.replace(/\/thumbnail$/, "/preview"),
     );
+    const download = viewer.getByRole("button", {
+      name: "Download",
+      exact: true,
+    });
+    expect(await download.isVisible()).toBeTrue();
+    const downloadBox = (await download.boundingBox())!;
+    expect(downloadBox.width).toBeGreaterThanOrEqual(44);
+    expect(downloadBox.height).toBeGreaterThanOrEqual(44);
+    const originalUrl = originalSource!.replace(/\/thumbnail$/, "");
+    const original = await (
+      await context.request.get(new URL(originalUrl, base).href)
+    ).body();
+    const requested = page.waitForRequest(new URL(originalUrl, base).href);
+    const downloaded = page.waitForEvent("download");
+    await download.tap();
+    const saved = await downloaded;
+    expect(saved.suggestedFilename()).toBe(opened!);
+    expect((await requested).url()).toBe(new URL(originalUrl, base).href);
+    expect(await Bun.file((await saved.path())!).bytes()).toEqual(
+      new Uint8Array(original),
+    );
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      Object.defineProperty(browser.navigator, "canShare", {
+        configurable: true,
+        value: ({ files }: any) =>
+          files.length === 1 && files[0] instanceof browser.File,
+      });
+      Object.defineProperty(browser.navigator, "share", {
+        configurable: true,
+        value: async ({ files }: any) => {
+          browser.sharedImage = {
+            name: files[0].name,
+            type: files[0].type,
+            bytes: Array.from(new Uint8Array(await files[0].arrayBuffer())),
+          };
+        },
+      });
+    });
+    await download.tap();
+    await page.waitForFunction("window.sharedImage");
+    expect(
+      await page.evaluate<{ name: string; type: string; bytes: number[] }>(
+        "window.sharedImage",
+      ),
+    ).toEqual({
+      name: opened!,
+      type: "image/png",
+      bytes: Array.from(original),
+    });
     const shown = () => detail.getAttribute("aria-label");
     const touch = await context.newCDPSession(page);
     const dragBox = async (from: { x: number; y: number }, hold = false) => {
@@ -189,6 +251,20 @@ export const tests: BrowserTest[] = [
     expect(await shown()).toBe(order[start + 1]);
     await viewer.getByRole("button", { name: "Previous image" }).tap();
     expect(await shown()).toBe(order[start]);
+    const hint = viewer.getByText("Hold to comment", { exact: true });
+    await hint.waitFor();
+    expect(
+      await viewer
+        .getByRole("button", { name: "Submit comments", exact: true })
+        .innerText(),
+    ).toBe("Submit");
+    expect(
+      await hint.evaluate((element: any) => {
+        const range = element.ownerDocument.createRange();
+        range.selectNodeContents(element);
+        return range.getClientRects().length;
+      }),
+    ).toBe(1);
     const frame = viewer.locator(".files-image-frame");
     const box = (await frame.boundingBox())!;
     let center = { x: box.x + box.width / 2, y: box.y + box.height / 2 };
@@ -257,9 +333,14 @@ export const tests: BrowserTest[] = [
     await page.touchscreen.tap(center.x, center.y);
     await page.touchscreen.tap(center.x, center.y);
     expect(await scale()).toBe(2);
+    const beforeOneFinger = await transform();
+    await dragBox(center);
+    expect(await transform()).not.toBe(beforeOneFinger);
+    expect(await frame.locator("mark.report-cbox").count()).toBe(0);
+    expect(await shown()).toBe(order[start]);
     const heldTransform = await transform();
     const zoomedBox = (await frame.boundingBox())!;
-    await dragBox(center);
+    await dragBox(center, true);
     await page.locator(".report-comment-popover textarea").waitFor();
     expect(await transform()).toBe(heldTransform);
     const mark = (await frame.locator("mark.report-cbox").boundingBox())!;
@@ -357,6 +438,13 @@ export const tests: BrowserTest[] = [
     const input = popover.locator("textarea");
     await dragBox(sendFrom, true);
     expect(await geometry()).toEqual(fittedGeometry);
+    const emptyInputHeight = (await input.boundingBox())!.height;
+    await input.fill("Keep the courtyard.\nLeave the planting unchanged.");
+    expect((await input.boundingBox())!.height).toBeGreaterThan(
+      emptyInputHeight,
+    );
+    await input.fill("");
+    expect((await input.boundingBox())!.height).toBe(emptyInputHeight);
     await input.fill(
       Array(20).fill("Keep this region, but widen the entrance.").join("\n"),
     );
@@ -467,7 +555,7 @@ export const tests: BrowserTest[] = [
     await page.touchscreen.tap(sendFrom.x, sendFrom.y);
     expect(await scale()).toBe(2);
     const zoomedGeometry = await geometry();
-    await dragBox(sendFrom);
+    await dragBox(sendFrom, true);
     await input.fill("Zoomed mobile image note");
     expect(await geometry()).toEqual(zoomedGeometry);
     await popover.getByRole("button", { name: "Comment", exact: true }).tap();
@@ -507,16 +595,16 @@ export const tests: BrowserTest[] = [
     await viewer
       .getByRole("button", { name: "Close image", exact: true })
       .tap();
-    const crop = sent.locator('img[alt$="-box-1.png"]');
+    const crop = sent.locator('img[alt$="-box-1.jpg"]');
     await crop.tap();
     expect(await shown()).toBe(await crop.getAttribute("alt"));
-    expect(await position.textContent()).toBe("1 of 1");
+    expect(await position.count()).toBe(0);
     expect(
-      await viewer.getByRole("button", { name: "Previous image" }).isDisabled(),
-    ).toBeTrue();
+      await viewer.getByRole("button", { name: "Previous image" }).count(),
+    ).toBe(0);
     expect(
-      await viewer.getByRole("button", { name: "Next image" }).isDisabled(),
-    ).toBeTrue();
+      await viewer.getByRole("button", { name: "Next image" }).count(),
+    ).toBe(0);
     await swipe(100);
     await swipe(-100);
     await page.keyboard.press("ArrowLeft");

@@ -37,7 +37,7 @@ type Cache = {
   rows: CanonicalReviewSourceEntry[];
   records: Evidence[];
   generation: string;
-  evidenceBlocks: string[];
+  evidence: string;
   bytes: number;
 };
 
@@ -199,13 +199,8 @@ function evidenceHeader(generation: string): string {
   ].join("\n");
 }
 
-function render(cache: Cache): string {
-  return cache.evidenceBlocks.join("");
-}
-
 export type DurableReviewJournal = Readonly<{
   journalEvidence: string;
-  evidenceBlocks: readonly string[];
   appendedRecords: number;
   reset: boolean;
   generation: string;
@@ -250,11 +245,10 @@ export function updateReviewerJournal(input: {
         input.session.getEntry(leafId) as never,
       );
       if (cursor.identityDigest === prior.rows.at(-1)?.identityDigest) {
-        const evidence = render(prior);
+        const evidence = prior.evidence;
         const evidenceDigest = digest(evidence);
         return Object.freeze({
           journalEvidence: evidence,
-          evidenceBlocks: Object.freeze([...prior.evidenceBlocks]),
           appendedRecords: 0,
           reset: false,
           generation: prior.generation,
@@ -310,35 +304,27 @@ export function updateReviewerJournal(input: {
       (record, index) =>
         renderRecord(record) === renderRecord(built.records[index]!),
     );
-  const evidenceBlocks = exactAppend
-    ? [
-        ...reusable!.evidenceBlocks,
-        ...(appendedRecords > 0
-          ? [
-              `\n${built.records.slice(priorRecords).map(renderRecord).join("\n")}`,
-            ]
-          : []),
-      ]
-    : [
-        [evidenceHeader(generation), ...built.records.map(renderRecord)].join(
-          "\n",
-        ),
-      ];
+  const evidence = exactAppend
+    ? reusable!.evidence +
+      (appendedRecords > 0
+        ? `\n${built.records.slice(priorRecords).map(renderRecord).join("\n")}`
+        : "")
+    : [evidenceHeader(generation), ...built.records.map(renderRecord)].join(
+        "\n",
+      );
   const cache: Cache = {
     sessionId,
     leafId,
     rows,
     records: built.records,
     generation,
-    evidenceBlocks,
+    evidence,
     bytes: built.bytes,
   };
   caches.set(input.conversationId, cache);
-  const evidence = render(cache);
   const tailDigest = digest(evidence);
   return Object.freeze({
     journalEvidence: evidence,
-    evidenceBlocks: Object.freeze([...evidenceBlocks]),
     appendedRecords,
     reset,
     generation,

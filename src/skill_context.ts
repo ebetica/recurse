@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import { resolveRoots } from "./local_roots";
 
-export const SKILL_CONTEXT_VERSION = 3;
+export const SKILL_CONTEXT_VERSION = 4;
 export const WORKDIR_CONTEXT_TTL_SECONDS = 5;
 
 type MarkerValue = null | boolean | number | string | bigint | MarkerValue[];

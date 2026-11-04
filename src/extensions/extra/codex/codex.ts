@@ -1,9 +1,9 @@
-/** Codex request inputs: replay cleanup after stamping and detailed payload
- * summaries after any caller transform. Other providers retain Pi's defaults.
- * The Models boundary also covers compaction.
- */
+// Codex request inputs: replay cleanup after stamping, detailed summaries and
+// saved compaction items after any caller transform. Other providers keep Pi's
+// defaults and never receive compaction items. Models also covers compaction.
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { filterCodexReplay } from "./codex-replay.ts";
+import { sendCheckpointItems, withoutCheckpointItems } from "./compaction.ts";
 import { detailedReasoningSummary } from "./reasoning-summary.ts";
 
 export interface CodexOptions {
@@ -24,10 +24,28 @@ export function codexSummaryOptions(
     ...options,
     onPayload: async (payload: unknown, actual: { provider: string }) => {
       const changed = await prior?.(payload, actual);
-      return detailedReasoningSummary(changed ?? payload, actual);
+      return sendCheckpointItems(
+        detailedReasoningSummary(changed ?? payload, actual),
+      );
     },
   };
 }
+
+function withoutForeignItems(model: unknown, context: unknown): unknown {
+  const messages = (context as { messages?: Message[] } | undefined)?.messages;
+  if ((model as { provider?: string }).provider === "openai-codex" || !messages)
+    return context;
+  const kept = withoutCheckpointItems(messages);
+  return kept === messages
+    ? context
+    : { ...(context as object), messages: kept };
+}
+
+/** Codex replay cleanup, a model-bound request transform. */
+export const codexReplay = (messages: Message[], provider: string): Message[] =>
+  (provider === "openai-codex"
+    ? filterCodexReplay(messages)
+    : messages) as Message[];
 
 export function createCodex(options: CodexOptions) {
   const methods = new Set([
@@ -42,10 +60,6 @@ export function createCodex(options: CodexOptions) {
     "classify",
   ]);
   return {
-    replay: (messages: Message[], provider: string): Message[] =>
-      (provider === "openai-codex"
-        ? filterCodexReplay(messages)
-        : messages) as Message[],
     models: new Proxy(options.models, {
       get(target, key) {
         const value: unknown = Reflect.get(target, key, target);
@@ -59,7 +73,7 @@ export function createCodex(options: CodexOptions) {
           value.call(
             target,
             model,
-            context,
+            withoutForeignItems(model, context),
             codexSummaryOptions(model, options),
           );
       },

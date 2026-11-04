@@ -10,7 +10,7 @@ export const tree = (id = "main") => [
     queued: 0,
     preview: "",
     muted: false,
-    pinned: false,
+    taken_over: false,
   },
 ];
 export const idleConv = (rows: any[] = []) => ({

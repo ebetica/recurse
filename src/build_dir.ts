@@ -2,11 +2,11 @@
 // dependencies
 // live in node_modules with Bun patches. Source-defined paths prevent separate
 // checkouts from sharing mutable executables.
-import { realpathSync } from "node:fs";
+import { realpath } from "node:fs/promises";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const sourceFile = realpathSync(fileURLToPath(import.meta.url));
+const sourceFile = await realpath(fileURLToPath(import.meta.url));
 export const CHECKOUT_ROOT = dirname(dirname(sourceFile));
 
 function pythonPath(path: string): string {

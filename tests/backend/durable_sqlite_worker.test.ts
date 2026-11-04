@@ -1,5 +1,6 @@
 import { afterAll, describe, expect, it, test } from "bun:test";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -12,8 +13,8 @@ import { openFauxHarness } from "./fixtures/durable_sqlite/harness.ts";
 
 const root = mkdtempSync(join(tmpdir(), "durable-sqlite-"));
 const worker = new SqliteWorker();
-afterAll(() => {
-  worker.close();
+afterAll(async () => {
+  await worker.close();
   rmSync(root, { recursive: true, force: true });
 });
 let databases = 0;
@@ -83,6 +84,10 @@ test("open costs measure initialization and file sizes before opening an existin
       stat_ms: expect.any(Number),
       migration_ms: expect.any(Number),
       metadata_ms: expect.any(Number),
+      queue_ms: expect.any(Number),
+      dispatch_ms: expect.any(Number),
+      execution_ms: expect.any(Number),
+      reply_ms: expect.any(Number),
     });
   } finally {
     await storage?.close(context);
@@ -90,7 +95,118 @@ test("open costs measure initialization and file sizes before opening an existin
   }
 });
 
-test("a dead Worker rejects pending requests and the next open starts a new one", async () => {
+test("a busy database open does not block another database before the lock is released", async () => {
+  const path = freshPath();
+  const foreign = new Database(path, { create: true });
+  foreign.exec(
+    "PRAGMA journal_mode=WAL; CREATE TABLE t (x INTEGER); BEGIN IMMEDIATE",
+  );
+  const posted = Promise.withResolvers<void>();
+  const owner = new SqliteWorker((url) => {
+    const thread = new Worker(url);
+    const post = thread.postMessage.bind(thread);
+    thread.postMessage = (message, options) => {
+      if (Array.isArray(options)) post(message, options);
+      else post(message, options);
+      if (message.op === "open" && message.sql === path) posted.resolve();
+    };
+    return thread;
+  });
+  let database: Awaited<ReturnType<SqliteWorker["openDatabase"]>> | undefined;
+  let settled = false;
+  const pending = owner
+    .openDatabase(path)
+    .then(async (opened) => {
+      database = opened;
+      await opened.transaction((tx) => tx.run("INSERT INTO t VALUES (?)", 1));
+    })
+    .then(
+      () => {
+        settled = true;
+        return "committed";
+      },
+      (error) => {
+        settled = true;
+        return String(error);
+      },
+    );
+  let other: Awaited<ReturnType<SqliteWorker["openDatabase"]>> | undefined;
+  try {
+    await posted.promise;
+    other = await owner.openDatabase(freshPath());
+    await other.exec("CREATE TABLE t (x INTEGER)");
+    await other.transaction((tx) => tx.run("INSERT INTO t VALUES (?)", 2));
+    expect(await other.all("SELECT x FROM t")).toEqual([{ x: 2 }]);
+    expect(settled).toBe(false);
+  } finally {
+    foreign.exec("ROLLBACK");
+    foreign.close();
+    await pending;
+    await other?.close();
+    await database?.close();
+    await owner.close();
+  }
+  expect(await pending).toBe("committed");
+});
+
+test("database workers start lazily and stop only after their last connection closes", async () => {
+  const started: Worker[] = [];
+  const exited: Promise<void>[] = [];
+  let closedCount = 0;
+  const owner = new SqliteWorker((url) => {
+    expect(closedCount).toBe(started.length);
+    const thread = new Worker(url);
+    const closed = Promise.withResolvers<void>();
+    thread.addEventListener(
+      "close",
+      () => {
+        closedCount++;
+        closed.resolve();
+      },
+      { once: true },
+    );
+    started.push(thread);
+    exited.push(closed.promise);
+    return thread;
+  });
+  try {
+    expect(started).toHaveLength(0);
+    const path = freshPath();
+    const database = await owner.openDatabase(path);
+    await database.exec("CREATE TABLE t (x INTEGER)");
+    await database.run("INSERT INTO t VALUES (?)", 1);
+    const reader = await owner.openDatabase(path, undefined, undefined, true);
+    expect(started).toHaveLength(1);
+    expect(await reader.all("SELECT x FROM t")).toEqual([{ x: 1 }]);
+    expect(
+      await reader.run("INSERT INTO t VALUES (?)", 2).then(String, String),
+    ).toContain("readonly");
+    await reader.close();
+    await database.run("INSERT INTO t VALUES (?)", 3);
+    expect(await database.all("SELECT x FROM t")).toEqual([{ x: 1 }, { x: 3 }]);
+    expect(started).toHaveLength(1);
+    await database.close();
+    const reopened = await owner.openDatabase(path);
+    expect(started).toHaveLength(2);
+    expect(await reopened.all("SELECT x FROM t")).toEqual([{ x: 1 }, { x: 3 }]);
+    await reopened.close();
+    await exited[1];
+    await expect(
+      owner.openDatabase(freshPath(), undefined, undefined, true),
+    ).rejects.toThrow();
+    expect(started).toHaveLength(3);
+    await exited[2];
+    const active = await owner.openDatabase(path);
+    const stopping = owner.close();
+    await active.close().catch(() => undefined);
+    expect(closedCount).toBe(4);
+    await stopping;
+  } finally {
+    await owner.close();
+  }
+});
+
+test("a dead Worker poisons only its database and the next open starts a new one", async () => {
   const started: Worker[] = [];
   const posted = Promise.withResolvers<void>();
   const owner = new SqliteWorker((url) => {
@@ -109,6 +225,9 @@ test("a dead Worker rejects pending requests and the next open starts a new one"
     const database = await owner.openDatabase(path);
     await database.exec("CREATE TABLE t (x INTEGER)");
     await database.run("INSERT INTO t VALUES (?)", 1);
+    const sibling = await owner.openDatabase(path);
+    const other = await owner.openDatabase(freshPath());
+    expect(started).toHaveLength(2);
     const pending = database.get(
       "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 5000000) SELECT count(*) AS n FROM c",
     );
@@ -119,12 +238,19 @@ test("a dead Worker rejects pending requests and the next open starts a new one"
     expect(await database.get("SELECT 1").then(String, String)).toBe(
       "Error: SQLite worker died: exited",
     );
+    expect(await sibling.get("SELECT 1").then(String, String)).toBe(
+      "Error: SQLite worker died: exited",
+    );
+    expect(await other.get("SELECT 1 AS one")).toEqual({ one: 1 });
     const reopened = await owner.openDatabase(path);
-    expect(started).toHaveLength(2);
+    expect(started).toHaveLength(3);
     expect(await reopened.all("SELECT x FROM t")).toEqual([{ x: 1 }]);
+    await sibling.close().catch(() => undefined);
+    await database.close().catch(() => undefined);
+    await other.close();
     await reopened.close();
   } finally {
-    owner.close();
+    await owner.close();
   }
 });
 
@@ -150,12 +276,119 @@ test("a parameter the Worker cannot receive rejects only that request", async ()
   const record = (reason: unknown) => unhandled.push(reason);
   process.on("unhandledRejection", record);
   try {
-    owner.close();
+    await owner.close();
     await exited.promise;
   } finally {
     process.off("unhandledRejection", record);
   }
   expect(unhandled.map(String)).toEqual([]);
+});
+
+// Feature: #3055 one exclusive owner serves durable history and search readers.
+test("stores share exclusive WAL with history and search readers", async () => {
+  const owner = new SqliteWorker();
+  const path = freshPath();
+  const database = await owner.openDatabase(path);
+  const { harness, conversation } = await openFauxHarness(database);
+  try {
+    expect(await database.get("PRAGMA journal_mode")).toEqual({
+      journal_mode: "wal",
+    });
+    expect(await database.get("PRAGMA locking_mode")).toEqual({
+      locking_mode: "exclusive",
+    });
+    const run = await conversation.submit(
+      { type: "input", content: "network question", requestId: "network" },
+      context,
+    );
+    expect((await run.wait(context)).status).toBe("done");
+    const reader = await owner.openDatabase(path, undefined, undefined, true);
+    try {
+      expect(
+        (await reader.all("SELECT id FROM entries")).length,
+      ).toBeGreaterThan(0);
+      expect(
+        await reader
+          .get("DELETE FROM entries RETURNING id")
+          .then(String, String),
+      ).toContain("readonly");
+      const storage = await openWorkerSqliteStorage(
+        owner,
+        path,
+        undefined,
+        undefined,
+        true,
+      );
+      expect(
+        (
+          await storage.scanEntries(
+            { conversationId: conversation.id },
+            1,
+            undefined,
+            context,
+          )
+        ).items.length,
+      ).toBeGreaterThan(0);
+      await storage.close(context);
+      const projection = await owner.syncSearch({ cid: "network", path });
+      expect(readFileSync(projection!.file!.path, "utf8")).toContain(
+        "network question",
+      );
+      expect(readFileSync(projection!.file!.path, "utf8")).toContain("done");
+      await database.exec("CREATE TABLE serial (n INTEGER)");
+      const started = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      const write = database.transaction(async (tx) => {
+        await tx.run("INSERT INTO serial VALUES (1)");
+        started.resolve();
+        await release.promise;
+      });
+      await started.promise;
+      const read = reader.all("SELECT n FROM serial");
+      release.resolve();
+      await write;
+      expect(await read).toEqual([{ n: 1 }]);
+      expect(
+        statSync(`${path}-shm`, { throwIfNoEntry: false }),
+      ).toBeUndefined();
+    } finally {
+      await reader.close();
+    }
+  } finally {
+    await harness.close(context);
+  }
+  const live = await owner.openDatabase(
+    path,
+    undefined,
+    undefined,
+    true,
+    false,
+  );
+  expect(await live.get("PRAGMA locking_mode")).toEqual({
+    locking_mode: "exclusive",
+  });
+  expect(
+    await live
+      .exec("PRAGMA query_only=OFF; DELETE FROM entries")
+      .then(String, String),
+  ).toContain("readonly");
+  await live.close();
+  const cold = await owner.openDatabase(path, undefined, undefined, true);
+  try {
+    expect((await cold.all("SELECT id FROM entries")).length).toBeGreaterThan(
+      0,
+    );
+    const writer = await owner.openDatabase(path);
+    await writer.run("INSERT INTO serial VALUES (2)");
+    expect(await cold.all("SELECT n FROM serial")).toEqual([
+      { n: 1 },
+      { n: 2 },
+    ]);
+    await writer.close();
+  } finally {
+    await cold.close();
+    await owner.close();
+  }
 });
 
 async function killInsideTransaction(

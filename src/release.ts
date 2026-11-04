@@ -1,6 +1,7 @@
 // The one source of Recurse's release identity: package.json's version plus,
 // when this file runs from a Git checkout, the short commit. `recurse
 // --version`, /api/version's `release` and Settings all read it from here.
+// Installer fixtures run this alone; keep it free of server dependencies.
 import { join } from "node:path";
 import { stat } from "node:fs/promises";
 

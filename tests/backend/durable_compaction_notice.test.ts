@@ -1,3 +1,4 @@
+import { commitWrites } from "@earendil-works/pi-durable/testing";
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -59,13 +60,15 @@ test("queued recorded compaction summary stays visible through input admission u
   const answer = held(fauxAssistantMessage("Step done"));
   faux.setResponses([answer.step, fauxAssistantMessage("Input answered")]);
   try {
-    await storage.commit(
+    await commitWrites(
+      storage,
       [
         { type: "conversation", value: { id: 1 } } as StorageWrite,
         ...rows.slice(0, 2).map((value) => ({ type: "entry" as const, value })),
       ],
       context,
     );
+    await storage.close(context);
     await host.send("c1", "Hold", "hold");
     await answer.started;
     const { harness, conversation } = await (
@@ -148,7 +151,7 @@ test("queued recorded compaction summary stays visible through input admission u
     answer.release();
     await host.close();
     await storage.close(context);
-    worker.close();
+    await worker.close();
     await rm(root, { recursive: true, force: true });
   }
 }, 30_000);

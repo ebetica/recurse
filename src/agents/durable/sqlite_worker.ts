@@ -1,35 +1,54 @@
-// Worker SQL/fsync; per-database queues hold transactions through commit.
-// SQLite waits for busy writes; any storage failure fails the session.
-// Worker death rejects pending work/poisons sessions; new opens replace it.
-// WAL/NORMAL survives process crashes, but power loss may drop the last commit.
+// One EXCLUSIVE native connection/queue per database serves logical readers.
+// Native read-only readers/backups require a closed owner; close/replacement
+// await worker exit. WAL/NORMAL survives process crashes, not power loss.
+// Open costs separate queue, dispatch/startup, execution and reply delivery.
 import {
   SqliteStorage,
   type SqliteDatabase,
   type SqliteExecutor,
   type SqliteValue,
 } from "@earendil-works/pi-durable/storage/sqlite";
+import { resolve } from "node:path";
+import { stat } from "node:fs/promises";
+import { slowSpan } from "../../observability/slow_span";
+import type { SearchTarget, SyncStats } from "../../search";
 import type {
   NativeOpenCosts,
   ThreadReply,
   ThreadRequest,
-} from "./sqlite_worker_thread.ts";
+} from "./sqlite_thread.worker.ts";
 
 export type SqliteOpenCosts = Partial<NativeOpenCosts> & {
   migration_ms: number;
   metadata_ms: number;
+  queue_ms: number;
+  dispatch_ms: number;
+  execution_ms: number;
+  reply_ms: number;
 };
 
-const THREAD_URL = new URL("./sqlite_worker_thread.ts", import.meta.url).href;
+// Spec: @tla workers
+const THREAD_URL = new URL("./sqlite_thread.worker.ts", import.meta.url).href;
 
 interface Thread {
+  path: string;
+  connections: number;
   worker: Worker;
-  waiting: Map<number, PromiseWithResolvers<unknown>>;
+  waiting: Map<
+    number,
+    PromiseWithResolvers<unknown> & {
+      costs?: SqliteOpenCosts;
+      dispatched: number;
+    }
+  >;
   dead: Error | null;
+  exited: Promise<void>;
+  tail: Promise<unknown>;
 }
 
-/** One Worker thread holding many SQLite connections. */
+/** One lazy Worker per database, stopped when its last connection closes. */
 export class SqliteWorker {
-  private thread: Thread | null = null;
+  private threads = new Map<string, Thread>();
   private nextId = 0;
   private nextConnection = 0;
   private closed = false;
@@ -39,46 +58,82 @@ export class SqliteWorker {
       new Worker(url),
   ) {}
 
-  private start(): Thread {
+  private start(path: string): Thread {
+    const exited = Promise.withResolvers<void>();
     const thread: Thread = {
-      worker: this.createWorker(THREAD_URL),
+      path,
+      connections: 0,
+      worker: slowSpan("sqlite_worker_create", undefined, () =>
+        this.createWorker(THREAD_URL),
+      ),
       waiting: new Map(),
       dead: null,
+      exited: exited.promise,
+      tail: Promise.resolve(),
     };
     thread.worker.onmessage = (event: MessageEvent<ThreadReply>) => {
       const reply = event.data;
       const waiter = thread.waiting.get(reply.id);
       if (!waiter) return;
       thread.waiting.delete(reply.id);
+      if (waiter.costs && reply.timing) {
+        const { received, finished } = reply.timing;
+        waiter.costs.dispatch_ms += Math.max(0, received - waiter.dispatched);
+        waiter.costs.execution_ms += Math.max(0, finished - received);
+        waiter.costs.reply_ms += Math.max(
+          0,
+          performance.timeOrigin + performance.now() - finished,
+        );
+      }
       if (reply.ok) waiter.resolve(reply.value);
       else
         waiter.reject(
           Object.assign(new Error(reply.error.message), reply.error),
         );
     };
-    const died = (cause: string) => {
-      if (thread.dead) return;
-      thread.dead = new Error(`SQLite worker died: ${cause}`);
-      if (this.thread === thread) this.thread = null;
-      for (const waiter of thread.waiting.values()) waiter.reject(thread.dead);
-      thread.waiting.clear();
-      thread.worker.terminate();
-    };
-    thread.worker.onerror = (event) => died(event.message || "error");
-    thread.worker.addEventListener("close", () => died("exited"));
+    thread.worker.onerror = (event) =>
+      this.stop(thread, event.message || "error");
+    thread.worker.addEventListener("close", () => {
+      this.stop(thread, "exited");
+      if (this.threads.get(thread.path) === thread)
+        this.threads.delete(thread.path);
+      exited.resolve();
+    });
+    this.threads.set(path, thread);
     return thread;
+  }
+
+  private stop(thread: Thread, cause: string): void {
+    if (thread.dead) return;
+    thread.dead = new Error(`SQLite worker died: ${cause}`);
+    for (const waiter of thread.waiting.values()) waiter.reject(thread.dead);
+    thread.waiting.clear();
+    thread.worker.terminate();
+  }
+
+  async release(thread: Thread, closeFailed = false): Promise<void> {
+    const last = --thread.connections === 0;
+    if (closeFailed || last)
+      this.stop(thread, closeFailed ? "connection close failed" : "closed");
+    if (thread.dead) await thread.exited;
   }
 
   // Send one request to `thread`; rejects if that thread is or becomes dead.
   request(
     thread: Thread,
     request: Omit<ThreadRequest, "id">,
+    costs?: SqliteOpenCosts,
   ): Promise<unknown> {
     if (thread.dead) return Promise.reject(thread.dead);
     const id = this.nextId++;
-    const waiter = Promise.withResolvers<unknown>();
+    // Spec: @tla dispatch {request, scope:thread.worker, path:thread.path, id}
+    const waiter = {
+      ...Promise.withResolvers<unknown>(),
+      costs,
+      dispatched: costs ? performance.timeOrigin + performance.now() : 0,
+    };
     try {
-      thread.worker.postMessage({ ...request, id });
+      thread.worker.postMessage({ ...request, id, measureRequest: !!costs });
     } catch (error) {
       // Invariant: A parameter that cannot be cloned never reaches the Worker.
       return Promise.reject(error);
@@ -92,25 +147,106 @@ export class SqliteWorker {
     path: string,
     refused?: (code: string) => void,
     costs?: SqliteOpenCosts,
+    readOnly = false,
+    nativeReadOnly = readOnly,
   ): Promise<WorkerSqliteDatabase> {
     if (this.closed) throw new Error("SQLite worker closed");
-    this.thread ??= this.start();
-    const thread = this.thread;
+    const key = resolve(path);
+    let previous = this.threads.get(key);
+    const waiting = previous?.dead && costs ? performance.now() : undefined;
+    while (previous?.dead) {
+      await previous.exited;
+      if (this.closed) throw new Error("SQLite worker closed");
+      previous = this.threads.get(key);
+    }
+    if (waiting !== undefined && costs)
+      costs.queue_ms += performance.now() - waiting;
+    const thread = previous ?? this.start(key);
+    thread.connections++;
     const connection = this.nextConnection++;
-    const native = await this.request(thread, {
-      connection,
-      op: "open",
-      sql: path,
-      measureOpen: costs !== undefined,
-    });
-    if (costs) Object.assign(costs, native);
-    return new WorkerSqliteDatabase(this, thread, connection, refused, costs);
+    // Spec: @tla admit tlaConn(thread,connection)
+    try {
+      const open = () =>
+        this.request(
+          thread,
+          {
+            connection,
+            op: "open",
+            sql: path,
+            measureOpen: costs !== undefined,
+            readOnly,
+            nativeReadOnly,
+          },
+          costs,
+        );
+      const native = await this.enqueue(thread, open, costs);
+      // Spec: @tla open tlaConn(thread,connection)
+      if (costs) Object.assign(costs, native);
+      return new WorkerSqliteDatabase(
+        this,
+        thread,
+        connection,
+        refused,
+        costs,
+        readOnly,
+      );
+    } catch (error) {
+      await this.release(thread);
+      // Spec: @tla close tlaConn(thread,connection)
+      throw error;
+    }
   }
 
-  /** Stop the Worker; pending and later requests reject. */
-  close(): void {
+  enqueue<T>(
+    thread: Thread,
+    operation: () => Promise<T>,
+    costs?: SqliteOpenCosts,
+  ): Promise<T> {
+    const queued = costs ? performance.now() : 0;
+    const result = thread.tail.then(() => {
+      if (costs) costs.queue_ms += performance.now() - queued;
+      return operation();
+    });
+    thread.tail = result.catch(() => undefined);
+    return result;
+  }
+
+  /** Closing actors still own their native handle until their exit event. */
+  hasDatabase(path: string): boolean {
+    return this.threads.has(resolve(path));
+  }
+
+  /** Project a store through its sole connection, including while live. */
+  async syncSearch(target: SearchTarget): Promise<SyncStats> {
+    const database = await this.openDatabase(
+      target.path,
+      undefined,
+      undefined,
+      true,
+      target.archived ?? false,
+    ).catch(async (error) => {
+      if (error.code !== "SQLITE_CANTOPEN") throw error;
+      const exists = await stat(target.path).catch((failure) => {
+        if (failure.code === "ENOENT") return null;
+        throw failure;
+      });
+      if (exists) throw error;
+      return null;
+    });
+    if (!database) return { entries: 0, bytes: 0, ms: 0 };
+    try {
+      return await database.syncSearch(target);
+    } finally {
+      await database.close();
+    }
+  }
+
+  /** Refuse requests, stop all Workers, and wait for their native handles. */
+  async close(): Promise<void> {
     this.closed = true;
-    this.thread?.worker.terminate();
+    const threads = [...this.threads.values()];
+    for (const thread of threads) this.stop(thread, "closed");
+    await Promise.all(threads.map((thread) => thread.exited));
   }
 }
 
@@ -128,6 +264,9 @@ class Executor implements SqliteExecutor {
   async run(sql: string, ...params: SqliteValue[]): Promise<void> {
     await this.send("run", sql, params);
   }
+  runCounted(sql: string, ...params: SqliteValue[]): Promise<number> {
+    return this.send("runCounted", sql, params) as Promise<number>;
+  }
   get<T extends object>(
     sql: string,
     ...params: SqliteValue[]
@@ -141,7 +280,6 @@ class Executor implements SqliteExecutor {
 
 /** One connection; requests run one at a time in call order. */
 export class WorkerSqliteDatabase extends Executor implements SqliteDatabase {
-  private tail: Promise<unknown> = Promise.resolve();
   private closed = false;
 
   constructor(
@@ -150,6 +288,7 @@ export class WorkerSqliteDatabase extends Executor implements SqliteDatabase {
     private readonly connection: number,
     private readonly refused?: (code: string) => void,
     private opening?: SqliteOpenCosts,
+    private readonly readOnly = false,
   ) {
     super((op, sql, params) => this.serial(() => this.direct(op, sql, params)));
   }
@@ -159,23 +298,17 @@ export class WorkerSqliteDatabase extends Executor implements SqliteDatabase {
     sql: string,
     params?: SqliteValue[],
   ): Promise<unknown> {
-    return this.owner.request(this.thread, {
-      connection: this.connection,
-      op,
-      sql,
-      params,
-    });
+    return this.owner.request(
+      this.thread,
+      { connection: this.connection, op, sql, params },
+      this.opening,
+    );
   }
 
   // Run `operation` after everything queued before it; it holds the queue until
   // it settles.
   private serial<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(operation);
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
+    return this.owner.enqueue(this.thread, operation, this.opening);
   }
 
   override get<T extends object>(
@@ -199,7 +332,7 @@ export class WorkerSqliteDatabase extends Executor implements SqliteDatabase {
     const started = costs ? performance.now() : 0;
     const result = this.serial(async () => {
       try {
-        await this.direct("exec", "BEGIN IMMEDIATE");
+        await this.direct("exec", this.readOnly ? "BEGIN" : "BEGIN IMMEDIATE");
       } catch (error) {
         const code = (error as { code?: unknown }).code;
         if (typeof code !== "string" || !/^SQLITE_(BUSY|LOCKED)/.test(code))
@@ -243,6 +376,17 @@ export class WorkerSqliteDatabase extends Executor implements SqliteDatabase {
       : result;
   }
 
+  syncSearch(target: SearchTarget): Promise<SyncStats> {
+    return this.serial(() =>
+      this.owner.request(this.thread, {
+        connection: this.connection,
+        op: "syncSearch",
+        sql: "",
+        target,
+      }),
+    ) as Promise<SyncStats>;
+  }
+
   finishOpenTiming(): void {
     this.opening = undefined;
   }
@@ -251,7 +395,14 @@ export class WorkerSqliteDatabase extends Executor implements SqliteDatabase {
     return this.serial(async () => {
       if (this.closed) return;
       this.closed = true;
-      await this.direct("close", "");
+      let failed = true;
+      try {
+        await this.direct("close", "");
+        failed = false;
+      } finally {
+        await this.owner.release(this.thread, failed);
+        // Spec: @tla close tlaConn(this.thread,this.connection)
+      }
     });
   }
 }
@@ -262,11 +413,28 @@ export async function openWorkerSqliteStorage(
   path: string,
   refused?: (code: string) => void,
   onCosts?: (costs: SqliteOpenCosts) => void,
+  readOnly = false,
+  nativeReadOnly = readOnly,
 ): Promise<SqliteStorage> {
-  const costs = onCosts ? { migration_ms: 0, metadata_ms: 0 } : undefined;
-  const database = await worker.openDatabase(path, refused, costs);
+  const costs = onCosts
+    ? {
+        migration_ms: 0,
+        metadata_ms: 0,
+        queue_ms: 0,
+        dispatch_ms: 0,
+        execution_ms: 0,
+        reply_ms: 0,
+      }
+    : undefined;
+  const database = await worker.openDatabase(
+    path,
+    refused,
+    costs,
+    readOnly,
+    nativeReadOnly,
+  );
   try {
-    return await SqliteStorage.open(database);
+    return await SqliteStorage.open(database, { readOnly });
   } finally {
     database.finishOpenTiming();
     if (costs) onCosts?.(costs);

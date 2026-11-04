@@ -116,7 +116,9 @@ def _environment(root: Path, sha: str, keepalive: bool) -> dict:
     env.update({f"RECURSE_MODAL_{key}": os.environ[f"RECURSE_MODAL_{key}"] for key in CONFIG})
     env.update(RECURSE_MODAL_CONFIRMED_VOLUME=os.environ["RECURSE_MODAL_VOLUME"], RECURSE_MODAL_PIN=sha,
                RECURSE_MODAL_KEEPALIVE="1" if keepalive else "0",
-               RECURSE_MODAL_WEB_EXTRA_SECRETS=json.dumps(settings.get("webExtraSecrets", [])))
+               RECURSE_MODAL_WEB_EXTRA_SECRETS=json.dumps(settings.get("webExtraSecrets", [])),
+               RECURSE_MODAL_APT_PACKAGES=json.dumps(settings.get("aptPackages", [])),
+               RECURSE_MODAL_PIP_PACKAGES=json.dumps(settings.get("pipPackages", [])))
     if settings.get("repoUrl"):
         env["CHAT_REPO_URL"] = settings["repoUrl"]
     if settings.get("displayName"):
@@ -134,24 +136,30 @@ def _get(url: str) -> tuple[int, str]:
 
 
 def verify(sha: str, log) -> str:
-    """Require the requested commit and a web address answering sign-in."""
+    """Require the requested commit, a web address answering sign-in and,
+    when the commit has one, a sleep check-in refusing keyless calls."""
     report = modal.Function.from_name(TARGET, "verify").remote()
     if report.get("image_pin") != sha:
         raise RuntimeError(f"verify: deployed commit {report.get('image_pin')} is not {sha}")
     url = modal.Cls.from_name(TARGET, "Web")().web.get_web_url()
+    checks = [(url, "/"), (url, "/api/version")]
+    try:
+        checks.append((modal.Function.from_name(TARGET, "sleep_check").get_web_url(), "/api/relay/requests"))
+    except Exception as error:
+        print(f"[verify] no sleep check-in: {error!r}", file=log, flush=True)
     deadline = time.monotonic() + VERIFY_SECONDS
-    for path in ("/", "/api/version"):
+    for base, path in checks:
         while True:
             try:
-                code, body = _get(urllib.parse.urljoin(url, path))
+                code, body = _get(urllib.parse.urljoin(base, path))
             except (urllib.error.URLError, OSError) as error:
                 code, body = 0, str(error)
             if code not in (0, 502, 503) or time.monotonic() > deadline:
                 break
             time.sleep(2)
-        print(f"[verify] GET {path} -> {code}", file=log, flush=True)
+        print(f"[verify] GET {base} {path} -> {code}", file=log, flush=True)
         if code != 401 or (path == "/" and "Sign in" not in body):
-            raise RuntimeError(f"verify: GET {path} returned {code}, not the sign-in page")
+            raise RuntimeError(f"verify: GET {base} {path} returned {code}, not 401 sign-in")
     return url
 
 
@@ -325,7 +333,8 @@ def _https(url: str) -> str:
 def settings_record(record) -> dict:
     """Validate a version-1 settings record; it never holds credentials."""
     keys = {"version", "repoUrl", "displayName", "webExtraSecrets"}
-    if not isinstance(record, dict) or set(record) != keys:
+    optional = {"aptPackages", "pipPackages"}
+    if not isinstance(record, dict) or not keys <= set(record) or set(record) - keys - optional:
         raise SystemExit("Invalid settings: use version 1 with repoUrl, displayName and webExtraSecrets.")
     name, extra = record["displayName"], record["webExtraSecrets"]
     if (record["version"] != 1 or not (record["repoUrl"] is None or isinstance(record["repoUrl"], str))
@@ -335,6 +344,14 @@ def settings_record(record) -> dict:
             or any(not isinstance(item, str) or not re.fullmatch(NAME_RE, item) for item in extra)
             or len(set(extra)) != len(extra) or len(json.dumps(record)) > 8192):
         raise SystemExit("Invalid settings: use version 1 with repoUrl, displayName and webExtraSecrets.")
+    for key, pattern in (("aptPackages", r"[a-z0-9](?:[a-z0-9+.-]{0,126}[a-z0-9])?"),
+                         ("pipPackages", r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,126}[A-Za-z0-9])?")):
+        packages = record.get(key, [])
+        if (not isinstance(packages, list) or len(packages) > 32
+                or any(not isinstance(item, str) or not re.fullmatch(pattern, item)
+                       or (key == "aptPackages" and ".." in item) for item in packages)
+                or len(set(packages)) != len(packages)):
+            raise SystemExit(f"Invalid {key}: use at most 32 distinct plain package names (1-128 characters).")
     if record["repoUrl"] is not None:
         _https(record["repoUrl"])
     return record
@@ -493,7 +510,8 @@ def main(argv: list[str]) -> int:
     deploy_parser.add_argument("--password-file", help="new 0600 password file for a new app")
     deploy_parser.add_argument("--no-keepalive", dest="keepalive", action="store_false",
                                help="throwaway deploys only: no scheduled wakeup")
-    settings_parser.add_argument("--file", required=True, help="JSON: version 1, repoUrl, displayName, webExtraSecrets")
+    settings_parser.add_argument("--file", required=True, help="JSON: version 1, repoUrl, displayName, webExtraSecrets; "
+                                 "optional aptPackages and pipPackages lists; saved on the Volume, not in git")
     settings_parser.add_argument("--replace", action="store_true", help="overwrite an existing record")
     options = parser.parse_args(argv)
     name = _name(options.name)

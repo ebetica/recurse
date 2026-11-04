@@ -3,8 +3,10 @@
 // Phone content/header share a scroller. Unregistered/unavailable panes hide
 // their rail; unavailable open panes close on refresh.
 import { currentUiOwnerId, DRAFT, embedded, state } from "./state.js";
+import { phoneListEntry } from "./phone-nav.js";
 import {
   DELETE_ICON,
+  SHARE_ICON,
   TAKE_CONTROL_ICON,
   UP_ICON,
   NEW_ICON,
@@ -17,6 +19,7 @@ import { installPaneChrome } from "./panes/chrome.js";
 import { createPanePowerbar, retainPanePowerbar } from "./panes/powerbar.js";
 import { $, inputEl } from "./dom.js";
 import { pendingCommentCount } from "./comments.js";
+import { handleCommentShortcut } from "./artifacts/selection-comments.js";
 import {
   ArtifactPaneAutoOpenPolicy,
   type ArtifactAutoOpenObservation,
@@ -46,7 +49,7 @@ export { setPaneLoading } from "./panes/loading.js";
 for (const [id, icon] of [
   ["trash-btn", DELETE_ICON],
   ["takeover-btn", TAKE_CONTROL_ICON],
-  ["up-btn", UP_ICON],
+  ["share-link-btn", SHARE_ICON],
   ["up-top", UP_ICON],
   ["new-top", NEW_ICON],
   ["pane-fab", MORE_ICON],
@@ -56,7 +59,7 @@ for (const [id, icon] of [
 const registry: PaneDef[] = [];
 const open = new Set<string>();
 const bodies = new Map<string, HTMLElement>();
-const cachedPhoneScroll = new WeakMap<HTMLElement, number>();
+const cachedPaneScroll = new WeakMap<HTMLElement, number>();
 let mobileActive: string | null = null;
 let railHash = "";
 let fullId: string | null = null;
@@ -75,8 +78,10 @@ const paneOwners = new Map<string, string>();
 const paneAgents = new Map<string, string>();
 const paneViewState = new PaneViewStateLifecycle();
 const paneInstances = new PaneInstanceCache();
+let paneParking: HTMLElement | null = null;
 let paneVisitAgentId: string | null = null;
 let paneVisitOwnerId: string | null = null;
+let paneRenderedAgentId: string | null = null;
 let paneVisitVisibility: PaneVisibility = { kind: "default" };
 
 const panesEl = $("#panes")!,
@@ -89,6 +94,14 @@ const fabEl = $("#pane-fab")!,
 const announcerEl = $("#pane-announcer");
 
 installPaneChrome(panesEl);
+panesEl.addEventListener("keydown", (event) => {
+  const pane = (event.target as Element).closest<HTMLElement>(".pane-col");
+  if (pane) handleCommentShortcut(event, pane);
+});
+panesEl.addEventListener("comments-submitting", (event) => {
+  const pane = (event.target as Element).closest<HTMLElement>(".pane-col");
+  if (pane?.dataset.pane) closePane(pane.dataset.pane, false, true);
+});
 
 const mq = matchMedia("(max-width: 700px)");
 const isMobile = (): boolean => mq.matches;
@@ -120,6 +133,7 @@ export function beginPaneVisit(
 
   paneVisitAgentId = agentId;
   paneVisitOwnerId = ownerId;
+  paneRenderedAgentId = null;
   paneVisitVisibility = conversationUiState.pane(ownerId);
   if (paneVisitVisibility.kind !== "default") {
     artifactAutoOpen.noteUserPaneChoice(agentId);
@@ -144,7 +158,7 @@ export function fetchPaneData(
     paneVisitVisibility.id === paneId &&
     paneVisitAgentId === agentId &&
     paneVisitOwnerId === currentUiOwnerId();
-  if (open.has(paneId) || restoring) {
+  if (open.has(paneId) || (restoring && paneRenderedAgentId === agentId)) {
     void run();
     return;
   }
@@ -317,6 +331,25 @@ function paneCacheScope(
   }
 }
 
+function parkPaneBody(body: HTMLElement): void {
+  if (!("moveBefore" in Element.prototype)) return;
+  if (!paneParking) {
+    const host = document.createElement("div");
+    host.hidden = true;
+    paneParking = document.createElement("div");
+    host.attachShadow({ mode: "closed" }).append(paneParking);
+    document.body.append(host);
+  }
+  try {
+    (
+      paneParking as HTMLElement & {
+        moveBefore(node: Node, child: Node | null): void;
+      }
+    ).moveBefore(body, null);
+    body.dataset.paneParked = "true";
+  } catch {}
+}
+
 function forgetPaneState(id: string): void {
   const body = bodies.get(id),
     ownerId = paneOwners.get(id),
@@ -330,12 +363,17 @@ function forgetPaneState(id: string): void {
       definition?.leave?.(body);
     } catch {}
   if (!body || !ownerId || !agentId || !definition?.cache) return;
-  if (isMobile())
-    cachedPhoneScroll.set(body, body.parentElement?.scrollTop ?? 0);
+  delete body.dataset.paneFocusWhenReady;
+  cachedPaneScroll.set(
+    body,
+    isMobile() ? (body.parentElement?.scrollTop ?? 0) : body.scrollTop,
+  );
   const context = buildCtxFor(agentId);
   const scope = paneCacheScope(id, ownerId, context, definition);
-  if (scope) paneInstances.put(scope, body, context, definition.cache);
-  else
+  if (scope) {
+    if (definition.cache.keepConnected) parkPaneBody(body);
+    paneInstances.put(scope, body, context, definition.cache);
+  } else
     try {
       definition.cache.dispose?.(body, context);
     } catch {}
@@ -444,6 +482,8 @@ export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
         `.pane-col[data-pane="${CSS.escape(id)}"]`,
       );
       const target = col?.querySelector<HTMLElement>(entrySel);
+      if (target?.inert && options.focusTarget === "body")
+        target.dataset.paneFocusWhenReady = "true";
       (target?.inert
         ? col?.querySelector<HTMLElement>(".pane-title")
         : target
@@ -455,8 +495,13 @@ function closePane(
   id: string,
   userInitiated = false,
   restoreFocus = userInitiated,
+  preserveComments = false,
 ): boolean {
-  if (!open.has(id) || (userInitiated && !guardLeaveComments())) return false;
+  if (
+    !open.has(id) ||
+    (userInitiated && !preserveComments && !guardLeaveComments())
+  )
+    return false;
   capturePaneState(id);
   if (userInitiated) noteUserPaneAction(id, false);
   const origin = focusOrigins.get(id);
@@ -623,7 +668,7 @@ export function closePaneKeyboardLayer(): boolean {
   const id = (isMobile() ? mobileActive : focusedCol?.dataset.pane) || null;
   if (!id || !open.has(id)) return false;
   const before = open.has(id);
-  closePane(id, true);
+  closePane(id, true, true, true);
   return before && !open.has(id);
 }
 // Only fullscreen/mobile/menu panes are modal; desktop columns preserve tree
@@ -695,10 +740,11 @@ export function focusPaneFromKeyboard(): boolean {
 export function closeFocusedPaneFromKeyboard(
   preferredId?: string,
   restoreVisibleOrigin = false,
+  preserveComments = false,
 ): boolean {
   const id = preferredId || activePaneId(true);
   if (!id) return false;
-  const closed = closePane(id, true, restoreVisibleOrigin);
+  const closed = closePane(id, true, restoreVisibleOrigin, preserveComments);
   if (closed && !restoreVisibleOrigin) restoreAgentFocus();
   return closed;
 }
@@ -765,8 +811,20 @@ function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
     body.tabIndex = -1;
   }
   body.dataset.pane = id;
-  col.append(retainPanePowerbar(body, head), body);
+  col.append(retainPanePowerbar(body, head));
   panesEl.appendChild(col);
+  if (body.dataset.paneParked === "true") {
+    try {
+      const move = (
+        col as { moveBefore?: (node: Node, child: Node | null) => void }
+      ).moveBefore;
+      if (move) move.call(col, body, null);
+      else col.appendChild(body);
+    } catch {
+      col.appendChild(body);
+    }
+    delete body.dataset.paneParked;
+  } else col.appendChild(body);
   bodies.set(id, body);
   paneOwners.set(id, ownerId);
   paneAgents.set(id, ctx.agentId);
@@ -831,19 +889,19 @@ function layout(): void {
     panesEl.classList.contains("overlay"),
   );
   syncFull();
-  if (mobile)
-    for (const body of bodies.values()) {
-      const top = cachedPhoneScroll.get(body);
-      if (top === undefined) continue;
-      body.parentElement!.scrollTop = top;
-      cachedPhoneScroll.delete(body);
-    }
+  for (const body of bodies.values()) {
+    const top = cachedPaneScroll.get(body);
+    if (top === undefined) continue;
+    (mobile ? body.parentElement! : body).scrollTop = top;
+    cachedPaneScroll.delete(body);
+  }
 }
 
 // ---- rail + mobile menu ---------------------------------------------------
 function paneBadge(pane: PaneDef, ctx: PaneContext): string {
   try {
     const value = pane.badge?.(ctx);
+    if (Number(/^(\d+)\+?$/.exec(String(value))?.[1]) > 999) return "999+";
     return value === null || value === undefined || value === ""
       ? ""
       : String(value).slice(0, 6);
@@ -855,10 +913,18 @@ function paneBadge(pane: PaneDef, ctx: PaneContext): string {
 function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   const mobile = isMobile();
   // Invariant: Reparent shared controls, retaining their owners and handlers.
-  const actions = [$("#trash-btn")!, $("#takeover-btn")!];
+  const actions = [
+    $("#trash-btn")!,
+    $("#takeover-btn")!,
+    $("#share-link-btn")!,
+  ];
+  // Spec: Phone menu order: Delete, Take control, divider, Share.
   const actionHost = mobile ? menuEl : railEl;
   if (actions[0].parentElement !== actionHost) {
-    actionHost.prepend(...actions);
+    if (mobile) {
+      $("#pane-menu-divider")!.before(actions[0], actions[1]);
+      $("#pane-menu-divider")!.after(actions[2]);
+    } else railEl.prepend(...actions);
     for (const action of actions) {
       if (mobile) action.setAttribute("role", "menuitem");
       else action.removeAttribute("role");
@@ -886,13 +952,11 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   const mobileAttention =
     artifactsAttention && avail.some((p) => p.id === ARTIFACTS_PANE_ID);
   fabEl.classList.toggle("attention", mobileAttention);
-  fabEl.title = mobileAttention
-    ? "More actions — Artifacts available"
-    : "More actions";
-  fabEl.setAttribute(
-    "aria-label",
-    mobileAttention ? "More actions — Artifacts available" : "More actions",
-  );
+  // Spec: Pane counts appear in the menu, not on More.
+  const fabLabel =
+    "More actions" + (mobileAttention ? " — Artifacts available" : "");
+  fabEl.title = fabLabel;
+  fabEl.setAttribute("aria-label", fabLabel);
 
   const railPanels = $("#pane-rail-panels")!;
   railPanels.innerHTML = "";
@@ -975,6 +1039,10 @@ function closeMenu(): void {
   if (!(isMobile() && mobileActive && open.size))
     backdropEl.classList.remove("on");
 }
+
+addEventListener("popstate", () => {
+  if (phoneListEntry()) closeMenu();
+});
 
 // Phone FAB press/slide/release picks a panel; plain taps toggle the menu.
 let hotItem: HTMLElement | null = null;
@@ -1071,9 +1139,14 @@ addEventListener("panes-relayout", () => layout());
 // ---- the per-poll sync (called from the conversation refresh) -------------
 let syncFailureAnnounced = false;
 
+export function notePaneConversationRendered(agentId: string): void {
+  if (paneVisitAgentId === agentId) paneRenderedAgentId = agentId;
+}
+
 function restorePanePreference(availableIds: ReadonlySet<string>): boolean {
   if (
     paneVisitAgentId !== state.selectedId ||
+    paneRenderedAgentId !== state.selectedId ||
     paneVisitOwnerId !== currentUiOwnerId() ||
     paneVisitVisibility.kind !== "open" ||
     open.size > 0 ||

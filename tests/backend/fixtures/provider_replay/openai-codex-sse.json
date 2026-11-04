@@ -301,37 +301,6 @@
               }
             },
             "strict": null
-          },
-          {
-            "type": "function",
-            "name": "multi_grep",
-            "parameters": {
-              "type": "object",
-              "required": [
-                "patterns"
-              ],
-              "properties": {
-                "patterns": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "constraints": {
-                  "type": "string"
-                },
-                "context": {
-                  "type": "number"
-                },
-                "limit": {
-                  "type": "number"
-                },
-                "cursor": {
-                  "type": "string"
-                }
-              }
-            },
-            "strict": null
           }
         ],
         "input": "nonempty array",

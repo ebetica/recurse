@@ -1,18 +1,13 @@
-// One unref'd timer measures loop lag; idle servers emit nothing.
-// Align CPU with window_ms, separate from timer lag and diagnostics_ms.
-// Bounded names and heap/RSS are diagnostics, sampled outside the CPU window.
-// Active windows summarize lag percentiles/max/count; no per-sample logs.
+// One unref'd timer measures lag; active windows summarize, idle emit nothing.
+// No native CPU or memory reads: process accounting can itself block.
+// window_ms covers the timer interval; diagnostics_ms measures stall details.
+// Bounded wall spans and overlapping open phases are context, not CPU causes.
 
 import { templateRoute } from "../http_transport";
-import { drainSlowSpans } from "./slow_span";
+import { drainSlowSpans, overlappingOpenPhases } from "./slow_span";
 import { INFO, WARNING, logEvent, type RuntimeLogger } from "./runtime_logging";
 
 const SHOWN = 3;
-const MB = 1024 * 1024;
-const micros = ({ user, system }: NodeJS.CpuUsage) => user + system;
-const threadCpuUsage = (
-  process as NodeJS.Process & { threadCpuUsage?: () => NodeJS.CpuUsage }
-).threadCpuUsage;
 
 export interface LoopLagOptions {
   readonly logger: RuntimeLogger;
@@ -22,10 +17,6 @@ export interface LoopLagOptions {
   readonly runningConversations: () => readonly string[];
   /** Names of detached tasks in flight (read only for a stall). */
   readonly jobs?: () => readonly string[];
-  /** Process CPU time (default process.cpuUsage). */
-  readonly cpuUsage?: () => NodeJS.CpuUsage;
-  /** Process memory (default process.memoryUsage). */
-  readonly memoryUsage?: () => NodeJS.MemoryUsage;
   readonly intervalMs?: number;
   readonly stallMs?: number;
   readonly summaryMs?: number;
@@ -41,10 +32,6 @@ export class LoopLag {
   private readonly stallMs: number;
   private readonly summaryMs: number;
   private readonly now: () => number;
-  private readonly cpuUsage: () => NodeJS.CpuUsage;
-  private readonly memoryUsage: () => NodeJS.MemoryUsage;
-  private cpuStart = 0;
-  private mainCpuStart: number | undefined;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private expected = 0;
   private windowStart = 0;
@@ -58,8 +45,6 @@ export class LoopLag {
     this.stallMs = options.stallMs ?? 250;
     this.summaryMs = options.summaryMs ?? 60_000;
     this.now = options.now ?? (() => performance.now());
-    this.cpuUsage = options.cpuUsage ?? process.cpuUsage;
-    this.memoryUsage = options.memoryUsage ?? process.memoryUsage;
   }
 
   start(): void {
@@ -86,40 +71,28 @@ export class LoopLag {
 
   private schedule(): void {
     this.expected = this.now() + this.intervalMs;
-    this.cpuStart = micros(this.cpuUsage());
-    const mainCpu = threadCpuUsage?.();
-    this.mainCpuStart = mainCpu ? micros(mainCpu) : undefined;
     this.timer = setTimeout(() => this.sample(), this.intervalMs);
     this.timer.unref?.();
   }
 
   private sample(): void {
-    const cpu = this.cpuUsage();
-    const mainCpu = threadCpuUsage?.();
     const now = this.now();
     const late = Math.max(0, now - this.expected);
     this.samples.push(late);
     if (this.options.runningCount() > 0) this.active = true;
     const spans = drainSlowSpans();
-    if (late > this.stallMs) this.stall(late, now, cpu, mainCpu, spans);
+    if (late > this.stallMs) this.stall(late, now, spans);
     this.finished = [];
     if (now - this.windowStart >= this.summaryMs) this.summarize(now);
     this.schedule();
   }
 
-  private stall(
-    late: number,
-    now: number,
-    cpu: NodeJS.CpuUsage,
-    mainCpu: NodeJS.CpuUsage | undefined,
-    spans: string[],
-  ): void {
+  private stall(late: number, now: number, spans: string[]): void {
     const routes = new Set<string>();
     for (const request of [...this.inFlight, ...this.finished]) {
       if (routes.size >= SHOWN) break;
       routes.add(templateRoute(request.route));
     }
-    const { heapUsed, rss } = this.memoryUsage();
     const conversations = this.options.runningConversations().slice(0, SHOWN);
     const jobs = [...new Set(this.options.jobs?.() ?? [])].slice(0, 6);
     logEvent(this.options.logger, WARNING, "event_loop_stall", {
@@ -128,15 +101,9 @@ export class LoopLag {
         window_ms: Math.round(now - this.expected + this.intervalMs),
         routes: [...routes],
         conversations,
-        cpu_ms: Math.round((micros(cpu) - this.cpuStart) / 1000),
-        main_cpu_ms:
-          mainCpu && this.mainCpuStart !== undefined
-            ? Math.round((micros(mainCpu) - this.mainCpuStart) / 1000)
-            : undefined,
-        heap_mb: Math.round(heapUsed / MB),
-        rss_mb: Math.round(rss / MB),
         jobs,
         spans,
+        phases: overlappingOpenPhases(this.expected - this.intervalMs, now),
         diagnostics_ms: Math.round(this.now() - now),
       },
     });

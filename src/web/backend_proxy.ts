@@ -15,6 +15,7 @@ const PREFIX = new Set([
   "attachments",
   "attachment-drafts",
   "artifacts",
+  "v1",
 ]);
 
 export function registerBackendProxy(
@@ -54,6 +55,8 @@ export function registerBackendProxy(
         !(
           PREFIX.has(parts[0]!) ||
           (parts.length === 1 && SINGLE.has(path)) ||
+          path === "subagent-tool/search" ||
+          path === "subagent-tool/read" ||
           (agent &&
             /^subagent-tool\/conversations\/[A-Za-z0-9_-]+\/transcript$/.test(
               path,
@@ -66,7 +69,7 @@ export function registerBackendProxy(
         throw new HttpError(403, "remote agent not allowed here");
       const label = ex.params.label!;
       if (agent) {
-        store.relayReady(label);
+        await store.relayReady(label);
         if ((inFlight.get(label) ?? 0) >= 16)
           throw new HttpError(
             429,

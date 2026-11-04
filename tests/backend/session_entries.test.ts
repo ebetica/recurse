@@ -1,8 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
-import {
-  AsyncJsonlRangeReader,
-  JsonlRangeReader,
-} from "../../src/agents/view/session_entries";
+import { AsyncJsonlRangeReader } from "../../src/agents/view/session_entries";
 import fixture from "./fixtures/session_entries/cases.json";
 import {
   jsonlBytes,
@@ -77,13 +74,13 @@ test("async forward pages charge each line once in both byte modes", async () =>
   }
 });
 
-test("cursors cap old-history scans", () => {
+test("cursors cap old-history scans", async () => {
   const scenario = scenarios.find((item) => item.scenario === "history.jsonl")!;
   const path = paths.get(scenario.scenario)!;
   const data = readFileSync(path);
   const headerEnd = data.indexOf(10) + 1;
-  const reader = new JsonlRangeReader(path);
-  const [backwardRows, capped] = reader.backwardLines(
+  const reader = new AsyncJsonlRangeReader(path);
+  const [backwardRows, capped] = await reader.backwardLines(
     data.length,
     headerEnd,
     520,
@@ -92,15 +89,14 @@ test("cursors cap old-history scans", () => {
   expect(backwardRows.length).toBeLessThan(8);
 });
 
-test("identity-pinned reads reject a replaced session file", () => {
+test("identity-pinned reads reject a replaced session file", async () => {
   const scenario = scenarios.find((item) => item.scenario === "history.jsonl")!;
   const path = paths.get(scenario.scenario)!;
-  const reader = new JsonlRangeReader(path);
-  const opened = reader.header();
+  const opened = await new AsyncJsonlRangeReader(path).header();
   expect(opened).not.toBeNull();
-  const identity = opened![2].identity;
+  const reader = new AsyncJsonlRangeReader(path, opened![2].identity);
   expect(
-    reader.backwardLines(opened![2].size, opened![0], 1 << 20, identity)[0]
+    (await reader.backwardLines(opened![2].size, opened![0], 1 << 20))[0]
       .length,
   ).toBeGreaterThan(0);
   const replacement = join(temp, "replacement.jsonl");
@@ -108,20 +104,20 @@ test("identity-pinned reads reject a replaced session file", () => {
   const retired = join(temp, "retired.jsonl");
   renameSync(path, retired);
   renameSync(replacement, path);
-  expect(() =>
-    reader.backwardLines(opened![2].size, opened![0], 1 << 20, identity),
-  ).toThrow();
+  await expect(
+    reader.backwardLines(opened![2].size, opened![0], 1 << 20),
+  ).rejects.toThrow();
 });
 
-test("unsafe symlink and hard-linked session paths fail closed", () => {
+test("unsafe symlink and hard-linked session paths fail closed", async () => {
   const scenario = scenarios.find((item) => item.scenario === "history.jsonl")!;
   const path = paths.get(scenario.scenario)!;
   const symlink = join(temp, "session-link.jsonl");
   const hardlink = join(temp, "session-hardlink.jsonl");
   symlinkSync(path, symlink);
   linkSync(path, hardlink);
-  expect(new JsonlRangeReader(symlink).header()).toBeNull();
-  expect(() =>
-    new JsonlRangeReader(hardlink).backwardLines(1024, 0, 1024),
-  ).toThrow();
+  expect(await new AsyncJsonlRangeReader(symlink).header()).toBeNull();
+  await expect(
+    new AsyncJsonlRangeReader(hardlink).backwardLines(1024, 0, 1024),
+  ).rejects.toThrow();
 });

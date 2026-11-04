@@ -1,15 +1,22 @@
 import { expect, test } from "bun:test";
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
-import { setEnvironmentData, type Worker } from "node:worker_threads";
-import { mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  writeFile,
+  rm,
+  symlink,
+  readdir,
+  readFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { FffWorker } from "../../../../src/extensions/extra/fff/fff_worker.ts";
 import { createFffExtension } from "../../../../src/extensions/extra/fff/fff.ts";
-import { FFF_IMPORT_COUNT } from "../../../../src/extensions/extra/fff/fff_tools.ts";
 import {
   fauxHost,
+  lifecycle,
   until,
 } from "../../../backend/fixtures/durable_host/host.ts";
 
@@ -19,10 +26,8 @@ const flags = (root: string, key: string) => ({
   "fff-frecency-db": path.join(root, `f-${key}`),
   "fff-history-db": path.join(root, `h-${key}`),
 });
-const unshareImportCount = () =>
-  setEnvironmentData(FFF_IMPORT_COUNT, undefined as never);
 const threadOf = (service: FffWorker) =>
-  (service as unknown as { thread: Worker }).thread;
+  (service as unknown as { child: ReturnType<typeof Bun.spawn> }).child;
 
 async function fixture(run: (root: string) => Promise<void>) {
   const root = await mkdtemp(path.join(os.tmpdir(), "fff-worker-"));
@@ -91,7 +96,7 @@ test("warm and lazy host search Workers retain the host's pi-fff Settings", () =
   }));
 
 test(
-  "abort/connection close keep the other conversation usable; shutdown joins the one thread",
+  "abort/connection close keep the other conversation usable; shutdown joins the child",
   () =>
     fixture(async (root) => {
       const other = path.join(root, "other");
@@ -157,7 +162,7 @@ test(
           );
         let exits = 0;
         let settledAtExit = false;
-        thread.once("exit", () => {
+        void thread.exited.then(() => {
           exits++;
           settledAtExit = settled;
         });
@@ -166,6 +171,7 @@ test(
         await second.close();
         expect(settledAtExit).toBe(true);
         expect(exits).toBe(1);
+        expect(() => process.kill(-thread.pid, 0)).toThrow();
         await expect(service.open(root, flags(root, "late"))).rejects.toThrow(
           "Search worker closed",
         );
@@ -175,6 +181,143 @@ test(
     }),
   60000,
 );
+
+// Regression: #3025 filesystem churn must not wake idle native search indexes.
+test.skipIf(process.platform !== "linux")(
+  "idle indexes do no background work during file churn",
+  () =>
+    fixture(async (root) => {
+      const service = new FffWorker();
+      const snapshot = async () => {
+        const tasks = await Promise.all(
+          (await readdir(`/proc/${threadOf(service).pid}/task`)).map(
+            async (tid) => {
+              try {
+                const name = (
+                  await readFile(
+                    `/proc/${threadOf(service).pid}/task/${tid}/comm`,
+                    "utf8",
+                  )
+                ).trim();
+                const fields = (
+                  await readFile(
+                    `/proc/${threadOf(service).pid}/task/${tid}/stat`,
+                    "utf8",
+                  )
+                )
+                  .split(") ")[1]!
+                  .split(" ");
+                return {
+                  name,
+                  state: fields[0],
+                  ticks: Number(fields[11]) + Number(fields[12]),
+                };
+              } catch {
+                return undefined;
+              }
+            },
+          ),
+        );
+        return tasks.filter((task) => task?.name.startsWith("fff-"));
+      };
+      try {
+        await writeFile(path.join(root, "first.txt"), "first needle\n");
+        const bundles = await Promise.all(
+          ["one", "two", "three"].map((key) =>
+            service.open(root, flags(root, key)),
+          ),
+        );
+        const searches = bundles.map(
+          (bundle) => bundle.definitions.find((tool) => tool.name === "find")!,
+        );
+        const search = (index: number) =>
+          searches[index]!.execute(
+            "refresh",
+            { pattern: "*.txt" },
+            undefined,
+            undefined,
+            ctx(root),
+          );
+        for (let i = 0; i < searches.length; i++) {
+          expect((await search(i)).details).toMatchObject({ totalMatched: 1 });
+        }
+        let before = await snapshot();
+        await until(async () => {
+          before = await snapshot();
+          return before.every((task) => task?.state === "S");
+        });
+        expect(before.some((task) => task?.name.startsWith("fff-bg-"))).toBe(
+          true,
+        );
+        expect(before.filter((task) => task?.name.includes("watcher"))).toEqual(
+          [],
+        );
+        for (let i = 0; i < 100; i++) {
+          await writeFile(path.join(root, `new-${i}.txt`), "new needle\n");
+          await writeFile(path.join(root, ".gitignore"), `absent-${i}\n`);
+        }
+        await service.warm();
+        const after = await snapshot();
+        expect(
+          after.filter((task) => task?.name.startsWith("fff-bg-")),
+        ).toEqual(before.filter((task) => task?.name.startsWith("fff-bg-")));
+        for (let i = 0; i < searches.length; i++) {
+          expect((await search(i)).details).toMatchObject({ totalMatched: 1 });
+        }
+      } finally {
+        await service.close();
+      }
+    }),
+  60000,
+);
+
+// Regression: #3036 repeated searches must reuse indexes instead of rescanning.
+test("main and external indexes reuse snapshots until the refresh interval", () =>
+  fixture(async (root) => {
+    const workspace = path.join(root, "workspace");
+    const external = path.join(root, "external");
+    await mkdir(workspace);
+    await mkdir(external);
+    await writeFile(path.join(workspace, "first.txt"), "needle\n");
+    await writeFile(path.join(external, "first.txt"), "needle\n");
+    const service = new FffWorker();
+    try {
+      const bundle = await service.open(workspace, {
+        ...flags(root, "refresh"),
+        "fff-refresh-interval-ms": "2000",
+      });
+      const find = bundle.definitions.find((tool) => tool.name === "find")!;
+      const search = (target?: string) =>
+        find.execute(
+          "refresh",
+          { pattern: "*.txt", ...(target ? { path: target } : {}) },
+          undefined,
+          undefined,
+          ctx(workspace),
+        );
+      expect((await search()).details).toMatchObject({ totalMatched: 1 });
+      expect((await search(external)).details).toMatchObject({
+        totalMatched: 1,
+      });
+      await writeFile(path.join(workspace, "new.txt"), "needle\n");
+      await writeFile(path.join(external, "new.txt"), "needle\n");
+      for (let i = 0; i < 3; i++) {
+        expect((await search()).details).toMatchObject({ totalMatched: 1 });
+        expect((await search(external)).details).toMatchObject({
+          totalMatched: 1,
+        });
+      }
+      await until(
+        async () =>
+          ((await search()).details as { totalMatched: number })
+            .totalMatched === 2 &&
+          ((await search(external)).details as { totalMatched: number })
+            .totalMatched === 2,
+      );
+    } finally {
+      await service.close();
+    }
+  }));
 
 // Regression: #2756 external searches must not reuse a broader auxiliary root.
 test("external searches keep exact roots and reject missing paths", () =>
@@ -201,7 +344,7 @@ test("external searches keep exact roots and reject missing paths", () =>
       expect((await search(external)).details).toMatchObject({ totalFiles: 2 });
       expect((await search(child)).details).toMatchObject({ totalFiles: 1 });
       await writeFile(path.join(child, "new.txt"), "new needle\n");
-      expect((await search(child)).details).toMatchObject({ totalFiles: 2 });
+      expect((await search(child)).details).toMatchObject({ totalFiles: 1 });
       let missingError: unknown;
       try {
         await search(path.join(root, "missing"));
@@ -248,6 +391,58 @@ test("external searches refuse files and roots covering $HOME", () =>
       await service.close();
     }
   }));
+
+// Regression: #3054 grep after an in-place file shrink raised SIGBUS.
+test.skipIf(process.platform !== "linux")(
+  "grep never maps file contents, so in-place truncation cannot crash the host",
+  () =>
+    fixture(async (root) => {
+      const workspace = path.join(root, "workspace");
+      await mkdir(workspace);
+      const cached = path.join(workspace, "cached.ts");
+      await writeFile(cached, "// filler\n".repeat(1200) + "needle\n");
+      await writeFile(
+        path.join(workspace, "large.ts"),
+        "// filler\n".repeat(30_000) + "needle\n",
+      );
+      const child = Bun.spawn(
+        [
+          process.execPath,
+          "--eval",
+          `import { readFileSync, writeFileSync } from "node:fs";
+           import { FffWorker } from ${JSON.stringify(path.join(repo, "src/extensions/extra/fff/fff_worker.ts"))};
+           const workspace = ${JSON.stringify(workspace)};
+           const service = new FffWorker();
+           try {
+             const bundle = await service.open(workspace, ${JSON.stringify(flags(root, "truncate"))});
+             const grep = () => bundle.definitions.find(tool => tool.name === "grep").execute(
+               "truncate", { pattern: "needle" }, undefined, undefined, { cwd: workspace },
+             );
+             const first = (await grep()).content;
+             const mapped = readFileSync("/proc/" + service.child.pid + "/maps", "utf8").split("\\n").filter(line => line.includes(workspace));
+             writeFileSync(${JSON.stringify(cached)}, "needle\\n");
+             const second = (await grep()).content;
+             console.log(JSON.stringify({ first, mapped, second }));
+           } finally {
+             await service.close();
+           }`,
+        ],
+        { env: process.env, stdout: "pipe", stderr: "pipe" },
+      );
+      const [stdout, stderr, exit] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
+      const result = JSON.parse(stdout);
+      expect(result.first).toEqual([
+        { type: "text", text: "cached.ts\n 1201: needle" },
+      ]);
+      expect(result.mapped).toEqual([]);
+      expect(result.second).toHaveLength(1);
+    }),
+);
 
 // Regression: #2834 symlink aliases must not bypass external home/root refusal.
 test.each([
@@ -316,45 +511,137 @@ test.each([
   }),
 );
 
+// Regression: #3058 native crashes must not kill the host or poison later searches.
 test(
-  "unexpected thread exit rejects all pending admissions without a hidden restart",
+  "SIGBUS rejects pending search; the host survives and the same connection restarts",
   () =>
     fixture(async (root) => {
-      const service = new FffWorker();
+      await writeFile(path.join(root, "first.txt"), "first needle\n");
+      const { host } = fauxHost(root);
+      const service = host.searchService(FffWorker);
       try {
-        const settled = Promise.allSettled([
-          service.open(root, flags(root, "one")),
-          service.open(root, flags(root, "two")),
-        ]);
-        const thread = threadOf(service);
-        await thread.terminate();
-        expect((await settled).map((result) => result.status)).toEqual([
-          "rejected",
-          "rejected",
-        ]);
-        await expect(service.open(root, flags(root, "later"))).rejects.toThrow(
-          "Search worker exited",
+        const bundle = await service.open(root, flags(root, "crash"));
+        const child = threadOf(service);
+        expect(lifecycle.ownedHandle(child)).not.toBeNull();
+        expect(
+          lifecycle.rows.get(lifecycle.ownedHandle(child)!.recordId),
+        ).toMatchObject({
+          kind: "file-search",
+          cid: null,
+        });
+        const grep = bundle.definitions.find((tool) => tool.name === "grep")!;
+        process.kill(child.pid, "SIGSTOP");
+        const search = () =>
+          grep.execute(
+            "crash",
+            { pattern: "needle" },
+            undefined,
+            undefined,
+            ctx(root),
+          );
+        const pending = Promise.allSettled([search(), search()]);
+        await until(
+          () =>
+            (service as unknown as { waiting: Map<number, unknown> }).waiting
+              .size === 2,
         );
-        expect(threadOf(service)).toBe(thread);
+        process.kill(child.pid, "SIGBUS");
+        process.kill(child.pid, "SIGCONT");
+        for (const result of await pending) {
+          expect(result.status).toBe("rejected");
+          if (result.status === "rejected")
+            expect(result.reason.message).toBe("File search crashed; retry");
+        }
+        expect(child.signalCode).toBe("SIGBUS");
+        const startupAbort = new AbortController();
+        let startupResult: string | undefined;
+        const startup = grep
+          .execute(
+            "cancel-startup",
+            { pattern: "needle" },
+            startupAbort.signal,
+            undefined,
+            ctx(root),
+          )
+          .then(
+            () => {
+              startupResult = "unexpected success";
+            },
+            (error: Error) => {
+              startupResult = error.message;
+            },
+          );
+        const replacement = threadOf(service);
+        process.kill(replacement.pid, "SIGSTOP");
+        try {
+          startupAbort.abort();
+          await until(() => startupResult !== undefined, 1000);
+          expect(startupResult).toBe("Operation aborted");
+          await startup;
+          const reopenAbort = new AbortController();
+          let cancelled: string | undefined;
+          const reopening = grep
+            .execute(
+              "cancel-reopen",
+              { pattern: "needle" },
+              reopenAbort.signal,
+              undefined,
+              ctx(root),
+            )
+            .then(
+              () => {
+                cancelled = "unexpected success";
+              },
+              (error: Error) => {
+                cancelled = error.message;
+              },
+            );
+          await until(
+            () =>
+              (service as unknown as { waiting: Map<number, unknown> }).waiting
+                .size === 1,
+          );
+          reopenAbort.abort();
+          await until(() => cancelled !== undefined, 1000);
+          expect(cancelled).toBe("Operation aborted");
+          await reopening;
+          expect(
+            (service as unknown as { waiting: Map<number, unknown> }).waiting
+              .size,
+          ).toBe(1);
+        } finally {
+          process.kill(replacement.pid, "SIGCONT");
+        }
+        expect((await search()).content).toEqual([
+          { type: "text", text: "first.txt\n 1: first needle" },
+        ]);
+        expect(threadOf(service).pid).not.toBe(child.pid);
+        const restarted = threadOf(service);
+        restarted.disconnect();
+        await restarted.exited;
+        expect(() => process.kill(-restarted.pid, 0)).toThrow();
+        expect((await search()).content).toEqual([
+          { type: "text", text: "first.txt\n 1: first needle" },
+        ]);
+        const finalChild = threadOf(service);
+        await host.close();
+        expect(() => process.kill(-finalChild.pid, 0)).toThrow();
+        expect(lifecycle.ownedHandle(finalChild)).toBeNull();
       } finally {
-        await service.close();
+        await host.close();
       }
     }),
   60000,
 );
 
 test(
-  "after warm(), the first open reuses the warmed thread's pi-fff import; close joins the thread",
+  "after warm(), the first open reuses the warmed child; close joins the child",
   () =>
     fixture(async (root) => {
-      const imports = new Int32Array(new SharedArrayBuffer(4));
-      setEnvironmentData(FFF_IMPORT_COUNT, imports);
       const service = new FffWorker();
       try {
         await service.warm();
-        unshareImportCount();
         const warmed = threadOf(service);
-        expect(Atomics.load(imports, 0)).toBe(1);
         const bundle = await createFffExtension(
           service,
           root,
@@ -362,14 +649,10 @@ test(
         );
         await bundle.close();
         expect(threadOf(service)).toBe(warmed);
-        expect(Atomics.load(imports, 0)).toBe(1);
-        const exited = new Promise((resolve) =>
-          threadOf(service).once("exit", resolve),
-        );
         await service.close();
-        await exited;
+        await warmed.exited;
+        expect(() => process.kill(-warmed.pid, 0)).toThrow();
       } finally {
-        unshareImportCount();
         await service.close();
       }
     }),

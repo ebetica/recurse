@@ -4,31 +4,25 @@
 .image-popout::backdrop { background: var(--media-backdrop); }
 .image-popout-body { --image-canvas-height: 100%; --image-comment-bar-height: 60px;
   --image-overlay-lift: 0px; --image-visible-height: 100dvh;
-  height: 100%; display: flex; flex-direction: column; }
-.image-popout-bar { display: flex; align-items: center; gap: var(--space-1); padding: var(--space-2);
-  padding-top: max(var(--space-2), env(safe-area-inset-top)); flex: none; }
-.image-popout-bar .files-name { flex: 1; font-size: 0.84375rem; }
-.image-popout-bar .btn { min-height: 28px; }
-.image-popout-bar .artifact-icon-btn { width: 28px; height: 28px; min-width: 28px; min-height: 28px; padding: var(--space-2); }
+  position: relative; height: var(--image-canvas-height); display: flex; flex-direction: column; }
+.image-popout-bar { height: calc(56px + env(safe-area-inset-top));
+  padding: env(safe-area-inset-top) max(var(--space-5), env(safe-area-inset-right)) 0 max(var(--space-5), env(safe-area-inset-left)); gap: 0; }
+.image-popout-bar .files-name { flex: 1; padding-inline-end: var(--space-3); }
+.image-popout-bar .files-position { color: var(--muted); }
+@media (max-width: 360px) {
+  .image-popout-bar:has(.files-position) { height: auto; flex-wrap: wrap; padding-left: max(var(--space-3), env(safe-area-inset-left)); padding-right: max(var(--space-3), env(safe-area-inset-right)); }
+  .image-popout-bar:has(.files-position) .files-name { flex-basis: 100%; padding-block: var(--space-2); }
+}
 .image-zoom-reset[hidden] { display: none; }
 .image-popout .files-detail { flex: 1; min-height: 0; display: flex; }
 .image-popout .image-zoom-viewport { flex: 1; min-width: 0; min-height: 0; container-type: size; }
 .image-popout .files-image-frame { --image-aspect: 1; width: min(100cqw, calc(100cqh * var(--image-aspect))); }
 .image-popout .image-zoom-viewport .files-image { width: 100%; max-height: none; background: none; }
 .image-popout .report-comments:empty, .image-popout .report-bar:empty { display: none; }
-.image-popout .report-comments { max-height: 25dvh; overflow: auto; }
-.image-comment-sidebar { display: contents; }
-.image-comment-heading, .image-compact-label, .report-sendbar-count { display: none; }
-.image-popout-body { position: relative; height: var(--image-canvas-height, 100%); }
+.image-comment-heading { display: none; }
 .image-popout .image-zoom-viewport { box-sizing: border-box;
   padding-bottom: calc(var(--image-comment-bar-height, 60px) + var(--space-1) + max(var(--space-3), env(safe-area-inset-bottom))); }
 .image-popout .image-popout-body button { min-width: 44px; min-height: 44px; }
-.image-popout-bar { gap: 0; padding: var(--space-1); padding-top: max(var(--space-1), env(safe-area-inset-top)); }
-.image-popout-bar .artifact-icon-btn { width: 44px; height: 44px; }
-.image-popout-bar .files-position { min-width: 44px; text-align: center; font-size: 0.6875rem; }
-.image-popout-bar .files-name { font-size: 0.75rem; }
-.image-popout .image-wide-label { display: none; }
-.image-popout .image-compact-label { display: inline; }
 .image-comment-sidebar { position: absolute; display: flex; flex-direction: column; min-height: 0;
   inset-inline: var(--space-3); bottom: calc(var(--image-overlay-lift, 0px) + max(var(--space-3), env(safe-area-inset-bottom)));
   max-width: 560px; margin-inline: auto; max-height: calc(var(--image-visible-height, 100dvh) - 64px);
@@ -49,12 +43,13 @@
 .image-comment-sidebar.comments-open .report-sendbar-clear { display: block; position: absolute; top: var(--space-3); right: var(--space-3); }
 .image-comment-sidebar .report-sendbar-note { flex: 1; min-width: 0; text-align: center; color: var(--muted); }
 .image-comment-sidebar .report-sendbar-note:empty::after { content: "Draw a box to add a note"; }
-.image-comment-sidebar .report-comment-popover { position: static; flex: none; width: 100%; border: 0;
-  max-height: calc(var(--image-visible-height, 100dvh) - 64px); overflow: auto; box-shadow: none; }
-.image-comment-sidebar .report-comment-popover::before { content: "New comment"; display: block; font-weight: 600; margin-bottom: var(--space-4); }
-.image-comment-sidebar .report-comment-popover textarea { field-sizing: content; min-height: 84px; resize: none;
-  max-height: min(240px, calc(var(--image-visible-height, 100dvh) * .3)); overflow: auto; }
-.image-comment-sidebar .report-comment-popover-actions { justify-content: space-between; }
+.image-comment-sidebar:has(.composer-box:not([hidden])) { border: 0; background: none; }
+.image-comment-sidebar .report-comment-popover { position: static; flex: none; width: 100%; }
+.files-comment-composer { flex-direction: column; align-items: stretch;
+  max-height: calc(var(--image-visible-height, 100dvh) - 64px); overflow: auto; }
+.files-comment-composer .composer-input { flex: none; resize: none; min-height: 0; max-height: calc(5lh + var(--space-3) * 2); overflow: auto; }
+.files-comment-composer .report-comment-popover-actions { margin-top: 0; }
+.files-comment-composer .report-comment-popover-actions button { width: auto; margin: 0; }
 .image-popout .image-comment-sidebar:has(.report-comment-popover:not([hidden])) :is(.report-comments, .report-bar, .image-comment-heading) { display: none; }
 /* The jump highlight is a one-shot attention cue with its own timing. */
 .file-jump-target { outline: 2px solid var(--accent); outline-offset: 4px;
@@ -93,7 +88,9 @@
   overflow: hidden; touch-action: none; min-height: 120px; }
 .image-zoom-viewport .files-image-frame { flex: none; max-width: 100%; transform-origin: center; }
 .image-zoom-viewport .files-image { width: auto; max-width: 100%; max-height: 65vh; }
-.image-zoom-viewport[data-zoomed="true"] { cursor: crosshair; }
+.image-zoom-viewport .report-box-frame { cursor: default; }
+.image-zoom-viewport[data-zoomed="true"] .report-box-frame { cursor: grab; }
+.image-zoom-viewport[data-zoomed="true"] .report-box-frame:active { cursor: grabbing; }
 .image-zoom-reset { position: absolute; z-index: var(--z-raised); right: var(--space-2); top: var(--space-2); }
 .files-detail-bar { display: flex; align-items: center; gap: var(--space-2); min-width: 0;
   padding: var(--space-1) var(--space-4); }

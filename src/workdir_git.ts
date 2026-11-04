@@ -9,6 +9,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isolatedSubprocessEnvironment } from "./local_roots";
 import * as startupMetrics from "./observability/startup_metrics";
 import { timed } from "./observability/request_timing";
+import { slowSpan } from "./observability/slow_span";
 import { prIdentity } from "./pull_request";
 import { pullRequestFiles } from "./pull_request/patch";
 
@@ -30,7 +31,8 @@ export interface WorkdirGitInputs {
   env: Env;
   /** Monotonic seconds; defaults to performance.now() / 1000. */
   now?: () => number;
-  backgroundTask?: (name: string, work: () => Promise<void>) => void;
+  /** Log one event, e.g. each `gh` call and why it ran. */
+  log?: (event: string, fields: Record<string, unknown>) => void;
 }
 
 /** Scrubbed subprocess environment for Git and its credential helper. */
@@ -67,6 +69,7 @@ const DIFF_TIMEOUT = 10.0;
 const CANDIDATE_TIMEOUT = 5.0;
 const GH_TIMEOUT = 4.0;
 const GH_CACHE_TTL = 20.0;
+const BRANCH_PR_INTERVAL = 60.0;
 const DIFF_TRUNCATION_MARK = "\n... [diff truncated at the 1 MiB server cap]\n";
 const SHA_RE = /^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$/u;
 // Python's unicode `\s` is str.isspace(), not JavaScript's `\s`.
@@ -217,15 +220,25 @@ async function runBounded(
   if (signal?.aborted) return null;
   let proc: import("bun").Subprocess<"ignore", "pipe", "ignore">;
   try {
-    const found = Bun.which(argv[0]!, { PATH: env.PATH ?? "" });
+    const github = argv[0] === "gh";
+    const found = slowSpan(
+      github ? "gh_executable_lookup" : "git_executable_lookup",
+      undefined,
+      () => Bun.which(argv[0]!, { PATH: env.PATH ?? "" }),
+    );
     if (found === null) return null;
-    proc = Bun.spawn([found, ...argv.slice(1)], {
-      cwd,
-      env,
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "ignore",
-    });
+    proc = slowSpan(
+      github ? "workdir_gh_spawn" : "workdir_git_spawn",
+      undefined,
+      () =>
+        Bun.spawn([found, ...argv.slice(1)], {
+          cwd,
+          env,
+          stdin: "ignore",
+          stdout: "pipe",
+          stderr: "ignore",
+        }),
+    );
   } catch {
     return null;
   }
@@ -276,22 +289,76 @@ async function runBounded(
 
 const decoder = new TextDecoder("utf-8");
 
-interface PrValue {
+/** owner/repo of a GitHub remote URL, or null. */
+function githubRepo(url: string): string | null {
+  const match =
+    /^(?:https:\/\/(?:[^/@\s]+@)?github\.com\/|ssh:\/\/(?:[^/@\s]+@)?github\.com\/|(?:[^@\s]+@)?github\.com:)([\w.-]{1,39})\/([\w.-]{1,100}?)(?:\.git)?$/u.exec(
+      url.trim(),
+    );
+  return match &&
+    ![match[1], match[2]].some((part) => part === "." || part === "..")
+    ? `${match[1]}/${match[2]}`
+    : null;
+}
+
+interface Head {
+  remote: string;
+  /** owner/repo of the remote. */
+  repo: string;
+  /** The remote branch the local branch tracks. */
+  branch: string;
+}
+
+export interface PrValue {
   number: number;
   title: string;
   url: string;
   baseRefName?: string;
-  state?: string;
+  /** OPEN, MERGED or CLOSED, as `gh pr list` reports it. */
+  state: string;
+  /** Its status checks in one word; null when it has none. */
+  checks: "pass" | "fail" | "pending" | null;
+  /** When it was opened, in epoch seconds; only from `pullRequest`. */
+  createdAt?: number;
 }
-export interface PrListRow {
-  repo: string;
-  number: number;
-  url: string;
-  title: string | null;
-  body?: string | null;
-  state: "open" | "merged" | "closed" | null;
-  metadata: "ready" | "pending" | "unavailable";
-  baseRefName?: string;
+
+const FAILED_CHECKS = new Set([
+  "FAILURE",
+  "ERROR",
+  "CANCELLED",
+  "TIMED_OUT",
+  "ACTION_REQUIRED",
+  "STARTUP_FAILURE",
+]);
+const PASSED_CHECKS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
+
+/** One word for `gh pr view --json statusCheckRollup`. */
+function checksSummary(rollup: unknown): PrValue["checks"] {
+  if (!Array.isArray(rollup) || !rollup.length) return null;
+  const results = rollup.map((check: Record<string, unknown> | null) =>
+    String(check?.conclusion || check?.state || check?.status || ""),
+  );
+  if (results.some((result) => FAILED_CHECKS.has(result))) return "fail";
+  return results.every((result) => PASSED_CHECKS.has(result))
+    ? "pass"
+    : "pending";
+}
+
+function prValue(row: Record<string, unknown> | undefined): PrValue | null {
+  const identity = typeof row?.url === "string" ? prIdentity(row.url) : null;
+  const { title, state, baseRefName, statusCheckRollup, createdAt } = row ?? {};
+  const opened = typeof createdAt === "string" ? Date.parse(createdAt) : NaN;
+  if (!identity || typeof title !== "string" || typeof state !== "string")
+    return null;
+  return {
+    number: identity.number,
+    title,
+    url: identity.url,
+    state,
+    ...(typeof baseRefName === "string" ? { baseRefName } : {}),
+    checks: checksSummary(statusCheckRollup),
+    ...(Number.isFinite(opened) ? { createdAt: opened / 1000 } : {}),
+  };
 }
 
 export interface DiffFile {
@@ -392,18 +459,21 @@ export class WorkdirGit {
   private readonly inputs: WorkdirGitInputs;
   private readonly now: () => number;
   private defaultBranchValue: string | null = null;
-  private readonly ghPrCache = new Map<string, [number, PrValue | null]>();
   // At most eight 1 MiB patches; concurrent file opens share the same fetch.
   private readonly prPatches = new Map<
     string,
-    [number, ReturnType<typeof runBounded>]
+    [
+      number,
+      Promise<{ out: Uint8Array; truncated: boolean } | undefined>,
+      Promise<string | undefined>,
+    ]
   >();
-  private readonly prMetadata = new Map<string, [number, PrListRow]>();
-  private readonly cwdPr = new Map<
-    string,
-    [number, PrValue | null, string | null]
-  >();
-  private readonly prRefreshing = new Set<string>();
+  /** Each worktree's last branch PR lookup: [PR, branch]. */
+  private readonly cwdPr = new Map<string, [PrValue | null, string | null]>();
+  private readonly headPrs = new Map<string, [number, PrValue | null]>();
+  private readonly headLookups = new Map<string, Promise<PrValue | null>>();
+  private readonly ghQueues = new Map<string, Promise<unknown>>();
+  private ghBackoff = { seconds: 0, until: 0 };
   private readonly githubBases = new Map<string, Promise<string | null>>();
   private readonly diffRuns = new Map<
     string,
@@ -428,15 +498,9 @@ export class WorkdirGit {
     if (!hit) {
       hit = this.gitText(["remote", "get-url", "origin"], cwd, 4096).then(
         (r) => {
-          if (r.code !== 0 || r.truncated) return null;
-          const match =
-            /^(?:https:\/\/(?:[^/@\s]+@)?github\.com\/|ssh:\/\/(?:[^/@\s]+@)?github\.com\/|(?:[^@\s]+@)?github\.com:)([\w.-]{1,39})\/([\w.-]{1,100}?)(?:\.git)?$/u.exec(
-              r.text?.trim() ?? "",
-            );
-          return match &&
-            ![match[1], match[2]].some((part) => part === "." || part === "..")
-            ? `https://github.com/${match[1]}/${match[2]}`
-            : null;
+          const repo =
+            r.code !== 0 || r.truncated ? null : githubRepo(r.text ?? "");
+          return repo && `https://github.com/${repo}`;
         },
       );
       this.githubBases.set(cwd, hit);
@@ -681,9 +745,8 @@ export class WorkdirGit {
     const branch =
       knownBranch === undefined ? await this.branchAt(wt, signal) : knownBranch;
     if (branch) {
-      const cached = this.ghPrCache.get(`${await pyResolve(wt)}\0${branch}`);
-      const pr =
-        cached && this.now() - cached[0] < GH_CACHE_TTL ? cached[1] : null;
+      const cached = this.cwdPr.get(wt);
+      const pr = cached?.[1] === branch ? cached[0] : null;
       if (pr?.state === "OPEN" && pr.baseRefName) {
         for (const ref of [`origin/${pr.baseRefName}`, pr.baseRefName]) {
           if ((await this.resolveRef(wt, ref, signal)) === null) continue;
@@ -740,208 +803,242 @@ export class WorkdirGit {
     return [null, null, "head"];
   }
 
-  private async currentPr(
+  /**
+   * `wt`'s PR from its upstream branch and repository, or null (detached, no
+   * GitHub upstream or PR, or a closed default-branch PR).
+   */
+  async branchPr(
     wt: string,
-    branch: string | null,
+    reason: string,
+    queue = wt,
   ): Promise<PrValue | null> {
-    if (
-      !branch ||
-      Bun.which("gh", { PATH: this.inputs.env.PATH ?? "" }) === null
-    )
-      return null;
-    const key = `${await pyResolve(wt)}\0${branch}`;
-    const hit = this.ghPrCache.get(key);
-    if (hit && this.now() - hit[0] < GH_CACHE_TTL) return hit[1];
-    let value: PrValue | null = null;
-    try {
-      const env = this.gitEnv();
-      env.GH_PAGER ??= "cat";
-      env.NO_COLOR ??= "1";
-      const r = await runBounded(
-        [
-          "gh",
-          "pr",
-          "view",
-          "--json",
-          "number,title,url,state,baseRefName",
-          "--",
-          branch,
-        ],
+    const branch = await this.branchAt(wt);
+    const head = branch ? await this.upstreamHead(wt, branch) : null;
+    let value = head
+      ? await this.cachedPr(`${head.repo.toLowerCase()}\0${head.branch}`, () =>
+          this.lookupHeadPr(wt, head, reason, queue),
+        )
+      : null;
+    if (head && value && value.state !== "OPEN") {
+      const main = await this.gitText(
+        ["symbolic-ref", "--short", `refs/remotes/${head.remote}/HEAD`],
         wt,
-        env,
-        Number.MAX_SAFE_INTEGER,
-        GH_TIMEOUT,
+        256,
+        5.0,
       );
-      const stdout = r === null ? "" : decoder.decode(r.out);
-      if (r !== null && r.code === 0 && pyStrip(stdout)) {
-        const payload: unknown = JSON.parse(stdout);
-        if (
-          payload !== null &&
-          typeof payload === "object" &&
-          !Array.isArray(payload)
-        ) {
-          const { number, title, url } = payload as Record<string, unknown>;
-          if (
-            typeof number === "number" &&
-            Number.isInteger(number) &&
-            typeof title === "string" &&
-            typeof url === "string"
-          )
-            value = {
-              number,
-              title,
-              url,
-              ...("baseRefName" in payload &&
-              typeof payload.baseRefName === "string"
-                ? { baseRefName: payload.baseRefName }
-                : {}),
-              ...("state" in payload && typeof payload.state === "string"
-                ? { state: payload.state }
-                : {}),
-            };
-        }
-      }
-    } catch {
-      value = null;
+      const name = pyStrip(main.text ?? "");
+      if (main.code !== 0 || name === `${head.remote}/${head.branch}`)
+        value = null;
     }
-    const now = this.now();
-    for (const [k, [at]] of this.ghPrCache)
-      if (now - at >= GH_CACHE_TTL) this.ghPrCache.delete(k);
-    this.ghPrCache.set(key, [now, value]);
+    this.cwdPr.delete(wt);
+    this.cwdPr.set(wt, [value, branch]);
+    while (this.cwdPr.size > 100)
+      this.cwdPr.delete(this.cwdPr.keys().next().value!);
     return value;
   }
 
-  // Cache-only pane read. GitHub queries run in owned background tasks, never
-  // on the render path; unknown metadata is explicit and subsequent reads fill
-  // it.
-  pullRequests(
-    wt: string | null,
-    urls: readonly string[],
-    knownBranch: string | null | undefined = undefined,
-  ): { prs: PrListRow[]; refreshing: boolean } {
-    const launch = (key: string, work: () => Promise<void>) => {
-      if (this.prRefreshing.has(key) || this.prRefreshing.size >= 4) return;
-      this.prRefreshing.add(key);
-      const run = async () => {
-        try {
-          await work();
-        } finally {
-          this.prRefreshing.delete(key);
-        }
-      };
-      if (this.inputs.backgroundTask)
-        this.inputs.backgroundTask("refresh_pr_metadata", run);
-      else void run().catch(() => {});
-    };
-    const cached = wt === null ? null : this.cwdPr.get(wt);
-    const branchPr =
-      knownBranch === undefined || cached?.[2] === knownBranch ? cached : null;
-    if (
-      wt !== null &&
-      (!branchPr || this.now() - branchPr[0] >= GH_CACHE_TTL)
-    ) {
-      launch(`cwd:${wt}`, async () => {
-        const branch =
-          knownBranch === undefined ? await this.branchAt(wt) : knownBranch;
-        const value = await this.currentPr(wt, branch);
-        this.cwdPr.set(wt, [this.now(), value, branch]);
-        while (this.cwdPr.size > 100)
-          this.cwdPr.delete(this.cwdPr.keys().next().value!);
-      });
-    }
-    const identities = new Map<
-      string,
-      NonNullable<ReturnType<typeof prIdentity>>
-    >();
-    for (const url of [
-      ...urls.slice(-50),
-      ...(branchPr?.[1] ? [branchPr[1].url] : []),
-    ]) {
-      const identity = prIdentity(url);
-      if (identity) identities.set(identity.url, identity);
-    }
-    const prs = [...identities.values()].slice(-50).map((identity) => {
-      const hit = this.prMetadata.get(identity.url);
-      if (!hit || this.now() - hit[0] >= GH_CACHE_TTL)
-        launch(identity.url, async () => {
-          let row: PrListRow = {
-            ...identity,
-            title: null,
-            state: null,
-            metadata: "unavailable",
-          };
-          const result = await runBounded(
-            [
-              "gh",
-              "pr",
-              "view",
-              String(identity.number),
-              "--repo",
-              identity.repo,
-              "--json",
-              "title,body,state,baseRefName",
-            ],
-            this.inputs.repoDir,
-            this.gitEnv(),
-            512 * 1024,
-            GH_TIMEOUT,
-          );
-          try {
-            const data: unknown =
-              result?.code === 0 && !result.truncated
-                ? JSON.parse(decoder.decode(result.out))
-                : null;
-            if (
-              data &&
-              typeof data === "object" &&
-              "title" in data &&
-              typeof data.title === "string" &&
-              "state" in data
-            ) {
-              const state =
-                data.state === "OPEN"
-                  ? "open"
-                  : data.state === "MERGED"
-                    ? "merged"
-                    : data.state === "CLOSED"
-                      ? "closed"
-                      : null;
-              if (state)
-                row = {
-                  ...identity,
-                  title: data.title,
-                  body:
-                    "body" in data && typeof data.body === "string"
-                      ? data.body
-                      : null,
-                  ...("baseRefName" in data &&
-                  typeof data.baseRefName === "string"
-                    ? { baseRefName: data.baseRefName }
-                    : {}),
-                  state,
-                  metadata: "ready",
-                };
-            }
-          } catch {}
-          this.prMetadata.set(identity.url, [this.now(), row]);
-          while (this.prMetadata.size > 500)
-            this.prMetadata.delete(this.prMetadata.keys().next().value!);
-        });
-      return (
-        hit?.[1] ?? {
-          ...identity,
-          title: branchPr?.[1]?.url === identity.url ? branchPr[1].title : null,
-          state: null,
-          metadata: "pending" as const,
-        }
+  private async upstreamHead(wt: string, branch: string): Promise<Head | null> {
+    const ref = await this.gitText(
+      [
+        "for-each-ref",
+        "--format=%(upstream:remotename)%00%(upstream:remoteref)",
+      ].concat([`refs/heads/${branch}`]),
+      wt,
+      1024,
+      5.0,
+    );
+    const [remote, merge] = pyStrip(ref.text ?? "").split("\0");
+    if (ref.code !== 0 || !remote || remote.startsWith("-")) return null;
+    if (!merge?.startsWith("refs/heads/")) return null;
+    const url = await this.gitText(["remote", "get-url", remote], wt, 4096);
+    const repo = url.code === 0 ? githubRepo(url.text ?? "") : null;
+    return repo
+      ? { remote, repo, branch: merge.slice("refs/heads/".length) }
+      : null;
+  }
+
+  /** The PR at `url` (canonical), or null when GitHub has none. */
+  pullRequest(url: string, reason: string, queue = url) {
+    const pr = prIdentity(url);
+    if (!pr) return Promise.resolve(null);
+    return this.cachedPr(pr.url, async () => {
+      const row = await this.gh(
+        queue,
+        ["pr", "view", String(pr.number), "--repo", pr.repo, "--json"].concat([
+          "number,title,url,state,baseRefName,statusCheckRollup,createdAt",
+        ]),
+        this.inputs.dataDir,
+        reason,
+        512 * 1024,
+        (r) => (r.truncated ? undefined : JSON.parse(decoder.decode(r.out))),
       );
+      return row === undefined ? undefined : prValue(row);
     });
-    return {
-      prs,
-      refreshing:
-        (wt !== null && this.prRefreshing.has(`cwd:${wt}`)) ||
-        [...identities.keys()].some((url) => this.prRefreshing.has(url)),
-    };
+  }
+
+  // Invariant: One lookup per repository branch or PR URL a minute, shared by
+  // worktrees and callers; a merged or closed PR is final. Capacity evicts
+  // only attempts older than a minute, final PRs only past 2,000 entries.
+  private cachedPr(
+    key: string,
+    find: () => Promise<PrValue | null | undefined>,
+  ): Promise<PrValue | null> {
+    const hit = this.headPrs.get(key);
+    if (
+      hit &&
+      (this.now() - hit[0] < BRANCH_PR_INTERVAL ||
+        (hit[1] !== null && hit[1].state !== "OPEN"))
+    )
+      return Promise.resolve(hit[1]);
+    let lookup = this.headLookups.get(key);
+    if (!lookup) {
+      lookup = find()
+        .catch(() => undefined)
+        .then((found) => {
+          const value = found === undefined ? (hit?.[1] ?? null) : found;
+          const now = this.now();
+          this.headPrs.delete(key);
+          this.headPrs.set(key, [now, value]);
+          for (const [old, [at, pr]] of this.headPrs) {
+            if (this.headPrs.size <= 200 || now - at < BRANCH_PR_INTERVAL)
+              break;
+            if (pr?.state === "OPEN" || !pr || this.headPrs.size > 2000)
+              this.headPrs.delete(old);
+          }
+          return value;
+        })
+        .finally(() => this.headLookups.delete(key));
+      this.headLookups.set(key, lookup);
+    }
+    return lookup;
+  }
+
+  /** The PR, null for none, or undefined when GitHub gave no valid answer. */
+  private async lookupHeadPr(
+    wt: string,
+    head: Head,
+    reason: string,
+    queue: string,
+  ): Promise<PrValue | null | undefined> {
+    const rows = await this.gh(
+      queue,
+      ["pr", "list", "--repo", head.repo, "--head", head.branch]
+        .concat(["--state", "all", "--limit", "5", "--json"])
+        .concat([
+          "number,title,url,state,baseRefName,statusCheckRollup,headRepository,headRepositoryOwner",
+        ]),
+      wt,
+      reason,
+      512 * 1024,
+      (r) => {
+        const rows: unknown = r.truncated
+          ? null
+          : JSON.parse(decoder.decode(r.out));
+        return Array.isArray(rows) ? rows : undefined;
+      },
+    );
+    if (rows === undefined) return undefined;
+    const ours = rows.filter(
+      (pr) =>
+        `${pr?.headRepositoryOwner?.login}/${pr?.headRepository?.name}`.toLowerCase() ===
+        head.repo.toLowerCase(),
+    );
+    return prValue(ours.find((pr) => pr.state === "OPEN") ?? ours[0]);
+  }
+
+  // One logged `gh` call at a time per `queue` (a conversation); `parse`
+  // rejects invalid output. Failures back all calls off, doubling from a
+  // minute to 15, or until GitHub's latest exhausted rate-limit reset.
+  private gh<T>(
+    queue: string,
+    args: string[],
+    cwd: string,
+    reason: string,
+    limit: number,
+    parse: (r: { out: Uint8Array; truncated: boolean }) => T | undefined,
+    timeout = GH_TIMEOUT,
+  ): Promise<T | undefined> {
+    const queued = this.now();
+    const run = (this.ghQueues.get(queue) ?? Promise.resolve()).then(
+      async () => {
+        if (this.now() < this.ghBackoff.until) {
+          this.inputs.log?.("gh_call_skipped", { reason, backoff: true });
+          return undefined;
+        }
+        const r = await this.ghLogged(
+          args,
+          cwd,
+          reason,
+          limit,
+          timeout,
+          queued,
+        );
+        let value: T | undefined;
+        try {
+          value = r?.code === 0 ? parse(r) : undefined;
+        } catch {}
+        if (value !== undefined) {
+          this.ghBackoff.seconds = 0;
+          return value;
+        }
+        const seconds = Math.min(Math.max(60, this.ghBackoff.seconds * 2), 900);
+        this.ghBackoff = {
+          seconds,
+          until: Math.max(this.ghBackoff.until, this.now() + seconds),
+        };
+        if (r === null) return undefined;
+        const limits = await this.ghLogged(
+          ["api", "rate_limit"],
+          cwd,
+          `${reason}_failed`,
+          64 * 1024,
+          GH_TIMEOUT,
+          this.now(),
+        );
+        try {
+          const resources = JSON.parse(decoder.decode(limits!.out)).resources;
+          for (const { remaining, reset } of Object.values(resources) as {
+            remaining?: unknown;
+            reset?: unknown;
+          }[])
+            if (remaining === 0 && typeof reset === "number")
+              this.ghBackoff.until = Math.max(
+                this.ghBackoff.until,
+                this.now() + reset - Date.now() / 1000,
+              );
+        } catch {}
+        return undefined;
+      },
+    );
+    const tail = run.catch(() => undefined);
+    this.ghQueues.set(queue, tail);
+    void tail.then(() => {
+      if (this.ghQueues.get(queue) === tail) this.ghQueues.delete(queue);
+    });
+    return run;
+  }
+
+  private async ghLogged(
+    args: string[],
+    cwd: string,
+    reason: string,
+    limit: number,
+    timeout: number,
+    queued: number,
+  ): ReturnType<typeof runBounded> {
+    const env = this.gitEnv();
+    env.GH_PAGER ??= "cat";
+    env.NO_COLOR ??= "1";
+    const started = this.now();
+    const r = await runBounded(["gh", ...args], cwd, env, limit, timeout);
+    this.inputs.log?.("gh_call", {
+      reason,
+      command: `gh ${args.slice(0, 2).join(" ")}`,
+      exit: r?.code ?? null,
+      waited_ms: Math.round((started - queued) * 1000),
+      ms: Math.round((this.now() - started) * 1000),
+    });
+    return r;
   }
 
   private async diffFiles(
@@ -1115,8 +1212,7 @@ export class WorkdirGit {
         statText += "\n... [stat truncated at the 64 KiB server cap]\n";
       if (df.truncated) diff += DIFF_TRUNCATION_MARK;
       const cached = this.cwdPr.get(wt);
-      const current = cached?.[2] === branch ? cached[1] : null;
-      this.pullRequests(wt, [], branch);
+      const current = cached?.[1] === branch ? cached[0] : null;
       if (
         !pyStrip(diff) &&
         !untrackedCapped.length &&
@@ -1185,13 +1281,10 @@ export class WorkdirGit {
     const candidate = join(root, rel);
     let newRaw = new Uint8Array(0);
     try {
-      if (
-        (await isFile(candidate)) &&
-        (await stat(candidate)).size > MAX_FILE_CONTENT_BYTES
-      )
+      const info = await stat(candidate);
+      if (info.isFile() && info.size > MAX_FILE_CONTENT_BYTES)
         return [null, null, true, false];
-      if (await isFile(candidate))
-        newRaw = new Uint8Array(await readFile(candidate));
+      if (info.isFile()) newRaw = new Uint8Array(await readFile(candidate));
     } catch {
       newRaw = new Uint8Array(0);
     }
@@ -1203,10 +1296,12 @@ export class WorkdirGit {
     return [oldText, newText, false, false];
   }
 
-  // GitHub's PR patch, independent of checkout lifetime. No full-file reads.
+  // GitHub's PR patch and description, independent of checkout lifetime. No
+  // full-file reads.
   async pullRequestDiff(
     url: string,
     path: string | null = null,
+    queue = url,
   ): Promise<Record<string, unknown>> {
     const pr = prIdentity(url);
     if (!pr) return { available: false, reason: "invalid-pull-request" };
@@ -1217,29 +1312,36 @@ export class WorkdirGit {
     if (!cached) {
       if (this.prPatches.size >= 8)
         this.prPatches.delete(this.prPatches.keys().next().value!);
+      const repo = ["--repo", pr.repo];
       cached = [
         now,
-        runBounded(
-          [
-            "gh",
-            "pr",
-            "diff",
-            String(pr.number),
-            "--repo",
-            pr.repo,
-            "--color",
-            "never",
-          ],
+        this.gh(
+          queue,
+          ["pr", "diff", String(pr.number), ...repo, "--color", "never"],
           this.inputs.dataDir,
-          this.gitEnv(),
+          "pull_request_diff",
           MAX_DIFF_BYTES,
+          (r) => r,
           DIFF_TIMEOUT,
+        ),
+        this.gh(
+          queue,
+          ["pr", "view", String(pr.number), ...repo, "--json", "body"],
+          this.inputs.dataDir,
+          "pull_request_description",
+          512 * 1024,
+          (r) => {
+            const body: unknown = r.truncated
+              ? null
+              : JSON.parse(decoder.decode(r.out))?.body;
+            return typeof body === "string" ? body : undefined;
+          },
         ),
       ];
       this.prPatches.set(pr.url, cached);
     }
     const result = await cached[1];
-    if (!result || result.code !== 0) {
+    if (!result) {
       this.prPatches.delete(pr.url);
       return { available: false, reason: "pull-request-unavailable", path };
     }
@@ -1256,9 +1358,11 @@ export class WorkdirGit {
         truncated: result.truncated || bytes.length > MAX_FILE_PATCH_BYTES,
       };
     }
+    const body = await cached[2];
     return {
       available: true,
       truncated: result.truncated,
+      body: body ?? null,
       files: files
         .slice(0, MAX_DIFF_FILES)
         .map(({ patch: _patch, ...file }) => file),

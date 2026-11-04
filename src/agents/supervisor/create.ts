@@ -12,7 +12,7 @@ import {
 import { abortable, checkAbort, type TaskSet } from "../../utils/tasks";
 import {
   CID_RE,
-  freshPinnedOrder,
+  freshTakenOverOrder,
   stripPendingKeys,
   validLevel,
   validateExternalKey,
@@ -124,8 +124,8 @@ export interface CreateDeps {
   sleep(seconds: number, signal: AbortSignal): Promise<void>;
   /** Joins create transactions at shutdown. */
   tasks: TaskSet;
-  /** conversation_store._fresh_pinned_order. */
-  freshPinnedOrder?: () => string;
+  /** conversation_store.freshTakenOverOrder. */
+  freshTakenOverOrder?: () => string;
 }
 
 export interface CreateOptions {
@@ -137,7 +137,6 @@ export interface CreateOptions {
   workdir?: string | null;
   attachmentDraft?: string | null;
   muted?: boolean;
-  pinned?: boolean;
   takenOver?: boolean;
   spawnRequestId?: string | null;
   externalKey?: string | null;
@@ -504,12 +503,14 @@ export class SupervisorCreate {
       latest_context_usage: null,
       status: "idle",
       muted: !!muted,
-      pinned: !!(o.takenOver || o.pinned),
+      taken_over: !!o.takenOver,
       updated: this.deps.now(),
       created: this.deps.now(),
     };
-    if (conv.pinned)
-      conv.pinned_order = (this.deps.freshPinnedOrder ?? freshPinnedOrder)();
+    if (conv.taken_over)
+      conv.taken_over_order = (
+        this.deps.freshTakenOverOrder ?? freshTakenOverOrder
+      )();
     if (level !== null) conv.level = level;
     if (externalKey) conv.external_key = externalKey;
     if (principal !== null) conv.service_principal = principal;
@@ -557,11 +558,14 @@ export class SupervisorCreate {
     );
   }
 
-  /** Set the operator Take-over flag (pin and mute together). */
-  async setPinned(cid: string, pinned: boolean): Promise<ConversationRecord> {
+  /** Set the operator Take-over flag and mute; notify on control changes. */
+  async setTakenOver(
+    cid: string,
+    takenOver: boolean,
+  ): Promise<ConversationRecord> {
     const { conversations, nodes } = this.deps;
     return this.deps.lifecycle.guard(
-      "set_pinned",
+      "set_taken_over",
       cid,
       () =>
         conversations.withConfigurationMetadataGuard(
@@ -569,17 +573,17 @@ export class SupervisorCreate {
           async (titleToken) => {
             const conv = conversations.load(cid);
             if (conv === null) throw new KeyError(cid);
-            const takenOver = pinned && !conv.pinned;
-            conv.pinned = !!pinned;
-            conv.muted = !!pinned;
-            conv.pinned_order = (
-              this.deps.freshPinnedOrder ?? freshPinnedOrder
+            const controlChanged = !!conv.taken_over !== takenOver;
+            conv.taken_over = takenOver;
+            conv.muted = takenOver;
+            conv.taken_over_order = (
+              this.deps.freshTakenOverOrder ?? freshTakenOverOrder
             )();
             conv.updated = this.deps.now();
             nodes.node(cid).muteDesired =
-              conv.status === "running" ? !!pinned : null;
+              conv.status === "running" ? takenOver : null;
             await conversations.save(conv, titleToken);
-            if (takenOver) this.notifyTakeover(cid, conv);
+            if (controlChanged) this.notifyControlChange(cid, conv);
             const found = nodes.existing(cid);
             const inbox = found !== null ? found.inboxMessages() : [];
             conv.pending = inbox.map((m) => stripPendingKeys(m));
@@ -590,18 +594,21 @@ export class SupervisorCreate {
     );
   }
 
-  private notifyTakeover(heldId: string, conv: ConversationRecord): void {
-    const content = `User has taken control of the agent, do not message ${conv.title || heldId} (${heldId}).`;
+  private notifyControlChange(heldId: string, conv: ConversationRecord): void {
+    const agent = `${conv.title || heldId} (${heldId})`;
+    const content = conv.taken_over
+      ? `User has taken control of ${agent}; do not message it.`
+      : `User has returned control of ${agent}; you can message it again.`;
     const recipients = new Set([heldId]);
     if (typeof conv.parent === "string" && conv.parent)
       recipients.add(conv.parent);
     for (const cid of recipients) {
-      this.deps.tasks.spawn("takeover_note", async () => {
+      this.deps.tasks.spawn("control_note", async () => {
         try {
           if ((await this.deps.deliverPlatformNote(cid, content)) === null)
-            throw new Error("recipient refused take-over note");
+            throw new Error("recipient refused control-change note");
         } catch (error) {
-          logEvent(this.deps.log, WARNING, "takeover_note_failed", {
+          logEvent(this.deps.log, WARNING, "control_note_failed", {
             conversation_id: cid,
             fields: { held_agent: heldId, error: String(error) },
           });

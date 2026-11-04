@@ -44,7 +44,7 @@ interface DownloadActions {
   fallback: () => void;
 }
 
-function responseFilename(response: Pick<Response, "headers">): string {
+export function responseFilename(response: Pick<Response, "headers">): string {
   const value = response.headers.get("Content-Disposition") || "";
   const encoded = /filename\*=utf-8''([^;]+)/i.exec(value)?.[1];
   if (encoded) {

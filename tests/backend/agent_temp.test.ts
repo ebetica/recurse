@@ -258,8 +258,8 @@ test("legacy row without tmp_key gets one assigned under the real store's guards
         effort: "high",
         title: "first",
         title_order: "00000000000000000001-a",
-        pinned: false,
-        pinned_order: `00000000000000000001-${"a".repeat(32)}`,
+        taken_over: false,
+        taken_over_order: `00000000000000000001-${"a".repeat(32)}`,
       });
       const spec: TempSpec = { name: "legacy", ops: [] };
       const { temp } = build(root, spec, () => 1, new Set(), {

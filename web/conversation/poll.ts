@@ -3,6 +3,8 @@
 // replaces the row poll while open, boot-restore selection, and pending
 // mute/title application. This module drives; thread/fetch/chrome render.
 import { homeBackend } from "../backends/backend.js";
+import { startTreeEvents } from "../backends/events.js";
+import { phoneListEntry } from "../phone-nav.js";
 import { sharedTrees, sharedTreeNodes } from "../shared-trees.js";
 import {
   refreshRemoteTrees,
@@ -72,6 +74,7 @@ import {
 import { reconcilePendingManualTitle } from "../title-actions.js";
 import {
   requestArtifactsRefresh,
+  requestPrsRefresh,
   requestUiRefresh,
   treeMutationNeedsUiRefresh,
 } from "../ui-events.js";
@@ -79,6 +82,8 @@ import {
 // Focused SSE owns rows; polls keep chrome and provide a fallback.
 let focusedEventsId: string | null = null;
 let focusedEventsSub: FocusedSubscription | null = null;
+let focusedEventsHealthy = false;
+let focusedEventsActivity = 0;
 let focusedEventsGone: string | null = null;
 let wakePaint: { id: string; at: number } | null = null;
 
@@ -98,19 +103,39 @@ function finishWakePaint(id: string, requestedAt: number): void {
 // arrive as snapshot/rows frames (resyncing with Last-Event-ID on
 // reconnect), so the poll loop skips its own /view tail read for this id.
 export function focusedEventsLive(id: string): boolean {
-  return focusedEventsId === id && focusedEventsSub !== null;
+  const running =
+    state.currentConv?.id === id && state.currentConv.status === "running";
+  if (
+    focusedEventsId === id &&
+    focusedEventsHealthy &&
+    performance.now() - focusedEventsActivity > (running ? 12_000 : 130_000)
+  ) {
+    closeFocusedEvents();
+    retargetFocusedEvents(id);
+  }
+  return (
+    focusedEventsId === id && focusedEventsSub !== null && focusedEventsHealthy
+  );
 }
 
 function closeFocusedEvents(): void {
   focusedEventsSub?.close();
   focusedEventsSub = null;
   focusedEventsId = null;
+  focusedEventsHealthy = false;
+  focusedEventsActivity = 0;
 }
 
 export function retargetFocusedEvents(id: string | null): void {
   if (focusedEventsGone !== null && focusedEventsGone !== id)
     focusedEventsGone = null;
-  if (!id || id === DRAFT || embeddedFrameHidden()) {
+  if (
+    !id ||
+    id === DRAFT ||
+    document.hidden ||
+    embeddedFrameHidden() ||
+    phoneListEntry()
+  ) {
     if (focusedEventsSub) closeFocusedEvents();
     return;
   }
@@ -123,17 +148,26 @@ export function retargetFocusedEvents(id: string | null): void {
   if (focusedEventsId === id || focusedEventsGone === id) return;
   closeFocusedEvents();
   const held = rowThreads.get(id);
-  const lastEventId = held ? `${held.instanceId}:${held.revision}` : null;
+  // Invariant: The stream resumes from rows a /view read already holds; with
+  // none it would resend that read's window as a snapshot.
+  if (!held) return;
+  const lastEventId = `${held.instanceId}:${held.revision}`;
   const sub = subscribeFocusedEvents(
     id,
     {
       onPage: (_kind, page, at) => {
+        focusedEventsHealthy = true;
         markMainThreadEvent("stream-batch");
+        const held = rowThreads.get(id);
+        const stale =
+          held?.instanceId === page.instance_id &&
+          held.revision > page.revision;
         applyFocusedEventPage(id, page);
-        applyFrameRunState(id, page, at);
+        if (!stale) applyFrameRunState(id, page, at);
         if (page.status === "ready") finishWakePaint(id, at);
       },
       onTerminal: (status) => {
+        focusedEventsHealthy = false;
         if (status === "gone") {
           focusedEventsGone = id;
           closeFocusedEvents();
@@ -143,15 +177,17 @@ export function retargetFocusedEvents(id: string | null): void {
         // reconnects on its own retry loop with the latest id.
         void poll();
       },
+      onActivity: () => {
+        focusedEventsActivity = performance.now();
+        focusedEventsHealthy = true;
+      },
       onTransportError: () => {
-        // Invariant: One-shot catch-up while the stream re-establishes: the
-        // recurring row poll is gone, but a failed attempt still gets a single
-        // /view tail read so errors keep the polling fallback V4 promised.
+        focusedEventsHealthy = false;
         catchUpRowThread(id);
         void poll();
       },
     },
-    { lastEventId },
+    { lastEventId, viewing: !embedded },
   );
   if (sub) {
     focusedEventsSub = sub;
@@ -200,11 +236,11 @@ export function applyPendingTakeovers(): void {
       delete state.pendingTakeovers[id];
       continue;
     }
-    if (n.muted === took && (n.pinned ?? false) === took)
+    if (n.muted === took && (n.taken_over ?? false) === took)
       delete state.pendingTakeovers[id];
     else {
       n.muted = took;
-      n.pinned = took;
+      n.taken_over = took;
     }
   }
 }
@@ -331,6 +367,19 @@ const labelOf = (id: string): string =>
 // Apply a backend tree to sidebar/finder/caches/chrome (home label: "").
 // Null means status-only change; return whether applied. The loader discards
 // superseded reads so stale snapshots never resurrect renamed/deleted agents.
+// Ancestors list their descendants' PRs: tell `id` and each ancestor.
+function prsChangedBelow(
+  id: string,
+  nodes: Record<string, import("../types.js").TreeNode>,
+): void {
+  const seen = new Set<string>();
+  for (let at: string | null = id; at && !seen.has(at); ) {
+    seen.add(at);
+    requestPrsRefresh(at);
+    at = nodes[at]?.parent ?? null;
+  }
+}
+
 function commitTree(label: string, read: TreeRead | null): boolean {
   if (!read) {
     if (label && homeTreeKnown) {
@@ -459,7 +508,25 @@ function commitTree(label: string, read: TreeRead | null): boolean {
         previousNodes[id].artifacts_revision !== node.artifacts_revision
       )
         requestArtifactsRefresh(id);
+      const prev = previousNodes[id];
+      if (prev && prev.prs_revision !== node.prs_revision)
+        requestPrsRefresh(id);
+      const moved = !!prev && prev.parent !== node.parent;
+      if (moved && prev.parent) prsChangedBelow(prev.parent, previousNodes);
+      if (
+        node.parent &&
+        (moved ||
+          (node.prs_revision &&
+            (prev
+              ? prev.prs_revision !== node.prs_revision ||
+                prev.title !== node.title
+              : Object.keys(previousNodes).length > 0)))
+      )
+        prsChangedBelow(node.parent, nextNodes);
     }
+    for (const [id, node] of Object.entries(previousNodes))
+      if (!nextNodes[id] && node.prs_revision && node.parent)
+        prsChangedBelow(node.parent, previousNodes);
     // Invariant: Deleted inactive conversations have no future selection
     // boundary at which to replace their stale browser preview.
     for (const id of [...state.convCache.keys()])
@@ -546,16 +613,65 @@ function commitTree(label: string, read: TreeRead | null): boolean {
 // Starts every backend's tree read independently of the focused read, so a
 // slow remote or focused read never holds back the home's tree.
 function readTrees(force: boolean): Promise<boolean> {
-  refreshRemoteTrees(commitTree, force);
-  return treeOf(homeBackend).refresh((read) => commitTree("", read), force);
+  const commit = (label: string, read: TreeRead | null) => {
+    if (read?.changed) notePollActivity();
+    return commitTree(label, read);
+  };
+  refreshRemoteTrees(commit, force);
+  return treeOf(homeBackend).refresh((read) => commit("", read), force);
 }
+
+// Quiet polls (no tree change, repaint or input) back off from 1.5 s to 5 s.
+const POLL_MS = 1500;
+const QUIET_POLL_MS = 5000;
+let quietPolls = 0;
+let pollActivity = 0;
+let pollTimer: ReturnType<typeof setTimeout> | undefined;
+let pollDueAt = 0;
+let pollWhen: () => boolean = () => true;
+
+function schedulePoll(delay: number): void {
+  clearTimeout(pollTimer);
+  pollDueAt = performance.now() + delay;
+  pollTimer = setTimeout(() => {
+    if (pollWhen()) void poll();
+    schedulePoll(
+      quietPolls < 3
+        ? POLL_MS
+        : Math.min(POLL_MS * 2 ** (quietPolls - 2), QUIET_POLL_MS),
+    );
+  }, delay);
+}
+
+/** Starts polling; hidden Side frames skip ticks via `when` and catch up. */
+export function startPolling(when: () => boolean): void {
+  pollWhen = when;
+  startTreeEvents((label) => (read) => {
+    if (read?.changed) notePollActivity();
+    return commitTree(label, read);
+  });
+  schedulePoll(POLL_MS);
+}
+
+/** Something changed or the user acted: poll at the fast rate again. */
+export function notePollActivity(): void {
+  pollActivity++;
+  quietPolls = 0;
+  if (pollTimer !== undefined && pollDueAt - performance.now() > POLL_MS)
+    schedulePoll(POLL_MS);
+}
+for (const event of ["keydown", "pointerdown"])
+  window.addEventListener(event, notePollActivity, {
+    capture: true,
+    passive: true,
+  });
 
 export function poll(): Promise<void> {
   return runPoll(false);
 }
 
 async function runPoll(force: boolean): Promise<void> {
-  if (initialPollSettled && embeddedFrameHidden()) return;
+  if (initialPollSettled && (document.hidden || embeddedFrameHidden())) return;
   if (!force && polling && performance.now() - pollStartedAt < POLL_WEDGE_MS) {
     void readTrees(false);
     return;
@@ -563,6 +679,7 @@ async function runPoll(force: boolean): Promise<void> {
   polling = true;
   pollStartedAt = performance.now();
   const generation = ++pollGeneration;
+  const activityBefore = pollActivity;
   // Invariant: Focused and tree reads race; warming waits for focused
   // completion. Catch at creation: navigation can leave the promise unawaited,
   // and render faults must not become unhandled rejections.
@@ -603,6 +720,7 @@ async function runPoll(force: boolean): Promise<void> {
     if (generation === pollGeneration) {
       polling = false;
       initialPollSettled = true;
+      if (pollActivity === activityBefore) quietPolls++;
     }
   }
 }
@@ -611,6 +729,7 @@ async function runPoll(force: boolean): Promise<void> {
 // backgrounding can freeze fetches and pause timers indefinitely.
 export function wake(): void {
   if (document.hidden || embeddedFrameHidden() || wakePollPending) return;
+  notePollActivity();
   wakePollPending = true;
   wakePaint = { id: state.selectedId, at: performance.now() };
   // Invariant: An open stream may have silently died while the phone slept.
@@ -635,8 +754,15 @@ window.addEventListener("recurse:embedded-visibility", () => {
   if (embeddedFrameHidden()) closeFocusedEvents();
   else wake();
 });
-document.addEventListener("visibilitychange", wake);
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) closeFocusedEvents();
+  else wake();
+});
 window.addEventListener("focus", wake);
+window.addEventListener("recurse:phone-view", () =>
+  retargetFocusedEvents(state.selectedId),
+);
+window.addEventListener("online", wake);
 window.addEventListener("pageshow", wake);
 
 // Cleared by refreshConv in fetch.ts when its focused read lands on the parked

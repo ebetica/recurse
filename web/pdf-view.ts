@@ -11,20 +11,46 @@ const ASSETS = "/static/pdfjs/";
 
 let library: Promise<typeof import("pdfjs-dist")> | null = null;
 const views = new Map<HTMLElement, AbortController>();
-const documents = new WeakMap<HTMLCanvasElement, PDFDocumentProxy>();
+interface HeldDocument {
+  doc: PDFDocumentProxy;
+  pins: number;
+  closing: boolean;
+  destroy: () => void;
+}
+const documents = new WeakMap<HTMLCanvasElement, HeldDocument>();
 
-/** Render a selected PDF region at 144 dpi, capped at 2048 px. */
-export async function cropPdfPage(
-  source: HTMLCanvasElement,
+/** Keep a PDF available for a pending crop even after its viewer closes. */
+export function holdPdfPage(source: HTMLCanvasElement): {
+  crop: (box: CommentBox) => Promise<HTMLCanvasElement>;
+  release: () => void;
+} {
+  const held = documents.get(source);
+  if (!held) throw new Error("PDF page unavailable");
+  held.pins++;
+  const page = Number(source.dataset.page);
+  let released = false;
+  return {
+    crop: (box) => cropPdfPage(held.doc, page, box),
+    release: () => {
+      if (released) return;
+      released = true;
+      held.pins--;
+      if (!held.pins && held.closing) held.destroy();
+    },
+  };
+}
+
+/** Render a selected PDF region at 144 dpi, capped at 1568 px. */
+async function cropPdfPage(
+  doc: PDFDocumentProxy,
+  pageNumber: number,
   box: CommentBox,
 ): Promise<HTMLCanvasElement> {
-  const doc = documents.get(source);
-  if (!doc) throw new Error("PDF page unavailable");
-  const page = await doc.getPage(Number(source.dataset.page));
+  const page = await doc.getPage(pageNumber);
   const natural = page.getViewport({ scale: 1 });
   const scale = Math.min(
     2,
-    2048 / Math.max(natural.width * box.w, natural.height * box.h),
+    1568 / Math.max(natural.width * box.w, natural.height * box.h),
   );
   const viewport = page.getViewport({ scale });
   const canvas = document.createElement("canvas");
@@ -126,23 +152,28 @@ async function show(
     },
     { rootMargin: "600px 0px" },
   );
+  let held: HeldDocument | null = null;
   signal.addEventListener(
     "abort",
     () => {
       observer.disconnect();
       for (const canvas of drawing.keys()) release(canvas);
-      void task.destroy();
+      if (held) {
+        held.closing = true;
+        if (!held.pins) held.destroy();
+      } else void task.destroy();
     },
     { once: true },
   );
   const doc = await task.promise;
+  held = { doc, pins: 0, closing: false, destroy: () => void task.destroy() };
   const first = (await doc.getPage(1)).getViewport({ scale: 1 });
   signal.throwIfAborted();
   const count = Math.min(doc.numPages, MAX_PAGES);
   const pages = Array.from({ length: count }, (_, index) => {
     const canvas = document.createElement("canvas");
     canvas.className = "files-pdf-page";
-    documents.set(canvas, doc);
+    documents.set(canvas, held!);
     canvas.dataset.page = String(index + 1);
     canvas.width = 0;
     canvas.height = 0;

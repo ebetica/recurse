@@ -8,6 +8,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ShellRecord, ShellRegistry } from "./pi_bg_shell";
 import { bootId, procStat, sessionMemberState } from "./utils/proc_stat";
 import { PROC } from "./utils/process_table";
+import { slowSpan } from "./observability/slow_span";
 
 import type { ProcStat } from "./utils/proc_stat";
 import { AsyncMutex, TaskSet } from "./utils/tasks";
@@ -901,11 +902,16 @@ export class ProcessLifecycle {
         ...(options.env ?? this.options.baseEnv?.() ?? {}),
         PI_BG_SHELL_OWNER_ID: ownerId,
       };
-      const proc = Bun.spawn(argv, {
-        ...(options.spawn ?? {}),
-        env,
-        detached: true,
-      }) as unknown as T;
+      const proc = slowSpan(
+        "owned_process_spawn",
+        options.cid ?? undefined,
+        () =>
+          Bun.spawn(argv, {
+            ...(options.spawn ?? {}),
+            env,
+            detached: true,
+          }),
+      ) as unknown as T;
       try {
         const handle = await this.registerProcess(
           proc,

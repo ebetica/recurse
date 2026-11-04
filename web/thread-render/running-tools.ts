@@ -35,7 +35,6 @@ export function runningToolLabel(row: ViewBlock): string {
     write: "Writing",
     wait: "Waiting",
     grep: "Searching",
-    multi_grep: "Searching",
     find: "Finding",
     chdir: "Opening",
   }[name || ""];

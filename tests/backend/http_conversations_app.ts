@@ -325,6 +325,7 @@ export async function buildConversationsApp(
     store: {
       load: (cid) => world.load(cid),
       metadataSnapshot: (cid) => world.load(cid),
+      subtree: () => [],
       save: (conv) => world.save(conv),
       effectiveWorkdir(conv) {
         if (typeof conv.workdir !== "string") throw new KeyError("workdir");
@@ -388,8 +389,6 @@ export async function buildConversationsApp(
       },
       readTurnPrompt: async (_cid, offset) =>
         offset === 0 ? { text: "prompt", offset } : null,
-      readMarkerSummary: async (_cid, _offset, generation) =>
-        generation === 1 ? { summary: "carried" } : null,
       readContextUsage: async (cid) =>
         world.convs.has(cid) ? { tokens: 10 } : null,
       readBasePrompt: async (cid) =>
@@ -405,10 +404,10 @@ export async function buildConversationsApp(
     create: {
       create: (o) => world.create(o),
       createOrRejoinServiceConversation: (o) => world.serviceCreate(o),
-      async setPinned(cid, pinned) {
-        world.log("set_pinned", cid, pinned);
+      async setTakenOver(cid, takenOver) {
+        world.log("set_taken_over", cid, takenOver);
         if (!world.convs.has(cid)) throw new KeyError(cid);
-        world.convs.get(cid)!.pinned = pinned;
+        world.convs.get(cid)!.taken_over = takenOver;
         return world.load(cid)!;
       },
     },
@@ -452,14 +451,6 @@ export async function buildConversationsApp(
         world.log("request_model_change", cid, model, effort, level);
         if (model === "unknown") return null;
         return { model, effort, level, pending_model: model };
-      },
-      async requestMute(cid, muted) {
-        world.log("request_mute", cid, muted);
-        return { id: cid, muted };
-      },
-      async toggleMute(cid) {
-        world.log("toggle_mute", cid);
-        return { id: cid, muted: true };
       },
     },
     compaction: {
@@ -526,6 +517,7 @@ export async function buildConversationsApp(
         cid === "done-spawn" ? { status: "created", id: cid } : null,
       observe: async (cid) => world.log("observe_spawn_outcome", cid),
     },
+    prs: { refresh: (cid) => world.log("refresh_prs", cid) },
     git: {
       workdirFile(key) {
         if (key.includes("..")) throw new ValueError("unsafe");
@@ -536,9 +528,9 @@ export async function buildConversationsApp(
       worktreeDiff: (cwd, base, source) => git.worktreeDiff(cwd, base, source),
       diffFile: (cwd, path, base, contents) =>
         git.diffFile(cwd, path, base, contents),
-      pullRequestDiff: (url, path) => git.pullRequestDiff(url, path),
+      pullRequestDiff: (url, path, queue) =>
+        git.pullRequestDiff(url, path, queue),
       diffCandidates: (cwd) => git.diffCandidates(cwd),
-      pullRequests: (cwd, urls) => git.pullRequests(cwd, urls),
       githubRepoUrl: (stored, file) => git.githubRepoUrl(stored, file),
     },
   };

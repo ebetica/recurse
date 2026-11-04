@@ -227,9 +227,8 @@ export async function reviewWithCandidates(
     action: string;
     durableEvidence: string;
     conversationId: string | undefined;
-    blocks: readonly string[] | undefined;
     complete?: Parameters<ReviewAction>[6];
-    inputs?: Parameters<ReviewAction>[10];
+    inputs?: Parameters<ReviewAction>[9];
   },
 ): Promise<SafetyVerdict> {
   const call = (candidate: ReviewSelection) =>
@@ -243,7 +242,6 @@ export async function reviewWithCandidates(
       args.complete,
       args.durableEvidence,
       args.conversationId,
-      args.blocks,
       args.inputs,
     );
   let verdict = await call(reviewers[0]!);

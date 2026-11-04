@@ -1,645 +1,94 @@
 #!/usr/bin/env bun
 /**
- * Subagent commands:
- *
- *   create --title "Short name" [--effort <1-5>] [--remote <label> | --sibling] [--taken-over] [--worktree <name> [--worktree-source <path>] [--commit <ref>]] "<task prompt>"
- *       Create a child in your cwd, or --sibling under your parent (top-level
- *       outside a tree); give it a complete task because it cannot see your
- *       conversation, and do not repeat a pending create.
- *       --worktree creates a managed child worktree from cwd or --worktree-source
- *       (a real, non-symlink, non-bare checkout root); --commit defaults to HEAD,
- *       fetches remote-tracking refs and stops creation on fetch/resolve failure.
- *       Worktree creation launches cleanup detached and never waits for it.
- *       --taken-over creates an agent already taken over: the operator controls
- *       it; its replies are not reported to you. Cannot combine with --remote.
- *       --remote <label> creates a top-level agent on a connected backend and
- *       returns cid@label. The remote applies its own defaults; no automatic
- *       parent report is sent. Cannot combine with sibling or worktree options.
- *       Offline remotes fail immediately with last-seen information; nothing queues.
- *       Keyless/open-mode connections refuse agent control; reconnect with a key.
- *
- *   send <cid|id@label> [--interrupt] "<message>"
- *       id@label reaches connected backends, or the home's agents and other
- *       remotes through a home polling this backend, then waits for
- *       delivered, failed or not confirmed. Bare ids remain local; reply to remote
- *       senders using the full id@label in their message header.
- *       Polling homes support only send; other remote commands need a direct connection.
- *       --interrupt stops the current turn before delivery; idle targets start
- *       a turn, and queued messages retain their order.
- *   interrupt <cid|cid@label>
- *       Stop its turn and background jobs.
- *   messages <target> [--limit N] [--before <cursor>] [--after <cursor>] [--full]
- *       Read live or archived JSONL pages without waking or reviving agents;
- *       stderr gives prev/next cursors. --full prints untruncated text/tool args.
- *       Local targets accept ids, titles or unique suffixes.
- *       id@label reads only backends this one connects to, not polling homes.
- *   backends add <label> <url>
- *       Request a backend connection; the operator signs it in in Settings.
- *   backends list
- *       List labels, URLs, states, reasons and last contact, never keys.
- *   tail <cid|cid@label>
- *   wait <cid|cid@label> [<cid|cid@label> ...] [--timeout S]
- *   move <cid> --to <new-parent-cid>
- *   rm <cid|cid@label> [<cid|cid@label> ...]
- *       Queue removal and detached worktree cleanup; neither waits for deletion.
- *   revive <id-or-query> [--top-level | --parent <cid>]
- *   revive --from PATH [--top-level | --parent <cid>]
- *       Restore archived history idle under you, keeping its id (cleared copies
- *       get a new id); revive descendants separately, and use --top-level or
- *       --parent to place it elsewhere.
- *       --from imports an archive directory, session.sqlite or Pi v3 JSONL
- *       (256 MiB max), leaving the source untouched and assigning a new id with
- *       safety on; unavailable model/cwd falls back with a note.
+ * create --title "short-name" [--effort 1-5] [--sibling | --remote <label>] [--taken-over] [--worktree <name> [--worktree-source <path>] [--commit <ref>]] "<task>"
+ *     Starts in your cwd and can't see your conversation: give it the complete
+ *     task. Its final message comes back to you automatically. Creation can be
+ *     slow; don't repeat a pending create. --sibling: under your parent.
+ *     --worktree: a managed checkout from cwd or --worktree-source (--commit
+ *     defaults to HEAD). --taken-over: the operator controls it; its replies
+ *     aren't reported to you. --remote: top-level on a connected backend;
+ *     returns id@label and sends no report back.
+ * send <id|id@label> [--interrupt] "<message>"
+ *     Waits until delivered, queued, failed or not confirmed; an idle agent
+ *     starts a turn. Reply to remote senders with the full id@label from their
+ *     header. --interrupt stops the current turn first.
+ * interrupt <id|id@label>
+ *     Stops its turn and its background jobs.
+ * status [<id|id@label> ...] [--subtree] [--json]
+ * idle [<id|id@label>] [--wait S]
+ *     Exit 0 if the subtree is idle; otherwise print busy ids and exit 1.
+ * wait <id|id@label> ... [--timeout S]
+ * tail <id|id@label>
+ * read <id@label> [--offset N] [--limit N]
+ *     A remote agent's transcript. For local agents, read their transcript.txt.
+ * search <query> [target] [--tree | --all] [--deleted] [--role <role>] [--limit N]
+ *     Literal, case-insensitive search of full transcripts; defaults to yours.
+ *     Runs until complete or the limit; interrupt to cancel. --deleted is slow
+ *     across all deleted agents; prefer a target.
+ * compact <id|id@label>
+ * move <id> --to <parent-id>
+ * tag <id> [--add a,b] [--remove a,b]
+ * rm <id|id@label> ...
+ *     Deletes each agent and its subtree; one id at a time is safest.
+ * revive <id-or-query | --from PATH> [--top-level | --parent <id>]
+ *     Restore a deleted agent (or import an archive/session file) idle under you.
  */
 // Agent-tree HTTP commands; the leading JSDoc is the canonical help source.
 
-import { lstatSync } from "node:fs";
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import {
   ensureNamedWorktree,
   requestReapSweep,
+  resolveWorktreeSource,
   rootFromEnv,
 } from "./worktree.ts";
 import { cleanTitle } from "../src/title_text";
+import { validBackendLabel } from "../src/backends/label";
 import { toolHelp } from "./_help.ts";
 
-type JsonObject = Record<string, unknown>;
+import {
+  codePointSlice,
+  isObject,
+  jsonLine,
+  jsonParse,
+  oneLine,
+  pyTruthy,
+  pythonStrip,
+  renderWindow,
+  summarizeArgs,
+  textBlocks,
+  type JsonObject,
+  type Row,
+} from "../src/agents/durable/message_projection";
 type Output = { code: number; stdout: string; stderr: string };
 
-const SUBCOMMAND_HELP: Record<string, string> = {
-  backends: `usage: subagent backends add <label> <url> | backends list
-
-Request a connection for the operator to sign in in Settings, or list
-labels, URLs, states, reasons and last contact. Never supplies or prints keys.
-`,
-  create: `usage: subagent.py create [-h] --title TITLE [--effort 1-5] [--sibling] [--taken-over]
-                          [--worktree name [--worktree-source path] [--commit ref]]
-                          prompt
-
-Spawn a child or sibling in your current directory, or a remote top-level agent.
-
-positional arguments:
-  prompt           task for the new subagent
-
-options:
-  -h, --help       show this help message and exit
-  --title TITLE    short sidebar label (a few words, e.g. dataset-impl-
-                   coding); detail goes in the task prompt
-  --effort 1-5     effort level 1-5 (local defaults to yours; remote uses its own)
-  --remote LABEL   create on a connected backend using its defaults; returns
-                   cid@label, without a parent report; offline calls queue nothing.
-                   Requires a backend key; reconnect open-mode remotes with authentication
-  --sibling        create a child of your parent; a top-level caller creates
-                   another top-level agent
-  --taken-over     create already taken over: the operator controls it; its replies
-                   are not reported to you. Cannot combine with --remote
-  --worktree name  give the child a fresh managed worktree (held by the child)
-                   instead of sharing your directory; source defaults to your cwd
-  --worktree-source path
-                   fork from this checkout instead (requires --worktree); path
-                   is resolved and must be a real, non-symlink, non-bare Git
-                   checkout top level, not a subdirectory
-  --commit ref     starting commit (default HEAD; requires --worktree); remote-
-                   tracking branches are fetched first, and fetch or resolution
-                   failures abort creation without falling back to HEAD
-`,
-  send: `usage: subagent.py send [-h] [--interrupt] cid message
-
-positional arguments:
-  cid          the subagent's local id, or id@label via a connected or polling home;
-               reply to remote senders with the full address in their header
-  message      the message to deliver
-
-options:
-  -h, --help   show this help message and exit
-  --interrupt  stop the running turn, if any, and report whether it stopped;
-               deliver the message either way, preserving queued message order
-               (default: queue until the current turn finishes)
-`,
-  interrupt: `usage: subagent.py interrupt [-h] cid
-
-positional arguments:
-  cid         the local id or cid@label on a connected backend
-
-options:
-  -h, --help  show this help message and exit
-`,
-  messages: `usage: subagent.py messages [-h] [--limit LIMIT] [--before cursor]
-                            [--after cursor] [--full]
-                            target
-
-positional arguments:
-  target           local id, name, unique suffix, or id@label (direct connections only)
-
-options:
-  -h, --help       show this help message and exit
-  --limit LIMIT    entries (1-50), live or archived
-  --full           untruncated text and tool arguments
-  --before cursor  older page ending before this entry id (from a prev:
-                   cursor)
-  --after cursor   newer page starting at this entry id (from a next: cursor)
-`,
-  tail: `usage: subagent.py tail [-h] cid
-
-positional arguments:
-  cid         the local id or cid@label on a connected backend
-
-options:
-  -h, --help  show this help message and exit
-`,
-  wait: `usage: subagent.py wait [-h] [--timeout S] cid [cid ...]
-
-positional arguments:
-  cid          local id(s) or cid@label on connected backends
-
-options:
-  -h, --help   show this help message and exit
-  --timeout S  give up after S seconds (1-86400)
-`,
-  move: `usage: subagent.py move [-h] --to new-parent-cid cid
-
-positional arguments:
-  cid                  the subagent to move
-
-options:
-  -h, --help           show this help message and exit
-  --to new-parent-cid  the new parent agent's id
-`,
-  rm: `usage: subagent.py rm [-h] cid [cid ...]
-
-positional arguments:
-  cid         local id(s) or cid@label on connected backends
-
-options:
-  -h, --help  show this help message and exit
-`,
-  revive: `usage: subagent.py revive [-h] [--top-level] [--parent cid] [--from PATH | target]
-
-Restore an archived (reaped or cleared) agent with its full history. It
-starts no turn until it gets a message.
-
-positional arguments:
-  target        agent id, archive id, or a fuzzy query naming one archived
-                agent (several matches list candidates)
-
-options:
-  -h, --help    show this help message and exit
-  --top-level   revive it as a top-level agent (overrides --parent)
-  --parent cid  revive it under this agent (default: under you)
---from PATH   copy an archive directory, session.sqlite, or Pi v3 .jsonl;
-              always a new id, safety review on, source untouched (256 MiB max)
-`,
-};
-
-const USAGE: Record<string, string> = {
-  root: "usage: subagent.py [-h] {create,send,interrupt,messages,tail,wait,move,rm,revive} ...",
-  create:
-    "usage: subagent.py create [-h] --title TITLE [--effort 1-5] [--sibling] [--taken-over]\n                          [--worktree name [--worktree-source path] [--commit ref]]\n                          prompt",
-  send: "usage: subagent.py send [-h] [--interrupt] cid message",
-  interrupt: "usage: subagent.py interrupt [-h] cid",
-  messages:
-    "usage: subagent.py messages [-h] [--limit LIMIT] [--before cursor]\n                            [--after cursor] [--full]\n                            target",
-  tail: "usage: subagent.py tail [-h] cid",
-  wait: "usage: subagent.py wait [-h] [--timeout S] cid [cid ...]",
-  move: "usage: subagent.py move [-h] --to new-parent-cid cid",
-  rm: "usage: subagent.py rm [-h] cid [cid ...]",
-  revive:
-    "usage: subagent.py revive [-h] [--top-level] [--parent cid] [--from PATH | target]",
-};
+import {
+  CliFailure,
+  parseArguments,
+  parseFloatPython,
+  parserFailure,
+  systemFailure,
+  type Parsed,
+} from "./subagent_args";
 
 const MODULE_HELP = toolHelp(import.meta.url);
 const DATA = process.env.CHAT_DATA_DIR
   ? resolve(process.env.CHAT_DATA_DIR)
   : resolve(process.cwd(), ".recurse-data");
 const SPAWN_WAIT_SECONDS = 5;
-const MSG_TEXT_CHARS = 1000;
-const MSG_LINE_CHARS = 500;
-const MSG_ARGS_CHARS = 200;
 /** Pages of 50 rows tail reads back to find the newest user message. */
 const MSG_TAIL_PAGES = 40;
 const MSG_TAIL_FALLBACK_ENTRIES = 10;
 const WAIT_POLL_SECONDS = 2;
+const IDLE_POLL_SECONDS = 5;
 const WAIT_TIMEOUT_MIN = 1;
 const WAIT_TIMEOUT_MAX = 86_400;
-
-class CliFailure extends Error {
-  code: number;
-  stdout: string;
-  stderr: string;
-
-  constructor(message: string, code = 1, stdout = "", stderr?: string) {
-    super(message);
-    this.code = code;
-    this.stdout = stdout;
-    this.stderr = stderr ?? message;
-  }
-}
-
-function isObject(value: unknown): value is JsonObject {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function pyTruthy(value: unknown): boolean {
-  if (
-    value === null ||
-    value === undefined ||
-    value === false ||
-    value === 0 ||
-    value === ""
-  )
-    return false;
-  if (Array.isArray(value)) return value.length > 0;
-  if (isObject(value)) return Object.keys(value).length > 0;
-  return true;
-}
-
-const JSON_NUMBER_LEXEMES = new WeakMap<object, Map<string, string>>();
-
-function numberLexeme(
-  parent: object | undefined,
-  key: string | undefined,
-): string | undefined {
-  if (!parent || key === undefined) return undefined;
-  return JSON_NUMBER_LEXEMES.get(parent)?.get(key);
-}
-
-function pythonFloatText(value: number): string {
-  if (Number.isNaN(value)) return "NaN";
-  if (value === Infinity) return "Infinity";
-  if (value === -Infinity) return "-Infinity";
-  if (Object.is(value, -0)) return "-0.0";
-  const magnitude = Math.abs(value);
-  if (magnitude !== 0 && (magnitude < 1e-4 || magnitude >= 1e16)) {
-    const [mantissa, exponentText] = value.toExponential().split("e");
-    const exponent = Number(exponentText);
-    const sign = exponent < 0 ? "-" : "+";
-    return `${mantissa}e${sign}${String(Math.abs(exponent)).padStart(2, "0")}`;
-  }
-  const rendered = String(value);
-  return rendered.includes(".") ? rendered : `${rendered}.0`;
-}
-
-function pythonNumberText(
-  value: number,
-  parent?: object,
-  key?: string,
-): string {
-  const source = numberLexeme(parent, key);
-  if (source !== undefined && !/[.eE]/.test(source))
-    return source === "-0" ? "0" : source;
-  if (
-    source !== undefined ||
-    !Number.isInteger(value) ||
-    Object.is(value, -0)
-  ) {
-    return pythonFloatText(value);
-  }
-  return String(value);
-}
-
-function pythonStringRepr(value: string): string {
-  const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
-  let rendered = "";
-  for (const char of value) {
-    const codePoint = char.codePointAt(0)!;
-    if (char === "\\") rendered += "\\\\";
-    else if (char === quote) rendered += `\\${char}`;
-    else if (char === "\n") rendered += "\\n";
-    else if (char === "\r") rendered += "\\r";
-    else if (char === "\t") rendered += "\\t";
-    else if (codePoint < 0x20 || codePoint === 0x7f)
-      rendered += `\\x${codePoint.toString(16).padStart(2, "0")}`;
-    else rendered += char;
-  }
-  return `${quote}${rendered}${quote}`;
-}
-
-function pythonStr(value: unknown, parent?: object, key?: string): string {
-  if (value === null || value === undefined) return "None";
-  if (value === true) return "True";
-  if (value === false) return "False";
-  if (typeof value === "number") return pythonNumberText(value, parent, key);
-  if (typeof value === "string") return value;
-  if (Array.isArray(value))
-    return `[${value.map((item, index) => pythonRepr(item, value, String(index))).join(", ")}]`;
-  if (isObject(value)) {
-    return `{${Object.keys(value)
-      .map(
-        (name) =>
-          `${pythonStringRepr(name)}: ${pythonRepr(value[name], value, name)}`,
-      )
-      .join(", ")}}`;
-  }
-  return String(value);
-}
-
-function pythonRepr(value: unknown, parent?: object, key?: string): string {
-  if (typeof value === "string") return pythonStringRepr(value);
-  return pythonStr(value, parent, key);
-}
-
-const PYTHON_SPACE =
-  /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u;
-function pythonStrip(value: string): string {
-  const points = Array.from(value);
-  let first = 0;
-  let last = points.length;
-  while (first < last && PYTHON_SPACE.test(points[first]!)) first++;
-  while (last > first && PYTHON_SPACE.test(points[last - 1]!)) last--;
-  return points.slice(first, last).join("");
-}
-
-function codePointSlice(value: string, length: number): string {
-  return Array.from(value).slice(0, length).join("");
-}
-
-function jsonLine(value: unknown): string {
-  return `${JSON.stringify(value)}\n`;
-}
-
-function jsonParse(text: string): unknown {
-  return JSON.parse(
-    text,
-    function (
-      this: object,
-      key: string,
-      value: unknown,
-      context?: { source?: string },
-    ): unknown {
-      if (typeof value === "number" && context?.source !== undefined) {
-        let fields = JSON_NUMBER_LEXEMES.get(this);
-        if (!fields) {
-          fields = new Map();
-          JSON_NUMBER_LEXEMES.set(this, fields);
-        }
-        fields.set(key, context.source);
-      }
-      return value;
-    },
-  );
-}
-
-function normalizedParserMessage(message: string): string {
-  return message.includes("--title") && message.includes("required")
-    ? "--title is required; use a concise name like 'Review auth flow'"
-    : message;
-}
-
-function parserFailure(message: string): never;
-function parserFailure(command: string | null, message: string): never;
-function parserFailure(
-  commandOrMessage: string | null,
-  maybeMessage?: string,
-): never {
-  if (maybeMessage === undefined) {
-    const message = normalizedParserMessage(String(commandOrMessage));
-    throw new CliFailure(`${USAGE.root}\nsubagent.py: error: ${message}\n`, 2);
-  }
-  const command = commandOrMessage;
-  const message = normalizedParserMessage(maybeMessage);
-  const usage = USAGE[command ?? "root"] ?? USAGE.root!;
-  throw new CliFailure(
-    `${usage}\nsubagent.py${command ? ` ${command}` : ""}: error: ${message}\n`,
-    2,
-  );
-}
-
-function systemFailure(message: string, stdout = ""): never {
-  throw new CliFailure(message, 1, stdout, `${message}\n`);
-}
-
-function parseFloatPython(raw: string): number {
-  const cleaned = raw.trim();
-  if (!cleaned) return Number.NaN;
-  if (/^[+-]?inf(?:inity)?$/i.test(cleaned))
-    return cleaned.startsWith("-") ? -Infinity : Infinity;
-  if (/^[+-]?nan$/i.test(cleaned)) return NaN;
-  return Number(cleaned);
-}
-
-function integerArg(raw: string, option: string, command: string): number {
-  if (!/^[+-]?\d+$/.test(raw)) {
-    parserFailure(command, `argument ${option}: invalid int value: '${raw}'`);
-  }
-  const value = Number(raw);
-  if (!Number.isSafeInteger(value))
-    parserFailure(command, `argument ${option}: invalid int value: '${raw}'`);
-  return value;
-}
-
-function floatArg(raw: string, option: string, command: string): number {
-  const value = parseFloatPython(raw);
-  if (Number.isNaN(value) && !/^[-+]?nan$/i.test(raw.trim())) {
-    parserFailure(command, `argument ${option}: invalid float value: '${raw}'`);
-  }
-  return value;
-}
-
-type Parsed = {
-  command: string;
-  positional: string[];
-  options: Map<string, string | true>;
-};
-
-function parseArguments(args: string[]): Parsed {
-  if (args.length > 0 && (args[0] === "-h" || args[0] === "--help"))
-    throw new CliFailure(`${MODULE_HELP}\n`, 0);
-  if (args.length === 0)
-    parserFailure(null, "the following arguments are required: cmd");
-  const command = args[0]!;
-  const valid = [
-    "create",
-    "send",
-    "interrupt",
-    "messages",
-    "tail",
-    "wait",
-    "move",
-    "rm",
-    "revive",
-    "backends",
-  ];
-  if (!valid.includes(command)) {
-    parserFailure(
-      null,
-      `invalid choice: '${command}' (choose from ${valid.map((x) => `'${x}'`).join(", ")})`,
-    );
-  }
-  const takesValue = new Set<string>();
-  const switches = new Set<string>();
-  switch (command) {
-    case "create":
-      takesValue.add("--title");
-      takesValue.add("--effort");
-      takesValue.add("--remote");
-      takesValue.add("--worktree");
-      takesValue.add("--worktree-source");
-      takesValue.add("--commit");
-      switches.add("--sibling");
-      switches.add("--taken-over");
-      break;
-    case "send":
-      switches.add("--interrupt");
-      break;
-    case "messages":
-      switches.add("--full");
-      takesValue.add("--limit");
-      takesValue.add("--before");
-      takesValue.add("--after");
-      break;
-    case "wait":
-      takesValue.add("--timeout");
-      break;
-    case "move":
-      takesValue.add("--to");
-      break;
-    case "revive":
-      takesValue.add("--from");
-      takesValue.add("--parent");
-      switches.add("--top-level");
-      break;
-  }
-  const positional: string[] = [];
-  const options = new Map<string, string | true>();
-  let terminated = false;
-  for (let i = 1; i < args.length; i++) {
-    const arg = args[i]!;
-    if (terminated) {
-      positional.push(arg);
-      continue;
-    }
-    if (arg === "--") {
-      terminated = true;
-      continue;
-    }
-    if (arg === "-h" || arg === "--help")
-      throw new CliFailure(SUBCOMMAND_HELP[command]!, 0);
-    const equals = arg.indexOf("=");
-    const flag = equals > 0 ? arg.slice(0, equals) : arg;
-    const inline = equals > 0 ? arg.slice(equals + 1) : undefined;
-    if (switches.has(flag)) {
-      if (inline !== undefined)
-        parserFailure(command, `option ${flag} does not take a value`);
-      options.set(flag, true);
-      continue;
-    }
-    if (takesValue.has(flag)) {
-      const value = inline ?? args[++i];
-      const looksLikeOption =
-        value !== undefined &&
-        value !== "-" &&
-        value.startsWith("-") &&
-        !/^(?:-\\d+|-\\d*\\.\\d+)$/.test(value);
-      if (value === undefined || (inline === undefined && looksLikeOption)) {
-        parserFailure(command, `argument ${flag}: expected one argument`);
-      }
-      options.set(flag, value!);
-      continue;
-    }
-    if (
-      arg.startsWith("-") &&
-      arg !== "-" &&
-      !/^(?:-\\d+|-\\d*\\.\\d+)$/.test(arg)
-    ) {
-      parserFailure(command, `unrecognized arguments: ${arg}`);
-    }
-    positional.push(arg);
-  }
-
-  const req = (flag: string): string | undefined => {
-    const value = options.get(flag);
-    return typeof value === "string" ? value : undefined;
-  };
-  const arity: Record<
-    string,
-    { min: number; max: number; required?: string[] }
-  > = {
-    backends: { min: 1, max: 3 },
-    create: { min: 1, max: 1, required: ["--title"] },
-    send: { min: 2, max: 2 },
-    interrupt: { min: 1, max: 1 },
-    messages: { min: 1, max: 1 },
-    tail: { min: 1, max: 1 },
-    wait: { min: 1, max: Infinity },
-    move: { min: 1, max: 1, required: ["--to"] },
-    rm: { min: 1, max: Infinity },
-    revive: {
-      min: options.has("--from") ? 0 : 1,
-      max: options.has("--from") ? 0 : 1,
-    },
-  };
-  const rule = arity[command]!;
-  const missing = rule.required?.filter((item) => !options.has(item)) ?? [];
-  if (missing.length) {
-    if (command === "create" && !positional.length && options.has("--title")) {
-      parserFailure(command, "the following arguments are required: prompt");
-    }
-    parserFailure(
-      command,
-      `the following arguments are required: ${missing.join(", ")}`,
-    );
-  }
-  if (positional.length < rule.min) {
-    const expected =
-      command === "create"
-        ? "prompt"
-        : command === "send"
-          ? "cid, message"
-          : command === "messages"
-            ? "target"
-            : command === "move"
-              ? "cid"
-              : command === "wait"
-                ? "cid"
-                : command === "revive"
-                  ? "target"
-                  : "cid";
-    parserFailure(command, `the following arguments are required: ${expected}`);
-  }
-  if (positional.length > rule.max) {
-    parserFailure(
-      command,
-      `unrecognized arguments: ${positional.slice(rule.max).join(" ")}`,
-    );
-  }
-  if (command === "create") {
-    for (const flag of ["--worktree-source", "--commit"]) {
-      if (options.has(flag) && !options.has("--worktree"))
-        parserFailure(
-          command,
-          `${flag} requires --worktree; add --worktree <name>`,
-        );
-    }
-    const effort = req("--effort");
-    if (effort !== undefined && !/^[+-]?\d+$/.test(effort))
-      parserFailure(
-        command,
-        `argument --effort: invalid int value: '${effort}'`,
-      );
-    if (effort !== undefined && ![1, 2, 3, 4, 5].includes(Number(effort))) {
-      parserFailure(
-        command,
-        `argument --effort: invalid choice: '${effort}' (choose from 1, 2, 3, 4, 5)`,
-      );
-    }
-  }
-  if (command === "messages") {
-    for (const flag of ["--limit", "--before", "--after"]) {
-      const raw = req(flag);
-      if (raw !== undefined) integerArg(raw, flag, command);
-    }
-  }
-  if (command === "wait") {
-    const raw = req("--timeout");
-    if (raw !== undefined) floatArg(raw, "--timeout", command);
-  }
-  return { command, positional, options };
-}
 
 function apiHeaders(): Record<string, string> {
   const headers: Record<string, string> = {
     "x-loopback-token": "",
+    "x-recurse-bundled-tool": "subagent",
     "Content-Type": "application/json",
   };
   const agentId = process.env.RECURSE_AGENT_ID;
@@ -653,6 +102,8 @@ async function api<T = JsonObject>(
   body?: JsonObject,
 
   answered: readonly number[] = [],
+  signal?: AbortSignal | null,
+  maxResponseBytes?: number,
 ): Promise<T> {
   let published: unknown;
   try {
@@ -680,7 +131,10 @@ async function api<T = JsonObject>(
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-      signal: AbortSignal.timeout(20_000),
+      signal:
+        signal === undefined
+          ? AbortSignal.timeout(20_000)
+          : (signal ?? undefined),
     });
   } catch (error) {
     const reason =
@@ -691,7 +145,25 @@ async function api<T = JsonObject>(
           : String(error);
     systemFailure(`Cannot reach the instance: ${reason}`);
   }
-  const text = await response.text();
+  let text: string;
+  if (maxResponseBytes !== undefined && response.body) {
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let size = 0;
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        size += chunk.value.byteLength;
+        if (size > maxResponseBytes)
+          systemFailure("backend response too large; try a smaller --limit");
+        chunks.push(chunk.value);
+      }
+    } finally {
+      await reader.cancel().catch(() => {});
+    }
+    text = new TextDecoder().decode(new Uint8Array(Buffer.concat(chunks)));
+  } else text = await response.text();
   if (!response.ok && !answered.includes(response.status)) {
     systemFailure(
       `Request failed (${response.status}): ${codePointSlice(text, 300)}`,
@@ -713,10 +185,21 @@ function convPath(cid: string): string {
   return join(DATA, "conversations", `${cid}.json`);
 }
 
-function backendFor(target: string) {
-  const match =
-    /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})@([A-Za-z0-9._-]{1,32})$/.exec(target);
-  if (target.includes("@") && !match) systemFailure("invalid remote target");
+function backendFor(target: string, archives = false) {
+  const match = /^([^@]+)@([A-Za-z0-9._-]{1,32})$/.exec(target);
+  if (
+    target.includes("@") &&
+    (!match ||
+      !validBackendLabel(match[2]) ||
+      (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(match[1]!) &&
+        !(
+          archives &&
+          /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}\.[A-Za-z0-9][A-Za-z0-9_-]{0,170}$/.test(
+            match[1]!,
+          )
+        )))
+  )
+    systemFailure("invalid remote target");
   const id = match ? match[1]! : target;
   const base = match ? `/api/backends/${encodeURIComponent(match[2]!)}` : "";
   return {
@@ -845,23 +328,6 @@ async function lastCommitText(workdir: unknown): Promise<string> {
   }
 }
 
-async function worktreeSource(cwd: string): Promise<string | null> {
-  try {
-    const real = realpathSync(cwd);
-    if (real !== cwd || lstatSync(cwd).isSymbolicLink()) return null;
-    const [code, top] = await runGit(["rev-parse", "--show-toplevel"], cwd);
-    if (code !== 0 || resolve(top) !== real) return null;
-    const [bareCode, bare] = await runGit(
-      ["rev-parse", "--is-bare-repository"],
-      cwd,
-    );
-    if (bareCode !== 0 || bare === "true") return null;
-    return real;
-  } catch {
-    return null;
-  }
-}
-
 async function enterChildWorktree(
   name: string,
   cid: string,
@@ -870,10 +336,12 @@ async function enterChildWorktree(
 ): Promise<string> {
   if (!name) parserFailure("create --worktree needs a name");
   const cwd = process.cwd();
-  const source = await worktreeSource(
-    sourcePath === undefined ? cwd : resolve(sourcePath),
-  );
-  if (!source) {
+  let source: string;
+  try {
+    source = resolveWorktreeSource(
+      sourcePath === undefined ? cwd : resolve(sourcePath),
+    );
+  } catch {
     throw new CliFailure(
       sourcePath === undefined
         ? "create --worktree requires your cwd to be inside a git repository: it forks the child's worktree from this checkout.\n"
@@ -928,7 +396,7 @@ async function cmdCreate(parsed: Parsed, stdout: string): Promise<string> {
   const title = cleanTitle(titleRaw);
   if (title === null)
     parserFailure(
-      "--title is required; use a concise name like 'Review auth flow'",
+      "--title is required; use a short kebab-case name like 'sidebar-design'",
     );
   const remote = parsed.options.get("--remote");
   if (typeof remote === "string") {
@@ -1034,7 +502,7 @@ async function cmdSend(parsed: Parsed, stdout: string): Promise<string> {
   const [cid, message] = parsed.positional;
   if (cid!.includes("@")) {
     const [agent, label] = cid!.split("@");
-    const unconfirmed = `Not confirmed: the connection to ${label} dropped during delivery; the message may have arrived. Check \`subagent messages ${agent}@${label}\` before resending.\n`;
+    const unconfirmed = `Not confirmed: the connection to ${label} dropped during delivery; the message may have arrived. Check \`subagent read ${agent}@${label}\` before resending.\n`;
     let result: JsonObject;
     try {
       result = await api(
@@ -1052,19 +520,26 @@ async function cmdSend(parsed: Parsed, stdout: string): Promise<string> {
     }
     if (typeof result.id !== "string")
       return `Failed: ${String(result.detail ?? "delivery refused").replace(/\.$/, "")}.\n`;
-    const deadline = performance.now() + 35_000;
+    const deadline = performance.now() + 100_000;
     while (performance.now() < deadline) {
       let outcome: JsonObject;
       try {
-        outcome = await api("GET", `/api/relay/messages/${result.id}`);
+        outcome = await api(
+          "GET",
+          `/api/relay/messages/${result.id}?wait=25`,
+          undefined,
+          [],
+          AbortSignal.timeout(
+            Math.min(30_000, Math.max(1, deadline - performance.now())),
+          ),
+        );
       } catch {
         return unconfirmed;
       }
       if (outcome.state === "delivered") return `Delivered to ${cid}.\n`;
-      if (outcome.state === "failed")
-        return `Failed: ${String(outcome.reason).replace(/\.$/, "")}.\n`;
+      if (outcome.state === "failed" || outcome.state === "queued")
+        return `${outcome.state === "failed" ? "Failed" : "Queued"}: ${String(outcome.reason).replace(/\.$/, "")}.\n`;
       if (outcome.state === "unconfirmed") return unconfirmed;
-      await Bun.sleep(250);
     }
     return unconfirmed;
   }
@@ -1095,9 +570,9 @@ async function cmdSend(parsed: Parsed, stdout: string): Promise<string> {
       delivered.interrupted === true
         ? "Stopped the running turn; the message will run next."
         : "There was no running turn to stop; the message will start fresh.";
-    return `${stdout}Message delivered to agent ${cid}. ${action} The turn's reply will be delivered to its parent when it finishes; use \`messages <id>\` for the full transcript meanwhile.\n`;
+    return `${stdout}Message delivered to agent ${cid}. ${action} The turn's reply will be delivered to its parent when it finishes; read the agent's transcript.txt for the full history meanwhile.\n`;
   }
-  return `${stdout}Message delivered to agent ${cid}; it will pick it up within a moment. The turn's reply will be delivered to its parent when it finishes; use \`messages <id>\` for the full transcript meanwhile.\n`;
+  return `${stdout}Message delivered to agent ${cid}; it will pick it up within a moment. The turn's reply will be delivered to its parent when it finishes; read the agent's transcript.txt for the full history meanwhile.\n`;
 }
 
 async function cmdInterrupt(parsed: Parsed, stdout: string): Promise<string> {
@@ -1177,6 +652,22 @@ async function cmdMove(parsed: Parsed, stdout: string): Promise<string> {
   return `${stdout}Move requested: agent ${cid} (and its subtree) will be re-parented under ${newParent}; its worktree is unchanged.\n`;
 }
 
+async function cmdTag(parsed: Parsed, stdout: string): Promise<string> {
+  const cid = parsed.positional[0]!;
+  const list = (flag: string) =>
+    String(parsed.options.get(flag) ?? "")
+      .split(",")
+      .map((name) => name.trim())
+      .filter(Boolean);
+  const add = list("--add");
+  const remove = list("--remove");
+  if (!add.length && !remove.length)
+    parserFailure("tag", "give --add or --remove with at least one tag");
+  await api("POST", `/api/conversations/${cid}/tags`, { add, remove });
+  const changes = [...add.map((t) => `+${t}`), ...remove.map((t) => `-${t}`)];
+  return `${stdout}Tags changed on ${cid}: ${changes.join(" ")}\n`;
+}
+
 function targetLabel(conv: JsonObject): string {
   const title = conv.title;
   return typeof title === "string" && pythonStrip(title)
@@ -1221,270 +712,6 @@ async function resolveTarget(
   if (suffix) return suffix;
   if (optional) return null;
   parserFailure(`no agent or active Pi session matches '${target}'`);
-}
-
-function clip(text: string, limit: number): [string, boolean] {
-  const points = Array.from(text);
-  return points.length <= limit
-    ? [text, false]
-    : [points.slice(0, limit).join(""), true];
-}
-
-function oneLine(value: string, limit: number): string {
-  return codePointSlice(pythonStrip(value.split("\n", 1)[0]!), limit);
-}
-
-function textBlocks(content: unknown): string[] | null {
-  if (content === null || content === undefined) return [];
-  if (typeof content === "string") return [content];
-  if (!Array.isArray(content)) return null;
-  const parts: string[] = [];
-  for (const block of content) {
-    if (!isObject(block)) return null;
-    if (block.type === "text") {
-      const text = block.text ?? "";
-      if (typeof text !== "string") return null;
-      parts.push(text);
-    }
-  }
-  return parts;
-}
-
-function toolCalls(content: unknown): JsonObject[] | null {
-  if (content === null || content === undefined || !Array.isArray(content))
-    return [];
-  const calls: JsonObject[] = [];
-  for (const block of content) {
-    if (!isObject(block)) return null;
-    if (block.type === "toolCall") calls.push(block);
-  }
-  return calls;
-}
-
-function comparePythonStrings(left: string, right: string): number {
-  const a = Array.from(left, (char) => char.codePointAt(0)!);
-  const b = Array.from(right, (char) => char.codePointAt(0)!);
-  for (let i = 0; i < Math.min(a.length, b.length); i++) {
-    if (a[i] !== b[i]) return a[i]! - b[i]!;
-  }
-  return a.length - b.length;
-}
-
-function pythonJsonDumps(
-  value: unknown,
-  parent?: object,
-  key?: string,
-): string {
-  if (value === null) return "null";
-  if (typeof value === "string") return JSON.stringify(value);
-  if (typeof value === "number") return pythonNumberText(value, parent, key);
-  if (typeof value === "boolean") return value ? "true" : "false";
-  if (Array.isArray(value)) {
-    return `[${value
-      .map((item, index) => pythonJsonDumps(item, value, String(index)))
-      .join(",")}]`;
-  }
-  if (isObject(value)) {
-    return `{${Object.keys(value)
-      .sort(comparePythonStrings)
-      .map(
-        (name) =>
-          `${JSON.stringify(name)}:${pythonJsonDumps(value[name], value, name)}`,
-      )
-      .join(",")}}`;
-  }
-  throw new TypeError("value is not JSON serializable");
-}
-
-function shortValue(
-  value: unknown,
-  limit = 60,
-  parent?: object,
-  key?: string,
-): string {
-  if (typeof value === "string") return oneLine(value, limit);
-  let rendered: string;
-  try {
-    rendered = pythonJsonDumps(value, parent, key);
-  } catch {
-    rendered = pythonStr(value, parent, key);
-  }
-  return oneLine(rendered, limit);
-}
-
-function summarizeArgs(
-  argumentsValue: unknown,
-  parent?: object,
-  key?: string,
-): string {
-  if (argumentsValue === null || argumentsValue === undefined) return "";
-  if (typeof argumentsValue === "string") {
-    const stripped = pythonStrip(argumentsValue);
-    if (stripped.startsWith("{")) {
-      try {
-        const parsed: unknown = jsonParse(stripped);
-        if (isObject(parsed)) return summarizeArgs(parsed);
-      } catch {}
-    }
-    return oneLine(stripped, MSG_ARGS_CHARS);
-  }
-  if (isObject(argumentsValue)) {
-    const command = argumentsValue.command;
-    if (typeof command === "string" && pythonStrip(command))
-      return oneLine(command, MSG_ARGS_CHARS);
-    const pairs = Object.keys(argumentsValue)
-      .slice(0, 6)
-      .map(
-        (name) =>
-          `${name}=${shortValue(argumentsValue[name], 60, argumentsValue, name)}`,
-      );
-    return oneLine(pairs.join(", "), MSG_ARGS_CHARS);
-  }
-  return oneLine(pythonStr(argumentsValue, parent, key), MSG_ARGS_CHARS);
-}
-
-function entryTimestamp(entry: JsonObject): unknown {
-  const ts = entry.timestamp;
-  if (typeof ts === "string") return Array.from(ts).length <= 128 ? ts : null;
-  if (typeof ts === "boolean" || typeof ts !== "number" || !Number.isFinite(ts))
-    return null;
-  return Math.abs(ts) <= 10 ** 15 ? ts : null;
-}
-
-function assistantCallBlocks(entry: JsonObject): JsonObject[] {
-  if (
-    entry.type !== "message" ||
-    !isObject(entry.message) ||
-    entry.message.role !== "assistant"
-  )
-    return [];
-  const calls = toolCalls(entry.message.content);
-  return calls ?? [];
-}
-
-type Row = [number, JsonObject];
-function resultName(
-  message: JsonObject,
-  callNames: Map<string, string>,
-  callOrder: Array<[number, string]>,
-  idx: number,
-): string {
-  const callId = message.toolCallId;
-  if (typeof callId === "string" && callNames.has(callId))
-    return callNames.get(callId)!;
-  let name = "unknown";
-  for (const [callIdx, callName] of callOrder) {
-    if (callIdx < idx) name = callName;
-    else break;
-  }
-  return name;
-}
-
-function renderUser(
-  message: JsonObject,
-  off: number,
-  ts: unknown,
-  full = false,
-): JsonObject[] {
-  const texts = textBlocks(message.content);
-  if (texts === null) return [];
-  const [text, cut] = clip(texts.join(""), full ? Infinity : MSG_TEXT_CHARS);
-  const line: JsonObject = { off, ts, role: "user", text };
-  if (cut) line.truncated = true;
-  return [line];
-}
-
-function renderAssistant(
-  message: JsonObject,
-  off: number,
-  ts: unknown,
-  full = false,
-): JsonObject[] {
-  const texts = textBlocks(message.content);
-  const calls = toolCalls(message.content);
-  if (texts === null || calls === null) return [];
-  const out: JsonObject[] = [];
-  const [text, cut] = clip(texts.join(""), full ? Infinity : MSG_TEXT_CHARS);
-  if (text) {
-    const line: JsonObject = { off, ts, role: "assistant", text };
-    if (cut) line.truncated = true;
-    out.push(line);
-  }
-  for (const call of calls) {
-    const name = call.name;
-    out.push({
-      off,
-      ts,
-      role: "tool",
-      tool: typeof name === "string" && name ? name : "unknown",
-      args: full
-        ? pythonJsonDumps(call.arguments ?? null, call, "arguments")
-        : summarizeArgs(call.arguments, call, "arguments"),
-    });
-  }
-  return out;
-}
-
-function renderResult(
-  message: JsonObject,
-  off: number,
-  ts: unknown,
-  idx: number,
-  callNames: Map<string, string>,
-  callOrder: Array<[number, string]>,
-  full = false,
-): JsonObject[] {
-  const texts = textBlocks(message.content);
-  if (texts === null) return [];
-  return [
-    {
-      off,
-      ts,
-      role: "tool",
-      tool: resultName(message, callNames, callOrder, idx),
-      text: full ? texts.join("") : oneLine(texts.join(""), MSG_LINE_CHARS),
-    },
-  ];
-}
-
-function renderEntry(
-  entry: JsonObject,
-  off: number,
-  idx: number,
-  callNames: Map<string, string>,
-  callOrder: Array<[number, string]>,
-  results: boolean,
-  full = false,
-): JsonObject[] {
-  const ts = entryTimestamp(entry);
-  if (!isObject(entry.message)) return [];
-  const message = entry.message;
-  if (message.role === "user") return renderUser(message, off, ts, full);
-  if (message.role === "assistant")
-    return renderAssistant(message, off, ts, full);
-  if (message.role === "toolResult" && results)
-    return renderResult(message, off, ts, idx, callNames, callOrder, full);
-  return [];
-}
-
-function renderWindow(rows: Row[], results = true, full = false): JsonObject[] {
-  const callNames = new Map<string, string>();
-  const callOrder: Array<[number, string]> = [];
-  rows.forEach(([, entry], idx) => {
-    for (const call of assistantCallBlocks(entry)) {
-      if (typeof call.name !== "string" || !call.name) continue;
-      callOrder.push([idx, call.name]);
-      if (typeof call.id === "string" && call.id && !callNames.has(call.id))
-        callNames.set(call.id, call.name);
-    }
-  });
-  const out: JsonObject[] = [];
-  rows.forEach(([off, entry], idx) =>
-    out.push(
-      ...renderEntry(entry, off, idx, callNames, callOrder, results, full),
-    ),
-  );
-  return out;
 }
 
 function fmtElapsed(value: unknown): string {
@@ -1613,55 +840,29 @@ async function emitTail(
   return { stdout, stderr: "" };
 }
 
-async function cmdMessages(parsed: Parsed, stdout: string): Promise<Output> {
-  const limitRaw = parsed.options.get("--limit");
-  const limit = typeof limitRaw === "string" ? Number(limitRaw) : 20;
-  if (limit < 1 || limit > 50)
-    parserFailure("messages --limit must be between 1 and 50");
-  const beforeRaw = parsed.options.get("--before");
-  const afterRaw = parsed.options.get("--after");
-  if (beforeRaw !== undefined && afterRaw !== undefined)
-    parserFailure("messages --before and --after are exclusive");
-  const before = typeof beforeRaw === "string" ? Number(beforeRaw) : undefined;
-  const after = typeof afterRaw === "string" ? Number(afterRaw) : undefined;
-  if (before !== undefined && before < 0)
-    parserFailure("messages --before must be a cursor (0 or more)");
-  if (after !== undefined && after < 0)
-    parserFailure("messages --after must be a cursor (0 or more)");
-  const target = parsed.positional[0]!;
-  let result: Window;
-  if (target.includes("@")) {
-    const match =
-      /^([A-Za-z0-9][A-Za-z0-9_-]{0,127})@([A-Za-z0-9._-]{1,32})$/.exec(target);
-    if (!match) systemFailure("invalid remote target");
-    const query = new URLSearchParams({ limit: String(limit) });
-    if (before !== undefined) query.set("before", String(before));
-    if (after !== undefined) query.set("after", String(after));
-    result = await api<Window>(
-      "GET",
-      `/api/relay/transcript/${match[2]}/${match[1]}?${query}`,
+async function cmdRead(parsed: Parsed): Promise<Output> {
+  const backend = backendFor(parsed.positional[0]!, true);
+  if (!backend.remote)
+    parserFailure(
+      "read",
+      "use the native read tool on local transcript paths; read requires id@label",
     );
-  } else {
-    const conv = await resolveTarget(target, true);
-    if (conv)
-      result = await transcript(String(conv.id), { limit, before, after });
-    else {
-      const { archiveMessages } = await import("./_archive_messages");
-      try {
-        result = await archiveMessages(DATA, target, { limit, before, after });
-      } catch (error) {
-        parserFailure(error instanceof Error ? error.message : String(error));
-      }
-    }
-  }
-  for (const line of renderWindow(
-    result.rows,
-    true,
-    parsed.options.has("--full"),
-  ))
-    stdout += jsonLine(line);
-  const stderr = `prev: ${result.prev}\nnext: ${result.next}\n`;
-  return { code: 0, stdout, stderr };
+  const query = new URLSearchParams({ target: backend.id });
+  for (const flag of ["--offset", "--limit"])
+    if (parsed.options.has(flag))
+      query.set(flag.slice(2), String(parsed.options.get(flag)));
+  const path = backend.path(`/api/subagent-tool/read?${query}`);
+  const result = await api(
+    "GET",
+    path,
+    undefined,
+    [],
+    undefined,
+    2 * 1024 * 1024,
+  );
+  if (typeof result.text !== "string")
+    systemFailure(`Request failed: invalid response for ${path}`);
+  return { code: 0, stdout: result.text, stderr: "" };
 }
 
 async function cmdTail(parsed: Parsed, stdout: string): Promise<Output> {
@@ -1694,6 +895,98 @@ function resolveWaitCids(
     else parserFailure(`ambiguous id suffix '${cid}': ${matches.join(", ")}`);
   }
   return resolved;
+}
+
+async function cmdStatus(parsed: Parsed): Promise<Output> {
+  const targets = parsed.positional.length ? parsed.positional : [""];
+  let stdout = "";
+  for (const target of targets) {
+    const backend = backendFor(target);
+    const path = backend.path(
+      !target
+        ? "/api/v1/agents"
+        : parsed.options.has("--subtree")
+          ? `/api/v1/agents?root=${encodeURIComponent(backend.id)}`
+          : `/api/v1/agents/${encodeURIComponent(backend.id)}`,
+    );
+    const response = await api("GET", path);
+    if (parsed.options.has("--json")) stdout += `${JSON.stringify(response)}\n`;
+    else {
+      const agents = Array.isArray(response.agents)
+        ? response.agents
+        : [response];
+      for (const row of agents) {
+        if (!isObject(row))
+          systemFailure(`Request failed: invalid response for ${path}`);
+        const status = [
+          "idle",
+          "running",
+          "stopping",
+          "interrupted",
+          "error",
+          "deleting",
+        ].includes(String(row.status))
+          ? row.status
+          : "unknown";
+        const context = isObject(row.context)
+          ? `${row.context.tokens}/${row.context.window ?? "unknown"}`
+          : "null";
+        stdout += `${row.id} ${status} queued=${row.queued} shells=${row.background_shells} monitor_shells=${row.monitor_shells} context=${context} ${row.title}\n`;
+      }
+    }
+  }
+  return { code: 0, stdout, stderr: "" };
+}
+
+async function cmdIdle(parsed: Parsed): Promise<Output> {
+  const target = parsed.positional[0] || process.env.RECURSE_AGENT_ID;
+  if (!target)
+    parserFailure("idle", "an agent id is required outside an agent");
+  const backend = backendFor(target);
+  const path = backend.path(
+    `/api/v1/agents/${encodeURIComponent(backend.id)}/idle`,
+  );
+  const raw = parsed.options.get("--wait");
+  const timeout = typeof raw === "string" ? parseFloatPython(raw) : 0;
+  if (
+    raw !== undefined &&
+    !(WAIT_TIMEOUT_MIN <= timeout && timeout <= WAIT_TIMEOUT_MAX)
+  )
+    parserFailure("idle", "--wait must be between 1 and 86400 seconds");
+  const deadline = performance.now() + timeout * 1000;
+  let busy = "";
+  const timedOut = (): Output => ({
+    code: 1,
+    stdout: busy,
+    stderr: `Timed out after ${timeout}s waiting for ${target} to become idle.\n`,
+  });
+  while (true) {
+    const remaining = deadline - performance.now();
+    if (timeout && remaining <= 0) return timedOut();
+    const signal = timeout
+      ? AbortSignal.timeout(Math.min(20_000, Math.ceil(remaining)))
+      : undefined;
+    let response: JsonObject;
+    try {
+      response = await api("GET", path, undefined, [], signal);
+    } catch (error) {
+      if (signal?.aborted && performance.now() >= deadline) return timedOut();
+      throw error;
+    }
+    if (timeout && performance.now() >= deadline) return timedOut();
+    if (response.idle === true) return { code: 0, stdout: "", stderr: "" };
+    if (response.idle !== false || !Array.isArray(response.busy))
+      systemFailure("Request failed: invalid idle response");
+    busy = response.busy.map((row) => `${row.id} ${row.reason}\n`).join("");
+    if (!timeout) return { code: 1, stdout: busy, stderr: "" };
+    const wakeAt = Math.min(
+      deadline,
+      performance.now() + IDLE_POLL_SECONDS * 1000,
+    );
+    do {
+      await Bun.sleep(Math.max(1, Math.ceil(wakeAt - performance.now())));
+    } while (performance.now() < wakeAt);
+  }
 }
 
 async function cmdWait(parsed: Parsed, stdout: string): Promise<Output> {
@@ -1773,7 +1066,7 @@ async function cmdRm(parsed: Parsed, stdout: string): Promise<string> {
   for (const cid of parsed.positional) {
     for (const candidate of [cid, ...[...descendantIds(convs, cid)].sort()]) {
       const conv = convs.get(candidate);
-      if (!conv || conv.pinned !== true) continue;
+      if (!conv || conv.taken_over !== true) continue;
       const title = conv.title;
       const label =
         typeof title === "string" && title
@@ -1816,6 +1109,69 @@ async function cmdRm(parsed: Parsed, stdout: string): Promise<string> {
   return stdout;
 }
 
+async function cmdSearch(parsed: Parsed): Promise<Output> {
+  const all = parsed.options.has("--all");
+  const target =
+    parsed.positional[1] ?? (all ? undefined : process.env.RECURSE_AGENT_ID);
+  if (!all && !target)
+    parserFailure("search", "give a target or --all outside an agent");
+  const backend = target ? backendFor(target, true) : null;
+  const query = new URLSearchParams({ q: parsed.positional[0]! });
+  if (target) query.set("target", backend!.id);
+  for (const flag of ["--tree", "--all", "--deleted"])
+    if (parsed.options.has(flag)) query.set(flag.slice(2), "true");
+  for (const flag of ["--role", "--limit"])
+    if (parsed.options.has(flag))
+      query.set(flag.slice(2), String(parsed.options.get(flag)));
+  const path = `/api/subagent-tool/search?${query}`;
+  const result = await api(
+    "GET",
+    backend?.path(path) ?? path,
+    undefined,
+    [],
+    null,
+  );
+  if (!Array.isArray(result.hits))
+    systemFailure("The running instance returned invalid search results.");
+  return {
+    code: 0,
+    stdout: result.hits
+      .map((hit) => {
+        if (
+          !isObject(hit) ||
+          typeof hit.path !== "string" ||
+          !Number.isSafeInteger(hit.line) ||
+          Number(hit.line) < 1 ||
+          typeof hit.agent !== "string" ||
+          typeof hit.snippet !== "string" ||
+          typeof hit.role !== "string" ||
+          typeof hit.time !== "number"
+        )
+          systemFailure(
+            "The running instance returned invalid search results.",
+          );
+        const agent = backend?.remote
+          ? `${hit.agent}${target!.slice(target!.lastIndexOf("@"))}`
+          : hit.agent;
+        const time =
+          Number.isFinite(hit.time) &&
+          hit.time > 0 &&
+          hit.time < 8640000000000000
+            ? new Date(hit.time).toISOString()
+            : "-";
+        return `${oneLine(hit.path, hit.path.length)}:${hit.line}: ${oneLine(hit.snippet, hit.snippet.length)} [${oneLine(agent, agent.length)} ${time} ${oneLine(hit.role, hit.role.length)}]\n`;
+      })
+      .join(""),
+    stderr:
+      (result.truncated
+        ? "Search truncated; narrow the query or scope.\n"
+        : "") +
+      (Number(result.not_indexed) > 0
+        ? `${result.not_indexed} ${result.not_indexed === 1 ? "agent is" : "agents are"} not indexed yet; results are incomplete.\n`
+        : ""),
+  };
+}
+
 async function cmdRevive(parsed: Parsed, stdout: string): Promise<string> {
   const from = parsed.options.get("--from");
   const target = parsed.positional[0]!;
@@ -1856,14 +1212,14 @@ async function cmdRevive(parsed: Parsed, stdout: string): Promise<string> {
 async function execute(args: string[]): Promise<Output> {
   let parsed: Parsed;
   try {
-    parsed = parseArguments(args);
+    parsed = parseArguments(args, MODULE_HELP);
   } catch (error) {
     if (error instanceof CliFailure && error.code === 0)
       return { code: 0, stdout: error.message, stderr: "" };
     throw error;
   }
   let stdout = "";
-  if (["move", "revive"].includes(parsed.command)) {
+  if (["move", "revive", "tag"].includes(parsed.command)) {
     const targets = parsed.command === "create" ? [] : parsed.positional;
     if (
       targets.some((value) => value.includes("@")) ||
@@ -1873,28 +1229,22 @@ async function execute(args: string[]): Promise<Output> {
       systemFailure(`${parsed.command} does not support remote targets`);
   }
   switch (parsed.command) {
-    case "backends": {
-      const [action, label, url] = parsed.positional;
-      if (action === "add" && label && url && parsed.positional.length === 3) {
-        await api("POST", "/api/backends", { label, url });
-        stdout = `Backend ${label} (${url}) needs sign-in: ask the operator to enter its password in Settings → Remotes.\n`;
-      } else if (action === "list" && parsed.positional.length === 1) {
-        const rows = await api<JsonObject[]>("GET", "/api/backends");
-        stdout = rows
-          .map(
-            (r) =>
-              `${r.label} ${r.url} ${r.state} · ${r.reason ?? "—"} · Last contact ${r.last_contact ?? "never"}\n`,
-          )
-          .join("");
-      } else parserFailure("backends", "expected add <label> <url> or list");
-      return { code: 0, stdout, stderr: "" };
-    }
     case "create":
       stdout = await cmdCreate(parsed, stdout);
       return { code: 0, stdout, stderr: "" };
     case "send":
       stdout = await cmdSend(parsed, stdout);
       return { code: 0, stdout, stderr: "" };
+    case "compact": {
+      const backend = backendFor(parsed.positional[0]!);
+      const response = await api(
+        "POST",
+        backend.path(
+          `/api/v1/agents/${encodeURIComponent(backend.id)}/compact`,
+        ),
+      );
+      return { code: 0, stdout: jsonLine(response), stderr: "" };
+    }
     case "interrupt":
       stdout = await cmdInterrupt(parsed, stdout);
       return { code: 0, stdout, stderr: "" };
@@ -1904,11 +1254,20 @@ async function execute(args: string[]): Promise<Output> {
     case "rm":
       stdout = await cmdRm(parsed, stdout);
       return { code: 0, stdout, stderr: "" };
+    case "tag":
+      stdout = await cmdTag(parsed, stdout);
+      return { code: 0, stdout, stderr: "" };
     case "revive":
       stdout = await cmdRevive(parsed, stdout);
       return { code: 0, stdout, stderr: "" };
-    case "messages":
-      return await cmdMessages(parsed, stdout);
+    case "search":
+      return await cmdSearch(parsed);
+    case "read":
+      return await cmdRead(parsed);
+    case "status":
+      return await cmdStatus(parsed);
+    case "idle":
+      return await cmdIdle(parsed);
     case "tail":
       return await cmdTail(parsed, stdout);
     case "wait":

@@ -127,6 +127,7 @@ function macLstat(fd: number, name: string, bigint: boolean) {
   ];
   const times = [ns(32), ns(48), ns(64), ns(80)];
   if (bigint) {
+    // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
     BigIntStatsClass ??= fs.lstatSync("/", { bigint: true })
       .constructor as unknown as typeof BigIntStatsClass;
     return new BigIntStatsClass!(...fields, ...times);
@@ -143,6 +144,7 @@ function macOpenDirectory(fd: number): Pointer {
   const directory = mac!.fdopendir(raw);
   if (!directory) {
     const error = failed("scandir", ".");
+    // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
     fs.closeSync(raw);
     throw error;
   }
@@ -196,6 +198,7 @@ export async function lstatAt(
 
 export function lstatAtSync(fd: number, name: string): Stats {
   if (mac) return macLstat(fd, name, false) as Stats;
+  // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
   return fs.lstatSync(descriptorPath(fd, name));
 }
 
@@ -211,6 +214,7 @@ export async function openAt(
   try {
     return await open(`/dev/fd/${raw}`, flags & ACCESS);
   } finally {
+    // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
     fs.closeSync(raw);
   }
 }
@@ -222,6 +226,7 @@ export function openAtSync(
   mode?: number,
 ): number {
   if (mac) return macOpen(fd, name, flags, mode);
+  // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
   return fs.openSync(descriptorPath(fd, name), flags, mode);
 }
 
@@ -238,6 +243,7 @@ export async function mkdirAt(
 export function mkdirAtSync(fd: number, name: string, mode: number): void {
   if (mac)
     return macCall(mac.mkdirat(fd, ptr(cName(name)), mode), "mkdir", name);
+  // oxlint-disable-next-line no-restricted-properties -- worker-only pinned trash-directory creation
   fs.mkdirSync(descriptorPath(fd, name), { mode });
 }
 
@@ -250,6 +256,7 @@ export async function unlinkAt(fd: number, name: string): Promise<void> {
 export function unlinkAtSync(fd: number, name: string): void {
   if (mac)
     return macCall(mac.unlinkat(fd, ptr(cName(name)), 0), "unlink", name);
+  // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
   fs.unlinkSync(descriptorPath(fd, name));
 }
 
@@ -260,6 +267,7 @@ export function rmdirAtSync(fd: number, name: string): void {
       "rmdir",
       name,
     );
+  // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
   fs.rmdirSync(descriptorPath(fd, name));
 }
 
@@ -286,6 +294,7 @@ export function renameAtSync(
       "rename",
       from,
     );
+  // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
   fs.renameSync(descriptorPath(fromFd, from), descriptorPath(toFd, to));
 }
 
@@ -297,6 +306,7 @@ export async function readdirAt(fd: number): Promise<string[]> {
 
 export function readdirAtSync(fd: number): string[] {
   if (mac) return [...macDirectoryNames(macOpenDirectory(fd))];
+  // oxlint-disable-next-line no-restricted-properties -- known: shared filesystem primitive: main-thread trash/reap callers still reach these fallbacks
   return fs.readdirSync(descriptorPath(fd));
 }
 

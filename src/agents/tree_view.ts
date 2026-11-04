@@ -2,7 +2,10 @@
 // Rebuild swaps whole maps, preserving refreshes/discards that raced its
 // awaits.
 // Serve does no record loads/scans; overlays derive from live in-memory rows.
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import type { ConversationRecord, LiveInputs } from "./conversation_store";
+import { liveTags } from "./conversation_tags";
 import {
   type RuntimeLogger,
   WARNING,
@@ -116,9 +119,9 @@ function checkedParent(conv: Conv): string | null {
   return parent;
 }
 
-/** The operator's take-over marker (the pin); mute never counts. */
+/** The operator's take-over marker; mute never counts. */
 export function isTakenOver(conv: Conv): boolean {
-  return pyTruthy(conv.pinned);
+  return pyTruthy(conv.taken_over);
 }
 
 function markAncestors(
@@ -246,6 +249,20 @@ export function buildRow(
     title: pyTruthy(conv.title) ? conv.title : "New agent",
     status,
     status_reason: statusReason,
+    error: isDict(last) && !!last.error,
+    model: typeof conv.model === "string" ? conv.model : null,
+    effort: typeof conv.level === "number" ? conv.level : null,
+    workdir: typeof conv.workdir === "string" ? conv.workdir : null,
+    ...(typeof conv.cwd === "string" && { cwd: conv.cwd }),
+    ...(typeof conv.branch === "string" && { branch: conv.branch }),
+    prs: Array.isArray(conv.prs)
+      ? conv.prs.filter(isDict).map((pr) => ({
+          number: pr.number,
+          state: pr.state,
+          checks: pr.checks ?? null,
+          merged: pr.state === "merged",
+        }))
+      : [],
     updated,
     operator_message_at:
       typeof conv.operator_message_at === "number"
@@ -255,7 +272,12 @@ export function buildRow(
     queued: o.queued,
     preview,
     muted: o.muted,
-    pinned: pyTruthy(conv.pinned),
+    taken_over: pyTruthy(conv.taken_over),
+    // Spec: Tabs opened before the taken_over rename read `pinned`; keep it
+    // for one release.
+    pinned: pyTruthy(conv.taken_over),
+    replied_at: typeof conv.replied_at === "number" ? conv.replied_at : null,
+    tags: conv.tags ?? {},
     restart_parked: pyTruthy(conv.restart_parked) && status === "interrupted",
     reap_deferred: pyTruthy(conv.reap_deferred),
     reap_deferred_reason: conv.reap_deferred_reason ?? null,
@@ -267,6 +289,13 @@ export function buildRow(
     ...(typeof conv.promotion_error === "string" && {
       promotion_error: conv.promotion_error,
     }),
+    ...(Array.isArray(conv.prs) &&
+      conv.prs.length > 0 && {
+        prs_revision: createHash("sha256")
+          .update(JSON.stringify(conv.prs))
+          .digest("hex")
+          .slice(0, 12),
+      }),
   };
 }
 
@@ -293,10 +322,23 @@ export class TreeView {
   private base = new Map<string, string>();
   private parent = new Map<string, string | null>();
   private takenOver = new Map<string, boolean>();
+  private workdirs = new Map<string, string | null>();
+  private readyState = false;
 
   private touched: Set<string> | null = null;
+  private readonly listeners = new Set<() => void>();
 
   constructor(private readonly deps: TreeViewDeps) {}
+
+  /** Observe admitted tag changes before their durable flush completes. */
+  subscribe(wake: () => void): () => void {
+    this.listeners.add(wake);
+    return () => this.listeners.delete(wake);
+  }
+
+  private changed(): void {
+    for (const wake of this.listeners) wake();
+  }
 
   private recomputeDerived(): void {
     const counts = new Map<string, number>();
@@ -336,9 +378,11 @@ export class TreeView {
       this.base.set(cid, base);
       this.parent.set(cid, parent);
       this.takenOver.set(cid, isTakenOver(conv));
+      this.workdirs.set(cid, entry.workdir);
       const skill = this.deps.skills.contextForWorkdirLoopSafe(entry.workdir);
       let children = 0;
       for (const p of this.parent.values()) if (p === cid) children += 1;
+      const previous = this.rows.get(cid);
       this.rows.set(
         cid,
         buildRow(conv, {
@@ -352,6 +396,8 @@ export class TreeView {
         }),
       );
       this.recomputeDerived();
+      if (previous && !isDeepStrictEqual(previous.tags, conv.tags ?? {}))
+        this.changed();
       return this.rows.get(cid) ?? null;
     } catch (error) {
       this.report("refresh", cid, error);
@@ -374,6 +420,7 @@ export class TreeView {
       this.base.delete(cid);
       this.parent.delete(cid);
       this.takenOver.delete(cid);
+      this.workdirs.delete(cid);
       this.recomputeDerived();
     } catch (error) {
       this.report("discard", cid, error);
@@ -382,6 +429,7 @@ export class TreeView {
 
   /** Rebuild every row; the finished maps swap in one synchronous step. */
   async rebuildAll(entries: readonly TreeEntryInput[]): Promise<void> {
+    this.readyState = false;
     const touched = new Set<string>();
     this.touched = touched;
     try {
@@ -395,11 +443,13 @@ export class TreeView {
       const rows = new Map<string, TreeRow>();
       const base = new Map<string, string>();
       const taken = new Map<string, boolean>();
+      const workdirs = new Map<string, string | null>();
       for (const e of entries) {
         const cid = statusRecordId(e.record);
         const b = projectBase(e.record, e.live);
         base.set(cid, b);
         taken.set(cid, isTakenOver(e.record));
+        workdirs.set(cid, e.workdir);
         const skill = await render(e.workdir);
         rows.set(
           cid,
@@ -420,6 +470,7 @@ export class TreeView {
           [base, this.base],
           [parents, this.parent],
           [taken, this.takenOver],
+          [workdirs, this.workdirs],
         ];
         for (const [next, live] of pairs)
           if (live.has(cid)) next.set(cid, live.get(cid));
@@ -429,7 +480,10 @@ export class TreeView {
       this.base = base;
       this.parent = parents;
       this.takenOver = taken;
+      this.workdirs = workdirs;
       this.recomputeDerived();
+      this.readyState = true;
+      this.changed();
     } catch (error) {
       this.report("rebuild_all", null, error);
     } finally {
@@ -437,9 +491,15 @@ export class TreeView {
     }
   }
 
-  /** The tree payload: cached rows, newest first. Callers must not mutate. */
-  serve(): TreeRow[] {
-    const rows = [...this.rows.values()];
+  /**
+   * The tree payload, newest first, without tags expired at `now` (epoch
+   * seconds). Callers must not mutate.
+   */
+  serve(now = Date.now() / 1000): TreeRow[] {
+    const rows: TreeRow[] = [...this.rows.values()].map((row) => ({
+      ...row,
+      tags: liveTags(row.tags, now),
+    }));
     for (const row of rows)
       if (typeof row.updated !== "number")
         throw new TypeError(
@@ -448,7 +508,28 @@ export class TreeView {
     return rows.sort((a, b) => (b.updated as number) - (a.updated as number));
   }
 
+  /** Mark the tree incomplete before preparing a replacement projection. */
+  invalidate(): void {
+    this.readyState = false;
+  }
+
+  /** Whether a complete tree projection has been installed. */
+  ready(): boolean {
+    return this.readyState;
+  }
+
+  /** Base statuses and working directories for API consumers. */
+  serveBase(rows = this.serve()): TreeRow[] {
+    return rows.map((row) => ({
+      ...row,
+      status: this.base.get(String(row.id)) ?? "unknown",
+      workdir: this.workdirs.get(String(row.id)) ?? null,
+    }));
+  }
+
   clear(): void {
+    this.readyState = false;
+    this.workdirs.clear();
     this.rows.clear();
     this.base.clear();
     this.parent.clear();

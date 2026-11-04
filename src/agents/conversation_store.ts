@@ -20,8 +20,9 @@ import {
 } from "../config";
 import { flockExclusive } from "../utils/flock";
 import { libc } from "../utils/libc";
+import { slowSpan } from "../observability/slow_span";
 import { pyCompactJson } from "../utils/py_compact_json";
-import { mergeTouchedPrs } from "./touched_prs";
+import { applyTagChange, type TagChange } from "./conversation_tags";
 
 export type ConversationRecord = Record<string, unknown>;
 const isRecord = (value: unknown): value is ConversationRecord =>
@@ -47,16 +48,19 @@ export const DURABLE_METADATA_KEYS: ReadonlySet<string> = new Set([
   "pending_model",
   "workdir",
   "muted",
-  "pinned",
-  "pinned_order",
+  "taken_over",
+  "taken_over_order",
   "safety_off",
   "session_id",
   "session_file",
   "session_cwd",
   "diff_base_ref",
-  "touched_prs",
+  "prs",
   "created",
   "operator_message_at",
+  "replied_at",
+  "replied_run",
+  "tags",
   "tmp_key",
   "external_key",
   "service_principal",
@@ -75,6 +79,23 @@ export const PIGGYBACK_METADATA_KEYS: ReadonlySet<string> = new Set([
   "last_interaction",
 ]);
 
+/**
+ * Rename the pre-`taken_over` take-over fields (`pinned`, `pinned_order`) in
+ * place; true when the record used them. Newer names win.
+ */
+export function renameLegacyTakeOver(record: ConversationRecord): boolean {
+  const legacy = "pinned" in record || "pinned_order" in record;
+  for (const [old, now] of LEGACY_TAKE_OVER) {
+    if (old in record && !(now in record)) record[now] = record[old];
+    delete record[old];
+  }
+  return legacy;
+}
+const LEGACY_TAKE_OVER = Object.entries({
+  pinned: "taken_over",
+  pinned_order: "taken_over_order",
+});
+
 /** Detached durable subset: mutable values must not alias a live record. */
 export function canonicalMetadata(
   record: ConversationRecord,
@@ -83,10 +104,7 @@ export function canonicalMetadata(
   for (const [key, value] of Object.entries(record)) {
     if (DURABLE_METADATA_KEYS.has(key))
       projected[key] =
-        key === "pending_model" &&
-        value &&
-        typeof value === "object" &&
-        !Array.isArray(value)
+        (key === "pending_model" || key === "tags") && isRecord(value)
           ? structuredClone(value)
           : Array.isArray(value)
             ? [...value]
@@ -107,7 +125,10 @@ export const TITLE_ORDER_RE = new RegExp(
   `^\\p{Nd}{20}-[A-Za-z0-9_-]{1,64}${END}`,
   "u",
 );
-export const PIN_ORDER_RE = new RegExp(`^\\p{Nd}{20}-[a-f0-9]{32}${END}`, "u");
+export const TAKEN_OVER_ORDER_RE = new RegExp(
+  `^\\p{Nd}{20}-[a-f0-9]{32}${END}`,
+  "u",
+);
 
 export function validateExternalKey(value: unknown): string | null {
   if (value == null) return null;
@@ -123,7 +144,7 @@ export function validateExternalKey(value: unknown): string | null {
   return value;
 }
 
-// Title/pin stamps preserve ordering even for choices in the same millisecond.
+// Title and take-over stamps order even choices in the same millisecond.
 function epochNanoseconds(): bigint {
   const stamp = new BigInt64Array(2);
   if (libc.clock_gettime(0, ptr(stamp)) !== 0)
@@ -140,7 +161,7 @@ export function cleanTitleOrder(
     ? value
     : fresh();
 }
-export function freshPinnedOrder(
+export function freshTakenOverOrder(
   nowNs: () => bigint = epochNanoseconds,
   id: () => string = () => randomUUID().replaceAll("-", ""),
 ): string {
@@ -194,6 +215,7 @@ export interface ConversationStoreHooks {
   hasLiveShell(cid: string): boolean;
   defaultSpawnWorkdir(): string;
   treeRefresh(entry: TreeEntry): void;
+  treeInvalidate?(): void;
   treeRebuild(entries: TreeEntry[]): void;
   treeDiscard(cid: string): void;
   safeRemoveTempKey(key: string): boolean | Promise<boolean>;
@@ -377,6 +399,9 @@ export class ConversationStore {
   private readonly mutex = new CidMutex();
   private readonly projection = new Map<string, ConversationRecord>();
   private readonly lastSaved = new Map<string, ConversationRecord>();
+  /** Rows the last scan read with pre-rename take-over fields. */
+  private readonly legacyTakeOverRows = new Set<string>();
+  private lastScanComplete = false;
   private projectionReadyState = true;
   private readonly guardTokens = new WeakMap<
     ConversationGuardToken,
@@ -616,6 +641,7 @@ export class ConversationStore {
   /** Detached database truth; read jobs stay off the event loop. */
   async collectAgentMetadata(): Promise<Record<string, ConversationRecord>> {
     const snapshot: Record<string, ConversationRecord> = {};
+    this.lastScanComplete = true;
     for (const cid of await this.agentStore.allAgentIds()) {
       try {
         const [metadata] = await this.agentStore.loadPersistedAgent(cid);
@@ -638,6 +664,7 @@ export class ConversationStore {
           snapshot[cid] = row;
         }
       } catch (error) {
+        this.lastScanComplete = false;
         this.hooks.log?.("agent_metadata_scan_skipped", {
           conversation_id: cid,
           error_type:
@@ -652,6 +679,7 @@ export class ConversationStore {
     for (const [cid, row] of Object.entries(snapshot))
       this.projection.set(cid, row);
     try {
+      this.hooks.treeInvalidate?.();
       this.hooks.treeRebuild(
         [...this.projection.values()].map((row) => this.treeEntry(row)),
       );
@@ -662,9 +690,11 @@ export class ConversationStore {
   applyAgentMetadata(snapshot: Record<string, ConversationRecord>): void {
     const rows: Record<string, ConversationRecord> = {};
     this.lastSaved.clear();
+    this.legacyTakeOverRows.clear();
     for (const [cid, metadata] of Object.entries(snapshot)) {
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
         continue;
+      if (renameLegacyTakeOver(metadata)) this.legacyTakeOverRows.add(cid);
       const durable = canonicalMetadata(metadata);
       this.lastSaved.set(cid, durable);
       const row: ConversationRecord = { ...durable };
@@ -693,6 +723,34 @@ export class ConversationStore {
       agents: Object.keys(snapshot).length,
     });
     return snapshot;
+  }
+  /**
+   * Rewrite rows stored with pre-rename take-over fields in flushed batches;
+   * `taken-over-rename.json` records a complete pass. Returns the count.
+   */
+  async migrateTakenOverNames(): Promise<number> {
+    const marker = join(this.paths.dataDir, "taken-over-rename.json");
+    // Invariant: An unreadable agents directory scans empty; never record it.
+    if (this.projection.size === 0 || (await readJson(marker))) return 0;
+    const rows = [...this.legacyTakeOverRows];
+    let complete = this.lastScanComplete;
+    for (let start = 0; start < rows.length; start += 256) {
+      const batch = rows.slice(start, start + 256);
+      for (const cid of batch) {
+        const row = this.projection.get(cid);
+        this.lastSaved.delete(cid);
+        if (row && !this.enqueueDurableMetadata(cid, row)) complete = false;
+      }
+      const flushed = await Promise.all(
+        batch.map((cid) => this.agentStore.flush(cid, 30)),
+      );
+      if (flushed.includes(false)) complete = false;
+    }
+    if (!complete)
+      throw new Error("taken_over rename incomplete; it reruns at startup");
+    await atomicJson(marker, { version: 1, rewritten: rows.length });
+    this.legacyTakeOverRows.clear();
+    return rows.length;
   }
   noteProjectionStale(): void {
     this.projectionReadyState = false;
@@ -732,9 +790,12 @@ export class ConversationStore {
   }
   // The projection and queue append are await-free; never put I/O between them.
   publishTitle(cid: string, title: string, order: string): boolean {
+    return this.patch(cid, { title, title_order: order });
+  }
+  private patch(cid: string, fields: ConversationRecord): boolean {
     const current = this.projection.get(cid);
     if (!current) return false;
-    const next = { ...current, title, title_order: order };
+    const next = { ...current, ...fields };
     if (!this.enqueueDurableMetadata(cid, next)) return false;
     this.projection.set(cid, next);
     this.refreshTreeRow(cid);
@@ -752,6 +813,20 @@ export class ConversationStore {
     this.projection.set(cid, next);
     this.refreshTreeRow(cid);
     this.enqueueDurableMetadata(cid, next);
+  }
+  /** Copies of `cid`'s live descendant conversations, parents first. */
+  subtree(cid: string): ConversationRecord[] {
+    const kids = new Map<unknown, ConversationRecord[]>();
+    for (const row of this.projection.values())
+      if (kids.get(row.parent)?.push(row) === undefined)
+        kids.set(row.parent, [row]);
+    const out: ConversationRecord[] = [];
+    const seen = new Set([cid]);
+    for (let i = -1; i < out.length; i++)
+      for (const row of kids.get(i < 0 ? cid : out[i]!.id) ?? [])
+        if (!seen.has(String(row.id)) && seen.add(String(row.id)))
+          out.push(row);
+    return out.map((row) => structuredClone(row));
   }
   metadataSnapshot(cid: string): ConversationRecord | null {
     const row = this.projection.get(cid);
@@ -952,11 +1027,11 @@ export class ConversationStore {
     if (!("parent" in record)) record.parent = null;
     if (!("status" in record)) record.status = "idle";
     if (!("draft" in record)) record.draft = null;
-    if (record.parent || record.pinned) {
+    if (record.parent || record.taken_over) {
       if (!("muted" in record)) record.muted = false;
     } else record.muted = false;
     if (!("safety_off" in record)) record.safety_off = false;
-    if (!("pinned" in record)) record.pinned = false;
+    if (!("taken_over" in record)) record.taken_over = false;
     // Invariant: Pi is the only backend, but a legacy record keeps its stored
     // provenance for read-only legacy history.
     if (!("backend" in record)) record.backend = LEGACY_BACKEND;
@@ -1033,8 +1108,8 @@ export class ConversationStore {
     current: ConversationRecord | undefined,
     record: ConversationRecord,
     caller: ConversationRecord,
-    field: "title" | "pinned",
-    order: "title_order" | "pinned_order",
+    field: "title" | "taken_over",
+    order: "title_order" | "taken_over_order",
     valid: RegExp,
   ): void {
     const stored = current?.[order],
@@ -1047,8 +1122,9 @@ export class ConversationStore {
         stored < candidate)
     )
       return;
-    if (field === "pinned" || field in current!) {
-      record[field] = field === "pinned" ? !!current![field] : current![field];
+    if (field === "taken_over" || field in current!) {
+      record[field] =
+        field === "taken_over" ? !!current![field] : current![field];
       caller[field] = record[field];
     } else {
       delete record[field];
@@ -1057,21 +1133,60 @@ export class ConversationStore {
     record[order] = stored;
     caller[order] = stored;
   }
-  async addTouchedPrs(cid: string, urls: readonly string[]): Promise<void> {
-    const admitted = await this.withTitleGuard(cid, async () => {
+  /** Replace the linked pull requests (`prs`, conversation_prs.ts). */
+  async updatePrs(
+    cid: string,
+    update: (prs: unknown) => unknown[],
+  ): Promise<void> {
+    await this.withTitleGuard(cid, async () => {
       const current = this.projection.get(cid);
-      if (!current) return false;
-      const next = {
-        ...current,
-        touched_prs: mergeTouchedPrs(current.touched_prs, urls),
-      };
-      if (!this.enqueueDurableMetadata(cid, next)) return false;
+      if (!current) return;
+      const next = { ...current, prs: update(current.prs) };
+      if (isDeepStrictEqual(next.prs, current.prs)) return;
+      if (!this.enqueueDurableMetadata(cid, next)) return;
       this.projection.set(cid, next);
-      return true;
+      this.refreshTreeRow(cid);
     });
-    if (!admitted) return;
+  }
+  /**
+   * Persist when run `key` was first reported (epoch s); a repeated report of
+   * the same run keeps its first stamp.
+   */
+  async stampReply(cid: string, key: string, at: number): Promise<void> {
+    const current = this.projection.get(cid);
+    if (!current) return;
+    // Invariant: A retried report flushes again: its stamp may be admitted
+    // but unpersisted.
+    const fresh = current.replied_run !== key;
+    if (fresh && !this.patch(cid, { replied_at: at, replied_run: key })) return;
     if (!(await this.agentStore.flush(cid)))
-      throw new Error(`PR metadata flush failed: ${cid}`);
+      throw new Error("reply stamp flush failed");
+  }
+  /**
+   * Apply one tag change for `by` to each of `cids`; returns the ids not
+   * found. A TagRefused for any conversation changes none of them.
+   */
+  async changeTags(
+    cids: readonly string[],
+    change: TagChange,
+    by: string,
+    now: number,
+  ): Promise<string[]> {
+    // Invariant: Validation and admission are await-free, so no concurrent
+    // change can refuse a batch after part of it was admitted.
+    const next = cids.flatMap((cid) => {
+      const current = this.projection.get(cid);
+      if (!current) return [];
+      return [[cid, applyTagChange(current.tags, change, by, now)] as const];
+    });
+    const changed = next
+      .filter(([cid, tags]) => this.patch(cid, { tags }))
+      .map(([cid]) => cid);
+    const flushed = await Promise.all(
+      changed.map((cid) => this.agentStore.flush(cid)),
+    );
+    if (flushed.includes(false)) throw new Error("tag change flush failed");
+    return cids.filter((cid) => !changed.includes(cid));
   }
   // Admit durable metadata before replacing projection; a rejected enqueue
   // swaps nothing.
@@ -1125,9 +1240,9 @@ export class ConversationStore {
             current,
             record,
             conv,
-            "pinned",
-            "pinned_order",
-            PIN_ORDER_RE,
+            "taken_over",
+            "taken_over_order",
+            TAKEN_OVER_ORDER_RE,
           );
           if (!setModel && current.backend === record.backend) {
             for (const key of ["model", "effort", "level"]) {
@@ -1136,11 +1251,13 @@ export class ConversationStore {
             }
           }
         }
-        // Invariant: Only addTouchedPrs owns this field; stale turn/settings
-        // snapshots must never erase observations admitted while they were
-        // running.
-        if (current?.touched_prs)
-          record.touched_prs = [...(current.touched_prs as string[])];
+        // Invariant: Only updatePrs, stampReply and changeTags own these
+        // fields; stale turn/settings snapshots must never erase values
+        // admitted while they were running.
+        for (const key of ["prs", "replied_at", "replied_run", "tags"])
+          if (current && key in current)
+            record[key] = structuredClone(current[key]);
+          else delete record[key];
         if (typeof current?.operator_message_at === "number")
           record.operator_message_at = current.operator_message_at;
         if (clearPending) delete record.pending_model;
@@ -1181,7 +1298,7 @@ export class ConversationStore {
       "parent",
       "title",
       "muted",
-      "pinned",
+      "taken_over",
       "workdir",
       "session_id",
       "msg_count",
@@ -1329,10 +1446,14 @@ export class ConversationStore {
     return this.mutex.withLock(key, async () => {
       const dir =
         kind === "title" ? this.paths.titleLockDir : this.paths.muteLockDir;
-      await mkdir(dir, { recursive: true });
-      const parent = await open(
-        dir,
-        constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+      await slowSpan("metadata_lock_dir_call", cid, () =>
+        mkdir(dir, { recursive: true }),
+      );
+      const parent = await slowSpan("metadata_lock_parent_call", cid, () =>
+        open(
+          dir,
+          constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+        ),
       );
       try {
         const handle = await openPinnedLockFile(`${cid}.lock`, parent);
@@ -1351,10 +1472,10 @@ export class ConversationStore {
             release();
           }
         } finally {
-          await handle.close();
+          await slowSpan("metadata_lock_close_call", cid, () => handle.close());
         }
       } finally {
-        await parent.close();
+        await slowSpan("metadata_parent_close_call", cid, () => parent.close());
       }
     });
   }

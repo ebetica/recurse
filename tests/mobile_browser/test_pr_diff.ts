@@ -30,25 +30,13 @@ export const tests: BrowserTest[] = [false, true].map(
       expect(theme.status()).toBe(200);
       const delivered: string[] = [];
       let contents = 0;
-      let metadataReady = false;
       let body = captured.pr.body;
+      const { body: _body, ...pr } = captured.pr;
       await page.route(`**/api/conversations/${demo}/**`, (route) => {
         const url = new URL(route.request().url());
         const path = url.pathname;
         if (path.endsWith("/prs"))
-          return route.fulfill({
-            json: {
-              prs: [
-                {
-                  ...captured.pr,
-                  body: metadataReady ? body : null,
-                  state: metadataReady ? captured.pr.state : null,
-                  metadata: metadataReady ? "ready" : "pending",
-                },
-              ],
-              refreshing: !metadataReady && !mobile,
-            },
-          });
+          return route.fulfill({ json: { prs: [pr] } });
         if (path.endsWith("/diff/candidates"))
           return route.fulfill({
             json: { branches: [], commits: [], tags: [] },
@@ -56,7 +44,7 @@ export const tests: BrowserTest[] = [false, true].map(
         if (path.endsWith("/diff"))
           return route.fulfill({
             json: url.searchParams.get("pr")
-              ? captured.summary
+              ? { ...captured.summary, body }
               : captured.working,
           });
         if (path.endsWith("/diff/files")) {
@@ -124,18 +112,15 @@ export const tests: BrowserTest[] = [false, true].map(
       expect(await pane.locator(".diff-base-repo").allTextContents()).toEqual([
         "ebetica/recurse",
       ]);
-      expect(await option.textContent()).toBe("#2069 · " + captured.pr.title);
-      const selectedMetadata = page.waitForResponse((response) =>
-        new URL(response.url()).pathname.endsWith(`/conversations/${demo}/prs`),
+      expect(await option.textContent()).toBe(
+        "#2069 · " + captured.pr.title + " · merged",
       );
       if (mobile) await option.tap();
       else {
         await input.press("ArrowDown");
         await input.press("Enter");
       }
-      expect((await (await selectedMetadata).json()).refreshing).toBe(!mobile);
       await pane.locator(".diff-row.add").first().waitFor();
-      metadataReady = true;
       expect(contents).toBe(0);
       const shot = async (view: string) => {
         const dir = process.env.RECURSE_SCREENSHOT_DIR;
@@ -157,42 +142,50 @@ export const tests: BrowserTest[] = [false, true].map(
         "Summary",
       );
       expect(await description.locator("code").count()).toBeGreaterThan(0);
-      const height = await description.evaluate((element) => {
-        const browser = globalThis as any;
-        const bottom = element.getBoundingClientRect().bottom;
-        const walker = browser.document.createTreeWalker(
-          element,
-          browser.NodeFilter.SHOW_TEXT,
-        );
-        const lines: Array<{ top: number; bottom: number }> = [];
-        let partial = false;
-        for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-          if (!node.textContent?.trim()) continue;
-          const range = browser.document.createRange();
-          range.selectNodeContents(node);
-          for (const rect of range.getClientRects()) {
-            if (rect.height && rect.top < bottom - 0.5) {
-              lines.push({ top: rect.top, bottom: rect.bottom });
-              if (rect.bottom > bottom + 0.5) partial = true;
+      const measurement = await page.waitForFunction(
+        (id) => {
+          const browser = globalThis as any;
+          const element = browser.document.getElementById(id);
+          if (!element) return null;
+          const bottom = element.getBoundingClientRect().bottom;
+          const walker = browser.document.createTreeWalker(
+            element,
+            browser.NodeFilter.SHOW_TEXT,
+          );
+          const lines: Array<{ top: number; bottom: number }> = [];
+          let partial = false;
+          for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+            if (!node.textContent?.trim()) continue;
+            const range = browser.document.createRange();
+            range.selectNodeContents(node);
+            for (const rect of range.getClientRects()) {
+              if (rect.height && rect.top < bottom - 0.5) {
+                lines.push({ top: rect.top, bottom: rect.bottom });
+                if (rect.bottom > bottom + 0.5) partial = true;
+              }
             }
           }
-        }
-        const bands: typeof lines = [];
-        for (const rect of lines.sort((a, b) => a.top - b.top)) {
-          const previous = bands.at(-1);
-          if (previous && rect.top < previous.bottom) {
-            previous.bottom = Math.max(previous.bottom, rect.bottom);
-          } else {
-            bands.push(rect);
+          const bands: typeof lines = [];
+          for (const rect of lines.sort((a, b) => a.top - b.top)) {
+            const previous = bands.at(-1);
+            if (previous && rect.top < previous.bottom) {
+              previous.bottom = Math.max(previous.bottom, rect.bottom);
+            } else {
+              bands.push(rect);
+            }
           }
-        }
-        return {
-          collapsed: element.clientHeight,
-          full: element.scrollHeight,
-          lines: bands.length,
-          partial,
-        };
-      });
+          return bands.length
+            ? {
+                collapsed: element.clientHeight,
+                full: element.scrollHeight,
+                lines: bands.length,
+                partial,
+              }
+            : null;
+        },
+        await description.getAttribute("id"),
+      );
+      const height = (await measurement.jsonValue())!;
       expect(height.lines).toBe(6);
       expect(height.partial).toBe(false);
       expect(height.full).toBeGreaterThan(height.collapsed);

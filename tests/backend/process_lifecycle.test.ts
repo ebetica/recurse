@@ -6,6 +6,7 @@ import { ShellRegistry } from "../../src/pi_bg_shell";
 import { ProcessLifecycle, returncode } from "../../src/process_lifecycle";
 import { procStat } from "../../src/utils/proc_stat";
 import { procIds, procText } from "../../src/utils/process_table";
+import { counters, processTicks } from "../dev/hotpath_cpu";
 const roots: string[] = [];
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -272,6 +273,67 @@ test("reap stops a detached shell group whose leader died; a stale stranger reco
   expect(life.rows.size).toBe(0);
   await expectAlive(other);
 });
+
+// Regression: #3058 child CPU must remain counted after its process is reaped.
+test.skipIf(process.platform !== "linux")(
+  "CPU totals survive child reaping",
+  async () => {
+    const ready = Promise.withResolvers<void>();
+    const reaped = Promise.withResolvers<void>();
+    const burn = `
+    const start = process.cpuUsage();
+    for (;;) {
+      const cpu = process.cpuUsage(start);
+      if (cpu.user + cpu.system >= 200000) break;
+    }
+    process.send("ready");
+    setInterval(() => {}, 1000);
+  `;
+    const parent = Bun.spawn(
+      [
+        PY,
+        "-e",
+        `
+    const child = Bun.spawn([process.execPath, "-e", ${JSON.stringify(burn)}], {
+      stdout: "ignore", stderr: "inherit",
+      ipc(value) { if (value === "ready") process.send("ready"); },
+    });
+    process.on("message", async () => {
+      child.kill("SIGTERM");
+      await child.exited;
+      process.send("reaped");
+    });
+  `,
+      ],
+      {
+        detached: true,
+        stdout: "ignore",
+        stderr: "inherit",
+        ipc(value) {
+          if (value === "ready") ready.resolve();
+          if (value === "reaped") reaped.resolve();
+        },
+      },
+    );
+    hardKill(parent.pid);
+    try {
+      await ready.promise;
+      const before = await counters(parent.pid);
+      const ticks = await processTicks(parent.pid);
+      expect(before.total).toBeGreaterThanOrEqual(15);
+      parent.send("reap");
+      await reaped.promise;
+      expect((await counters(parent.pid)).total).toBeGreaterThanOrEqual(
+        before.total,
+      );
+      expect(await processTicks(parent.pid)).toBeGreaterThanOrEqual(ticks);
+    } finally {
+      process.kill(-parent.pid, "SIGKILL");
+      await parent.exited;
+    }
+    await expectGroupGone(parent.pid);
+  },
+);
 
 test("idle Stop kills shells behind a live core and leaves the core", async () => {
   const state = join(scratch(), "state");

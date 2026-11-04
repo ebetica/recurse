@@ -61,23 +61,26 @@ const run = (args: object, requestId: string) =>
   );
 
 if (mode === "complete") {
-  harness.subscribeCommits((publication) => {
-    for (const change of publication.changes) {
-      const value = (change as { value?: Record<string, any> }).value;
-      if (
-        killAt === "exit-committed" &&
-        change.type === "task" &&
-        value?.kind === SHELL_TASK &&
-        value.state?.checkpoint?.phase === "notify"
-      )
-        die();
-      if (
-        killAt === "exit-submitted" &&
-        change.type === "submission" &&
-        String(value?.requestId).endsWith(":exit")
-      )
-        die();
-    }
+  harness.observeCommits({
+    end: () => {},
+    advance: (publication) => {
+      for (const change of publication.changes) {
+        const value = (change as { value?: Record<string, any> }).value;
+        if (
+          killAt === "exit-committed" &&
+          change.type === "task" &&
+          value?.kind === SHELL_TASK &&
+          value.state?.checkpoint?.phase === "notify"
+        )
+          die();
+        if (
+          killAt === "exit-submitted" &&
+          change.type === "submission" &&
+          String(value?.requestId).endsWith(":exit")
+        )
+          die();
+      }
+    },
   });
   await (
     await run({ command: "sleep 0.5; echo finished", background: true }, "bg")
@@ -124,16 +127,19 @@ if (mode === "survive") {
   }
   if (killAt === "old-owner") {
     const store = new RegistryStore(stateDir, "agent-1");
-    for (const record of store.readAll()) {
+    for (const record of await store.readAll()) {
       if (
-        !store.write({ ...record, ownerId: "legacy-opaque-owner-capability" })
+        !(await store.write({
+          ...record,
+          ownerId: "legacy-opaque-owner-capability",
+        }))
       )
         throw new Error("could not persist the legacy owner record");
     }
     if (
-      !store
-        .readAll()
-        .every((record) => record.ownerId === "legacy-opaque-owner-capability")
+      !(await store.readAll()).every(
+        (record) => record.ownerId === "legacy-opaque-owner-capability",
+      )
     )
       throw new Error("legacy owner record was not retained");
   }
@@ -173,5 +179,5 @@ print({
 });
 await harness.close(context);
 await shells.shutdown();
-worker.close();
+await worker.close();
 process.exit(0);

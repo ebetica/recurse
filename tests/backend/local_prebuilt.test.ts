@@ -12,7 +12,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { RootError } from "../../src/local_roots";
-import { acquireSupervisorLock, LOCK_FD_ENV } from "../../src/launcher/lock";
+import {
+  acquireSupervisorLock,
+  LOCK_FD_ENV,
+} from "../../src/launcher/lock.cli";
 import * as local from "../../src/local";
 import { captureFixture } from "./fixture_subprocess";
 

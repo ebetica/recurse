@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   agentAttachmentHref,
-  agentAttachmentPreviewHref,
+  agentAttachmentThumbnailHref,
 } from "../../web/agent-attachments";
 
 describe("agent attachment controls", () => {
@@ -10,8 +10,8 @@ describe("agent attachment controls", () => {
     expect(agentAttachmentHref("agent one", "opaque/id")).toBe(
       "/api/conversations/agent%20one/attachments/opaque%2Fid",
     );
-    expect(agentAttachmentPreviewHref("agent one", "opaque/id")).toBe(
-      "/api/conversations/agent%20one/attachments/opaque%2Fid/preview",
+    expect(agentAttachmentThumbnailHref("agent one", "opaque/id")).toBe(
+      "/api/conversations/agent%20one/attachments/opaque%2Fid/thumbnail",
     );
   });
 });

@@ -15,6 +15,10 @@ export interface ViewBlock {
   kind: string;
   role: string;
   text: string;
+  /** On a text-delta page: `text` follows this many held characters. */
+  text_from?: number;
+  /** With `text_from`: hash of the held text it follows (`textHash`). */
+  text_hash?: number;
   thinking_title?: string | null;
   has_thinking?: boolean;
   thinking_elapsed_ms?: number;
@@ -62,6 +66,7 @@ export interface ViewPage {
   retry_notice?: string | null;
   turn_status?: string;
   active_run?: string | null;
+  run_state_clock?: [string, number];
   blocks: unknown;
   older?: boolean;
   newer?: boolean;

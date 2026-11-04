@@ -91,6 +91,17 @@ export function thinkingSummaryTail(value: unknown): string {
   return body.trim();
 }
 
+/** Plain prose beneath the title already shown by the live bar. */
+export function thinkingSummaryBody(value: string, title: string): string {
+  const text = value.trim();
+  const heading = /^\*\*(.+?)\*\*[ \t]*(?:\r?\n|$)/u.exec(text);
+  const body =
+    heading && thinkingSummaryLabel(heading[0]) === title
+      ? text.slice(heading[0].length)
+      : text;
+  return body.replaceAll("**", "").trim();
+}
+
 function actionText(call: ToolCall): string {
   const rawName = safeToolName(call.name).toLowerCase();
   const name = clipHead(rawName, MAX_ACTIVITY_CHARS - 2);
@@ -130,6 +141,7 @@ export interface LiveActivityRow {
   live?: boolean;
   // A persisted row whose thinking summary is still streaming live.
   live_thinking?: boolean;
+  stop_reason?: string | null;
 }
 
 export type LiveActivityKind = "tool" | "thinking" | "starting";
@@ -144,6 +156,8 @@ export interface LiveActivityPanel {
   args?: string;
   // Elapsed thinking time is rendered in its own ticking span.
   thinkingElapsedMs?: number;
+  hasThinking?: boolean;
+  thinkingActive?: boolean;
 }
 
 // Shows the current turn's latest thinking title, independent of tools. Only
@@ -161,14 +175,29 @@ export function liveActivityState(
     }
   }
   const currentRows = rows.slice(turnStart);
-  // Invariant: Admission can precede user-row readback; retained rows may be
-  // old. Require current live rows, not status or a user row alone. Undefined
-  // acceptance keeps the legacy projection for older callers.
+  const lastReply = currentRows.findLastIndex(
+    (row) =>
+      row.role === "assistant" &&
+      !row.live &&
+      row.stop_reason !== "toolUse" &&
+      Boolean(row.text?.trim() || row.stop_reason),
+  );
+  const currentRunRows = currentRows.slice(lastReply + 1);
+  const isThinking = (row: LiveActivityRow): boolean =>
+    Boolean(
+      row.has_thinking || row.thinking_title?.trim() || row.thinking?.trim(),
+    );
+  // Invariant: Settled final replies fence off the prior turn during admission;
+  // persisted thinking in an unfinished tool round survives quiet model waits.
   if (
     promptAccepted !== undefined &&
     (!hasBoundary ||
-      !currentRows.some(
-        (row) => row.live === true || row.live_thinking === true,
+      !currentRunRows.some(
+        (row) =>
+          row.live ||
+          row.running ||
+          row.live_thinking ||
+          (promptAccepted && isThinking(row)),
       ))
   )
     return promptAccepted
@@ -184,38 +213,23 @@ export function liveActivityState(
           title: "Starting agent…",
           key: "starting",
         };
-  // Invariant: Live rows may trail the prior turn before the user row arrives.
-  // Only live tools or current-run thinking may win, never settled old tools.
-  const currentRunRows =
-    promptAccepted !== undefined &&
-    !currentRows.some(
-      (row) =>
-        row.live === true && (row.role === "user" || row.role === "custom"),
-    )
-      ? currentRows.filter(
-          (row) => row.live === true || row.live_thinking === true,
-        )
-      : currentRows;
-  const isThinking = (row: LiveActivityRow): boolean =>
-    row.has_thinking === true ||
-    (typeof row.thinking_title === "string" && row.thinking_title.trim()) ||
-    (typeof row.thinking === "string" && row.thinking.trim())
-      ? true
-      : false;
   const latestThinking = [...currentRunRows].reverse().find(isThinking);
-  // Invariant: A later row can carry timing without a new heading. Keep the
-  // last actual bold heading until a newer heading arrives, including while
-  // tools run.
-  const titledThinking = [...currentRunRows]
-    .reverse()
-    .find(
-      (row) =>
-        isThinking(row) &&
-        thinkingSummaryLabel(row.thinking_title ?? row.thinking) !== "Thinking",
-    );
-  const thinking = thinkingSummaryLabel(
-    titledThinking?.thinking_title ?? titledThinking?.thinking,
+  const thinkingActive = Boolean(
+    latestThinking &&
+    (latestThinking.live || latestThinking.live_thinking) &&
+    (!latestThinking.stop_reason || latestThinking.stop_reason === "pending") &&
+    !latestThinking.text?.trim() &&
+    !currentRunRows
+      .slice(currentRunRows.indexOf(latestThinking) + 1)
+      .some((row) => row.kind === "tool_call"),
   );
+  const summary = thinkingSummaryLabel(
+    latestThinking?.thinking_title ?? latestThinking?.thinking,
+  );
+  const thinking =
+    latestThinking && !thinkingActive && summary === "Thinking"
+      ? "Waiting"
+      : summary;
   const thinkingElapsedMs =
     typeof latestThinking?.thinking_elapsed_ms === "number" &&
     Number.isFinite(latestThinking.thinking_elapsed_ms)
@@ -231,10 +245,14 @@ export function liveActivityState(
   if (latestThinking || hasContent)
     return {
       kind: "thinking",
-      label: thinking,
+      label:
+        latestThinking && !thinkingActive && thinking !== "Waiting"
+          ? `Waiting · ${thinking}`
+          : thinking,
       title: thinking,
       key: `thinking:${latestThinking?.id ?? currentRunRows[0]?.id ?? "current"}\0${thinking}`,
       thinkingElapsedMs,
+      ...(latestThinking ? { hasThinking: true, thinkingActive } : {}),
     };
   return {
     kind: "starting",

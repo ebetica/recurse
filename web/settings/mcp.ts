@@ -1,6 +1,7 @@
 /** MCP reads/checks/sign-in live only while Settings is visible. */
 import { settingsClient, settingsDirectUrl, settingsLabel } from "./target.js";
 import { copyText } from "../tool_details.js";
+import { pasteSignInForm } from "./paste-sign-in.js";
 
 interface ServerStatus {
   name: string;
@@ -15,7 +16,7 @@ interface ServerStatus {
 export function buildMcpStatus(body: HTMLElement): () => void {
   const { api, jpost } = settingsClient();
   const list = document.createElement("div");
-  list.className = "mcp-status";
+  list.className = "mcp-status group";
   list.setAttribute("aria-label", "MCP server status");
   const message = document.createElement("p");
   message.className = "msg err";
@@ -168,45 +169,25 @@ export function buildMcpStatus(body: HTMLElement): () => void {
       row.append(button);
       list.append(row);
       if (pasting?.name !== server.name || server.signedIn) continue;
-      const form = document.createElement("form");
-      form.className = "row mcp-paste";
-      const open = document.createElement("a");
-      open.className = "btn";
-      open.href = pasting.url;
-      open.target = "_blank";
-      open.rel = "noopener noreferrer";
-      open.textContent = `Open ${server.name} sign-in`;
-      const hint = document.createElement("p");
-      hint.className = "hint";
-      hint.textContent = `After approving, your browser shows an unreachable ${pasting.redirectUrl} page. Paste that page's full address here.`;
-      const answer = document.createElement("input");
-      answer.className = "text-field";
-      answer.required = true;
-      answer.autocomplete = "off";
-      answer.value = pasting.answer ?? "";
-      answer.oninput = () => {
-        if (pasting) pasting.answer = answer.value;
-      };
-      answer.setAttribute(
-        "aria-label",
-        `Address after signing in to ${server.name}`,
+      list.append(
+        pasteSignInForm({
+          name: server.name,
+          url: pasting.url,
+          redirectUrl: pasting.redirectUrl,
+          answer: pasting.answer,
+          onInput: (answer) => {
+            if (pasting) pasting.answer = answer;
+          },
+          busy: checking,
+          onSubmit: (answer) =>
+            void act(
+              "finish-sign-in",
+              "Couldn't finish sign-in.",
+              () => (pasting = undefined),
+              { url: answer },
+            ),
+        }),
       );
-      const finish = document.createElement("button");
-      finish.className = "btn";
-      finish.type = "submit";
-      finish.textContent = "Finish sign-in";
-      finish.disabled = checking;
-      form.onsubmit = (event) => {
-        event.preventDefault();
-        void act(
-          "finish-sign-in",
-          "Couldn't finish sign-in.",
-          () => (pasting = undefined),
-          { url: answer.value },
-        );
-      };
-      form.append(open, hint, answer, finish);
-      list.append(form);
     }
   };
   const refresh = async () => {

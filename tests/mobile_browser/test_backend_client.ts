@@ -160,7 +160,7 @@ export const test_backend_client: BrowserTest = async (browser) => {
       home: "connected",
     });
     await servers[1]!.close();
-    const unreachable = await page.evaluate(async () => {
+    const stillRevoked = await page.evaluate(async () => {
       const client = (globalThis as any).backendClient;
       const backend = new client.Backend("B");
       const response = await backend.api("/api/version");
@@ -170,9 +170,9 @@ export const test_backend_client: BrowserTest = async (browser) => {
         home: client.homeBackend.connectionHealth.snapshot().phase,
       };
     });
-    expect(unreachable).toEqual({
-      status: 502,
-      remote: "reconnecting",
+    expect(stillRevoked).toEqual({
+      status: 424,
+      remote: "auth-expired",
       home: "connected",
     });
     await context.clearCookies();

@@ -84,13 +84,15 @@ test("Durable sections are byte-identical to Pi's custom-prompt path", async () 
       "---\nname: prompt-test\ndescription: Check prompt parity.\n---\nSkill instructions.\n",
     );
     state = {
-      ...snapshot(),
+      ...(await snapshot()),
       ...(await loadPromptResources(repo, agent, [skill])),
     };
     expect(
       state.contextFiles.some((file) => file.path === join(repo, "AGENTS.md")),
     ).toBe(true);
-    expect(state.skills.map((skill) => skill.name)).toEqual(["prompt-test"]);
+    expect(new Set(state.skills.map((skill) => skill.name))).toEqual(
+      new Set(["prompt-test", "recurse-settings"]),
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -123,7 +125,7 @@ test("Durable sections are byte-identical to Pi's custom-prompt path", async () 
 test("owned instruction sections match a recorded fresh Durable request", async () => {
   const root = await mkdtemp(join(tmpdir(), "durable-prompt-capture-"));
   try {
-    const state = snapshot();
+    const state = await snapshot();
     state.recurse_memory = renderMemoryPrompt(
       await captureMemorySnapshot(String(conv.id), root),
       root,
@@ -200,6 +202,12 @@ test("tree memory is shared within the current tree only", async () => {
       const request = captured.request as {
         context: { messages: Array<{ sections?: Record<string, string> }> };
       };
+      const declarations = request.context.messages
+        .flatMap((message) =>
+          message.sections?.codemode ? [message.sections.codemode] : [],
+        )
+        .at(-1);
+      expect(declarations).toBeUndefined();
       const memory = request.context.messages
         .flatMap((message) =>
           message.sections?.recurse_memory
@@ -219,20 +227,24 @@ test("tree memory is shared within the current tree only", async () => {
 
 test("capture refuses credential overrides without storing them or stale requests", async () => {
   const captures = new RequestCaptures(() => "agent");
-  for (const override of [
-    { env: { OPENAI_API_KEY: "synthetic-secret" } },
-    { apiKey: "synthetic-secret" },
-    { headers: { Authorization: "synthetic-secret" } },
-  ]) {
-    captures.record("streamSimple", {}, { messages: [] }, { sessionId: "s" });
-    expect(() =>
-      captures.record(
-        "streamSimple",
-        {},
-        { messages: [] },
-        { sessionId: "s", ...override },
-      ),
-    ).toThrow("Models-owned authentication");
-    expect(await captures.latest("agent")).toBeUndefined();
+  try {
+    for (const override of [
+      { env: { OPENAI_API_KEY: "synthetic-secret" } },
+      { apiKey: "synthetic-secret" },
+      { headers: { Authorization: "synthetic-secret" } },
+    ]) {
+      captures.record("streamSimple", {}, { messages: [] }, { sessionId: "s" });
+      expect(() =>
+        captures.record(
+          "streamSimple",
+          {},
+          { messages: [] },
+          { sessionId: "s", ...override },
+        ),
+      ).toThrow("Models-owned authentication");
+      expect(await captures.latest("agent")).toBeUndefined();
+    }
+  } finally {
+    await captures.close();
   }
 });

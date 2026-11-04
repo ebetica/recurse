@@ -6,7 +6,7 @@
 - [Examples](examples.md): how goals, loops, watchers and graphs of agents are
   built from those parts, and how to customize Recurse.
 - [Develop Recurse](develop.md), including testing install changes.
-- [Deploy on Modal](../playground/modal/deploy.md) ([how it works](../playground/modal/README.md)).
+- An optional Modal deployment lives in playground/modal.
 
 ## For agents
 

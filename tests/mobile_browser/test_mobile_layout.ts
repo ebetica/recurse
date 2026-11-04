@@ -11,6 +11,10 @@ import {
   runBrowserTests,
   visibleAndUncovered,
   type BrowserTest,
+  startNewAgent,
+  openSettingsPanel,
+  showAgentList,
+  waitForLayout,
 } from "./common";
 
 async function layerAt(page: any, at: string | [number, number]) {
@@ -21,7 +25,7 @@ async function layerAt(page: any, at: string | [number, number]) {
         return [r.x + r.width / 2, r.y + r.height / 2];
       });
   return page.evaluate(
-    `document.elementFromPoint(${x}, ${y})?.closest("#sidebar, #backdrop, #topbar, #panes, #pane-backdrop, #pane-menu")?.id`,
+    `document.elementFromPoint(${x}, ${y})?.closest("#sidebar, #topbar, #panes, #pane-backdrop, #pane-menu")?.id`,
   );
 }
 
@@ -59,6 +63,89 @@ const turn = (id: string, user: string, assistant: string) => ({
   ],
 });
 export const tests: BrowserTest[] = [
+  // Feature: #2991 installed fullscreen apps keep controls below the display cutout.
+  async function test_fullscreen_safe_area(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 915 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    await gotoRoot(page, base);
+    const manifest = await page
+      .locator('link[rel="manifest"]')
+      .getAttribute("href");
+    expect(
+      (await (await page.request.get(new URL(manifest!, base).href)).json())
+        .display,
+    ).toBe("fullscreen");
+    const cdp = await context.newCDPSession(page);
+    await cdp.send("Emulation.setSafeAreaInsetsOverride", {
+      insets: { top: 60, bottom: 24 },
+    });
+    await page.locator(".agent").first().waitFor();
+    expect(
+      await page
+        .locator("#topbar")
+        .evaluate((el) => (globalThis as any).getComputedStyle(el).paddingTop),
+    ).toBe("60px");
+    expect(
+      (await page.locator("#menu-btn").boundingBox())!.y,
+    ).toBeGreaterThanOrEqual(60);
+    await openSettingsPanel(page);
+    expect(
+      (await page.locator("#settings-close").boundingBox())!.y,
+    ).toBeGreaterThanOrEqual(60);
+    expect(
+      (await page.locator(".settings-head h2").boundingBox())!.y,
+    ).toBeGreaterThanOrEqual(60);
+    await page.locator('#settings-nav button[data-cat="appearance"]').click();
+    expect(
+      (await page.locator(".settings-back:visible").boundingBox())!.y,
+    ).toBeGreaterThanOrEqual(60);
+    await page.getByRole("button", { name: /^Name and icon / }).click();
+    await page.locator("dialog.settings-sheet[open]").evaluate((el) => {
+      (el as any).style.height = "100dvh";
+    });
+    expect(
+      (await page.locator("dialog.settings-sheet[open]").boundingBox())!.y,
+    ).toBeGreaterThanOrEqual(60);
+    await page
+      .locator("dialog.settings-sheet[open] .settings-sheet-close")
+      .click();
+    await page.setViewportSize({ width: 915, height: 412 });
+    await cdp.send("Emulation.setSafeAreaInsetsOverride", {
+      insets: { left: 60, right: 0, top: 0, bottom: 24 },
+    });
+    expect(
+      (await page.locator(".settings-head h2").boundingBox())!.x,
+    ).toBeGreaterThanOrEqual(60);
+    expect(
+      (await page
+        .locator('#settings-nav button[data-cat="appearance"]')
+        .boundingBox())!.x,
+    ).toBeGreaterThanOrEqual(60);
+    await page.locator("#settings-close").click();
+    expect(
+      (await page.locator("#input").boundingBox())!.y +
+        (await page.locator("#input").boundingBox())!.height,
+    ).toBeLessThanOrEqual(388);
+    await page.setViewportSize({ width: 667, height: 375 });
+    await showAgentList(page);
+    await page.waitForFunction(
+      "document.querySelector('#sidebar.open')?.getBoundingClientRect().left >= 0",
+    );
+    expect(
+      (await page.locator("#sidebar .agent").first().boundingBox())!.x,
+    ).toBeGreaterThanOrEqual(60);
+    await openSettingsPanel(page);
+    await page.locator('#settings-nav button[data-cat="appearance"]').click();
+    await page.getByRole("button", { name: /^Name and icon / }).click();
+    expect(
+      (await page.locator("dialog.settings-sheet[open] h2").boundingBox())!.x,
+    ).toBeGreaterThanOrEqual(60);
+    await context.close();
+  },
   // Regression: #2505 the sidebar and fonts can be ready before the first conversation view loads.
   async function test_fresh_mobile_and_desktop(browser, base) {
     for (const [name, viewport, isMobile, hasTouch] of [
@@ -160,12 +247,14 @@ export const tests: BrowserTest[] = [
       } else {
         expect(await page.locator("#panes").isVisible()).toBeFalse();
         expect(await page.locator("#pane-fab.attention").count()).toBe(0);
+        expect(await page.locator("#pane-fab").isVisible()).toBeTrue();
+        await page.locator("#input").blur();
         const trigger = await page.locator("#pane-fab").evaluate((element) => {
           const browser = globalThis as any;
           const rect = element.getBoundingClientRect();
           const style = browser.getComputedStyle(element);
-          const title = browser.document
-            .querySelector("#conv-title")
+          const box = browser.document
+            .querySelector("#new-top")
             .getBoundingClientRect();
           return {
             width: rect.width,
@@ -175,17 +264,17 @@ export const tests: BrowserTest[] = [
             padding: style.padding,
             borderWidth: style.borderWidth,
             background: style.backgroundColor,
-            titleRight: title.right,
+            boxRight: box.right,
             label: element.getAttribute("aria-label"),
             hasPopup: element.getAttribute("aria-haspopup"),
           };
         });
-        expect(trigger.width).toBe(44);
-        expect(trigger.height).toBe(44);
+        expect(trigger.width).toBeGreaterThanOrEqual(44);
+        expect(trigger.height).toBeGreaterThanOrEqual(44);
         expect(trigger.padding).toBe("0px");
         expect(trigger.borderWidth).toBe("0px");
         expect(trigger.background).toBe("rgba(0, 0, 0, 0)");
-        expect(trigger.titleRight).toBeLessThanOrEqual(trigger.left);
+        expect(trigger.boxRight).toBeLessThanOrEqual(trigger.left);
         expect(trigger.right).toBeLessThanOrEqual(viewport.width);
         expect(trigger.label).toBe("More actions");
         expect(trigger.hasPopup).toBe("menu");
@@ -255,7 +344,7 @@ export const tests: BrowserTest[] = [
     }
   },
   // Feature: #2354 touch attachment controls keep image previews accessible.
-  async function test_mobile_shell_stays_visible_across_scroll_resize_and_drawer(
+  async function test_mobile_shell_stays_visible_across_scroll_resize_and_list(
     browser,
     base,
   ) {
@@ -484,6 +573,7 @@ export const tests: BrowserTest[] = [
       expect(chip.height).toBeGreaterThanOrEqual(44);
       expect(chip.centreOpensPreview).toBeTrue();
     }
+    await page.locator("#input").blur();
     await page.setViewportSize({ width: 390, height: 568 });
     await page.waitForFunction(
       "document.querySelector('#composer').getBoundingClientRect().bottom <= (visualViewport?.offsetTop ?? 0) + (visualViewport?.height ?? innerHeight) + 1",
@@ -507,7 +597,7 @@ export const tests: BrowserTest[] = [
     expect(
       await page.evaluate(() => {
         const browser = globalThis as any;
-        const button = browser.document.querySelector("#menu-btn");
+        const button = browser.document.querySelector("#conv-title");
         const rect = button.getBoundingClientRect();
         const hit = browser.document.elementFromPoint(
           rect.left + rect.width / 2,
@@ -518,179 +608,28 @@ export const tests: BrowserTest[] = [
     ).toBeTrue();
     await page.locator("#input").fill("");
     await page.locator("#agent-finder.on").waitFor({ state: "detached" });
-    await page.locator("#input").focus();
-    await page.evaluate(
-      "history.pushState({}, '', location.pathname + '#mobile-shell')",
-    );
-    await page.goBack();
-    await page.waitForFunction("document.activeElement?.id === 'input'");
-    expect(String(await page.evaluate("document.activeElement?.id"))).toBe(
-      "input",
-    );
-    await page.locator("#pane-fab").click();
-    await page.locator("#pane-menu.on").waitFor();
-    await page.locator('.pane-menu-item[data-pane="report"]').click();
-    await page.locator("#panes.on.overlay").waitFor();
     await page.locator("#menu-btn").click();
-    const drawer = page.locator("#sidebar.open");
-    await drawer.waitFor();
-    const row = drawer.locator('.agent[data-id="leaf"]');
-    await page.waitForFunction(
-      "document.querySelector('#sidebar .agent')?.getBoundingClientRect().left >= 0",
-    );
-    expect(await row.isVisible()).toBeTrue();
-    expect(await row.getAttribute("data-id")).toBe("leaf");
-    await row.focus();
+    await page.locator("#sidebar.open").waitFor();
+    await visibleAndUncovered(page, '.agent[data-id="leaf"]');
     expect(
-      await page.evaluate(
-        "document.activeElement === document.querySelector('#sidebar .agent[data-id=\\\"leaf\\\"]')",
-      ),
-    ).toBeTrue();
-    const drawerBox = await drawer.boundingBox();
-    const rowBox = await row.boundingBox();
-    expect(drawerBox && rowBox && rowBox.y >= drawerBox.y).toBeTrue();
+      await page.locator("#sidebar").evaluate((el) => (el as any).inert),
+    ).toBeFalse();
     expect(
-      await row.evaluate((element) => {
-        const browser = globalThis as any;
-        const rect = element.getBoundingClientRect();
-        const point = browser.document.elementFromPoint(
-          rect.left + rect.width / 2,
-          rect.top + rect.height / 2,
-        );
-        return point === element || element.contains(point);
-      }),
+      await page.locator("#main").evaluate((el) => (el as any).inert),
     ).toBeTrue();
-    await row.focus();
-    expect(
-      await page.evaluate(
-        "document.activeElement === document.querySelector('#sidebar .agent[data-id=\\\"leaf\\\"]')",
-      ),
-    ).toBeTrue();
-    await row.press("Shift+Tab");
-    expect(
-      await page.evaluate(
-        "document.activeElement?.closest('#sidebar') !== null",
-      ),
-    ).toBeTrue();
-    await page.evaluate(() => {
-      const browser = globalThis as any;
-      const row = browser.document.querySelector("#sidebar .agent");
-      const touch = new browser.Touch({
-        identifier: 1,
-        target: row,
-        clientX: 20,
-        clientY: 20,
-      });
-      row.dispatchEvent(
-        new browser.TouchEvent("touchstart", {
-          bubbles: true,
-          touches: [touch],
-          changedTouches: [touch],
-        }),
-      );
-    });
-    await page.locator("#sidebar .rename-input").waitFor();
-    await page.keyboard.press("Escape");
-    await page.waitForFunction(
-      "!document.querySelector('#sidebar .rename-input')",
-    );
-    expect(await page.locator("#sidebar.open").count()).toBe(1);
-    await page.locator("#menu-btn").click();
-    await page.waitForFunction(
-      "!document.querySelector('#sidebar').classList.contains('open')",
-    );
-    expect(
-      await page.evaluate(
-        "document.activeElement === document.querySelector('#menu-btn')",
-      ),
-    ).toBeTrue();
-    await page.locator(".pane-head .x").click();
-    await page.locator("#menu-btn").click();
-    await page.waitForFunction(
-      "document.querySelector('#sidebar').classList.contains('open')",
-    );
-    await page.evaluate(
-      "document.querySelector('.activity-group-toggle')?.click()",
-    );
-    if (await page.locator("#prompt-overlay.on").count()) {
-      await page.locator("#prompt-overlay.on").waitFor();
-      await page.keyboard.press("Escape");
-      await page.waitForFunction(
-        "!document.querySelector('#prompt-overlay').classList.contains('on')",
-      );
-      expect(await page.locator("#sidebar.open").count()).toBe(1);
-    }
-    await page.locator("#settings-btn").click();
-    await page.locator("#settings-overlay.on").waitFor();
+    await openSettingsPanel(page);
     await page.locator("#settings-close").click();
-    expect(
-      await page.evaluate(
-        "document.activeElement === document.querySelector('#menu-btn')",
-      ),
-    ).toBeTrue();
-    expect(
-      await page.evaluate("document.querySelector('#sidebar').inert"),
-    ).toBeTrue();
-    expect(
-      await page.evaluate(
-        "!document.querySelector('#tree-announcer').closest('[inert]')",
-      ),
-    ).toBeTrue();
-    await page.locator("#menu-btn").focus();
-    for (let i = 0; i < 16; i++) {
-      await page.keyboard.press("Tab");
-      expect(
-        await page.evaluate(
-          "document.activeElement?.closest('#sidebar') === null",
-        ),
-      ).toBeTrue();
-    }
-    await page.locator("#new-top").click();
+    await page.waitForFunction("!history.state?.settings");
+    expect(await page.locator("#sidebar.open").count()).toBe(1);
+    await startNewAgent(page);
+    await visibleAndUncovered(page, "#input");
+    expect(await page.locator("#sidebar.open").count()).toBe(0);
     await page.locator("#menu-btn").click();
-    await page.waitForFunction(
-      "document.querySelector('#sidebar').classList.contains('open')",
-    );
-    const draftFocus = await page.evaluate(() => {
-      const browser = globalThis as any;
-      return {
-        id: browser.document.activeElement?.id,
-        tag: browser.document.activeElement?.tagName,
-      };
-    });
-    expect(
-      await page.evaluate(
-        "document.activeElement?.closest('#sidebar') !== null",
-      ),
-    ).toBeTrue();
-    expect(
-      draftFocus.tag === "SUMMARY" || draftFocus.id === "settings-btn",
-    ).toBeTrue();
-    expect(
-      await page.evaluate("!document.activeElement?.matches('.agent')"),
-    ).toBeTrue();
+    await page.locator("#sidebar.open").waitFor();
     await page.keyboard.press("Escape");
-    await page.waitForFunction(
-      "!document.querySelector('#sidebar').classList.contains('open')",
-    );
-    await page.locator("#menu-btn").click();
-    await page.waitForFunction(
-      "document.querySelector('#sidebar').classList.contains('open')",
-    );
-    await page.keyboard.press("Escape");
-    await page.waitForFunction(
-      "!document.querySelector('#backdrop').classList.contains('on')",
-    );
-    expect(await page.locator("#menu-btn").getAttribute("aria-expanded")).toBe(
-      "false",
-    );
-    expect(
-      await page.evaluate(
-        "document.activeElement === document.querySelector('#menu-btn')",
-      ),
-    ).toBeTrue();
+    expect(await page.locator("#sidebar.open").count()).toBe(1);
     expect(errors).toEqual([]);
-    await page.unrouteAll({ behavior: "ignoreErrors" });
-    await context.close();
+    await closeWithRoutes(context);
 
     const desktop = await browser.newContext({
       viewport: { width: 1280, height: 800 },
@@ -881,6 +820,10 @@ export const tests: BrowserTest[] = [
       await page.goto(base, { waitUntil: "domcontentloaded" });
       await page.waitForURL(`${base}?_recurse_generation=${runtimeVersion}**`);
       await page.locator(`.agent[data-id="${rememberedId}"]`).waitFor();
+      if (name === "phone") {
+        await page.locator("#sidebar.open").waitFor();
+        await page.locator(`.agent[data-id="${rememberedId}"]`).click();
+      }
       await page
         .locator("#conv-title")
         .filter({ hasText: "Remembered mobile agent" })
@@ -906,7 +849,7 @@ export const tests: BrowserTest[] = [
       await closeWithRoutes(context);
     }
   },
-  async function test_phone_drawer_and_pane_menu_stack_over_an_open_pane(
+  async function test_phone_back_closes_pane_before_returning_to_list(
     browser,
     base,
   ) {
@@ -918,10 +861,6 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const fab = page.locator("#pane-fab");
-    const drawerAt = (edge: string) =>
-      page.waitForFunction(
-        `document.querySelector('#sidebar')?.getBoundingClientRect().${edge}`,
-      );
     await page.goto(`${base}#agent=${fixture.demo}`);
     await page.locator("#pane-fab.on").waitFor();
     await fab.click();
@@ -936,28 +875,18 @@ export const tests: BrowserTest[] = [
     );
     await fab.click();
     await page.locator("#pane-menu.on").waitFor({ state: "detached" });
-    await page.locator("#menu-btn").click();
-    await drawerAt("left >= 0");
-    expect(await layerAt(page, [100, 600])).toBe("sidebar");
-    expect(await layerAt(page, [400, 600])).toBe("backdrop");
+    await page.goBack();
+    await page.locator("#panes.on").waitFor({ state: "detached" });
+    await visibleAndUncovered(page, "#input");
     expect(await layerAt(page, "#menu-btn")).toBe("topbar");
-    await fab.click();
-    const menu = (await page.locator("#pane-menu.on").boundingBox())!;
-    const mid = menu.y + menu.height / 2;
-    expect(await layerAt(page, [menu.x + 8, mid])).toBe("sidebar");
-    expect(await layerAt(page, [menu.x + menu.width - 8, mid])).toBe(
-      "pane-menu",
-    );
-    await fab.click();
+    expect(await layerAt(page, "#pane-fab")).toBe("topbar");
     await page.locator("#menu-btn").click();
-    await drawerAt("right <= 0");
-    expect(await layerAt(page, [206, 600])).toBe("panes");
+    await page.locator("#sidebar.open").waitFor();
+    expect(await layerAt(page, [100, 600])).toBe("sidebar");
+    expect(await layerAt(page, [400, 600])).toBe("sidebar");
     await context.close();
   },
-  async function test_reduced_motion_stops_drawer_and_control_transitions(
-    browser,
-    base,
-  ) {
+  async function test_reduced_motion_stops_control_transitions(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 412, height: 915 },
       isMobile: true,
@@ -975,7 +904,9 @@ export const tests: BrowserTest[] = [
       );
     const moving = await durations();
     expect(moving.length).toBeGreaterThanOrEqual(3);
-    expect(moving.filter((d) => d.endsWith(" 0s"))).toEqual([]);
+    expect(
+      moving.filter((d) => !d.startsWith("#sidebar") && d.endsWith(" 0s")),
+    ).toEqual([]);
     await page.emulateMedia({ reducedMotion: "reduce" });
     expect((await durations()).filter((d) => !d.endsWith(" 0s"))).toEqual([]);
     await context.close();
@@ -1004,7 +935,7 @@ export const tests: BrowserTest[] = [
         .map(([w, h]) => `${selector} ${w}x${h}`);
     };
     const misses: string[] = [];
-    for (const selector of ["#menu-btn", "#new-top", "#pane-fab"])
+    for (const selector of ["#menu-btn", "#pane-fab"])
       misses.push(...(await short(selector)));
     await page.locator("#input").fill("A message");
     for (const selector of ["#attach", "#send"]) {
@@ -1024,11 +955,24 @@ export const tests: BrowserTest[] = [
       });
       expect(hits).toEqual([true, true, true, true]);
     }
+    expect(await page.locator("#menu-btn").isVisible()).toBeTrue();
+    expect(await page.locator("#pane-fab").isVisible()).toBeTrue();
+    await page.locator("#send").tap();
+    await page
+      .locator(".msg.assistant .content", { hasText: "Acknowledged." })
+      .waitFor();
+    await visibleAndUncovered(page, "#menu-btn");
+    await visibleAndUncovered(page, "#pane-fab");
+    expect(await page.locator("#input").inputValue()).toBe("");
     await page.locator("#menu-btn").click();
-    await page.locator('#menu-btn[aria-expanded="true"]').waitFor();
+    await page.locator("#sidebar.open").waitFor();
     expect(await page.locator("#sidebar .agent").count()).toBeGreaterThan(0);
-    await page.locator("#menu-btn").click();
-    await page.locator('#menu-btn[aria-expanded="false"]').waitFor();
+    misses.push(...(await short("#new-list, #settings-btn")));
+    misses.push(
+      ...(await short("#sidebar .agent, .tree-section-toggle", true)),
+    );
+    await page.locator("#sidebar .agent").first().click();
+    await page.locator("#sidebar.open").waitFor({ state: "detached" });
     await page.locator("#pane-fab").click();
     await page.locator("#pane-menu.on .pane-menu-item").first().waitFor();
     misses.push(...(await short("#pane-menu.on .pane-menu-item", true)));
@@ -1245,6 +1189,125 @@ export const tests: BrowserTest[] = [
     expect(await live.innerText()).toContain("Visible live output");
     expect(errors).toEqual([]);
     await context.close();
+  },
+  // Feature: #3061 phone thread drags dismiss the keyboard without losing the draft.
+  async function test_phone_thread_drag_hides_keyboard(browser, base) {
+    for (const width of [390, 1280]) {
+      const { agent } = await postFixture(base, "seed-scroll-pin");
+      const context = await browser.newContext({
+        viewport: { width, height: 844 },
+        isMobile: width === 390,
+        hasTouch: true,
+      });
+      const page = await context.newPage();
+      try {
+        await page.goto(`${base}#agent=${agent}`);
+        const input = page.locator("#input");
+        await input.fill("Start the reply.");
+        await page.locator("#send").click();
+        await page.getByText("Short reply.", { exact: true }).waitFor();
+        const draft = "Keep this draft and caret while I read.";
+        await input.fill(draft);
+        await input.evaluate((el: any) => el.setSelectionRange(7, 7));
+        const beforeStream = await page.locator("#scroll").evaluate((el) => ({
+          top: el.scrollTop,
+          height: el.scrollHeight,
+        }));
+        await postFixture(base, "scroll-pin-release");
+        await page.getByText("First paragraph 10.", { exact: false }).waitFor();
+        await waitForLayout(page);
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBeTrue();
+        expect(
+          await page.locator("#scroll").evaluate((el) => el.scrollHeight),
+        ).toBeGreaterThan(beforeStream.height);
+        expect(
+          await page.locator("#scroll").evaluate((el) => el.scrollTop),
+        ).toBeGreaterThan(beforeStream.top);
+        await page.locator("#scroll").evaluate((el) => (el.scrollTop = 0));
+        await waitForLayout(page);
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBeTrue();
+        await page.setViewportSize({ width, height: 650 });
+        await waitForLayout(page);
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBeTrue();
+        await page.setViewportSize({ width, height: 844 });
+        await waitForLayout(page);
+        const cdp = await context.newCDPSession(page);
+        const drag = async (selector: string) => {
+          const box = (await page.locator(selector).boundingBox())!;
+          const x = box.x + box.width / 2;
+          const y = box.y + box.height / 2;
+          await cdp.send("Input.dispatchTouchEvent", {
+            type: "touchStart",
+            touchPoints: [{ x, y }],
+          });
+          for (const distance of [15, 35, 60])
+            await cdp.send("Input.dispatchTouchEvent", {
+              type: "touchMove",
+              touchPoints: [{ x, y: y - distance }],
+            });
+          await cdp.send("Input.dispatchTouchEvent", {
+            type: "touchEnd",
+            touchPoints: [],
+          });
+        };
+        await input.fill(Array.from({ length: 12 }, () => draft).join("\n"));
+        await drag("#input");
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBeTrue();
+        await input.fill(draft);
+        await input.evaluate((el: any) => el.setSelectionRange(7, 7));
+        const shots =
+          width === 390 && process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (shots)
+          await page.screenshot({ path: `${shots}/keyboard-before.png` });
+        await drag("#scroll");
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBe(width !== 390);
+        expect(await input.inputValue()).toBe(draft);
+        expect(
+          await page.locator("#scroll").evaluate((el) => el.scrollTop),
+        ).toBeGreaterThan(0);
+        expect(
+          await input.evaluate((el: any) => [
+            el.selectionStart,
+            el.selectionEnd,
+          ]),
+        ).toEqual([7, 7]);
+        if (shots)
+          await page.screenshot({ path: `${shots}/keyboard-after.png` });
+        await waitForLayout(page);
+        await input.tap();
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBeTrue();
+        const box = (await page.locator("#scroll").boundingBox())!;
+        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+        await page.mouse.wheel(0, 100);
+        await waitForLayout(page);
+        expect(
+          await input.evaluate((el) => el === el.ownerDocument.activeElement),
+        ).toBeTrue();
+        expect(await input.inputValue()).toBe(draft);
+        for (let i = 0; i < 4; i++)
+          await postFixture(base, "scroll-pin-release");
+        await page.getByText("Scroll pin finished.", { exact: true }).waitFor();
+      } finally {
+        await context.request.delete(`${base}api/conversations/${agent}`);
+        await page.waitForFunction(
+          async (url) => (await fetch(url)).status === 404,
+          `${base}api/conversations/${agent}/view`,
+        );
+        await context.close();
+      }
+    }
   },
 ];
 if (import.meta.main) await runBrowserTests([["mobile-layout", tests]]);

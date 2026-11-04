@@ -27,6 +27,7 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 export const listEl = req("#agent-list");
 export const msgsEl = req("#messages");
 export const scrollEl = req("#scroll");
+export const liveBarEl = req("#live-bar");
 export const inputEl = req<HTMLTextAreaElement>("#input");
 export const sendEl = req<HTMLButtonElement>("#send");
 export const titleEl = req("#conv-title");

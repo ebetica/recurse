@@ -1,16 +1,9 @@
 /**
- * usage: worktree.ts [--root <data-dir>] [--agent <id>] enter <name>
- *        worktree.ts [--root <data-dir>] sweep
+ * enter <name> | sweep
  *
- * Create an agent-held checkout without waiting for cleanup. Managed Recurse
- * checkouts get private local dependency directories automatically. Re-enter
- * your own checkout to restore dependencies after restart. Retire checkouts
- * without live holders or live agent workdirs, including those with no holder
- * record, in a detached, single-instance sweep launched by enter, subagent
- * create --worktree, and subagent rm. Failed or incomplete live-agent lookup
- * retains all checkouts. Uncommitted changes do not protect unheld checkouts.
- * The sweep does not unlock or prune Git admin metadata. Make baseline checkouts
- * through enter or in $RECURSE_AGENT_TMPDIR, never manually in worktrees/.
+ * Create or re-enter your own checkout, with private dependencies. Checkouts no
+ * live agent holds or works in are removed automatically, even with uncommitted
+ * changes.
  */
 // Managed entry writes holders; cleanup requires complete membership.
 // Dependency preparation and lifecycle utilities remain dependency-free.
@@ -630,7 +623,10 @@ export async function getLiveAgentIds(
       return [observedAt, UNKNOWN, false];
     }
     const response = await fetch(url.toString(), {
-      headers: { "x-loopback-token": config.token },
+      headers: {
+        "x-loopback-token": config.token,
+        "x-recurse-bundled-tool": "worktree",
+      },
       signal: AbortSignal.timeout(config.timeout * 1000),
     });
     if (response.status !== 200) return [observedAt, UNKNOWN, false];

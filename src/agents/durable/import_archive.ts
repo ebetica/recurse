@@ -14,7 +14,7 @@ import { importPiSession, type PiImportOptions } from "./import_pi_session";
 import { openWorkerSqliteStorage, SqliteWorker } from "./sqlite_worker";
 import type { AgentArchive, ArchivedAgent } from "./archive";
 import { sanitizeImportedProcesses } from "./revive_processes.ts";
-import * as trash from "../../utils/trash";
+import { retirePath } from "../../utils/trash_sweep";
 
 export const MAX_REVIVE_BYTES = 256 * 1024 * 1024;
 const MAX_META_BYTES = 64 * 1024;
@@ -201,9 +201,11 @@ export async function importArchive(
         const version = await db.get<{ version: number }>(
           "SELECT version FROM durable_schema WHERE singleton = 1",
         );
-        if (!version || version.version !== CURRENT_SQLITE_SCHEMA_VERSION)
+        // Invariant: Older schemas migrate when the copy opens; the source
+        // stays as is.
+        if (!version || version.version > CURRENT_SQLITE_SCHEMA_VERSION)
           refuse(
-            `Durable schema version ${version?.version ?? "missing"} cannot be opened by this instance (supported: ${CURRENT_SQLITE_SCHEMA_VERSION}).`,
+            `Durable schema version ${version?.version ?? "missing"} cannot be opened by this instance (supported: up to ${CURRENT_SQLITE_SCHEMA_VERSION}).`,
           );
         const check = await db.get<{ quick_check: string }>(
           "PRAGMA quick_check",
@@ -277,7 +279,7 @@ export async function importArchive(
       `Cannot import revive source: ${String((error as Error).message ?? error)}`,
     );
   } finally {
-    worker.close();
-    trash.retire(stage, options.trashDir);
+    await worker.close();
+    await retirePath(stage, options.trashDir);
   }
 }

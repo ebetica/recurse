@@ -59,23 +59,18 @@ async function lockedSession(state: string) {
 
   const before = await host.open("c1");
   const foreign = new Database(host.storagePath("c1"));
-  foreign.exec("BEGIN IMMEDIATE");
-  let refused: unknown;
   try {
-    refused = await host.send("c1", "second", "r2").catch((error) => error);
+    expect(() => foreign.exec("BEGIN IMMEDIATE")).toThrow("database is locked");
+    expect(() => foreign.query("SELECT id FROM entries").all()).toThrow(
+      "database is locked",
+    );
   } finally {
-    foreign.exec("ROLLBACK");
     foreign.close();
   }
-  expect(String(refused)).toBe(
-    "Error: SQLite refused the write: database is locked",
-  );
-  expect(warnings.find(([event]) => event === "durable_write_refused")).toEqual(
-    ["durable_write_refused", { cid: "c1", code: "SQLITE_BUSY" }],
-  );
-
-  expect((await before.harness.closed).reason).toBe("failed");
-  expect((await host.open("c1")).harness).not.toBe(before.harness);
+  expect(
+    warnings.filter(([event]) => event === "durable_write_refused"),
+  ).toEqual([]);
+  expect((await host.open("c1")).harness).toBe(before.harness);
   expect(await rows()).toEqual([
     ["user", "first"],
     ["assistant", "one"],
@@ -90,11 +85,21 @@ async function lockedSession(state: string) {
     ["assistant", "two"],
   ]);
   expect(faux.state.callCount).toBe(2);
+  await host.close();
+  const closed = new Database(host.storagePath("c1"));
+  try {
+    expect(closed.query("SELECT id FROM entries").all().length).toBeGreaterThan(
+      0,
+    );
+    closed.exec("BEGIN IMMEDIATE; ROLLBACK");
+  } finally {
+    closed.close();
+  }
 }
 
-// Regression: #2326 failed sessions (also after clear) must reopen committed state.
+// Regression: #2326 external locks cannot interrupt opened or cleared sessions.
 test.each(["opened", "cleared"])(
-  "a write lock fails the %s session; a reopened resend is answered once",
+  "the %s session excludes foreign SQLite connections and answers once",
   lockedSession,
   20_000,
 );

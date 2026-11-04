@@ -1,6 +1,6 @@
 // Accepts built-page error relays only from the watched iframe. Errors display
 // as text, can be sent to the owning agent, and reload on request.
-import { backendFor } from "../backends/backend.js";
+import { sendOperatorMessage } from "../conversation/operator-send.js";
 import { html, render } from "lit";
 import {
   MAX_PAGE_ERRORS,
@@ -58,12 +58,9 @@ async function sendErrors(watch: Watch): Promise<void> {
   renderStrip(watch);
   let ok = false;
   try {
-    const response = await backendFor(owner).jpost(
-      `/api/conversations/${owner}/deliver`,
-      {
-        content: pageErrorReport(watch.info, version, errors),
-      },
-    );
+    const response = await sendOperatorMessage(owner, {
+      content: pageErrorReport(watch.info, version, errors),
+    });
     ok = response.ok;
   } catch {
     ok = false;

@@ -3,7 +3,7 @@
 // update request and progress reports the supervisor and server exchange. The
 // channel is what the checkout records, never RECURSE_VERSION/RECURSE_BRANCH.
 import { join } from "node:path";
-import { entrypointEnv } from "./build";
+import { entrypointEnv } from "./environment";
 import type { RunResult } from "./system";
 
 export interface UpdateRequest {

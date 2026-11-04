@@ -1,10 +1,10 @@
+import { Type } from "typebox";
 import { expect, test } from "bun:test";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
-  Type,
   createModels,
   fauxProvider,
   fauxAssistantMessage,

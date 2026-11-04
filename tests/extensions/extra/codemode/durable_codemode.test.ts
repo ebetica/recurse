@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { readdir, readFile } from "node:fs/promises";
+import { mkdir, readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,6 +16,7 @@ import { LiveDoc } from "@earendil-works/pi-durable";
 import type { DurableHost } from "../../../../src/agents/durable/host.ts";
 import { McpServers } from "../../../../src/extensions/extra/mcp/mcp.ts";
 import { mcpStatuses } from "../../../../src/extensions/extra/mcp/status.ts";
+import piTools from "../../../backend/fixtures/durable_host/pi-tools.json";
 import {
   fauxHost,
   held,
@@ -34,6 +35,8 @@ afterAll(() => {
 });
 type Rec = Record<string, any>;
 const RUN = crypto.randomUUID().slice(0, 8);
+const PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 function setup(marker: string, env: Record<string, string> = {}) {
   const root = mkdtempSync(join(tmpdir(), "durable-codemode-"));
@@ -64,7 +67,13 @@ function script(
   const step: FauxResponseStep = async (request, ...rest) => {
     if (JSON.stringify(request).includes("untrusted record of a user's")) {
       const action = JSON.stringify(request.messages.at(-1)?.content);
-      reviews.push(action);
+      reviews.push(
+        JSON.stringify(
+          request.messages
+            .filter((message) => message.role === "user")
+            .flatMap((message): unknown => message.content),
+        ),
+      );
       return fauxAssistantMessage(verdict(action));
     }
     requests.push(JSON.stringify(request));
@@ -117,19 +126,21 @@ async function latest(host: DurableHost, kind: string, callId?: string) {
 
 describe("codemode on Durable", () => {
   // Regression: #2856 native read images must reach the next model request from scripts.
-  test("read returns image blocks and text to a script", async () => {
+  test("all native tools remain callable from scripts without a codemode section and with image results", async () => {
     const { host, faux, root, work } = setup("cm-read-image");
-    const png =
-      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    await mkdir(host.collection("c1", {}), { recursive: true });
     writeFileSync(join(root, "mcp.json"), JSON.stringify({ mcpServers: {} }));
     writeFileSync(
       join(work, "pixel.png"),
-      Uint8Array.from(Buffer.from(png, "base64")),
+      Uint8Array.from(Buffer.from(PNG, "base64")),
     );
-    writeFileSync(join(work, "note.txt"), "read text unchanged");
+    writeFileSync(
+      join(work, "note.txt"),
+      "skip-first-line\nread text unchanged\nskip-last-line",
+    );
     const { requests } = script(faux, [
       codemode(
-        "const note = await tools.read({path:'note.txt'}); text({kind:typeof note,note}); image(await tools.read({path:'pixel.png'}));",
+        "await tools.write({path:'created.txt',content:'original'}); await tools.edit({path:'created.txt',edits:[{oldText:'original',newText:'updated'}]}); text(await tools.env({action:'set',name:'PROMPT_TOOL_CHECK',value:'available'})); text(await tools.bash({command:'printf \"%s\" \"$PROMPT_TOOL_CHECK\"'})); text(await tools.publish({paths:['created.txt']})); text(await tools.find({pattern:'note.txt'})); text(await tools.grep({pattern:'unchanged',path:'note.txt'})); const note = await tools.read({path:'note.txt',offset:2,limit:1}); text({kind:typeof note,note}); image(await tools.read({path:'pixel.png'}));",
       ),
       fauxAssistantMessage("saw image and text"),
     ]);
@@ -140,6 +151,37 @@ describe("codemode on Durable", () => {
       expect(result).not.toContain("TypeError");
       expect(result).toContain('"kind":"string"');
       expect(result).toContain("read text unchanged");
+      expect(result).not.toContain("skip-first-line");
+      expect(result).not.toContain("skip-last-line");
+      expect(await readFile(join(work, "created.txt"), "utf8")).toBe("updated");
+      const capture = (await host.prompt("c1")).request as Rec;
+      const sections = capture.context.messages.flatMap((message: Rec) =>
+        message.sections?.codemode ? [message.sections.codemode] : [],
+      );
+      expect(sections).toHaveLength(0);
+      expect(
+        capture.context.messages
+          .flatMap((message: Rec) => message.toolsAdded ?? [])
+          .filter((tool: Rec) =>
+            ["read", "write", "edit", "codemode"].includes(tool.name),
+          ),
+      ).toEqual(piTools);
+      expect(JSON.stringify(capture)).toContain(
+        "Native tools use the same arguments.",
+      );
+      expect(JSON.stringify(capture)).not.toContain(
+        "The `codemode` section of the system prompt lists",
+      );
+      const agent = await (await host.open("c1")).conversation.agent(context);
+      const offered = new Set(agent.tools.map((tool) => tool.name));
+      const native = agent.callable.filter((tool) => offered.has(tool.name));
+      const block = ((await host.view("c1")).blocks as Rec[]).find(
+        (block) => block.name === "codemode",
+      )!;
+      expect(new Set(block.calls.map((call: Rec) => call.name))).toEqual(
+        new Set(native.map((tool) => tool.name)),
+      );
+      expect(block.calls.every((call: Rec) => call.status === "ok")).toBe(true);
       const next = JSON.parse(requests[1]!);
       const content = next.messages.flatMap((message: Rec) =>
         Array.isArray(message.content) ? message.content : [],
@@ -147,7 +189,7 @@ describe("codemode on Durable", () => {
       expect(content).toContainEqual(
         expect.objectContaining({
           type: "image",
-          data: png,
+          data: PNG,
           mimeType: "image/png",
         }),
       );
@@ -262,8 +304,13 @@ describe("codemode on Durable", () => {
     }
   });
 
-  test("a restarted script reconnects MCP before making a new call", async () => {
-    const { root, host, faux } = setup("cm-restart");
+  // Regression: #3013 module-3 scripts started on Pi 1.4 must still return read images after a Pi 1.5 restart.
+  test("a restarted legacy script reconnects MCP and reads an image", async () => {
+    const { root, host, faux, work } = setup("cm-restart");
+    writeFileSync(
+      join(work, "pixel.png"),
+      Uint8Array.from(Buffer.from(PNG, "base64")),
+    );
     writeFileSync(
       join(root, "mcp.json"),
       JSON.stringify({
@@ -296,7 +343,7 @@ describe("codemode on Durable", () => {
       }
       child.kill("SIGKILL");
       await child.exited;
-      faux.setResponses([fauxAssistantMessage("recovered")]);
+      const { requests } = script(faux, [fauxAssistantMessage("recovered")]);
       await host.openLive();
       await until(idle(host));
       const result = await latest(host, "pi.tool-result", "cm");
@@ -304,6 +351,18 @@ describe("codemode on Durable", () => {
       expect(result).toContain("interrupted");
       expect(result).toContain("echo:new call after restart");
       expect(result).not.toContain("Tool not found");
+      const next = JSON.parse(requests[0]!);
+      expect(
+        next.messages.flatMap((message: Rec) =>
+          Array.isArray(message.content) ? message.content : [],
+        ),
+      ).toContainEqual(
+        expect.objectContaining({
+          type: "image",
+          data: PNG,
+          mimeType: "image/png",
+        }),
+      );
       expect(await readFile(join(root, "restart-attempts"), "utf8")).toBe(
         "start\nstart\n",
       );
@@ -438,10 +497,10 @@ describe("codemode on Durable", () => {
       const codemodeSections = after.context.messages.flatMap((message: Rec) =>
         message.sections?.codemode ? [message.sections.codemode] : [],
       );
-      expect(codemodeSections.join("\n")).not.toContain(
-        "### `mcp__probe__echo`",
-      );
-      expect(codemodeSections.join("\n")).toContain("### `mcp__inline__echo`");
+      expect(codemodeSections.join("\n")).not.toContain("mcp__probe__echo");
+      expect(codemodeSections.join("\n")).toContain("mcp__inline__echo");
+      expect(codemodeSections.join("\n")).not.toContain("declare const tools");
+      expect(codemodeSections.join("\n")).not.toContain("###");
       const callable = (
         await (await host.open("c1")).conversation.agent(context)
       ).callable;
@@ -725,7 +784,7 @@ describe("codemode on Durable", () => {
       expect(reviews).toHaveLength(5);
       expect(reviews.at(-1)).toContain("mcp__probe__write_note");
       expect(reviews.at(-1)).toContain("calledBy");
-      expect(JSON.parse(reviews.at(-1)!)[0].text).toContain(
+      expect(JSON.parse(reviews.at(-1)!).at(-1).text).toContain(
         '"mcpServer": "probe"',
       );
       const block = ((await host.view("c1")).blocks as Rec[]).find(

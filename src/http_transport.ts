@@ -1,7 +1,7 @@
 // Transport order: accounting -> compression -> auth/CSRF -> decode -> route.
 // Bound gzip wire/decoded bytes and concurrent decoded bodies; decode off-loop.
-// HEAD/range/SSE/no-transform/existing codings pass through unchanged.
-// Log route templates and wire counts, never raw paths/queries/bodies.
+// HEAD/range/no-transform/existing codings pass; SSE gzips per write.
+// Cancellation releases gzip slots; logs never include raw paths or bodies.
 
 import zlib from "node:zlib";
 import {
@@ -464,8 +464,7 @@ function transformable(method: string, response: Response): boolean {
     [204, 205, 206, 304].includes(status) ||
     headers.has("content-range") ||
     headers.has("content-encoding") ||
-    noTransform(headers) ||
-    isEventStream(headers)
+    noTransform(headers)
   );
 }
 
@@ -522,28 +521,48 @@ const gzipAsync = (data: Uint8Array, level: number) =>
 class StreamingGzip {
   private readonly gz: zlib.Gzip;
   private out: Buffer[] = [];
+  private closed = false;
+  private cancelPending: (() => void) | undefined;
   constructor(level: number) {
     this.gz = zlib.createGzip({ level });
     this.gz.on("data", (chunk: Buffer) => this.out.push(chunk));
   }
   async push(data: Uint8Array, final: boolean): Promise<Uint8Array> {
-    if (final)
-      await new Promise<void>((resolve, reject) => {
-        this.gz.once("end", resolve);
-        this.gz.once("error", reject);
-        this.gz.end(data);
-      });
-    else {
-      if (data.byteLength) this.gz.write(data);
-      await new Promise<void>((resolve) =>
-        this.gz.flush(zlib.constants.Z_SYNC_FLUSH, () => resolve()),
-      );
-    }
+    if (this.closed) return new Uint8Array();
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        this.cancelPending = undefined;
+        this.gz.off("end", onEnd);
+        this.gz.off("error", onError);
+        if (error) reject(error);
+        else resolve();
+      };
+      const onEnd = () => finish();
+      const onError = (error: Error) => finish(error);
+      this.cancelPending = onEnd;
+      this.gz.once("error", onError);
+      try {
+        if (final) {
+          this.gz.once("end", onEnd);
+          this.gz.end(data);
+        } else {
+          if (data.byteLength) this.gz.write(data);
+          this.gz.flush(zlib.constants.Z_SYNC_FLUSH, onEnd);
+        }
+      } catch (error) {
+        finish(error as Error);
+      }
+    });
     const chunk = concatBytes(this.out.map(u8));
     this.out = [];
     return chunk;
   }
   close(): void {
+    this.closed = true;
+    this.cancelPending?.();
     this.gz.destroy();
   }
 }
@@ -571,8 +590,7 @@ function identityHeaders(method: string, response: Response) {
   const adaptiveUncertain = !(
     headers.has("content-encoding") ||
     headers.has("content-range") ||
-    noTransform(headers) ||
-    isEventStream(headers)
+    noTransform(headers)
   );
   if ((response.status === 304 || method === "HEAD") && adaptiveUncertain) {
     // Invariant: The matching adaptive GET may use gzip and omit these fields;
@@ -729,6 +747,21 @@ export function responseCompression(
       requireGzip(n) || beneficial(raw, compressed, minimum, savings, r);
 
     const source = response.body ? response.body.getReader() : null;
+    if (source && isEventStream(headers) && !headers.has("content-length")) {
+      // Invariant: A live event stream cannot wait for a probe; text frames
+      // always compress, and each chunk is flushed as it arrives.
+      const gz = new StreamingGzip(streamingLevel);
+      return rebuilt(
+        response,
+        encodedHeaders(response, null),
+        resumed(
+          [],
+          source,
+          (chunk, final) => work(() => gz.push(chunk, final)),
+          () => gz.close(),
+        ),
+      );
+    }
     const buffer: Uint8Array[] = [];
     let buffered = 0;
     for (;;) {
@@ -952,8 +985,7 @@ export function httpAccounting(
       const ended = clock();
       const ms = (ended - started) * 1000;
       const route = templateRoute(ex.route);
-      const trace =
-        ex.request.headers.get("x-recurse-trace") ?? ex.query.switch_trace;
+      const trace = ex.request.headers.get("x-recurse-trace");
       log("http_response", {
         method,
         route,
@@ -1015,7 +1047,8 @@ export function httpAccounting(
         const chunk = read.value;
         state.bytesOut += chunk.byteLength;
         state.chunks += 1;
-        if (sse) state.events += countBlankLines(chunk);
+        if (sse && encoding === "identity")
+          state.events += countBlankLines(chunk);
         if (sse || state.chunks > 1) {
           const now = clock();
           if (now - state.lastHeartbeat >= heartbeatInterval) {

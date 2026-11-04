@@ -11,6 +11,7 @@ import {
 import { compactConv, row, tree } from "./fixtures";
 import { ConversationView } from "../../src/agents/view/conversation";
 import captured from "../backend/fixtures/compaction/real-shapes.json";
+import { SERVER_COMPACTION_MARKER } from "../../src/extensions/core/context/server-compaction";
 import durableBoundary from "./fixtures/durable-compaction-boundary.json";
 import durableUser from "./fixtures/durable-compaction-user.json";
 import {
@@ -68,6 +69,8 @@ export const tests: BrowserTest[] = [
       [1280, "user"],
       [390, "tool"],
       [1280, "tool"],
+      [390, "server"],
+      [1280, "server"],
       [390, null],
       [1280, null],
     ] as const) {
@@ -82,6 +85,10 @@ export const tests: BrowserTest[] = [
         : width === 390
           ? captured.manual
           : captured.automatic;
+      if (cut === "server")
+        for (const entry of recorded)
+          if (entry.type === "compaction")
+            entry.summary = SERVER_COMPACTION_MARKER;
       const summaryId = durable
         ? cut === "user"
           ? "65997"
@@ -165,6 +172,18 @@ export const tests: BrowserTest[] = [
         expect(
           await page.locator(".compacted-activity.file-jump-target").count(),
         ).toBe(0);
+        if (cut === "server") {
+          expect(await divider.innerText()).toBe(SERVER_COMPACTION_MARKER);
+          expect(await divider.locator("button").count()).toBe(0);
+          await divider.scrollIntoViewIfNeeded();
+          const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+          if (shots)
+            await page.screenshot({
+              path: `${shots}/server-compaction-${width}.png`,
+            });
+          expect(errors).toEqual([]);
+          continue;
+        }
         const head = divider.locator(".compacted-head");
         const [background] = await themeColors(page, "var(--panel-2)");
         expect(

@@ -1,7 +1,7 @@
-// Report settled runs as one message: the latest run's trigger and outcome.
-// Advance the cursor only after parent admission/drop; a retry over the same
-// runs reuses the key; a held report keeps the cursor (delivery.ts). Read
-// stored submissions/entries; withdrawn or stale inputs report nothing.
+// Report the latest settled trigger/outcome from stored submissions/entries.
+// Advance only after parent admission/drop; retries reuse keys and holds keep
+// the cursor (delivery.ts). Stale/withdrawn inputs report nothing. Each advance
+// checkpoints latest-only state so later reads do not replay earlier advances.
 import { randomBytes } from "node:crypto";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
@@ -22,6 +22,7 @@ export const ReportDoc = defineDoc<{ generation: string; after: number }>({
   history: "latest",
   fork: "initial",
   initial: () => ({ generation: "", after: -1 }),
+  checkpointWhen: () => true,
 });
 
 /** Names this storage in report keys and view identities before any run. */

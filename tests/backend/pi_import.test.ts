@@ -56,7 +56,7 @@ const models = createModels();
 for (const provider of builtinProviders()) models.setProvider(provider);
 const worker = new SqliteWorker();
 afterAll(async () => {
-  worker.close();
+  await worker.close();
   await rm(root, { recursive: true, force: true });
 });
 const recorded = JSON.parse(

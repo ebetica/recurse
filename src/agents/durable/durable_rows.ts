@@ -13,6 +13,10 @@ import type {
 } from "@earendil-works/pi-durable";
 import { InboxDoc, LiveDoc } from "@earendil-works/pi-durable";
 import type { Context } from "@earendil-works/chord";
+import {
+  SERVER_COMPACTION_MARKER,
+  serverCompactionSource,
+} from "../../extensions/core/context/server-compaction";
 import { ReportDoc } from "./report";
 import { ReplyTimesDoc } from "./reply_times";
 import { ConversationView, LOST_STOP_REASON } from "../view/conversation";
@@ -28,6 +32,9 @@ import {
 } from "../view/reader";
 
 type Rec = Record<string, unknown>;
+
+export type ViewConversation = Pick<Conversation, "id" | "entries">;
+export type ViewSession = Pick<Harness, "snapshot" | "getTask">;
 
 export type ReplyTimes = Readonly<Record<string, number>>;
 
@@ -54,9 +61,13 @@ export function compactionSummary(entry: EntryRecord): string {
         .map((part: Rec) => (part.type === "text" ? part.text : ""))
         .join("")
     : String(content ?? "");
-  return text.startsWith(SUMMARY_PREFIX) && text.endsWith(SUMMARY_SUFFIX)
-    ? text.slice(SUMMARY_PREFIX.length, -SUMMARY_SUFFIX.length)
-    : text;
+  const unwrapped =
+    text.startsWith(SUMMARY_PREFIX) && text.endsWith(SUMMARY_SUFFIX)
+      ? text.slice(SUMMARY_PREFIX.length, -SUMMARY_SUFFIX.length)
+      : text;
+  return serverCompactionSource(unwrapped) === undefined
+    ? unwrapped
+    : SERVER_COMPACTION_MARKER;
 }
 
 /** An assistant message's full thinking, bounded; null when it has none. */
@@ -204,6 +215,20 @@ export function projectionEntries(
           : entry.kind === "pi.tool-result" && !imported
             ? { artifactId: `${artifactPrefix}-r${String(entry.id)}` }
             : {}),
+      });
+    } else if (entry.kind === "recurse.cache-warm" && record(entry.data)) {
+      out.push({
+        ...base,
+        type: "custom",
+        customType: "recurse.usage",
+        data: {
+          tokens: entry.data.usage,
+          cost: (entry.data.usage as Rec)?.cost,
+          model: entry.data.model,
+          stopReason: "cache_warm",
+          partial: false,
+          at: entry.data.at,
+        },
       });
     } else if (imported) {
       out.push({ ...imported, ...base });
@@ -382,6 +407,8 @@ export interface PageOptions {
   limit?: number;
   since?: number | null;
   instance?: string | null;
+  /** Change pages may carry only appended assistant text (`text_from`). */
+  textDeltas?: boolean;
 }
 
 /** One Durable conversation's projection and its paging position. */
@@ -393,6 +420,12 @@ export class DurableRows {
   /** The parent id of the next new entry. */
   private tail: string | null = null;
   private readonly state = rowState();
+  private readonly publishedNested = new Map<string, string>();
+  private activeCodemode = new Set<string>();
+  // Invariant: Incomplete scans retry with backoff; new publications wake them.
+  private readonly pendingFiles = new Set<string>();
+  private filesRetryAt = 0;
+  private filesRetryDelay = 5000;
   private replyTimes: () => Promise<ReplyTimes> = async () => ({});
 
   constructor(
@@ -405,13 +438,13 @@ export class DurableRows {
   // Serve one /view page; the caller runs reads of one conversation one at a
   // time.
   async page(
-    conversation: Conversation,
+    conversation: ViewConversation,
     context: Context,
     live: Readonly<LiveState> | undefined,
     envelope: Rec,
     options: PageOptions,
     replyTimes: () => Promise<ReplyTimes> = async () => ({}),
-    files: PublishedFiles = async () => ({}),
+    files: PublishedFiles = async () => ({ files: {}, complete: true }),
     inbox?: Readonly<InboxState>,
   ): Promise<Rec> {
     this.replyTimes = replyTimes;
@@ -421,9 +454,78 @@ export class DurableRows {
     if (needsOlder(this.view, before, limit))
       await this.loadOlder(conversation, context);
 
-    const callIds = this.view.unresolvedAttachments();
-    const published = callIds.length ? await files(callIds) : {};
     const newest = this.newest === null ? null : String(this.newest);
+    const liveRows = liveEntries(live, newest, this.state, inbox);
+    this.view.syncLive(liveRows, { caughtUp: true });
+    const active = (live?.tools ?? [])
+      .filter((slot) => slot.name === "codemode" && slot.status === "running")
+      .map((slot) => slot.callId);
+    const completed = new Map<string, string[]>();
+    for (const call of live?.nestedTools ?? []) {
+      if (call.name !== "publish" || call.status !== "done") continue;
+      const parent = active
+        .filter((id) => call.callId.startsWith(`${id}/`))
+        .sort((a, b) => b.length - a.length)[0];
+      if (parent)
+        completed.set(parent, [...(completed.get(parent) ?? []), call.callId]);
+    }
+    const signatures = new Map(
+      [...completed].map(([id, calls]) => [id, JSON.stringify(calls)]),
+    );
+    const force = new Set<string>();
+    for (const [id, signature] of signatures)
+      if (this.publishedNested.get(id) !== signature) force.add(id);
+    for (const id of this.publishedNested.keys())
+      if (
+        !active.includes(id) &&
+        (this.activeCodemode.has(id) || !this.pendingFiles.has(id))
+      )
+        force.add(id);
+    if (performance.now() >= this.filesRetryAt)
+      for (const id of this.pendingFiles) force.add(id);
+    const callIds = this.view
+      .unresolvedAttachments(force)
+      .filter((id) => !this.pendingFiles.has(id) || force.has(id));
+    if (callIds.length)
+      for (const id of this.pendingFiles)
+        if (!callIds.includes(id)) callIds.push(id);
+    const lookup = callIds.length
+      ? await files(callIds)
+      : { files: {}, complete: true };
+    const published: Record<string, unknown[]> = Object.assign(
+      Object.create(null),
+      lookup.files,
+    );
+    if (callIds.length) {
+      for (const id of callIds) {
+        const signature = signatures.get(id);
+        if (signature) this.publishedNested.set(id, signature);
+        if (lookup.complete) {
+          published[id] ??= [];
+          this.pendingFiles.delete(id);
+          if (!active.includes(id)) this.publishedNested.delete(id);
+        } else {
+          this.pendingFiles.add(id);
+          if (published[id]) {
+            const merged = new Map<string, unknown>();
+            for (const item of [
+              ...(this.view.attachments[id] ?? []),
+              ...published[id],
+            ])
+              merged.set(String((item as { id: unknown }).id), item);
+            published[id] = [...merged.values()];
+          }
+        }
+      }
+      if (lookup.complete && !this.pendingFiles.size) {
+        this.filesRetryAt = 0;
+        this.filesRetryDelay = 5000;
+      } else if (!lookup.complete) {
+        this.filesRetryAt = performance.now() + this.filesRetryDelay;
+        this.filesRetryDelay = Math.min(this.filesRetryDelay * 2, 60_000);
+      }
+    }
+    this.activeCodemode = new Set(active);
     return slowSpan("view_projection", this.cid, () =>
       window(
         this.view,
@@ -432,12 +534,15 @@ export class DurableRows {
           sessionId: `${this.cid}:${this.artifactPrefix}`,
           sessionFile: null,
           sessionCwd: "",
-          live: JSON.stringify(liveEntries(live, newest, this.state, inbox)),
-          envelope: JSON.stringify(envelope),
+          live: JSON.stringify(liveRows),
+          envelope: JSON.stringify({
+            ...envelope,
+            files_pending: this.pendingFiles.size > 0,
+          }),
           files: JSON.stringify(published),
           maxSessionBytes: 0,
         },
-        { caughtUp: true, ...options, before, limit },
+        { caughtUp: true, liveSynced: true, ...options, before, limit },
       ),
     );
   }
@@ -457,7 +562,7 @@ export class DurableRows {
   }
 
   private async catchUp(
-    conversation: Conversation,
+    conversation: ViewConversation,
     context: Context,
   ): Promise<void> {
     if (this.newest === null) {
@@ -476,6 +581,11 @@ export class DurableRows {
     for (let pages = 0; ; pages += 1) {
       if (pages === CATCH_UP_PAGES) {
         this.view.reset("durable");
+        this.publishedNested.clear();
+        this.activeCodemode.clear();
+        this.pendingFiles.clear();
+        this.filesRetryAt = 0;
+        this.filesRetryDelay = 5000;
         this.newest = null;
         this.held = undefined;
         Object.assign(this.state, rowState());
@@ -525,7 +635,7 @@ export class DurableRows {
   }
 
   private async loadOlder(
-    conversation: Conversation,
+    conversation: ViewConversation,
     context: Context,
   ): Promise<void> {
     const page = await conversation.entries(
@@ -549,7 +659,7 @@ export class DurableRows {
 
 export type PublishedFiles = (
   callIds: readonly string[],
-) => Promise<Record<string, unknown[]>>;
+) => Promise<{ files: Record<string, unknown[]>; complete: boolean }>;
 
 export class DurableViews {
   private readonly cache: ViewCache;
@@ -563,13 +673,16 @@ export class DurableViews {
     );
   }
   /** Paging state per cached projection; it goes when the projection does. */
-  private readonly rows = new WeakMap<ViewEntry, DurableRows>();
+  private readonly rows = new WeakMap<
+    ViewEntry,
+    { generation: string; rows: DurableRows }
+  >();
 
   /** Read and project one /view page; task ages stay outside the cache lock. */
   async page(
     cid: string,
-    harness: Harness,
-    conversation: Conversation,
+    harness: ViewSession,
+    conversation: ViewConversation,
     context: Context,
     envelope: Rec,
     options: PageOptions,
@@ -582,27 +695,27 @@ export class DurableViews {
     ))!.generation;
     const live = await harness.snapshot(LiveDoc, conversation.id, context);
     const inbox = await harness.snapshot(InboxDoc, conversation.id, context);
-    const run = live?.run === undefined ? null : String(live.run.taskId);
     const artifactPrefix = `d-${generation}`;
     let page: Rec = unavailable();
     for await (const view of this.cache.acquire(cid)) {
       if (view === null) return page;
-      let rows = this.rows.get(view);
-      if (rows === undefined)
-        this.rows.set(
-          view,
-          (rows = new DurableRows(cid, this.pageSize, view, artifactPrefix)),
-        );
-      page = await rows.page(
+      let cached = this.rows.get(view);
+      if (cached === undefined || cached.generation !== generation) {
+        if (cached !== undefined) view.reset("durable");
+        cached = {
+          generation,
+          rows: new DurableRows(cid, this.pageSize, view, artifactPrefix),
+        };
+        this.rows.set(view, cached);
+      }
+      page = await cached.rows.page(
         conversation,
         context,
         live,
         {
           ...envelope,
           generation: 0,
-          turn_status: run === null ? "idle" : "running",
           retry_notice: live?.generation?.retry?.error ?? null,
-          active_run: run,
         },
         options,
         async () =>

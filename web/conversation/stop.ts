@@ -1,6 +1,6 @@
 // Stop control and dispatch. The browser owns only the POST-in-flight paint;
 // authoritative running, interrupting, and idle state always comes from /view.
-import { backendFor } from "../backends/backend.js";
+import { deliverStop } from "./operator-send.js";
 import { setComposerStopAvailability } from "../composer/action.js";
 import { phaseFor } from "./freshness.js";
 import { inputEl } from "../dom.js";
@@ -136,11 +136,10 @@ export async function requestStop(
     requestIdGenerator: generated.generator,
   });
   try {
-    const response = await backendFor(cid).jpost(
-      `/api/conversations/${cid}/deliver`,
-      { run_id: run, stop_id: stopId },
-      { availability: "core" },
-    );
+    const response = await deliverStop(cid, {
+      run_id: run,
+      stop_id: stopId,
+    });
     reportStopDiagnostic("request_result", {
       conversationId: cid,
       runId: run,
@@ -194,11 +193,7 @@ async function requestIdleProcessStop(
   }
   const stopId = generated.id;
   try {
-    const response = await backendFor(cid).jpost(
-      `/api/conversations/${cid}/deliver`,
-      { stop_id: stopId },
-      { availability: "core" },
-    );
+    const response = await deliverStop(cid, { stop_id: stopId });
     reportStopDiagnostic("request_result", {
       conversationId: cid,
       stopId,

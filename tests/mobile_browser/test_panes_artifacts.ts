@@ -21,8 +21,273 @@ import {
 import { writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import * as artifacts from "../../src/artifacts";
+import { artifactReopen } from "./artifact_reopen";
 
 export const tests: BrowserTest[] = [
+  // Feature: #2918 a reloaded Artifact retains its selection and revalidates cached content.
+  async function test_artifact_reload_selection_and_content(
+    browser,
+    base,
+    data,
+    serverPid,
+  ) {
+    const context = {
+      artifactsDir: join(data, "data", "artifact_repos"),
+      trashDir: join(data, "data", "trash"),
+    };
+    const owner = rootAgentId();
+    const first = await artifacts.create(context, { owner, title: "First" });
+    const second = await artifacts.create(context, { owner, title: "Second" });
+    for (const [item, title] of [
+      [first, "First"],
+      [second, "Second"],
+    ] as const) {
+      await writeFile(
+        join(String(item.repo_path), "index.md"),
+        `# ${title} initial`,
+      );
+      await artifacts.publish(context, owner, String(item.id));
+    }
+    for (const phone of [false, true]) {
+      const browserContext = await browser.newContext({
+        viewport: { width: phone ? 390 : 1280, height: 800 },
+        isMobile: phone,
+        hasTouch: phone,
+      });
+      const page = await browserContext.newPage();
+      const errors = captureErrors(page);
+      await page.goto(`${base}#agent=${owner}&artifact=${first.id}`);
+      await page.locator("#artifact-picker").waitFor();
+      await page.evaluate(
+        (id) =>
+          (globalThis as any).history.replaceState(null, "", `#agent=${id}`),
+        owner,
+      );
+      await page.locator("#artifact-picker").selectOption(String(second.id));
+      await page
+        .getByRole("heading", { name: "Second initial", exact: true })
+        .waitFor();
+      const version = String(
+        (await artifacts.get(context, owner, String(second.id))).version,
+      );
+      const url = `${base}api/artifacts/${second.id}/file?agent=${owner}&path=index.md&version=${version}`;
+      const response = await page.request.get(url);
+      const etag = response.headers().etag;
+      expect(etag).toBeTruthy();
+      expect(
+        (
+          await page.request.get(url, { headers: { "If-None-Match": etag! } })
+        ).status(),
+      ).toBe(304);
+      expect(
+        (
+          await page.request.get(
+            url.replace(`agent=${owner}`, "agent=missing-owner"),
+            {
+              headers: { "If-None-Match": etag! },
+            },
+          )
+        ).status(),
+      ).toBe(404);
+      const unversioned = await page.request.get(
+        url.replace(`&version=${version}`, ""),
+        {
+          headers: { "If-None-Match": etag! },
+        },
+      );
+      expect(unversioned.status()).toBe(200);
+      expect(unversioned.headers()["cache-control"]).toBe("private, no-store");
+      const revalidation = page.waitForRequest((request) => {
+        const target = new URL(request.url());
+        return (
+          target.pathname === `/api/artifacts/${second.id}/file` &&
+          target.searchParams.get("version") === version
+        );
+      });
+      await page.reload();
+      expect((await (await revalidation).allHeaders())["if-none-match"]).toBe(
+        etag,
+      );
+      await page
+        .getByRole("heading", { name: "Second initial", exact: true })
+        .waitFor();
+      expect(await page.locator("#artifact-picker").inputValue()).toBe(
+        String(second.id),
+      );
+      if (!phone) {
+        let release = () => {};
+        let held = () => {};
+        const pending = new Promise<void>((resolve) => (release = resolve));
+        const requested = new Promise<void>((resolve) => (held = resolve));
+        const route = `**/api/conversations/${owner}?**`;
+        const files: string[] = [];
+        const recordFile = (request: { url(): string }) => {
+          if (
+            new URL(request.url()).pathname.endsWith(
+              `/artifacts/${second.id}/file`,
+            )
+          )
+            files.push(request.url());
+        };
+        page.on("request", recordFile);
+        await page.route(route, async (request) => {
+          held();
+          await pending;
+          await request.continue();
+        });
+        const reload = page.reload();
+        await requested;
+        await page.locator(".agent").first().waitFor();
+        expect(
+          await page.locator('.pane-col[data-pane="report"]').count(),
+        ).toBe(0);
+        expect(files).toEqual([]);
+        release();
+        await reload;
+        await page.unroute(route);
+        page.off("request", recordFile);
+        await page
+          .getByRole("heading", { name: "Second initial", exact: true })
+          .waitFor();
+      }
+      await writeFile(
+        join(String(second.repo_path), "index.md"),
+        "# Second updated",
+      );
+      const updated = await artifacts.publish(
+        context,
+        owner,
+        String(second.id),
+      );
+      await page
+        .getByRole("heading", { name: "Second updated", exact: true })
+        .waitFor();
+      expect(
+        (
+          await page.request.get(
+            url.replace(version, String(updated.version)),
+            {
+              headers: { "If-None-Match": etag! },
+            },
+          )
+        ).status(),
+      ).toBe(200);
+      if (phone) {
+        await artifacts.deleteArtifact(
+          context,
+          owner,
+          String(second.id),
+          String(updated.version),
+        );
+        expect(
+          (
+            await page.request.get(url, { headers: { "If-None-Match": etag! } })
+          ).status(),
+        ).toBe(404);
+        await page.reload();
+        await page
+          .getByRole("heading", { name: "First initial", exact: true })
+          .waitFor();
+        expect(await page.locator("#artifact-picker").inputValue()).toBe(
+          String(first.id),
+        );
+      }
+      expect(errors).toEqual([]);
+      await browserContext.close();
+      if (!phone) {
+        await writeFile(
+          join(String(second.repo_path), "index.md"),
+          "# Second initial",
+        );
+        await artifacts.publish(context, owner, String(second.id));
+      }
+    }
+    const remote = await startServer({ auth: true });
+    try {
+      const login = await fetch(remote.base + "login", {
+        method: "POST",
+        redirect: "manual",
+        body: new URLSearchParams({ password: LOGIN }),
+      });
+      const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+      const tree = (await (
+        await fetch(remote.base + "api/tree", { headers: { cookie } })
+      ).json()) as Array<{ id: string; parent: string | null }>;
+      const remoteOwner = tree.find((node) => node.parent === null)!.id;
+      const remoteContext = {
+        artifactsDir: join(remote.data, "data", "artifact_repos"),
+        trashDir: join(remote.data, "data", "trash"),
+      };
+      const app = await artifacts.create(remoteContext, {
+        owner: remoteOwner,
+        title: "Remote app",
+      });
+      await writeFile(
+        join(String(app.repo_path), "index.html"),
+        '<button id="count" onclick="this.textContent=\'clicked\'">click</button>',
+      );
+      const published = await artifacts.publish(
+        remoteContext,
+        remoteOwner,
+        String(app.id),
+      );
+      const page = await browser.newPage({
+        viewport: { width: 1280, height: 800 },
+      });
+      expect(
+        (
+          await page.request.post(base + "api/backends", {
+            data: { label: "CacheRemote", url: remote.base, password: LOGIN },
+          })
+        ).ok(),
+      ).toBeTrue();
+      const path = `/api/backends/CacheRemote/artifacts/${app.id}/page`;
+      const initial = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === path,
+      );
+      await page.goto(
+        `${base}#agent=${encodeURIComponent(`CacheRemote/${remoteOwner}`)}&artifact=${app.id}`,
+      );
+      const frame = page.frameLocator("iframe.artifact-embed-page");
+      await frame.locator("#count").click();
+      await frame.getByText("clicked", { exact: true }).waitFor();
+      const etag = (await initial).headers().etag;
+      expect(etag).toBeTruthy();
+      const unauthorized = await fetch(
+        `${remote.base}api/artifacts/${app.id}/page?agent=${remoteOwner}&version=${published.version}`,
+        { headers: { "If-None-Match": etag! } },
+      );
+      expect(unauthorized.status).not.toBe(304);
+      expect(unauthorized.ok).toBeFalse();
+      const revalidation = page.waitForRequest(
+        (request) => new URL(request.url()).pathname === path,
+      );
+      await page.reload();
+      expect((await (await revalidation).allHeaders())["if-none-match"]).toBe(
+        etag,
+      );
+      await frame.locator("#count").click();
+      await frame.getByText("clicked", { exact: true }).waitFor();
+      await writeFile(
+        join(remote.data, "data/config/themes.json"),
+        JSON.stringify({ theme: "Ocean" }),
+      );
+      const themed = await fetch(
+        `${remote.base}api/artifacts/${app.id}/page?agent=${remoteOwner}&version=${published.version}`,
+        {
+          headers: { cookie, "If-None-Match": etag! },
+        },
+      );
+      expect(themed.status).toBe(200);
+      expect(themed.headers.get("etag")).not.toBe(etag);
+      await page.close();
+    } finally {
+      await fetch(base + "api/backends/CacheRemote", {
+        method: "DELETE",
+      }).finally(() => stopServer(remote));
+    }
+    await artifactReopen(browser, base, data, serverPid);
+  },
   // Feature: #2728 Git commits publish into the already-open Artifact pane.
   async function test_artifact_commit_updates_open_pane(browser, base, data) {
     const page = await browser.newPage();
@@ -593,6 +858,13 @@ export const tests: BrowserTest[] = [
     expect(revised.version).not.toBe(app.version);
     await switchTo(rootAgentId());
     await page.locator("#pane-fab.attention").waitFor({ timeout: 25_000 });
+    expect(await page.locator("#pane-fab").getAttribute("aria-label")).toBe(
+      "More actions — Artifacts available",
+    );
+    expect(await page.locator("#pane-fab").getAttribute("title")).toBe(
+      "More actions — Artifacts available",
+    );
+    expect(await page.locator("#pane-fab .badge").count()).toBe(0);
     expect(
       await page
         .locator('#pane-menu .pane-menu-item[data-pane="report"].attention')
@@ -673,6 +945,13 @@ export const tests: BrowserTest[] = [
       await page
         .locator(".artifact-notice", { hasText: "Artifact not found" })
         .waitFor();
+      if (width === 390) {
+        await page.goBack();
+        await page.locator('.pane-col[data-pane="report"]').waitFor({
+          state: "detached",
+        });
+        expect(await page.locator("#topbar").isVisible()).toBeTrue();
+      }
       await context.close();
     }
   },
@@ -850,7 +1129,7 @@ export const tests: BrowserTest[] = [
       (route) => {
         attempts++;
         submissions.push(route.request().postDataJSON());
-        if (attempts === 1)
+        if (attempts === 1 || attempts === 3)
           return route.fulfill({ status: 500, json: { detail: "retry" } });
         return route.fulfill({ json: { steer: false } });
       },
@@ -895,17 +1174,18 @@ export const tests: BrowserTest[] = [
     await page.locator(".report-comment-popover textarea").fill("second note");
     await page.locator(".report-comment-popover-submit").click();
     expect(await page.locator(".report-comment").count()).toBe(2);
-    const send = page.locator(".report-sendbar-send");
-    await send.click();
-    await page.waitForFunction(
-      "document.querySelector('.report-sendbar-send')?.textContent?.includes('Failed')",
-    );
-    expect(await page.locator(".report-comment").count()).toBe(2);
-    await send.click();
-    await page.waitForFunction(
-      "document.querySelectorAll('.report-comment').length === 0",
-    );
+    await page.locator(".report-sendbar-send").click();
+    const pending = page.locator("[data-comment-send]");
+    const failure = pending.getByRole("alert");
+    await failure.waitFor();
+    expect(await pending.textContent()).toContain("first note");
+    expect(await pending.textContent()).toContain("second note");
+    await failure.getByRole("button", { name: "Retry" }).click();
+    await pending.waitFor({ state: "detached" });
     expect(submissions.length).toBe(2);
+    expect(submissions[1].client_message_id).toBe(
+      submissions[0].client_message_id,
+    );
     const payload = String(submissions[0].content);
     expect(payload).toContain(ARTIFACT.title);
     expect(payload).toContain(ARTIFACT.id);
@@ -915,6 +1195,20 @@ export const tests: BrowserTest[] = [
     );
     expect(payload).toContain("first note");
     expect(payload).toContain("second note");
+    await page.locator("#pane-fab").click();
+    await page.locator('.pane-menu-item[data-pane="report"]').click();
+    await page.locator('.pane-col[data-pane="report"] .report-doc').waitFor();
+    await dispatchArtifactSelection(page, "touch");
+    await page
+      .locator(".report-comment-popover:not([hidden]) textarea")
+      .fill("Discard this note");
+    await page.locator(".report-comment-popover-submit").click();
+    await page.locator(".report-sendbar-send").click();
+    const discarded = page.locator("[data-comment-send]");
+    page.once("dialog", (dialog) => void dialog.accept());
+    await discarded.getByRole("button", { name: "Discard" }).click();
+    await discarded.waitFor({ state: "detached" });
+    expect(attempts).toBe(3);
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -927,8 +1221,10 @@ export const tests: BrowserTest[] = [
     await routeArtifacts(page, base);
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
-    await page.locator('.pane-col[data-pane="report"]').waitFor();
     const picker = page.locator("#artifact-picker.artifact-title-select");
+    await page
+      .locator(".pane-powerbar-controls:not([inert]) #artifact-picker")
+      .waitFor();
     await visibleAndUncovered(page, "#artifact-picker.artifact-title-select");
     expect(await picker.inputValue()).toBe(ARTIFACT.id);
     expect(await picker.innerText()).toContain("Browser artifact");

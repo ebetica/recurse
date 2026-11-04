@@ -45,11 +45,18 @@ test("connected backend proxy streams and enforces the operator boundary", async
           { headers: { "content-type": "text/event-stream" } },
         );
       if (url.pathname === "/api/version") {
-        forwarded = request.headers;
+        if (request.headers.get("x-recurse-trace") === "proxy-test")
+          forwarded = request.headers;
         credential = request.headers.get("authorization")?.slice(7) ?? "";
-        if (fault === "redirect")
+        if (
+          fault === "redirect" &&
+          request.headers.get("x-recurse-trace") === "fault-probe"
+        )
           return Response.redirect(servers[1]!.url + "/api/version", 302);
-        if (fault === "echo")
+        if (
+          fault === "echo" &&
+          request.headers.get("x-recurse-trace") === "fault-probe"
+        )
           return new Response(credential, {
             headers: {
               "x-secret": credential,
@@ -68,6 +75,11 @@ test("connected backend proxy streams and enforces the operator boundary", async
         },
       );
       const headers = new Headers(response.headers);
+      if (
+        fault === "bad-clock" &&
+        url.pathname.startsWith("/api/conversations/")
+      )
+        headers.set("x-recurse-run-state-clock", "not-a-clock");
       if (url.pathname.endsWith("/preview") && response.status === 200) {
         const bytes = await response.arrayBuffer();
         const etag =
@@ -155,14 +167,82 @@ test("connected backend proxy streams and enforces the operator boundary", async
     expect(forwarded.get("x-unlisted")).toBeNull();
     expect(forwarded.get("x-recurse-agent")).toBeNull();
     expect(forwarded.get("x-recurse-trace")).toBe("proxy-test");
-    for (const path of ["tree", `conversations/${cid}/view`]) {
+    for (const path of [
+      "tree",
+      `conversations/${cid}/view`,
+      "v1/version",
+      "v1/schema",
+      "v1/agents",
+      `v1/agents/${cid}`,
+      `v1/agents/${cid}/idle`,
+      `v1/agents/${cid}/messages`,
+    ]) {
       const direct = await fetch(servers[1]!.url + "/api/" + path, {
         headers: remoteHeaders,
       });
       const through = await proxy(path);
       expect(through.status).toBe(direct.status);
-      expect(JSON.parse(await checked(through))).toEqual(await direct.json());
+      const proxiedBody = JSON.parse(await checked(through));
+      const directBody = (await direct.json()) as Record<string, any>;
+      if (path.endsWith("/view")) {
+        expect(proxiedBody.run_state_clock[0]).toBe(
+          directBody.run_state_clock[0],
+        );
+        expect(proxiedBody.run_state_clock[1]).toBeGreaterThanOrEqual(
+          directBody.run_state_clock[1],
+        );
+        delete proxiedBody.run_state_clock;
+        delete directBody.run_state_clock;
+      }
+      expect(proxiedBody).toEqual(directBody);
     }
+    const metadata = await proxy(`conversations/${cid}?focused=1`);
+    const clock = metadata.headers.get("x-recurse-run-state-clock");
+    expect(clock).toMatch(/^[0-9a-f-]+:\d+(?:\.\d+)?$/);
+    const metadataEtag = metadata.headers.get("etag")!;
+    await checked(metadata);
+    const revalidated = await proxy(`conversations/${cid}?focused=1`, {
+      headers: { "if-none-match": metadataEtag },
+    });
+    expect(revalidated.status).toBe(304);
+    expect(revalidated.headers.get("x-recurse-run-state-clock")).toMatch(
+      /^[0-9a-f-]+:\d+(?:\.\d+)?$/,
+    );
+    fault = "bad-clock";
+    const malformedClock = await proxy(`conversations/${cid}?focused=1`);
+    expect(malformedClock.headers.get("x-recurse-run-state-clock")).toBeNull();
+    await checked(malformedClock);
+    fault = "";
+    const capability = await proxy(`conversations/${cid}/attachment-crops`);
+    expect(capability.status).toBe(200);
+    const cropInfo = JSON.parse(await checked(capability)) as {
+      idempotent: boolean;
+      now: number;
+    };
+    expect(cropInfo.idempotent).toBe(true);
+    const cropKey = "a".repeat(32);
+    const cropExpires = String(cropInfo.now + 300000);
+    const cropUpload = () => {
+      const cropForm = new FormData();
+      cropForm.set("owner", cid);
+      cropForm.set("file", new File(["crop"], "crop.png"));
+      cropForm.set("crop_key", cropKey);
+      cropForm.set("crop_expires", cropExpires);
+      return proxy("attachments", { method: "POST", body: cropForm });
+    };
+    const cropFirst = await cropUpload();
+    expect(cropFirst.status).toBe(200);
+    const cropSaved = JSON.parse(await checked(cropFirst));
+    const cropReplay = await cropUpload();
+    expect(cropReplay.status).toBe(200);
+    expect(JSON.parse(await checked(cropReplay))).toEqual(cropSaved);
+    const cropCancel = await proxy(
+      `conversations/${cid}/attachment-crops/${cropKey}?expires=${cropExpires}`,
+      { method: "DELETE" },
+    );
+    expect(cropCancel.status).toBe(200);
+    await checked(cropCancel);
+    expect((await cropUpload()).status).toBe(409);
     const form = new FormData();
     const svg =
       '<svg xmlns="http://www.w3.org/2000/svg"><text>proxied file</text></svg>';
@@ -192,7 +272,7 @@ test("connected backend proxy streams and enforces the operator boundary", async
     });
     expect(events.status).toBe(200);
     expect(events.headers.get("content-type")).toContain("text/event-stream");
-    expect(events.headers.get("content-encoding")).toBeNull();
+    expect(events.headers.get("content-encoding")).toBe("gzip");
     const reader = events.body!.getReader();
     expect(new TextDecoder().decode((await reader.read()).value)).toContain(
       "data:",
@@ -219,6 +299,7 @@ test("connected backend proxy streams and enforces the operator boundary", async
     for (const path of [
       "settings",
       "backend-keys",
+      "v1extra/version",
       "conversations//view",
       "conversations/%252e%252e/settings",
       "conversations%2f../settings",
@@ -313,6 +394,7 @@ test("connected backend proxy streams and enforces the operator boundary", async
           headers: {
             "x-loopback-token": token,
             "x-recurse-agent": homeCid,
+            "x-recurse-bundled-tool": "subagent",
             "content-type": "application/json",
           },
           body: JSON.stringify({ label: "pending", url: gateway.url.origin }),
@@ -324,10 +406,13 @@ test("connected backend proxy streams and enforces the operator boundary", async
     expect(await pending.json()).toEqual({
       detail: "Backend pending needs sign-in in Settings",
     });
+    const faultHeaders = { "x-recurse-trace": "fault-probe" };
     fault = "echo";
-    expect(await checked(await proxy("version"))).toBe("[redacted]");
+    expect(
+      await checked(await proxy("version", { headers: faultHeaders })),
+    ).toBe("[redacted]");
     fault = "redirect";
-    const redirect = await proxy("version");
+    const redirect = await proxy("version", { headers: faultHeaders });
     expect(redirect.status).toBe(502);
     expect(redirect.headers.has("location")).toBe(false);
     fault = "";
@@ -342,10 +427,10 @@ test("connected backend proxy streams and enforces the operator boundary", async
     );
     await gateway.stop(true);
     const unreachable = await proxy("tree");
-    expect(unreachable.status).toBe(502);
-    expect(await unreachable.json()).toEqual({
-      detail: "Backend B is unreachable",
-    });
+    expect(unreachable.status).toBe(424);
+    expect(await unreachable.text()).toContain(
+      "key was revoked: reconnect in Settings",
+    );
   } finally {
     await gateway.stop(true);
     await Promise.all(servers.map((server) => server.close()));

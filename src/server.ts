@@ -1,7 +1,7 @@
 // Server chain: errors/accounting/compression/auth/decode/router.
 // Refused callers never decode; trust proxy headers only from configured peers.
 // HTTP drain and runtime shutdown start together, before launcher KILL.
-// Only native adoption shares TCP with its storeless startup listener.
+// Direct startup probes loopback and the configured address before opening TCP.
 
 import type { Server } from "bun";
 import { chmod, lstat, mkdir, unlink } from "node:fs/promises";
@@ -403,8 +403,33 @@ async function checkCompose(
   }
 }
 
+async function assertPortAvailable(host: string, port: number): Promise<void> {
+  if (port === 0) return;
+  const addresses = new Set([
+    "127.0.0.1",
+    ...(host === "::" ? ["::1"] : host === "0.0.0.0" ? [] : [host]),
+  ]);
+  for (const address of addresses) {
+    await new Promise<void>((resolve, reject) => {
+      const probe = createConnection({ host: address, port });
+      probe.once("connect", () => {
+        probe.destroy();
+        reject(new Error(`port ${port} is already in use by another server`));
+      });
+      probe.once("error", () => resolve());
+      probe.setTimeout(1000, () => {
+        probe.destroy();
+        reject(
+          new Error(`port ${port} startup probe timed out for ${address}`),
+        );
+      });
+    });
+  }
+}
+
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
+  if (!args.check) await assertPortAvailable(args.host, args.port);
   const { buildApp } = await import("./web/app");
   if (args.check) {
     await checkCompose(buildApp);

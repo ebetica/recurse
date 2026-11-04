@@ -8,7 +8,7 @@ import {
   logEvent,
   type RuntimeLogger,
 } from "./observability/runtime_logging";
-import { retire } from "./utils/trash";
+import { retirePath } from "./utils/trash_sweep";
 
 type Row = Record<string, unknown>;
 const nonEmpty = (value: unknown): value is string =>
@@ -69,8 +69,8 @@ export class PiSessionRetirement {
     try {
       const ledger = await sessions.boundSessionFile(id, file, cwd);
       if (ledger === null) return false;
-      const retired = retire(ledger, trashDir);
-      retire(`${ledger}.owner.json`, trashDir);
+      const retired = await retirePath(ledger, trashDir);
+      await retirePath(`${ledger}.owner.json`, trashDir);
       return retired;
     } catch (error) {
       logEvent(logger, WARNING, "pi_session_retire_failed", {

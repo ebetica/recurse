@@ -17,6 +17,7 @@ export interface OAuthMcpServer {
   tokenRequests(): number;
   /** Every token the revocation endpoint received. */
   revoked: string[];
+  issuedRefreshTokens: string[];
   clients: Map<string, Client>;
   /** The scope of every authorization request, in order. */
   scopes: (string | null)[];
@@ -26,6 +27,8 @@ export interface OAuthMcpServer {
   holdRefreshes(): () => void;
   /** How many refresh_token grants are being held. */
   heldRefreshes(): number;
+  holdRevocations(): () => void;
+  heldRevocations(): number;
   stop(): Promise<void>;
 }
 
@@ -58,13 +61,17 @@ export function startOAuthMcpServer(
   const scopes: (string | null)[] = [];
   let hold: Promise<void> | undefined;
   let held = 0;
+  let holdRevocation: Promise<void> | undefined;
+  let heldRevocation = 0;
   let tokenRequests = 0;
   const revoked: string[] = [];
+  const issuedRefreshTokens: string[] = [];
   const issue = (client_id: string) => {
     const token = id();
     const refreshToken = id();
     access.set(token, { client_id, expiresAt: Date.now() + 3600_000 });
     refresh.set(refreshToken, client_id);
+    issuedRefreshTokens.push(refreshToken);
     return json({
       access_token: token,
       token_type: "Bearer",
@@ -208,6 +215,11 @@ export function startOAuthMcpServer(
         return json({ error: "unsupported_grant_type" }, 400);
       }
       if (path === "/revoke" && request.method === "POST") {
+        if (holdRevocation) {
+          heldRevocation++;
+          await holdRevocation;
+          heldRevocation--;
+        }
         const token = new URLSearchParams(await request.text()).get("token");
         if (token) {
           revoked.push(token);
@@ -279,6 +291,7 @@ export function startOAuthMcpServer(
     grants,
     scopes,
     revoked,
+    issuedRefreshTokens,
     clients,
     expireAccessTokens: () => {
       for (const grant of access.values()) grant.expiresAt = 0;
@@ -292,6 +305,15 @@ export function startOAuthMcpServer(
       };
     },
     heldRefreshes: () => held,
+    holdRevocations: () => {
+      let release!: () => void;
+      holdRevocation = new Promise((done) => (release = done));
+      return () => {
+        holdRevocation = undefined;
+        release();
+      };
+    },
+    heldRevocations: () => heldRevocation,
     tokenRequests: () => tokenRequests,
     stop: () => server.stop(true),
   };

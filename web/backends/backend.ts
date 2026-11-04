@@ -30,6 +30,7 @@ export class Backend {
   readonly base: string;
   readonly connectionHealth: ConnectionHealth;
   apiVersion: number | null = null;
+  compatibility: "incompatible" | "unknown" = "unknown";
   directUrl = "";
   readonly api: ReturnType<typeof createApiClient>["api"];
   readonly apiJson: ReturnType<typeof createApiClient>["apiJson"];

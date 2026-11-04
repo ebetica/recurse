@@ -2,6 +2,7 @@
 // Comments hold the reviewed snapshot; repaints preserve editors and focus.
 // Lazy patches/contents expose truncation honestly; mutation-driven summary
 // reads cache during ordinary UI polls. diff/comments.ts owns staged notes.
+import { sendOperatorMessage } from "./conversation/operator-send.js";
 import { backendFor } from "./backends/backend.js";
 import { html, render, nothing, type TemplateResult } from "lit";
 import {
@@ -61,7 +62,11 @@ function loadCore(): Promise<Core> {
   coreMod ??= import("@git-diff-view/core");
   return coreMod;
 }
-import { UI_REFRESH_EVENT, requestUiRefresh } from "./ui-events.js";
+import {
+  PRS_REFRESH_EVENT,
+  UI_REFRESH_EVENT,
+  requestUiRefresh,
+} from "./ui-events.js";
 
 const PANE_ID = "diff";
 
@@ -74,15 +79,20 @@ function loadRenderer(): Promise<RenderMod> {
 
 interface CurrentPr {
   baseRefName?: string;
+  // When it was first linked, in epoch seconds.
+  detected_at?: number;
+  // The child conversation that linked it, in a parent's list.
+  agent?: { id: string; title: string };
   state?: string | null;
-  metadata?: string;
+  checks?: string | null;
   number: number;
   title: string;
-  body?: string | null;
   url: string;
 }
 interface DiffSummary {
   available?: boolean;
+  // A pull request's description, with its diff.
+  body?: string | null;
   reason?: string | null;
   base?: string | null;
   baseSha?: string | null;
@@ -113,8 +123,14 @@ interface CacheEntry {
   prExpanded: boolean;
   prOverflow: boolean;
   prInflight: boolean;
-  prTimer: ReturnType<typeof setTimeout> | null;
+  prAgain: boolean;
+  prRefresh: boolean;
   prError: string | null;
+  // Uncommitted working-directory changes, shown above a pull request's diff.
+  local: DiffSummary | null;
+  localGeneration: number;
+  // The reader picked the target; the newest pull request no longer wins.
+  chosen: boolean;
 }
 
 interface DiffCtx {
@@ -146,9 +162,7 @@ const newerContent =
 function reviewing(id: string): boolean {
   return (
     pendingCount(id) > 0 ||
-    [...(fileViews.get(id)?.values() || [])].some((view) =>
-      view.body.querySelector(".diff-line-comment"),
-    )
+    viewsOf(id).some((view) => view.body.querySelector(".diff-line-comment"))
   );
 }
 let shownId: string | null = null;
@@ -187,12 +201,24 @@ function entry(id: string): CacheEntry {
       prExpanded: false,
       prOverflow: false,
       prInflight: false,
-      prTimer: null,
+      prAgain: false,
+      prRefresh: false,
       prError: null,
+      local: null,
+      localGeneration: 0,
+      chosen: false,
     };
     cache.set(id, e);
   }
   return e;
+}
+
+// Key suffix for views and patches of uncommitted changes, diffed against HEAD.
+const LOCAL = "\nlocal";
+const ownerOf = (key: string) => key.split("\n")[0]!;
+const isLocal = (key: string) => key.endsWith(LOCAL);
+function fileQuery(key: string, separator: string): string {
+  return isLocal(key) ? separator + "base=HEAD" : prQuery(key, separator);
 }
 
 function targetFor(summary: DiffSummary): DiffTarget {
@@ -222,6 +248,7 @@ function maybeFetch(
   if (e.inflight || !e.invalidated) return;
   e.invalidated = false;
   loadPullRequests(id);
+  if (e.selectedPr) loadLocal(id);
   const generation = ++e.generation;
   e.inflight = true;
   return backendFor(id)
@@ -314,11 +341,11 @@ function loadPatch(
   m.set(path, st);
   const url =
     "/api/conversations/" +
-    agentId +
+    ownerOf(agentId) +
     "/diff/files?path=" +
     encodeURIComponent(path) +
-    prQuery(agentId, "&");
-  void backendFor(agentId)
+    fileQuery(agentId, "&");
+  void backendFor(ownerOf(agentId))
     .api(url)
     .then(async (r) => {
       if (!r.ok) {
@@ -375,7 +402,7 @@ function loadContents(
 ): void {
   const st = patchFor(agentId, path, version);
   if (!st || st.status !== "ready") return;
-  if (entry(agentId).selectedPr) {
+  if (!isLocal(agentId) && entry(agentId).selectedPr) {
     st.contentsStatus = "unavailable";
     return;
   }
@@ -383,16 +410,17 @@ function loadContents(
   st.contentsStatus = "loading";
   const url =
     "/api/conversations/" +
-    agentId +
+    ownerOf(agentId) +
     "/diff/files?path=" +
     encodeURIComponent(path) +
-    "&contents=1";
+    "&contents=1" +
+    (isLocal(agentId) ? "&base=HEAD" : "");
   const done = () => {
     if (st.contentsStatus === "unavailable") {
       fileViews.get(agentId)?.get(path)?.showContentsUnavailable();
     } else repaintView(agentId, path);
   };
-  void backendFor(agentId)
+  void backendFor(ownerOf(agentId))
     .api(url)
     .then(async (r) => {
       const cur = patchFor(agentId, path, version);
@@ -425,6 +453,22 @@ function loadContents(
       const cur = patchFor(agentId, path, version);
       if (cur) cur.contentsStatus = "unavailable";
       done();
+    });
+}
+
+// The uncommitted changes shown above the selected pull request; a newer
+// target or read drops an older answer.
+function loadLocal(id: string): void {
+  const e = entry(id);
+  const generation = ++e.localGeneration;
+  void backendFor(id)
+    .api("/api/conversations/" + id + "/diff?base=HEAD")
+    .then(async (r) => (r.ok ? ((await r.json()) as DiffSummary) : null))
+    .catch(() => null)
+    .then((s) => {
+      if (!s || generation !== e.localGeneration || !e.selectedPr) return;
+      heldSummaries.set(id + LOCAL, s);
+      repaintShell();
     });
 }
 
@@ -462,17 +506,19 @@ function prQuery(id: string, separator: string): string {
   return pr ? separator + "pr=" + encodeURIComponent(pr.url) : "";
 }
 
-// Pending metadata rereads are single-owner, with at most 60 bounded retries.
-function loadPullRequests(id: string, remaining = 60): void {
+// One read at a time; a change pushed during a read reads again. Opening the
+// pane also asks the server for a background branch PR lookup.
+function loadPullRequests(id: string, refresh = false): void {
   const e = entry(id);
-  if (e.prInflight) return;
+  e.prRefresh ||= refresh;
+  if (e.prInflight) return void (e.prAgain = true);
   e.prInflight = true;
-  if (e.prTimer !== null) clearTimeout(e.prTimer);
-  e.prTimer = null;
-  const target = e.selectedPr?.url;
+  e.prAgain = false;
+  const query = e.prRefresh ? "?refresh=1" : "";
+  e.prRefresh = false;
   void backendFor(id)
-    .apiJson<{ prs: CurrentPr[]; refreshing?: boolean }>(
-      "/api/conversations/" + id + "/prs",
+    .apiJson<{ prs: CurrentPr[] }>(
+      "/api/conversations/" + id + "/prs" + query,
       {},
       { timeoutMs: 5000 },
     )
@@ -482,26 +528,8 @@ function loadPullRequests(id: string, remaining = 60): void {
       if (e.selectedPr)
         e.selectedPr =
           e.prs.find((pr) => pr.url === e.selectedPr!.url) || e.selectedPr;
+      followNewestPr(id);
       e.prError = null;
-      if (
-        (data.refreshing || e.prs.some((pr) => pr.metadata === "pending")) &&
-        state.selectedId === id &&
-        paneEl?.isConnected
-      ) {
-        if (remaining)
-          e.prTimer = setTimeout(() => {
-            e.prTimer = null;
-            if (
-              state.selectedId === id &&
-              paneEl?.isConnected &&
-              e.selectedPr?.url === target
-            )
-              loadPullRequests(id, remaining - 1);
-          }, 1000);
-        else
-          e.prError =
-            "Pull request details are still pending. Reopen the picker to retry.";
-      }
       e.available = !!e.summary?.available || e.prs.length > 0;
       refilterFinder(id);
       repaintShell();
@@ -515,14 +543,15 @@ function loadPullRequests(id: string, remaining = 60): void {
     })
     .finally(() => {
       e.prInflight = false;
-      if (
-        state.selectedId === id &&
-        paneEl?.isConnected &&
-        e.selectedPr?.url !== target
-      )
-        loadPullRequests(id);
+      if (e.prAgain || e.prRefresh) loadPullRequests(id);
     });
 }
+
+window.addEventListener(PRS_REFRESH_EVENT, (event: Event) => {
+  const id = (event as CustomEvent<{ agentId?: unknown }>).detail?.agentId;
+  if (typeof id === "string" && state.selectedId === id && cache.has(id))
+    loadPullRequests(id);
+});
 
 export function openPullRequestFinder(): void {
   const id = state.selectedId;
@@ -536,29 +565,49 @@ export function openPullRequestFinder(): void {
   ed.input.focus();
 }
 
+// Until the reader picks a target, Changes shows the newest pull request
+// linked in the conversation's subtree, switching only between reviews and
+// never while a base is being applied.
+function followNewestPr(id: string): void {
+  const e = entry(id);
+  const newest = e.prs.reduce<CurrentPr | null>(
+    (a, pr) => (!a || (pr.detected_at ?? 0) > (a.detected_at ?? 0) ? pr : a),
+    null,
+  );
+  if (
+    !e.chosen &&
+    newest?.url !== e.selectedPr?.url &&
+    !reviewing(id) &&
+    !baseEditors.get(id)?.busy
+  )
+    switchDiffTarget(id, newest, true, true);
+}
+
 function switchDiffTarget(
   id: string,
   pr: CurrentPr | null,
   confirmed = false,
+  automatic = false,
 ): void {
   const e = entry(id);
   const n = pendingCount(id);
   if (!confirmed && n && !confirmDiscard(n)) return;
+  if (!automatic) e.chosen = true;
   comments.delete(id);
-  fileViews.delete(id);
-  patches.delete(id);
+  dropViews(id);
   heldSummaries.delete(id);
+  heldSummaries.delete(id + LOCAL);
+  e.local = null;
+  e.localGeneration++;
   e.selectedPr = pr;
   e.prExpanded = false;
   e.prOverflow = false;
-  if (e.prTimer !== null) clearTimeout(e.prTimer);
-  e.prTimer = null;
   e.summary = null;
   e.error = null;
   e.generation++;
   e.inflight = false;
   e.invalidated = true;
-  closeBaseEditor(id);
+  if (!automatic) closeBaseEditor(id);
   void maybeFetch(id, false);
 }
 
@@ -669,11 +718,10 @@ function refilterFinder(agentId: string): void {
         "#" +
         pr.number +
         " · " +
-        (pr.title ||
-          (pr.metadata === "unavailable"
-            ? "Metadata unavailable"
-            : "Metadata pending")) +
-        (pr.state ? " · " + pr.state.toLowerCase() : ""),
+        pr.title +
+        (pr.state ? " · " + pr.state.toLowerCase() : "") +
+        (pr.checks ? " · checks " + pr.checks : "") +
+        (pr.agent ? " · " + (pr.agent.title || pr.agent.id) : ""),
     })),
   ];
   const query = ed.dirty ? ed.input.value : "";
@@ -790,9 +838,8 @@ async function applyBase(agentId: string): Promise<void> {
   const ed = baseEditors.get(agentId);
   if (!ed || !ed.open || ed.busy) return;
   const value = ed.input.value.trim();
-  const switching = !!entry(agentId).selectedPr;
   const count = pendingCount(agentId);
-  if (switching && count && !confirmDiscard(count)) return;
+  if (entry(agentId).selectedPr && count && !confirmDiscard(count)) return;
   ed.busy = true;
   ed.applyBtn.disabled = true;
   ed.applyBtn.textContent = "Applying\u2026";
@@ -824,11 +871,12 @@ async function applyBase(agentId: string): Promise<void> {
       return;
     }
     closeBaseEditor(agentId);
+    entry(agentId).chosen = true;
     // Invariant: Pending line comments live outside the git cache, so dropping
     // the cached patches and forcing open views to redraw is comment-safe.
     patches.delete(agentId);
     forceViewRefresh.add(agentId);
-    if (switching) switchDiffTarget(agentId, null, true);
+    if (entry(agentId).selectedPr) switchDiffTarget(agentId, null, true);
     else void maybeFetch(agentId, true);
   } catch {
     showBaseError(
@@ -843,6 +891,7 @@ async function applyBase(agentId: string): Promise<void> {
       cur.applyBtn.textContent = "Apply";
       renderFinder(agentId);
     }
+    followNewestPr(agentId);
   }
 }
 
@@ -1103,7 +1152,7 @@ function fileViewFor(
   const body = el("div", "diff-file-body");
   body.style.display = "none";
   const ctx: DiffCtx = {
-    agentId,
+    agentId: ownerOf(agentId),
     group: target.id,
     path: file.path,
     target,
@@ -1350,12 +1399,19 @@ function fileViewFor(
   return v;
 }
 
+// The file views of the pane's target and of its uncommitted changes.
+function viewsOf(agentId: string | null): FileView[] {
+  if (!agentId) return [];
+  return [agentId, agentId + LOCAL].flatMap((key) => [
+    ...(fileViews.get(key)?.values() || []),
+  ]);
+}
+
 // Re-render every open file after the unified/split toggle. Patch text and
 // full contents are cached, so this reuses them without refetching; the
 // pane-wide expand-all re-applies in the new mode on the next draw.
 function redrawOpenViews(agentId: string | null): void {
-  if (!agentId) return;
-  for (const view of fileViews.get(agentId)?.values() || []) {
+  for (const view of viewsOf(agentId)) {
     view.allExpandedMode = null;
     view.redraw();
   }
@@ -1364,9 +1420,7 @@ function redrawOpenViews(agentId: string | null): void {
 // Open every listed file (patches load lazily as before; with expand-all on,
 // each file's draw fetches full contents and expands on arrival).
 function openAllViews(agentId: string | null): void {
-  if (!agentId) return;
-  for (const view of fileViews.get(agentId)?.values() || [])
-    if (!view.open) view.setOpen(true);
+  for (const view of viewsOf(agentId)) if (!view.open) view.setOpen(true);
 }
 
 // Collapse every open file's context back to its patch hunks. File bodies
@@ -1379,7 +1433,7 @@ async function collapseAllViews(agentId: string | null): Promise<void> {
   } catch {
     return;
   }
-  for (const view of fileViews.get(agentId)?.values() || []) {
+  for (const view of viewsOf(agentId)) {
     if (view.file) {
       // Invariant: Both modes: expansion state is per-mode in the library, so a
       // later layout toggle must not resurrect the other mode's lines.
@@ -1398,15 +1452,19 @@ let paneEl: DiffEl | null = null;
 let submitting = false;
 let submitFailed = false;
 
-// Repaints keyed shell rows; referenced file bodies preserve their DOM.
+// Repaints keyed shell rows; referenced file bodies preserve their DOM. They
+// also follow a newer pull request once a review or editor closes.
 function repaintShell(): void {
-  if (paneEl && shownId) renderShell(paneEl, shownId);
+  if (!paneEl || !shownId) return;
+  followNewestPr(shownId);
+  renderShell(paneEl, shownId);
 }
 
 function prSummaryTemplate(agentId: string): TemplateResult | typeof nothing {
   const e = entry(agentId);
   const pr = e.selectedPr;
   if (!pr) return nothing;
+  const body = e.summary?.body;
   const bodyId = "diff-pr-description-" + agentId;
   let observer: ResizeObserver | null = null;
   return html`<section class="diff-pr-summary" aria-label="Pull request">
@@ -1421,7 +1479,12 @@ function prSummaryTemplate(agentId: string): TemplateResult | typeof nothing {
         )}</a
       >
     </h3>
-    ${pr.body?.trim()
+    <p class="diff-pr-meta">
+      #${pr.number}${pr.state ? " · " + pr.state.toLowerCase() : ""}${pr.checks
+        ? " · checks " + pr.checks
+        : ""}
+    </p>
+    ${body?.trim()
       ? html`<div
             id=${bodyId}
             class="content diff-pr-body ${e.prExpanded
@@ -1441,7 +1504,7 @@ function prSummaryTemplate(agentId: string): TemplateResult | typeof nothing {
               observer.observe(element);
             })}
           >
-            ${unsafeHTML(safeMarkdown(pr.body))}
+            ${unsafeHTML(safeMarkdown(body))}
           </div>
           ${e.prOverflow || e.prExpanded
             ? html`<button
@@ -1458,11 +1521,7 @@ function prSummaryTemplate(agentId: string): TemplateResult | typeof nothing {
                   : "Show more"}
               </button>`
             : nothing}`
-      : pr.metadata === "pending"
-        ? html`<div class="diff-loading" role="status">
-            ${e.prError || "Loading pull request description…"}
-          </div>`
-        : nothing}
+      : nothing}
   </section>`;
 }
 
@@ -1582,6 +1641,14 @@ function fileRowTemplate(
   </div>`;
 }
 
+// Forgets the file views and patches of the target and uncommitted changes.
+function dropViews(agentId: string): void {
+  for (const key of [agentId, agentId + LOCAL]) {
+    fileViews.delete(key);
+    patches.delete(key);
+  }
+}
+
 // Submits all staged notes; clear/submit drop notes and file views together.
 // The action bar stays in flow and hides only while no notes are pending.
 function submitBarTemplate(agentId: string): TemplateResult {
@@ -1597,8 +1664,7 @@ function submitBarTemplate(agentId: string): TemplateResult {
   const clear = () => {
     if (n > 0 && !confirmDiscard(n)) return;
     comments.delete(agentId);
-    fileViews.delete(agentId);
-    patches.delete(agentId);
+    dropViews(agentId);
     submitFailed = false;
     repaintShell();
   };
@@ -1613,12 +1679,7 @@ function submitBarTemplate(agentId: string): TemplateResult {
     repaintShell();
     let ok = false;
     try {
-      const r = await backendFor(agentId).jpost(
-        "/api/conversations/" + agentId + "/deliver",
-        {
-          content: msg,
-        },
-      );
+      const r = await sendOperatorMessage(agentId, { content: msg });
       ok = r.ok;
       if (ok) {
         const result = (await r.json()) as { steer?: unknown };
@@ -1636,8 +1697,7 @@ function submitBarTemplate(agentId: string): TemplateResult {
       if (live) acknowledgeComments(live, submitted);
       if (!live?.size) {
         comments.delete(agentId);
-        fileViews.delete(agentId);
-        patches.delete(agentId);
+        dropViews(agentId);
       }
       submitFailed = false;
     } else submitFailed = true;
@@ -1664,6 +1724,64 @@ function submitBarTemplate(agentId: string): TemplateResult {
   </div>`;
 }
 
+// One summary's changed files (patches load lazily) and untracked names.
+function fileGroupsTemplate(
+  agentId: string,
+  s: DiffSummary,
+  label: string,
+): TemplateResult {
+  const { changed, untracked } = buildFileRows(
+    s.files || [],
+    s.untracked || [],
+  );
+  const version = s.version || null;
+  const target = targetFor(s);
+  const more = s.moreFiles || 0;
+  const openByDefault = !more && changed.length <= OPEN_ALL_FILES_MAX;
+  return html`${changed.length
+    ? html`<div class="diff-group">
+        <div class="diff-group-head">
+          <span class="diff-group-label">${label}</span>
+          <span class="badge diff-group-count"
+            >${more ? `${changed.length}+` : changed.length}</span
+          >
+        </div>
+        ${repeat(
+          changed,
+          (f) => f.path,
+          (f) => fileRowTemplate(agentId, f, target, version, openByDefault),
+        )}
+        ${more
+          ? html`<div class="diff-more" aria-live="polite">
+              …and ${more} more file${more === 1 ? "" : "s"} (list capped).
+            </div>`
+          : nothing}
+      </div>`
+    : nothing}
+  ${untracked.length
+    ? html`<div class="diff-group">
+        <div class="diff-group-head">
+          <span class="diff-group-label">Untracked</span>
+          <span class="badge diff-group-count">${untracked.length}</span>
+        </div>
+        ${repeat(
+          untracked,
+          (p) => p,
+          (p) =>
+            html`<div class="diff-file">
+              <div class="diff-file-head">
+                <span class="diff-mark add" aria-hidden="true">+</span>
+                <span class="diff-path">${p}</span>
+                <span class="diff-untracked-note"
+                  >untracked — content not shown</span
+                >
+              </div>
+            </div>`,
+        )}
+      </div>`
+    : nothing}`;
+}
+
 // The whole shell for one agent's summary: the head, the view toggle, the
 // stat, the changed files from the summary's file list, the untracked names,
 // and the submit bar. Per-file patches load lazily on expand.
@@ -1676,10 +1794,9 @@ function shellTemplate(
     s.files || [],
     s.untracked || [],
   );
-  const version = s.version || null;
-  const target = targetFor(s);
   const more = s.moreFiles || 0;
-  const openByDefault = !more && changed.length <= OPEN_ALL_FILES_MAX;
+  const e = entry(agentId);
+  const local = e.selectedPr && e.local?.available ? e.local : null;
   return html` <div class="diff-list" tabindex="-1">
       ${prSummaryTemplate(agentId)}
       ${error
@@ -1708,49 +1825,14 @@ function shellTemplate(
             The diff hit the server’s size cap — some content below is partial.
           </div>`
         : nothing}
-      ${changed.length
-        ? html`<div class="diff-group">
-            <div class="diff-group-head">
-              <span class="diff-group-label">Changed files</span>
-              <span class="badge diff-group-count"
-                >${more ? `${changed.length}+` : changed.length}</span
-              >
-            </div>
-            ${repeat(
-              changed,
-              (f) => f.path,
-              (f) =>
-                fileRowTemplate(agentId, f, target, version, openByDefault),
-            )}
-            ${more
-              ? html`<div class="diff-more" aria-live="polite">
-                  …and ${more} more file${more === 1 ? "" : "s"} (list capped).
-                </div>`
-              : nothing}
-          </div>`
+      ${local
+        ? fileGroupsTemplate(agentId + LOCAL, local, "Uncommitted changes")
         : nothing}
-      ${untracked.length
-        ? html`<div class="diff-group">
-            <div class="diff-group-head">
-              <span class="diff-group-label">Untracked</span>
-              <span class="badge diff-group-count">${untracked.length}</span>
-            </div>
-            ${repeat(
-              untracked,
-              (p) => p,
-              (p) =>
-                html`<div class="diff-file">
-                  <div class="diff-file-head">
-                    <span class="diff-mark add" aria-hidden="true">+</span>
-                    <span class="diff-path">${p}</span>
-                    <span class="diff-untracked-note"
-                      >untracked — content not shown</span
-                    >
-                  </div>
-                </div>`,
-            )}
-          </div>`
-        : nothing}
+      ${fileGroupsTemplate(
+        agentId,
+        s,
+        e.selectedPr ? "Pull request files" : "Changed files",
+      )}
       ${!s.available && !error
         ? html`<div class="diff-empty" role="status">
             Working directory diff unavailable. Choose a pull request above.
@@ -1773,6 +1855,15 @@ function focusDiffList(body: HTMLElement): void {
 // loading placeholder — the poll fills it in a beat later.
 function renderShell(el0: DiffEl, agentId: string): void {
   const e = cache.get(agentId);
+  const local = heldSummaries.get(agentId + LOCAL);
+  // Invariant: New uncommitted changes wait, like the target's summary, until
+  // no comment is being written.
+  if (e && local && (!e.local || !reviewing(agentId))) {
+    heldSummaries.delete(agentId + LOCAL);
+    if (e.local?.version !== local.version)
+      refreshFileViews(agentId + LOCAL, local);
+    e.local = local;
+  }
   const held = heldSummaries.get(agentId);
   if (e && held && !reviewing(agentId)) {
     heldSummaries.delete(agentId);
@@ -1847,6 +1938,17 @@ registerCommentSource({
   },
 });
 
+// Opening Changes asks the server to look up the listed pull requests again,
+// including the selected one's owner, which may be past the first few.
+function paneOpened(id: string): void {
+  loadPullRequests(id, true);
+  const owner = cache.get(id)?.selectedPr?.agent?.id;
+  if (owner)
+    void backendFor(id)
+      .api("/api/conversations/" + owner + "/prs?refresh=1")
+      .catch(() => null);
+}
+
 registerPane({
   id: PANE_ID,
   title: "Changes",
@@ -1863,10 +1965,21 @@ registerPane({
     // Invariant: The pane shell remains the keyboard entry point; arrows belong
     // to the list.
     el0.onfocus = () => focusDiffList(el0);
+    paneOpened(ctx.agentId);
     void maybeFetch(ctx.agentId, false);
     update(el0 as DiffEl, ctx);
   },
   refresh(el0: HTMLElement, ctx: PaneContext) {
+    // Invariant: Reopening a cached pane body asks for a PR lookup like a
+    // fresh render and rereads the diff.
+    if (el0.dataset.diffLeft) {
+      delete el0.dataset.diffLeft;
+      paneOpened(ctx.agentId);
+      void maybeFetch(ctx.agentId, true);
+    }
     update(el0 as DiffEl, ctx);
+  },
+  leave(el0: HTMLElement) {
+    el0.dataset.diffLeft = "1";
   },
 });

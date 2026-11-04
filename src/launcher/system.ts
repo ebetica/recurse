@@ -129,7 +129,8 @@ export class TimeoutExpired extends Error {
 export interface RunOptions {
   readonly cwd?: string;
   readonly env: Readonly<Record<string, string>>;
-  readonly timeoutSeconds: number;
+  /** Omit to wait for the command however long it takes. */
+  readonly timeoutSeconds?: number;
   /** Own and kill the command's process group when its deadline expires. */
   readonly killDescendants?: boolean;
 }
@@ -164,8 +165,10 @@ export async function run(
     child.exited,
   ]);
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const { timeoutSeconds } = options;
   const deadline = new Promise<null>((done) => {
-    timer = setTimeout(() => done(null), options.timeoutSeconds * 1000);
+    if (timeoutSeconds !== undefined)
+      timer = setTimeout(() => done(null), timeoutSeconds * 1000);
   });
   try {
     const result = await Promise.race([finished, deadline]);
@@ -180,7 +183,7 @@ export async function run(
       finished.catch(() => {});
       await Promise.all(readers.map((reader) => reader.cancel()));
       await child.exited;
-      throw new TimeoutExpired(argv, options.timeoutSeconds);
+      throw new TimeoutExpired(argv, timeoutSeconds!);
     }
     const [stdout, stderr, returncode] = result;
     return { returncode, stdout, stderr };

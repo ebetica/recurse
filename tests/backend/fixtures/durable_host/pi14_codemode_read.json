@@ -1,0 +1,8 @@
+{
+  "version": 3,
+  "read": {
+    "name": "read",
+    "jsName": "read",
+    "description": "Read the contents of a file. Supports text files and images (jpg, png, gif, webp, bmp). Images are sent as attachments. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.\n\ncodemode tool declaration:\n```ts\ndeclare const tools: { read(args: {\n  // Maximum number of lines to read\n  limit?: number;\n  // Line number to start reading from (1-indexed)\n  offset?: number;\n  // Path to the file to read (relative or absolute)\n  path: string;\n}): Promise<string | { data: string; mimeType: string; type: \"image\"; }>; };\n```"
+  }
+}

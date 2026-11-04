@@ -5,6 +5,7 @@ import { backendFor, parseConversationId } from "../backends/backend.js";
 import { artifactWorkingPath } from "../../src/artifacts/working_path.js";
 import { html, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
+import { imageCommentHint } from "../image-preview/zoom.js";
 import { repeat } from "lit/directives/repeat.js";
 import { panePowerbar } from "../panes/powerbar.js";
 import {
@@ -26,13 +27,18 @@ import {
   commentRoots,
   comments,
   currentCommentKey,
+  dropComments,
   orderedComments,
   pendingFor,
+  stageSelectionForSend,
   unmark,
   unmarkAll,
 } from "./selection-comments.js";
 import { contentCache } from "./artifact-state.js";
-import { commentBoxCoordinates, uploadCommentCrop } from "./comment-crops.js";
+import { commentBoxCoordinates, prepareCommentCrop } from "./comment-crops.js";
+import { queueComments } from "./comment-outbox.js";
+import { newestCommittedOffset } from "../pending-queue.js";
+import { newClientMessageId } from "../composer/send.js";
 import { artifactMount } from "./artifact-state.js";
 import type {
   ArtifactEl,
@@ -49,6 +55,7 @@ function cardT(pane: CommentPane, comment: Comment): TemplateResult {
   const onRemove = () => {
     const key = currentCommentKey(pane);
     if (key) cmap(key).delete(comment.cid);
+    comment.crop?.release();
     for (const root of commentRoots(pane)) unmark(root, comment.cid);
     renderComments(pane);
   };
@@ -230,6 +237,7 @@ export function renderBar(pane: CommentPane): void {
   const sidebar = pane.querySelector(".image-comment-sidebar");
   if (!total) sidebar?.classList.remove("comments-open");
   const countLabel = total === 1 ? "1 comment" : `${total} comments`;
+  const commentHint = imageCommentHint(pane.dataset.imagePointer);
   const toggleList = () => {
     sidebar?.classList.toggle("comments-open");
     renderBar(pane);
@@ -237,11 +245,12 @@ export function renderBar(pane: CommentPane): void {
   const clear = () => {
     cancelSelectionComment();
     const key = currentCommentKey(pane);
-    if (key) comments.delete(key);
+    if (key) dropComments(key);
     for (const root of commentRoots(pane)) unmarkAll(root);
     renderComments(pane);
   };
   const send = async () => {
+    if (!stageSelectionForSend(pane)) return;
     const recipient = commentTarget(),
       artifactId = rs.selId;
     const artifactKey = currentCommentKey(pane),
@@ -264,114 +273,64 @@ export function renderBar(pane: CommentPane): void {
       !submitted.length
     )
       return;
-    const request = ++rs.sendSeq;
-    // Invariant: `rs.selectedVersion === displayedVersion` is not required:
-    // selection can advance while the old immutable snapshot remains on screen.
-    const currentRequest = () =>
-      rs.sendSeq === request &&
-      rs.selId === artifactId &&
-      rs.contentInfo?.id === artifactId &&
-      rs.contentInfo.version === displayedVersion &&
-      commentTarget() === recipient;
-    rs.sending = true;
-    rs.sendFailed = false;
-    renderBar(pane);
-    let ok = false;
-    try {
-      const crops = new Map<string, { filename: string; url: string }>();
-      let boxNumber = 0;
-      const stem =
-        displayed.title
-          .replace(/\.[^.]+$/, "")
-          .replace(/[^a-zA-Z0-9_-]/g, "-")
-          .slice(0, 100) || "file";
-      for (const note of submitted) {
-        if (!note.box) continue;
-        const filename = `${stem}-box-${++boxNumber}.png`;
-        try {
-          const url = await uploadCommentCrop(
-            pane,
-            note.box,
-            filename,
-            recipient,
-          );
-          crops.set(note.cid, { filename, url });
-        } catch {
-          // Invariant: An unavailable crop never drops its comment.
-        }
-        if (!currentRequest()) break;
-      }
-      if (!currentRequest()) {
-        for (const { url } of crops.values())
-          void backendFor(recipient)
-            .api(
-              `${url}?owner=${encodeURIComponent(parseConversationId(recipient).cid)}`,
-              {
-                method: "DELETE",
-              },
-            )
-            .catch(() => {});
-        throw new Error("Comment document changed");
-      }
-      const response = await backendFor(recipient).jpost(
-        `/api/conversations/${recipient}/deliver`,
-        {
-          content: composeMessage(pane, crops, submitted),
-        },
-      );
-      ok = response.ok;
-      if (!ok) {
-        for (const { url } of crops.values())
-          void backendFor(recipient)
-            .api(
-              `${url}?owner=${encodeURIComponent(parseConversationId(recipient).cid)}`,
-              {
-                method: "DELETE",
-              },
-            )
-            .catch(() => {});
-      }
-      if (ok) {
-        // Invariant: The conversation response is enough to clear the staged
-        // comments. Do not request a global artifact refresh: its list response
-        // can be a stale snapshot that would replace this pane's selected
-        // document.
-        await response.json();
-      }
-    } catch {
-      ok = false;
+    const stem =
+      displayed.title
+        .replace(/\.[^.]+$/, "")
+        .replace(/[^a-zA-Z0-9_-]/g, "-")
+        .slice(0, 100) || "file";
+    const placeholders = new Map<string, { filename: string; url: string }>();
+    const prepared: Array<{
+      token: string;
+      filename: string;
+      crop: ReturnType<typeof prepareCommentCrop>;
+    }> = [];
+    let boxNumber = 0;
+    for (const note of submitted) {
+      if (!note.box) continue;
+      const filename = `${stem}-box-${++boxNumber}.jpg`;
+      const token = `recurse-comment-crop-${note.cid}`;
+      placeholders.set(note.cid, { filename, url: token });
+      prepared.push({
+        token,
+        filename,
+        crop: note.crop ?? prepareCommentCrop(pane, note.box),
+      });
     }
-    if (!currentRequest()) {
-      // Invariant: A refresh or navigation can stale this response without
-      // starting a replacement send. Release only this request's spinner;
-      // staged comments remain bound to their displayed version and are never
-      // cleared here.
-      if (rs.sendSeq === request) {
-        rs.sending = false;
-        renderBar(pane);
-      }
-      return;
-    }
-    rs.sending = false;
-    if (ok) {
-      const map = comments.get(artifactKey);
-      for (const sent of submitted) {
-        if (map?.get(sent.cid)?.text === sent.text) {
-          map.delete(sent.cid);
-          for (const root of commentRoots(pane)) unmark(root, sent.cid);
-        }
-      }
-      renderComments(pane);
-      pane.dispatchEvent(new Event("comments-sent"));
-    } else {
+    const snapshot = composeMessage(pane, placeholders, submitted);
+    const sinceOffset = newestCommittedOffset(recipient);
+    const clientMessageId = newClientMessageId();
+    const queued = queueComments(
+      {
+        recipient,
+        text: message,
+        snapshot,
+        count: submitted.length,
+        clientId: clientMessageId,
+        sinceOffset,
+        crops: prepared.map(({ token, filename }) => ({ token, filename })),
+      },
+      prepared.map(({ crop }) => crop),
+    );
+    if (!queued) {
       rs.sendFailed = true;
       renderBar(pane);
+      return;
     }
+    rs.sendFailed = false;
+    const map = comments.get(artifactKey);
+    for (const sent of submitted) {
+      if (map?.get(sent.cid)?.text === sent.text) {
+        map.delete(sent.cid);
+        for (const root of commentRoots(pane)) unmark(root, sent.cid);
+      }
+    }
+    renderComments(pane);
+    pane.dispatchEvent(new Event("comments-submitting", { bubbles: true }));
   };
   const sendLabel = rs.sending
     ? "Submitting…"
     : rs.sendFailed
-      ? "Failed — retry"
+      ? "Couldn’t save comments — retry"
       : "Submit comments";
   render(
     html`<div class=${`report-sendbar ${total ? "on" : ""}`} aria-live="polite">
@@ -386,9 +345,15 @@ export function renderBar(pane: CommentPane): void {
             ${countLabel}
           </button>`
         : null}
-      <span class="report-sendbar-note"
-        >${target ? "" : "Open an agent to send"}</span
-      >
+      <span
+        class="report-sendbar-note"
+        ?data-image-comment-hint=${!!sidebar && !!target}
+        .textContent=${target
+          ? sidebar
+            ? commentHint
+            : ""
+          : "Open an agent to send"}
+      ></span>
       <span class="report-sendbar-spacer"></span>
       <button
         class="btn quiet report-sendbar-clear"
@@ -400,17 +365,16 @@ export function renderBar(pane: CommentPane): void {
       <button
         class="btn primary report-sendbar-send"
         aria-label=${sendLabel}
+        title=${`${sendLabel} (${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"}+Enter)`}
         @click=${send}
         ?disabled=${!ready || !target || rs.sending || rs.deleting}
       >
         ${sidebar
-          ? html`<span class="image-compact-label"
-                >${rs.sending
-                  ? "Submitting…"
-                  : rs.sendFailed
-                    ? "Retry"
-                    : "Submit"}</span
-              ><span class="image-wide-label">${sendLabel}</span>`
+          ? rs.sending
+            ? "Submitting…"
+            : rs.sendFailed
+              ? "Retry"
+              : "Submit"
           : sendLabel}
       </button>
     </div>`,
@@ -422,7 +386,7 @@ export function discardCurrent(pane: CommentPane): boolean {
   const id = currentCommentKey(pane);
   if (!confirmDiscard(pendingFor(id))) return false;
   cancelSelectionComment();
-  if (id) comments.delete(id);
+  if (id) dropComments(id);
   for (const root of commentRoots(pane)) unmarkAll(root);
   return true;
 }
@@ -580,7 +544,7 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
     const cache = entry(requestedAgent);
     cache.list = cache.list.filter((item) => item.id !== requestedId);
     const artifactKey = commentKey(requestedAgent, requestedId);
-    if (artifactKey) comments.delete(artifactKey);
+    if (artifactKey) dropComments(artifactKey);
     if (!currentRequest()) {
       await refreshList(requestedAgent, true);
       return;

@@ -8,7 +8,6 @@ import {
   AttachmentError,
   AttachmentNotFound,
 } from "../../src/agents/runtime/attachments/base";
-import { historyGeneration } from "../../src/agents/history_claim";
 import {
   SupervisorReads,
   type FileOps,
@@ -40,7 +39,6 @@ interface Case {
   results: { op: Op; out: unknown; calls: unknown[]; logs: unknown[] }[];
 }
 
-const SESSION = "0190a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const temps: string[] = [];
 afterAll(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true });
@@ -188,12 +186,14 @@ class Harness {
         ])) as any,
       publishedCallFiles: (async (_col: string, owner: string) => {
         this.calls.push(["published_call_index", owner]);
-        return Object.fromEntries(
-          Object.entries(this.scenario.published ?? {}).map(([call, file]) => [
-            call,
-            [file],
-          ]),
-        );
+        return {
+          files: Object.fromEntries(
+            Object.entries(this.scenario.published ?? {}).map(
+              ([call, file]) => [call, [file]],
+            ),
+          ),
+          complete: true,
+        };
       }) as any,
     };
     return {
@@ -303,15 +303,6 @@ async function replay(row: Case): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), "sup-reads-"));
   temps.push(root);
   const h = new Harness(row.scenario, root);
-  const offsets = new Map<string, number>();
-  for (const [name, text] of Object.entries(row.scenario.files ?? {})) {
-    let position = 0;
-    for (const line of text.split(/(?<=\n)/)) {
-      if (line && (JSON.parse(line) as Json).type === "compaction")
-        offsets.set(name, position);
-      position += Buffer.byteLength(line);
-    }
-  }
   let lastPage: Json | null = null;
   let lastReplies: Json | null = null;
   for (const result of row.results) {
@@ -384,18 +375,6 @@ async function replay(row: Case): Promise<void> {
           if (!(error instanceof CompletedReplyStorageUnavailable)) throw error;
           out = { raises: "CompletedReplyStorageUnavailable" };
         }
-        break;
-      }
-      case "marker": {
-        const offset =
-          op.offset === "<compaction>"
-            ? offsets.get("main")!
-            : Number(op.offset);
-        const generation =
-          op.generation === "<current>"
-            ? historyGeneration(SESSION)
-            : ((op.generation as number | undefined) ?? null);
-        out = await h.reads.readMarkerSummary(cid, offset, generation);
         break;
       }
       case "file_snapshot":

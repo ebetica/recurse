@@ -19,7 +19,7 @@ export function previewTargetFor(a: {
   const scoped = /^\/api\/conversations\/[^/?#]+\/attachments\/[^/?#]+$/.exec(
     a.url,
   );
-  if (scoped) return { url: `${scoped[0]}/preview`, alt };
+  if (scoped) return { url: `${scoped[0]}/thumbnail`, alt };
   if (!isServedAttachmentUrl(a.url)) return null;
   return { url: a.url, alt };
 }
@@ -29,7 +29,7 @@ export function previewTargetFor(a: {
 export function isServedAttachmentUrl(url: string): boolean {
   return (
     /^\/api\/attachments\/[\w.\-]+$/.test(url) ||
-    /^\/api\/conversations\/[^/?#]+\/attachments\/[^/?#]+\/preview$/.test(
+    /^\/api\/conversations\/[^/?#]+\/attachments\/[^/?#]+\/(?:preview|thumbnail)$/.test(
       url,
     ) ||
     // Invariant: Draft-staged uploads serve image bytes inline at the upload

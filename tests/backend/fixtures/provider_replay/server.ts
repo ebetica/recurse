@@ -16,7 +16,8 @@ export interface Recording {
     requestHeaders: Record<string, string>;
     status: number;
     headers: Record<string, string>;
-    chunks: { ms: number; data: string }[];
+    /** `drop` ends the connection there, mid-reply (hand-written fixtures). */
+    chunks: { ms: number; data: string; drop?: true }[];
   }[];
 }
 
@@ -30,6 +31,7 @@ export function protocolHeaders(
       "anthropic-version",
       "anthropic-beta",
       "openai-beta",
+      "x-codex-beta-features",
     ].flatMap((name) =>
       headers.has(name) ? [[name, headers.get(name)!]] : [],
     ),
@@ -37,8 +39,19 @@ export function protocolHeaders(
 }
 
 /** Keep provider controls and tool schemas, but no private conversation text. */
-export function requestShape(body: Record<string, unknown>) {
+export function requestShape(request: Record<string, unknown>) {
   const shape: Record<string, unknown> = {};
+  // Invariant: Responses tools declared in additional_tools input items
+  // (Pi 1.4) compare like top-level tools (earlier recordings).
+  const declared = Array.isArray(request.input)
+    ? request.input.flatMap((item) =>
+        item?.type === "additional_tools" ? item.tools : [],
+      )
+    : [];
+  const body =
+    "tools" in request || !declared.length
+      ? request
+      : { ...request, tools: declared };
   for (const key of [
     "model",
     "stream",
@@ -159,12 +172,14 @@ export function replayProvider(
     for (const chunk of chunks) {
       await Bun.sleep(Math.max(0, chunk.ms - previous) * timeScale);
       previous = chunk.ms;
+      if (chunk.drop) throw new Error("connection dropped");
       emit(new Uint8Array(Buffer.from(chunk.data, "base64")));
     }
   };
   const server = Bun.serve<{
     path: string;
     headers: Pick<Headers, "has" | "get">;
+    tools?: unknown;
   }>({
     hostname: "127.0.0.1",
     port: 0,
@@ -219,10 +234,18 @@ export function replayProvider(
           const body = JSON.parse(String(message));
           if (body.type !== "response.create")
             throw new Error("request mismatch: WebSocket type");
+          // Invariant: A continuation (previous_response_id) keeps the tools
+          // its chain declared; Pi 1.4 does not declare them again.
+          const tools =
+            requestShape(body).tools ??
+            (body.previous_response_id === undefined
+              ? undefined
+              : socket.data.tools);
+          socket.data.tools = tools;
           const exchange = select(
             "websocket",
             socket.data.path,
-            body,
+            tools === undefined ? body : { ...body, tools },
             socket.data.headers,
           );
           await send(exchange.chunks, (bytes) =>

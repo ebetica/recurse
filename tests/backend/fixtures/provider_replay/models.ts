@@ -11,13 +11,23 @@ export const recordingNames = [
 ] as const;
 export type RecordingName = (typeof recordingNames)[number];
 
-export async function recordedModels(name: RecordingName, copies = 1) {
+/** `headers` join each recorded response's headers. */
+export async function recordedModels(
+  name: RecordingName,
+  copies = 1,
+  headers: Record<string, string> = {},
+) {
   const recording = (await Bun.file(
     new URL(`./${name}.json`, import.meta.url).pathname,
   ).json()) as Recording;
   const replay = replayProvider({
     ...recording,
-    exchanges: Array.from({ length: copies }, () => recording.exchanges).flat(),
+    exchanges: Array.from({ length: copies }, () => recording.exchanges)
+      .flat()
+      .map((exchange) => ({
+        ...exchange,
+        headers: { ...exchange.headers, ...headers },
+      })),
   });
   const builtin = builtinProviders().find(
     (p) => p.id === recording.model.provider,

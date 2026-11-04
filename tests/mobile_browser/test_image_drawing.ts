@@ -28,6 +28,8 @@ const measure = `(source) => {
     corner: [...d.slice(d.length - 4)] };
 }`;
 
+const lastSentOriginal = `(async () => { const shown = [...document.querySelectorAll('#attachments .preview img')].at(-1); const original = new Image(); original.src = shown.src.replace(/\\/thumbnail$/, '/preview'); await original.decode(); return (${measure})(original); })()`;
+
 type Box = { x: number; y: number; width: number; height: number };
 type Pixels = {
   width: number;
@@ -116,6 +118,23 @@ const drawing: BrowserTest = async (browser, base) => {
     await page.locator("#attachments .preview").last().click();
     await detail.waitFor();
     await draw.waitFor();
+    const toolbar = page.locator(".image-popout-bar");
+    expect(await toolbar.locator(".files-name").getAttribute("title")).toBe(
+      "original.png",
+    );
+    expect(await toolbar.locator(".files-position").count()).toBe(0);
+    expect(
+      await toolbar.getByRole("button", { name: "Previous image" }).count(),
+    ).toBe(0);
+    expect(
+      await toolbar.getByRole("button", { name: "Next image" }).count(),
+    ).toBe(0);
+    expect(
+      await toolbar.getByRole("button", { name: "Open in Files" }).isVisible(),
+    ).toBeTrue();
+    expect(
+      await page.locator(".image-popout .report-sendbar-send").innerText(),
+    ).toBe("Submit");
     expect(await loaded()).toEqual([]);
     await detail.locator("img").dblclick();
     expect(
@@ -198,9 +217,7 @@ const drawing: BrowserTest = async (browser, base) => {
     await page.waitForFunction(
       `(() => { const images = document.querySelectorAll('#attachments .preview img'); const image = images[images.length - 1]; return images.length === 2 && image.complete && image.naturalWidth > 0; })()`,
     );
-    const sent = await page.evaluate<Pixels>(
-      `(${measure})([...document.querySelectorAll('#attachments .preview img')].at(-1))`,
-    );
+    const sent = await page.evaluate<Pixels>(lastSentOriginal);
     expect(sent.width).toBe(4000);
     expect(sent.height).toBe(2400);
     const fraction = (pixels: Pixels) => {
@@ -256,9 +273,7 @@ const drawing: BrowserTest = async (browser, base) => {
       await page.waitForFunction(
         `(() => { const image = [...document.querySelectorAll('#attachments .preview img')].at(-1); return image.complete && image.naturalWidth > 0 && document.querySelectorAll('#attachments .preview img').length === 3; })()`,
       );
-      const expanded = await page.evaluate<Pixels>(
-        `(${measure})([...document.querySelectorAll('#attachments .preview img')].at(-1))`,
-      );
+      const expanded = await page.evaluate<Pixels>(lastSentOriginal);
       if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR) {
         const data = await page.evaluate<string>(
           `(() => { const image = [...document.querySelectorAll('#attachments .preview img')].at(-1); const canvas = document.createElement('canvas'); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight; canvas.getContext('2d').drawImage(image, 0, 0); return canvas.toDataURL().split(',')[1]; })()`,

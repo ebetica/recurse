@@ -105,7 +105,7 @@ export async function refreshArtifact(pane: ArtifactEl): Promise<void> {
 
 export async function showArtifact(pane: ArtifactEl): Promise<void> {
   const rs = pane._rs;
-  if (rs.restoredArtifactId !== undefined) return;
+  if (rs.restoredArtifactId !== undefined || rs.revalidating) return;
   const info = selectedInfo(pane);
   if (rs.contentInfo && pendingFor(currentCommentKey(pane))) return;
   if (!info || !rs.agentId) {
@@ -145,7 +145,6 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
         }
         const response = await backendFor(requestedAgent).api(
           artifactFileUrl(requestedAgent, requestedId, entry, requestedVersion),
-          { cache: "reload" },
         );
         if (!response.ok)
           throw new Error(

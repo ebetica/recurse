@@ -1,7 +1,7 @@
-// Built-in credentials come only from Settings-owned auth.json, never ambient
-// env/files or another provider. Custom providers use their own stored key or
-// sole named env_key; it reaches only that provider, never tool environments.
-// Anthropic OAuth refresh uses the shared OAuth library.
+// Built-ins use only Settings-owned auth.json, never ambient credentials.
+// Custom providers use their own key or env_key, never tool environments.
+// Anthropic OAuth uses Recurse's refresh. Patched lazy credentials and
+// asynchronous catalog reads keep disk I/O off the event loop.
 import {
   type ApiKeyAuth,
   type AuthContext,
@@ -11,12 +11,21 @@ import {
   type OAuthCredential,
   type Provider,
 } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import {
+  builtinProviders,
+  getBuiltinModelDataGeneratedAt,
+} from "@earendil-works/pi-ai/providers/all";
+import { personalizeOpenRouterCatalog } from "@earendil-works/pi-ai/providers/openrouter";
 import { createModels } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 
 import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
+import { FileModelsStore } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/models-store.js";
+import {
+  withPersonalizedCatalog,
+  withRemoteCatalog,
+} from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/remote-catalog-provider.js";
 import { join } from "node:path";
 
 /** No environment variables and no ambient credential files. */
@@ -93,14 +102,28 @@ export function withRequestedEffort(models: Models): Models {
   });
 }
 
-/** Built-in providers over the credentials in `<piAgentDir>/auth.json`. */
+/** Settings-owned credentials and Pi's catalog; restore offline only. */
 export function durableModels(piAgentDir: string): MutableModels {
   const models = createModels({
-    credentials: AuthStorage.create(join(piAgentDir, "auth.json")),
+    credentials: AuthStorage.createLazy(join(piAgentDir, "auth.json")),
     authContext: STORED_CREDENTIALS_ONLY,
+    modelsStore: new FileModelsStore(join(piAgentDir, "models-store.json")),
   });
-  for (const provider of builtinProviders())
-    models.setProvider(withRecurseAnthropicRefresh(provider));
+  const generatedAt = getBuiltinModelDataGeneratedAt();
+  for (const provider of builtinProviders()) {
+    const catalog =
+      provider.id === "radius"
+        ? provider
+        : provider.id === "openrouter"
+          ? withPersonalizedCatalog(
+              provider,
+              personalizeOpenRouterCatalog,
+              undefined,
+              generatedAt,
+            )
+          : withRemoteCatalog(provider, undefined, generatedAt);
+    models.setProvider(withRecurseAnthropicRefresh(catalog));
+  }
   return models;
 }
 
@@ -188,7 +211,7 @@ export function customProviderSync(
   envValue: (provider: string) => string | undefined,
 ): (providers: Record<string, CustomProviderSpec>) => void {
   let applied: Record<string, CustomProviderSpec> = {};
-  const builtins = new Map(builtinProviders().map((p) => [p.id, p]));
+  const builtins = new Map(models.getProviders().map((p) => [p.id, p]));
   return (providers) => {
     if (providers === applied) return;
     for (const id of Object.keys(applied)) {

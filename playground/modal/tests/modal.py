@@ -4,6 +4,7 @@ spawn runs the deployer's real `run` in a freshly imported module, as the
 NAME-deployer container would, with the environment `start` configured."""
 import importlib.util
 import os
+import shutil
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -12,8 +13,14 @@ ROOT = Path(os.environ["FAKE_MODAL_ROOT"])
 
 
 class _Chain:
+    def __init__(self):
+        self.layers = []
+
     def __getattr__(self, name):
-        return lambda *args, **kwargs: self
+        def call(*args, **kwargs):
+            self.layers.append((name, args))
+            return self
+        return call
 
 
 class Image:
@@ -31,6 +38,53 @@ class App:
     def function(self, **kwargs):
         return lambda function: function
 
+    cls = function
+
+
+def concurrent(**kwargs):
+    return lambda obj: obj
+
+
+def web_server(*args, **kwargs):
+    return lambda obj: obj
+
+
+asgi_app = web_server
+
+
+class _Call:
+    """A Dict method callable directly or through `.aio`."""
+    def __init__(self, call):
+        self.call = call
+
+    def __call__(self, *args):
+        return self.call(*args)
+
+    async def aio(self, *args):
+        return self.call(*args)
+
+
+class Dict:
+    """An in-memory Dict per name."""
+    named = {}
+
+    def __init__(self):
+        self.data = {}
+        self.put = _Call(self.data.__setitem__)
+        self.get = _Call(lambda key, default=None: self.data.get(key, default))
+
+    @classmethod
+    def from_name(cls, name, **kwargs):
+        return cls.named.setdefault(name, cls())
+
+
+def exit():
+    return lambda obj: obj
+
+
+def Period(**kwargs):
+    return None
+
 
 class Volume:
     def __init__(self, name):
@@ -43,6 +97,24 @@ class Volume:
     def read_file(self, path):
         yield (self.root / path).read_bytes()
 
+    def batch_upload(self, force=False):
+        self.force = force
+        return self
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        pass
+
+    def put_file(self, source, path, mode):
+        destination = self.root / path
+        if destination.exists() and not self.force:
+            raise FileExistsError(path)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+        destination.chmod(mode)
+
 
 class Function:
     def __init__(self, app, name):
@@ -54,6 +126,9 @@ class Function:
 
     def remote(self):
         return {"image_pin": os.environ["FAKE_MODAL_SERVED_PIN"]}
+
+    def get_web_url(self):
+        return os.environ["FAKE_MODAL_WEB_URL"]
 
     def spawn(self, request):
         spec = importlib.util.spec_from_file_location("container", sys.modules["__main__"].__file__)

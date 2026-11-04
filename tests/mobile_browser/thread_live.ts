@@ -11,6 +11,7 @@ import {
   fixtureRows,
   gotoRoot,
   mockConversation,
+  postFixture,
   summary,
   visibleAndUncovered,
   waitForLayout,
@@ -140,7 +141,7 @@ export const liveTests: BrowserTest[] = [
           },
         }),
       );
-      await page.route(`${base}api/conversations/main/events`, (route) => {
+      await page.route(`${base}api/conversations/main/events?*`, (route) => {
         const currentRows = fixtureRows(thread);
         if (eventRows !== currentRows) {
           eventRows = currentRows;
@@ -360,6 +361,81 @@ export const liveTests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Regression: #2958 a text-delta gap reread updated the held rows but never repainted.
+  async function test_unmatched_text_delta_rereads_and_repaints(browser, base) {
+    const thread: any = {
+      id: "main",
+      title: "Text delta",
+      status: "running",
+      active_run: "run-delta",
+      rows: [
+        {
+          id: "u",
+          kind: "text",
+          role: "user",
+          origin: "operator",
+          text: "Say hello",
+        },
+        {
+          id: "a",
+          kind: "text",
+          role: "assistant",
+          text: "Hello",
+          live: true,
+        },
+      ],
+    };
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+    });
+    try {
+      const page = await context.newPage();
+      const errors = captureErrors(page);
+      await mockConversation(page, base, "main", () => thread);
+      const instance = "fixture:main:0";
+      const frame = (kind: string, revision: number, blocks: any[]) =>
+        `retry: 300\n\nid: ${instance}:${revision}\nevent: ${kind}\n` +
+        `data: ${JSON.stringify({ status: "ready", instance_id: instance, revision, blocks, older: false, newer: false })}\n\n`;
+      let delta = false;
+      const rereads: string[] = [];
+      page.on("request", (request) => {
+        if (request.url().includes("/api/conversations/main/view?since=-1"))
+          rereads.push(request.url());
+      });
+      await page.route(`${base}api/conversations/main/events?*`, (route) => {
+        const body = !delta
+          ? frame("snapshot", 1, fixtureRows(thread))
+          : frame("rows", 2, [
+              {
+                ...fixtureRows(thread)[1],
+                text: " world",
+                text_from: 5,
+                text_hash: 0,
+              },
+            ]);
+        if (delta) thread.rows[1].text = "Hello world";
+        return route.fulfill({
+          status: 200,
+          contentType: "text/event-stream",
+          body,
+        });
+      });
+      await gotoRoot(page, base);
+      const reply = page.locator(".msg.assistant .content", {
+        hasText: "Hello",
+      });
+      await reply.waitFor();
+      delta = true;
+      await page
+        .locator(".msg.assistant .content", { hasText: "Hello world" })
+        .waitFor();
+      expect(rereads.length).toBeGreaterThan(0);
+      expect((await reply.innerText()).trim()).toBe("Hello world");
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  },
   async function test_held_shell_finalizes_provider_segment_without_duplicate(
     browser,
     base,
@@ -437,15 +513,15 @@ export const liveTests: BrowserTest[] = [
       await mockConversation(page, base, "main", () => thread);
       await gotoRoot(page, base);
       await page
-        .locator('.turn.current .working .live-label[title="Thinking"]')
+        .locator('#live-bar .working .live-label[title="Thinking"]')
         .waitFor();
       const contents = page.locator(".turn.current .msg.assistant > .content");
       expect(await contents.allInnerTexts()).toEqual([
         "The provider response is complete.",
       ]);
-      const workLabel = page.locator(".turn.current .working .live-label");
+      const workLabel = page.locator("#live-bar .working .live-label");
       expect(await workLabel.getAttribute("title")).toBe("Thinking");
-      const chip = page.locator(".turn.current .shell-chip");
+      const chip = page.locator("#live-bar .shell-chip");
       expect(await chip.count()).toBe(1);
       expect((await chip.innerText()).trim()).toBe("1");
       expect(await chip.getAttribute("aria-label")).toBe(
@@ -657,7 +733,7 @@ export const liveTests: BrowserTest[] = [
       await page
         .locator('.agent[data-id="main"]')
         .evaluate((element) => (element as HTMLElement).click());
-      await page.locator("#messages .working").waitFor({ state: "detached" });
+      await page.locator("#live-bar .working").waitFor({ state: "detached" });
       expect(await page.locator(".turn-foot .turn-summary").count()).toBe(0);
       const hidden = page.locator(".activity-group-summary .turn-summary");
       await hidden.filter({ hasText: "Ran 2 commands" }).waitFor();
@@ -998,6 +1074,253 @@ export const liveTests: BrowserTest[] = [
       expect(await page.locator(".live-panel-box.is-queued").count()).toBe(1);
     } finally {
       await context.close();
+    }
+  },
+  // Regression: #3065 wait for full streamed paragraphs before measuring scroll preservation. (also #2976 short replies add no space; long replies stop at the send.)
+  async function test_send_pins_message_and_live_bar_stays_visible(
+    browser,
+    base,
+  ) {
+    for (const [viewport, mobile] of [
+      [{ width: 1280, height: 800 }, false],
+      [{ width: 390, height: 844 }, true],
+    ] as const) {
+      const context = await browser.newContext({
+        viewport,
+        isMobile: mobile,
+        hasTouch: mobile,
+      });
+      try {
+        const shortPage = await context.newPage();
+        const shortErrors = captureErrors(shortPage);
+        const empty = await postFixture(base, "seed-scroll-pin", {
+          history: false,
+        });
+        await shortPage.goto(`${base}#agent=${empty.agent}`);
+        await shortPage.locator("#input").fill("A short question.");
+        await shortPage.locator("#send").click();
+        await shortPage.getByText("Short reply.", { exact: true }).waitFor();
+        await waitForLayout(shortPage);
+        expect(await shortPage.locator("#send-pin-space").count()).toBe(0);
+        expect(
+          await shortPage.locator("#scroll").evaluate((scroll: any) => {
+            const content = document
+              .querySelector("#messages")
+              .getBoundingClientRect().height;
+            return {
+              top: scroll.scrollTop,
+              extra:
+                scroll.scrollHeight - Math.max(scroll.clientHeight, content),
+            };
+          }),
+        ).toEqual({ top: 0, extra: 0 });
+        for (let part = 0; part < 4; part += 1)
+          await postFixture(base, "scroll-pin-release");
+        await shortPage.locator("#live-bar").waitFor({ state: "hidden" });
+        expect(shortErrors).toEqual([]);
+        await shortPage.close();
+        const page = await context.newPage();
+        const errors = captureErrors(page);
+        const { agent } = await postFixture(base, "seed-scroll-pin", {
+          tokensPerSecond: 600,
+        });
+        await page.goto(`${base}#agent=${agent}`);
+        await page
+          .locator("#messages p", { hasText: "History answer 5." })
+          .waitFor();
+        await waitForLayout(page);
+        await page.locator("#input").fill("Pin this message.");
+        await page.locator("#send").click();
+        await page.getByText("Short reply.", { exact: true }).waitFor();
+        await waitForLayout(page);
+        const geometry = () =>
+          page.evaluate(() => {
+            const box = (selector: string) =>
+              document.querySelector(selector)?.getBoundingClientRect();
+            const sent = Array.from(
+              document.querySelectorAll("#messages .msg.user"),
+            ).findLast((element: any) =>
+              element.textContent.includes("Pin this message."),
+            ) as any;
+            const queued = Array.from(
+              document.querySelectorAll("#messages .msg.user"),
+            ).findLast((element: any) =>
+              element.textContent.includes("Queued while working."),
+            ) as any;
+            const scroll = document.querySelector("#scroll");
+            return {
+              scrollTop: scroll.scrollTop,
+              extraSpace:
+                scroll.scrollHeight -
+                Math.max(
+                  scroll.clientHeight,
+                  document.querySelector("#messages").getBoundingClientRect()
+                    .height +
+                    parseFloat(
+                      document.defaultView.getComputedStyle(scroll)
+                        .paddingBottom,
+                    ),
+                ),
+              padding: document.querySelector("#send-pin-space") !== null,
+              fromBottom:
+                scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight,
+              scroll: box("#scroll"),
+              sent: sent?.getBoundingClientRect(),
+              queued: queued?.getBoundingClientRect(),
+              bar: box("#live-bar .working"),
+              composer: box("#composer"),
+              jump: document
+                .querySelector("#scroll-btn")
+                .classList.contains("visible"),
+            };
+          });
+        const releaseParagraph = async (label: string) => {
+          await postFixture(base, "scroll-pin-release");
+          await page
+            .getByText(
+              `${label} paragraph 10. ${"The reply keeps streaming below the message. ".repeat(5)}`.trim(),
+              { exact: true },
+            )
+            .waitFor();
+          await waitForLayout(page);
+        };
+        const short = await geometry();
+        expect(short.padding).toBe(false);
+        expect(Math.abs(short.extraSpace)).toBeLessThanOrEqual(1);
+        expect(short.fromBottom).toBeLessThanOrEqual(1);
+        expect(short.sent.top - short.scroll.top).toBeGreaterThan(40);
+        await releaseParagraph("First");
+        const pinned = await geometry();
+        expect(
+          Math.abs(pinned.sent.top - pinned.scroll.top),
+        ).toBeLessThanOrEqual(1);
+        expect(pinned.fromBottom).toBeGreaterThan(0);
+        expect(pinned.jump).toBe(true);
+        expect(pinned.bar.top).toBeGreaterThanOrEqual(pinned.scroll.bottom);
+        expect(pinned.bar.bottom).toBeLessThanOrEqual(pinned.composer.top);
+        await releaseParagraph("Second");
+        const held = await geometry();
+        expect(held.scrollTop).toBe(pinned.scrollTop);
+        expect(held.sent.top).toBe(pinned.sent.top);
+
+        const box = (await page.locator("#scroll").boundingBox())!;
+        const x = Math.round(box.x + box.width / 2);
+        const y = Math.round(box.y + box.height / 2);
+        if (mobile) {
+          const cdp = await context.newCDPSession(page);
+          const touch = (
+            type: "touchStart" | "touchMove" | "touchEnd",
+            dy: number,
+          ) =>
+            cdp.send("Input.dispatchTouchEvent", {
+              type,
+              touchPoints: type === "touchEnd" ? [] : [{ x, y: y + dy }],
+            });
+          await touch("touchStart", -200);
+          for (let dy = -180; dy <= 200; dy += 20) await touch("touchMove", dy);
+          await touch("touchEnd", 200);
+        } else {
+          await page.mouse.move(x, y);
+          await page.mouse.wheel(0, -400);
+        }
+        await page.waitForFunction(
+          (top) => document.querySelector("#scroll").scrollTop < top - 200,
+          held.scrollTop,
+        );
+        await waitForLayout(page);
+        const reading = await geometry();
+        await releaseParagraph("Third");
+        const grown = await geometry();
+        expect(grown.scrollTop).toBe(reading.scrollTop);
+        expect(grown.sent.top).toBe(reading.sent.top);
+        expect(grown.bar.top).toBeGreaterThanOrEqual(grown.scroll.bottom);
+
+        await page.locator("#input").fill("Queued while working.");
+        await page.locator("#send").click();
+        await page
+          .locator("#messages .msg.user", { hasText: "Queued while working." })
+          .waitFor({ state: "attached" });
+        await waitForLayout(page);
+        expect((await geometry()).scrollTop).toBe(reading.scrollTop);
+        await page.locator("#scroll-btn.visible").click();
+        await page.waitForFunction(() => {
+          const scroll = document.querySelector("#scroll");
+          return (
+            scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 2
+          );
+        });
+        const latest = await geometry();
+        expect(latest.queued.top).toBeGreaterThanOrEqual(latest.scroll.top);
+        expect(latest.queued.bottom).toBeLessThanOrEqual(latest.scroll.bottom);
+        expect(latest.queued.bottom).toBeLessThanOrEqual(latest.bar.top);
+        await page.locator("#input").fill("Queued at the bottom.");
+        await page.locator("#send").click();
+        await page
+          .locator("#messages .msg.user", { hasText: "Queued at the bottom." })
+          .waitFor({ state: "attached" });
+        await waitForLayout(page);
+        expect(
+          Math.abs((await geometry()).scrollTop - latest.scrollTop),
+        ).toBeLessThanOrEqual(1);
+
+        await postFixture(base, "scroll-pin-release");
+        await page.locator("#live-bar").waitFor({ state: "hidden" });
+        await page.evaluate(() => {
+          const input = document.querySelector("#input") as any;
+          for (const text of ["Rapid one.", "Rapid two."]) {
+            input.value = text;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            (document.querySelector("#send") as any).click();
+          }
+        });
+        const rapid = page.locator("#messages .msg.user[data-row-id]", {
+          hasText: "Rapid two.",
+        });
+        await rapid.waitFor();
+        await page.locator("#live-bar").waitFor({ state: "hidden" });
+        await waitForLayout(page);
+        const scrollBox = (await page.locator("#scroll").boundingBox())!;
+        const rapidBox = (await rapid.boundingBox())!;
+        expect(rapidBox.y - scrollBox.y).toBeGreaterThanOrEqual(0);
+        expect(
+          Math.min(rapidBox.y - scrollBox.y, (await geometry()).fromBottom),
+        ).toBeLessThanOrEqual(1);
+
+        const view = `**/api/conversations/${agent}/view**`;
+        const waiting: Array<() => void> = [];
+        let holding = true;
+        await page.route(view, async (route: any) => {
+          if (holding)
+            await new Promise<void>((resolve) => waiting.push(resolve));
+          await route.continue();
+        });
+        await page.locator("#input").fill("Continue.");
+        await page.locator("#send").click();
+        await page.locator("#send.stop").waitFor();
+        await page.locator("#input").fill("Continue.");
+        await page.locator("#send").click();
+        await page.waitForFunction(
+          () =>
+            Array.from(document.querySelectorAll("#messages .msg.user")).filter(
+              (element: any) => element.textContent.includes("Continue."),
+            ).length >= 2,
+        );
+        await waitForLayout(page);
+        const queuedHandoffTop = (await geometry()).scrollTop;
+        holding = false;
+        for (const resolve of waiting) resolve();
+        await postFixture(base, "scroll-pin-release");
+        const handoff = page.locator("#messages .msg.user[data-row-id]", {
+          hasText: "Continue.",
+        });
+        await handoff.nth(1).waitFor({ state: "attached" });
+        await page.locator("#live-bar").waitFor({ state: "hidden" });
+        await waitForLayout(page);
+        expect((await geometry()).scrollTop).toBe(queuedHandoffTop);
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
     }
   },
 ];

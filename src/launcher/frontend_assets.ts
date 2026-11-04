@@ -58,6 +58,10 @@ export async function copyFrontendAssets(
   await cp(join(excalidraw, "fonts"), join(outputDir, "excalidraw", "fonts"), {
     recursive: true,
   });
+  await copyFile(
+    join(codeDir, "node_modules", "quickjs-wasi", "quickjs.wasm"),
+    join(outputDir, "quickjs.wasm"),
+  );
   const pdfjs = join(codeDir, "node_modules", "pdfjs-dist");
   await rm(join(outputDir, "pdfjs"), { recursive: true, force: true });
   await mkdir(join(outputDir, "pdfjs"));
@@ -65,7 +69,8 @@ export async function copyFrontendAssets(
     join(pdfjs, "legacy", "build", "pdf.worker.min.mjs"),
     join(outputDir, "pdfjs", "pdf.worker.js"),
   );
-  // Invariant: Publish PDF rendering data, never the QuickJS scripting engine.
+  // Invariant: Publish PDF rendering data, never pdf.js's QuickJS engine; the
+  // sidebar script worker loads quickjs-wasi's engine from quickjs.wasm.
   for (const name of ["cmaps", "standard_fonts", "iccs", "wasm"])
     await cp(join(pdfjs, name), join(outputDir, "pdfjs", name), {
       recursive: true,

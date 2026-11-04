@@ -1,7 +1,7 @@
-// Async durable JSON leaves and pinned no-follow child opens. Check identity
-// before/open/after, including directories where O_NOFOLLOW may be ignored.
+// Async JSON; no-follow opens check identity before/open/after, even for dirs.
 // Atomic JSON fsyncs the new file before rename, not the parent.
 // JS normalizes integral floats and integer-like object key ordering.
+// Lock spans time filesystem invocation prefixes, not promise waits.
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
@@ -10,6 +10,7 @@ import type { Stats } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { lstatAt, openAt } from "../utils/dir_fd";
 import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
+import { slowSpan } from "../observability/slow_span";
 
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const DIRECTORY = constants.O_DIRECTORY ?? 0;
@@ -29,39 +30,59 @@ export async function openPinnedLockFile(
     try {
       let before: Stats;
       try {
-        before = await lstatAt(parent.fd, name);
+        before = await slowSpan("lock_leaf_lstat_call", undefined, () =>
+          lstatAt(parent.fd, name),
+        );
       } catch (error) {
         if (!isMissing(error, "ENOENT")) throw error;
         try {
-          handle = await openAt(
-            parent.fd,
-            name,
-            constants.O_RDWR | constants.O_CREAT | constants.O_EXCL | NOFOLLOW,
-            0o600,
+          handle = await slowSpan("lock_leaf_create_call", undefined, () =>
+            openAt(
+              parent.fd,
+              name,
+              constants.O_RDWR |
+                constants.O_CREAT |
+                constants.O_EXCL |
+                NOFOLLOW,
+              0o600,
+            ),
           );
         } catch (createError) {
           if (isMissing(createError, "EEXIST")) continue;
           throw createError;
         }
-        before = await handle.stat();
+        before = await slowSpan("lock_leaf_stat_call", undefined, () =>
+          handle!.stat(),
+        );
       }
       if (!before.isFile()) throw new Error(`unsafe lock: ${name}`);
       if (!handle) {
         try {
-          handle = await openAt(parent.fd, name, constants.O_RDWR | NOFOLLOW);
+          handle = await slowSpan("lock_leaf_open_call", undefined, () =>
+            openAt(parent.fd, name, constants.O_RDWR | NOFOLLOW),
+          );
         } catch (openError) {
           if (isMissing(openError, "ENOENT")) continue;
           throw openError;
         }
       }
-      const opened = await handle.stat();
-      const after = await lstatAt(parent.fd, name);
+      const opened = await slowSpan("lock_leaf_stat_call", undefined, () =>
+        handle!.stat(),
+      );
+      const after = await slowSpan("lock_leaf_lstat_call", undefined, () =>
+        lstatAt(parent.fd, name),
+      );
       if (!same(before, opened) || !same(before, after) || !after.isFile())
         throw new Error(`replaced lock: ${name}`);
-      await handle.chmod(0o600);
+      await slowSpan("lock_leaf_chmod_call", undefined, () =>
+        handle!.chmod(0o600),
+      );
       return handle;
     } catch (error) {
-      if (handle) await handle.close();
+      if (handle)
+        await slowSpan("lock_leaf_close_call", undefined, () =>
+          handle!.close(),
+        );
       throw error;
     }
   }

@@ -5,6 +5,7 @@ import type { EntryId } from "@earendil-works/pi-durable";
 import type { DurableHost } from "../host.ts";
 import { modelResponse } from "../../view/model_response";
 import { runtime } from "./load.ts";
+import { slowSpan } from "../../../observability/slow_span";
 
 type Rec = Record<string, unknown>;
 
@@ -32,7 +33,9 @@ export async function prompt(host: DurableHost, cid: string): Promise<Rec> {
       naming,
       capture_status: host.isRunning(cid) ? "pending" : "unavailable",
     };
-  const request = JSON.parse(capture.json) as {
+  const request = slowSpan("request_capture_decode", cid, () =>
+    JSON.parse(capture.json),
+  ) as {
     context: { systemPrompt?: string; messages: Rec[] };
   };
   return {
@@ -82,7 +85,7 @@ export async function contextUsage(
     if (entry.kind !== "pi.assistant") continue;
     const message = entry.model?.[0] as Rec | undefined;
     const usage = message?.usage as Rec | undefined;
-    const { promptTokens, estimateRequestTokens } =
+    const { promptTokens, estimateRequestTokens, assistantContextUsage } =
       await import("../../runtime/context_usage.ts");
     const used = promptTokens(usage);
     const capture = await captures.latest(cid);
@@ -91,13 +94,7 @@ export async function contextUsage(
         used !== null && capture !== undefined
           ? estimateRequestTokens(capture.json, used)
           : null,
-      usage: usage
-        ? {
-            ...usage,
-            selectors: [`${message?.provider}/${message?.model}`],
-            selectorPartial: false,
-          }
-        : null,
+      usage: assistantContextUsage(message),
     };
   }
   return { usage: null };
@@ -171,17 +168,4 @@ export async function turnPrompt(
         }
       : {}),
   };
-}
-
-/** The summary of the compaction entry at `offset`. */
-export async function markerSummary(
-  host: DurableHost,
-  cid: string,
-  offset: number,
-): Promise<Rec | null> {
-  const { compactionSummary } = await runtime();
-  const found = await entry(host, cid, offset);
-  if (found?.kind !== "pi.compaction") return null;
-  const summary = compactionSummary(found);
-  return summary.trim() ? { summary, marker: "compact" } : null;
 }

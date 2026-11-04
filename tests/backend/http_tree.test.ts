@@ -66,7 +66,6 @@ async function buildTreeApp(world: World) {
     nodeCids: () => [...seed.node_cids],
     cliIndex: async () => structuredClone(seed.cli_index),
     transcript: async () => null,
-    changeEnvironment: async () => null,
     stopDiagnostics: new StopDiagnosticBuckets(),
     loadConversation: (cid) => world.load(cid),
     activeRunId,

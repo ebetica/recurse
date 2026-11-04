@@ -28,6 +28,7 @@ import {
   ARTIFACTS_PANE_ID,
   artifactMount,
   commentMount,
+  contentCache,
   type ArtifactEl,
 } from "./artifact-state.js";
 import {
@@ -49,7 +50,7 @@ import {
   cancelSelectionComment,
   claimComments,
   commentRoots,
-  comments,
+  dropAllComments,
   pendingTotal,
   pendingFor,
   currentCommentKey,
@@ -63,6 +64,7 @@ export function openArtifactLink(hash = location.hash): void {
   if (!id || !state.selectedId || state.draft) return;
   if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
   linkedAgent = state.selectedId;
+  entry(state.selectedId).invalidated = true;
   if (!openPane(ARTIFACTS_PANE_ID)) return;
   const pane = artifactMount.current;
   if (!pane) return;
@@ -76,7 +78,8 @@ export function openArtifactLink(hash = location.hash): void {
     pane._rs.requestSeq++;
   }
   pane._rs.failedKey = null;
-  void refreshList(state.selectedId, true);
+  if (!entry(state.selectedId).fetching)
+    void refreshList(state.selectedId, true);
   renderShell(pane);
   void showArtifact(pane);
 }
@@ -327,7 +330,7 @@ export function renderShell(pane: ArtifactEl): void {
             rs.selectedVersion !== currentInfo?.version
           ? "Newer content is available. It loads after comments are sent or discarded."
           : rs.notice);
-  setPaneLoading(pane, coldList || !!rs.loadingKey);
+  setPaneLoading(pane, coldList || !!rs.loadingKey || rs.revalidating);
   renderPowerbarControls(
     pane,
     html`${currentInfo
@@ -518,7 +521,7 @@ registerCommentSource({
   count: pendingTotal,
   discard: () => {
     cancelSelectionComment();
-    comments.clear();
+    dropAllComments();
     const pane = commentMount.current;
     if (pane) for (const root of commentRoots(pane)) unmarkAll(root);
     if (pane) renderComments(pane);
@@ -552,22 +555,66 @@ registerPane({
     if (!cache.loaded || cache.error) return undefined;
     return artifactGeneration(cache.list);
   },
+  leave(element: HTMLElement) {
+    const pane = element as ArtifactEl;
+    pane._rs.revalidationSeq++;
+    pane._rs.revalidating = false;
+    if (artifactMount.current === pane) {
+      cancelSelectionComment();
+      artifactMount.current = null;
+    }
+    if (commentMount.current === pane) commentMount.current = null;
+  },
   cache: {
     version: 1,
     key: (ctx) => ctx.agentId,
+    keepConnected: true,
     resume(element: HTMLElement, ctx: PaneContext) {
       const pane = element as ArtifactEl;
       if (pane._rs.agentId !== ctx.agentId) return;
+      const rs = pane._rs;
       const cache = entry(ctx.agentId);
       if (cache.error) cache.invalidated = true;
-      if (pane._rs.failedKey) pane._rs.failedKey = null;
-      if (pane.querySelector(".artifact-failed-image"))
-        pane._rs.shownKey = null;
-      if (pane._rs.versionsError) {
-        pane._rs.versionsId = null;
-        pane._rs.versions = [];
-        pane._rs.versionsError = false;
+      if (rs.failedKey) rs.failedKey = null;
+      if (rs.selectedVersion === null) {
+        contentCache.invalidateMutable(ctx.agentId);
+        rs.shownKey = null;
       }
+      if (
+        pane.querySelector(".artifact-failed-image") ||
+        (!pane.isConnected && pane.querySelector("iframe.artifact-embed-page"))
+      )
+        rs.shownKey = null;
+      if (rs.versionsError) {
+        rs.versionsId = null;
+        rs.versions = [];
+        rs.versionsError = false;
+      }
+      const sequence = ++rs.revalidationSeq;
+      rs.revalidating = true;
+      rs.requestSeq++;
+      rs.loadingKey = null;
+      pane.style.visibility = "hidden";
+      setPaneLoading(pane, true);
+      void refreshList(ctx.agentId, true).then(() => {
+        if (rs.revalidationSeq !== sequence || artifactMount.current !== pane)
+          return;
+        rs.revalidating = false;
+        renderShell(pane);
+        if (
+          cache.error ||
+          rs.contentInfo?.id !== rs.selId ||
+          rs.contentInfo?.version !== rs.selectedVersion ||
+          !rs.shownKey
+        ) {
+          pane.querySelector<HTMLElement>(".report-doc")!.innerHTML = "";
+          rs.contentInfo = null;
+          rs.shownKey = null;
+        }
+        pane.style.visibility = "";
+        if (!cache.error) void showArtifact(pane);
+        setPaneLoading(pane, !!rs.loadingKey);
+      });
     },
     dispose(element: HTMLElement) {
       const pane = element as ArtifactEl;
@@ -618,6 +665,8 @@ registerPane({
       loadingKey: null,
       failedKey: null,
       requestSeq: 0,
+      revalidationSeq: 0,
+      revalidating: false,
       versionsSeq: 0,
       versionsId: null,
       versions: [],
@@ -642,6 +691,7 @@ registerPane({
     artifactMount.current = pane;
     claimComments(pane);
     const changedAgent = retarget(pane, ctx.agentId);
+    entry(ctx.agentId).invalidated = true;
     renderShell(pane);
     renderBar(pane);
     // Invariant: A cached success stays request-free across visits. A cached

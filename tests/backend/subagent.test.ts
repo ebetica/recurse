@@ -375,6 +375,19 @@ test("subagent create refreshes remote --commit refs and rejects failed fetches"
   }
 });
 
+// Feature: #2892 remote requests use settings instead of subagent.
+test("subagent rejects removed backends commands without contacting the server", async () => {
+  for (const args of [
+    ["backends", "list"],
+    ["backends", "add", "remote", "https://example.invalid"],
+  ]) {
+    const got = await runOne({ input: { args } } as Case);
+    expect(got.exit).toBe(2);
+    expect(got.err).toContain("invalid choice: 'backends'");
+    expect(got.calls).toEqual([]);
+  }
+});
+
 test("subagent create rejects invalid worktree flags before spawning", async () => {
   const rejected: [string[], number, string][] = [
     [

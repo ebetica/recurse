@@ -117,7 +117,7 @@ export class PiModelUpdater {
     const { models, errors } = await requestList(this.deps, true);
     // Invariant: Pi's store keeps a failed provider's previous catalog, so the
     // list is still current; only a clean update moves the "updated" time.
-    this.deps.config.setPiModelList(
+    await this.deps.config.setPiModelList(
       models,
       errors.length ? undefined : started,
     );

@@ -1,11 +1,11 @@
 // Open a conversation's Harness in steps: settings and environment, extensions,
 // storage, root, side forks, live row, interrupted commands, held clear input,
-// then resume. A failed open closes everything it allocated. Side
-// conversations open as forks followed in their parent's Harness.
+// then resume. A failed open closes everything it allocated. Side conversations
+// open as forks followed in their parent's Harness.
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import type { MutableModels } from "@earendil-works/pi-ai";
+import type { Models, MutableModels } from "@earendil-works/pi-ai";
 import type {
   Conversation,
   Extension,
@@ -18,6 +18,7 @@ import type { Reporter } from "../report.ts";
 import type { RequestCaptures } from "../request_capture.ts";
 import { modelRef, requireModel } from "../model_selection";
 import { INFO, WARNING } from "../../../observability/runtime_logging";
+import { slowSpan, startOpenPhase } from "../../../observability/slow_span";
 import { resumeClear, submitHeld, type ClearState } from "./clear.ts";
 import { syncAgent } from "./send.ts";
 import {
@@ -30,6 +31,7 @@ import {
 import { runtime, type Runtime } from "./load.ts";
 
 type Rec = Record<string, unknown>;
+type Inspection = Awaited<ReturnType<Harness["inspect"]>>;
 
 const SLOW_OPEN_MS = 250;
 
@@ -70,6 +72,7 @@ export interface Opening extends Pick<
   /** The conversation's record when the open began. */
   conv: Rec;
   models: MutableModels;
+  requestModels?: Models;
   model: ReturnType<typeof modelRef>;
   effort: string;
   /** The conversation's workdir: the cwd until the agent changes it. */
@@ -85,17 +88,32 @@ export interface Opening extends Pick<
   conversation?: Conversation;
 }
 
-/** Durations of an open's phases for the durable_open log line. */
+/** Wall costs and overlapping open context, never exclusive CPU attribution. */
 class OpenTiming {
   private readonly started: number;
   private mark: number;
   private envMark: number;
+  private rootMark?: number;
+  private focusWaitMs = 0;
   private readonly phases: Rec = {};
   /** Environment and storage costs, logged only for a slow open. */
   private readonly detail: Record<string, number> = {};
+  private readonly scope: ReturnType<typeof startOpenPhase>;
 
-  constructor(private readonly now: () => number) {
+  constructor(
+    private readonly now: () => number,
+    cid: string,
+  ) {
     this.started = this.mark = this.envMark = now();
+    this.scope = startOpenPhase(cid);
+  }
+
+  begin(name: string): void {
+    this.scope.begin(name);
+  }
+
+  close(): void {
+    this.scope.close();
   }
 
   /** End phase `name`, which began where the previous phase ended. */
@@ -104,6 +122,25 @@ class OpenTiming {
     this.phases[`${name}_ms`] = Math.round(at - this.mark);
     this.mark = this.envMark = at;
   };
+
+  /** End a root subphase without changing the enclosing root phase. */
+  rootStep(name: string): void {
+    const at = this.now();
+    this.phases[`root_${name}_ms`] = Math.round(
+      at - (this.rootMark ?? this.mark),
+    );
+    this.rootMark = at;
+  }
+
+  /** Charge admission waits separately from the phase that yielded. */
+  async focusWait(wait: () => Promise<void>): Promise<void> {
+    const started = this.now();
+    await wait();
+    const elapsed = this.now() - started;
+    this.focusWaitMs += elapsed;
+    this.mark += elapsed;
+    this.envMark += elapsed;
+  }
 
   /** Add `ms` to environment step `name`. */
   readonly env = (name: string, ms: number): void => {
@@ -136,6 +173,7 @@ class OpenTiming {
       {
         cid,
         ...this.phases,
+        focus_wait_ms: Math.round(this.focusWaitMs),
         ...(total > SLOW_OPEN_MS ? this.detail : {}),
         total_ms: total,
       },
@@ -154,11 +192,18 @@ export async function openHarness(
   background = false,
 ): Promise<Opened> {
   const allocated: { close?: () => Promise<void> } = {};
+  const timing = new OpenTiming(
+    host.deps.openClock ?? (() => performance.now()),
+    cid,
+  );
   try {
-    return await openSteps(host, cid, background, allocated);
+    return await openSteps(host, cid, background, allocated, timing);
   } catch (error) {
+    timing.begin("cleanup");
     await allocated.close?.();
     throw error;
+  } finally {
+    timing.close();
   }
 }
 
@@ -167,13 +212,13 @@ async function openSteps(
   cid: string,
   background: boolean,
   allocated: { close?: () => Promise<void> },
+  timing: OpenTiming,
 ): Promise<Opened> {
-  const yieldToFocus = focusYield(host, cid, background);
+  const wait = focusYield(host, cid, background);
+  const yieldToFocus = () => timing.focusWait(wait);
   await yieldToFocus();
-  const timing = new OpenTiming(
-    host.deps.openClock ?? (() => performance.now()),
-  );
   const { rt, ...setup } = await prepare(host, cid, timing, yieldToFocus);
+  timing.begin("tools");
   const target: Opening = {
     ...setup,
     cid,
@@ -193,12 +238,14 @@ async function openSteps(
   );
   const close = closer(host, target, tools);
   allocated.close = close;
+  timing.begin("safety");
   const hooks = installHooks(host, rt, target, tools);
   timing.phase("safety");
   await yieldToFocus();
   const harness = await openStorage(host, rt, target, tools, hooks, timing);
-  const conversation = await openRoot(host, rt, target, hooks.readyMcp);
+  const conversation = await openRoot(host, rt, target, hooks.readyMcp, timing);
   timing.phase("root");
+  timing.begin("track");
   const opened = handle(host, rt, target, tools, hooks, close);
   await attachForks(host, rt, cid, opened);
   const tracking = await follow(host, cid, rt, opened, target.conv, () => {
@@ -206,6 +253,7 @@ async function openSteps(
   });
   await tracking.track();
   timing.phase("track");
+  timing.begin("recover");
   // Invariant: Groups a killed server left behind stop before their tasks
   // resume. A group not proven gone fails the open (and keeps its record), so
   // no work resumes beside it; the next open retries.
@@ -219,9 +267,11 @@ async function openSteps(
       `processes of an interrupted command survived: ${pending.join(", ")}`,
     );
   timing.phase("recover");
+  timing.begin("resume");
   if (target.clear?.rotated)
     await submitHeld(host, cid, target.clear, conversation);
-  await showShells(host, rt, target);
+  const inspection = await harness.inspect(context);
+  await showShells(host, rt, target, inspection);
   if (typeof target.conv.revived_from === "string")
     await rt.settleRevive(
       harness,
@@ -261,25 +311,33 @@ async function prepare(
   timing: OpenTiming,
   yieldToFocus: () => Promise<void>,
 ) {
+  timing.begin("runtime");
   const conv = host.deps.load(cid);
   if (conv === null || !host.owns(conv))
     throw new Error(`not a durable conversation: ${cid}`);
   const rt = await runtime();
   const models = await host.models();
   timing.phase("runtime");
+  timing.begin("env_settings");
   const [modelId, effort] = host.deps.settings(conv);
   const model = modelRef(modelId);
   requireModel(models, model);
   const cwd = String(conv.workdir ?? host.deps.dataDir);
   const path = host.storagePath(cid);
   timing.envStep("settings");
+  timing.begin("env_clear");
   const clear = await resumeClear(host, cid);
   timing.envStep("clear");
-  await mkdir(join(path, ".."), { recursive: true, mode: 0o700 });
+  timing.begin("env_dir");
+  await slowSpan("env_dir_mkdir_call", cid, () =>
+    mkdir(join(path, ".."), { recursive: true, mode: 0o700 }),
+  );
   timing.envStep("dir");
   await yieldToFocus();
+  timing.begin("env_build");
   const env = await host.deps.agentEnv(conv, timing.env);
   timing.envRestart();
+  timing.begin("env_files");
   // Invariant: Every run, resumed or new, runs on an open Harness: publishing
   // works from its first tool call, as TurnPrep's admission gives a Pi turn.
   await host.deps.admitFiles?.(conv);
@@ -298,6 +356,8 @@ function closer(
   const { cid, row, attached } = target;
   return async (options = {}) => {
     host.idle.forget(cid);
+    tools.warmer.close();
+    host.cacheWarmers.delete(tools.warmer);
     for (const [side, handle] of attached) {
       if (host.opened.get(side) !== undefined) host.opened.delete(side);
       await (await handle.catch(() => null))?.close();
@@ -310,6 +370,7 @@ function closer(
     } finally {
       if (host.liveRows.get(cid) === row) {
         host.liveRows.delete(cid);
+        host.reconcileCacheWarmers();
         host.views?.drop(cid);
         host.reportHolds.closed(cid, host.closing);
         if (row.runId !== undefined || row.shells.size)
@@ -330,28 +391,30 @@ async function openStorage(
   timing: OpenTiming,
 ): Promise<Harness> {
   const { cid, row, cwd, env: baseEnv } = target;
-  const storage = await rt.openWorkerSqliteStorage(
-    host.sqlite(rt),
-    target.path,
-    (code) => host.deps.log("durable_write_refused", { cid, code }, WARNING),
-    timing.storage,
+  timing.begin("storage");
+  const storage = await host.messageSearch.withStores([target.path], () =>
+    rt.openWorkerSqliteStorage(
+      host.sqlite(rt),
+      target.path,
+      (code) => host.deps.log("durable_write_refused", { cid, code }, WARNING),
+      timing.storage,
+    ),
   );
   target.storage = storage;
   timing.phase("storage");
+  timing.begin("harness");
   const { registry, context: contextExtension } = tools;
   const { side } = hooks;
   // Invariant: Match Pi: idle admission starts only the oldest input; a
   // running turn receives all queued steers together at its next boundary.
+  target.requestModels = rt.shareParentSession(hooks.models, (id) =>
+    target.parentSessions.get(id),
+  );
   target.harness = await rt.Harness.open(
     storage,
     {
       models: rt.withRequestedEffort(
-        rt.captureRequests(
-          rt.shareParentSession(hooks.models, (id) =>
-            target.parentSessions.get(id),
-          ),
-          tools.captures,
-        ),
+        rt.captureRequests(target.requestModels, tools.captures),
       ),
       registry,
       settings: {
@@ -386,7 +449,16 @@ async function openStorage(
           },
         });
       },
-      onReport: failureLog(host, cid)("durable_extension_report"),
+      onReport: (report) => {
+        const { error } = report;
+        const task = "task" in report ? report.task : undefined;
+        host.deps.log("durable_extension_report", {
+          cid,
+          type: report.kind,
+          ...(task ? { task: Number(task.id), kind: task.kind } : {}),
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
     },
     context,
   );
@@ -401,21 +473,26 @@ async function openRoot(
   rt: Runtime,
   target: Opening,
   readyMcp: () => Promise<void>,
+  timing: OpenTiming,
 ): Promise<Conversation> {
   const { conv, model, effort } = target;
   const harness = target.harness!;
+  timing.begin("root_conversation");
   const conversation = await harness.root(context, {
     agent: { model, thinkingLevel: effort as never, cwd: target.cwd },
   });
   target.conversation = conversation;
-  if (
-    (await harness.snapshot(rt.LiveDoc, conversation.id, context))?.tools?.some(
-      (slot) => slot.name === "codemode",
-    )
-  )
+  timing.rootStep("conversation");
+  timing.begin("root_snapshot");
+  const live = await harness.snapshot(rt.LiveDoc, conversation.id, context);
+  timing.rootStep("snapshot");
+  timing.begin("root_mcp");
+  if (live?.tools?.some((slot) => slot.name === "codemode"))
     await readyMcp().catch(
       failureLog(host, target.cid)("durable_mcp_recovery_failed"),
     );
+  timing.rootStep("mcp");
+  timing.begin("root_import");
   // Invariant: Foreign stored settings are never trusted. Do this before
   // recovery/resume.
   if (
@@ -435,7 +512,10 @@ async function openRoot(
     )
       await rt.setSafetyReviewOff(conversation, false, context);
   }
+  timing.rootStep("import");
+  timing.begin("root_report");
   await rt.ensureReportGeneration(harness, conversation);
+  timing.rootStep("report");
   return conversation;
 }
 
@@ -525,12 +605,13 @@ async function showShells(
   host: DurableHost,
   rt: Runtime,
   target: Opening,
+  inspection: Inspection,
 ): Promise<void> {
   const { row, cid } = target;
   const conversation = target.conversation!;
   // Invariant: Before resume() no task runs, so no shell task changes until
   // the commit listener above takes over.
-  for (const { record } of (await target.harness!.inspect(context)).tasks)
+  for (const { record } of inspection.tasks)
     if (
       record.kind === rt.SHELL_TASK &&
       record.conversationId === conversation.id
@@ -564,6 +645,12 @@ async function follow(
       deleting: host.deleting(cid),
     }),
     current: () => host.liveRows.get(cid) === row,
+    activityChanged: () => host.reconcileCacheWarmers(),
+    committed: (publication) => {
+      if (opened.parent === undefined)
+        host.messageSearch.schedule(host.searchTarget(cid), publication);
+    },
+    contextChanged: () => host.invalidatePromptCache(cid),
     syncAgent: () => syncAgent(host, cid, opened.harness, opened.conversation),
     clearPending: () => {
       if (host.clears.has(cid)) void host.maybeRotate(cid);
@@ -578,7 +665,9 @@ async function follow(
     },
     log: (event, fields, level) => host.deps.log(event, fields, level),
     rowChanged: () => host.deps.rowChanged?.(cid),
+    viewChanged: () => host.viewChanged(cid),
     safetyChanged: () => host.deps.safetyChanged?.(cid),
+    prsCreated: (urls, since) => host.deps.prsCreated?.(cid, urls, since),
   });
 }
 
@@ -633,6 +722,7 @@ async function attachSide(
       stopTracking();
       if (host.liveRows.get(cid) === row) {
         host.liveRows.delete(cid);
+        host.reconcileCacheWarmers();
         host.views?.drop(cid);
         if (row.runId !== undefined) host.deps.rowChanged?.(cid);
       }

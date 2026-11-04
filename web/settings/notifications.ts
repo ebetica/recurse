@@ -1,13 +1,14 @@
-// Settings > Account: this browser's "agent finished" notifications. Turning
-// them on asks for permission, registers /push-worker.js (web/push-worker.ts)
-// at root scope and saves this device's push subscription on the server;
-// turning them off removes both. Each browser opts in separately.
+// Settings > Account: per-browser opt-in for agent-finished pushes. Turning on
+// asks permission, registers /push-worker.js and saves the push subscription;
+// turning off removes both. Insecure origins cannot register workers or receive
+// pushes; the disabled setting explains that HTTPS is required.
 import { api, jpost } from "../api.js";
 import { agentLinkUrl } from "../deep-link.js";
 
 export const NOTIFY_LABEL = "Notify me when a top-level agent finishes";
 
 const supported = () =>
+  window.isSecureContext &&
   "serviceWorker" in navigator &&
   "PushManager" in window &&
   "Notification" in window;
@@ -59,9 +60,10 @@ async function turnOff(): Promise<string> {
 
 export function buildNotificationsSection(body: HTMLElement): void {
   body.innerHTML = `
-    <label class="row check"><input type="checkbox" name="notify">
-      <span>${NOTIFY_LABEL}</span></label>
-    <p class="hint">Only this browser. Agents you have taken over notify too.</p>
+    <div class="group"><label class="item check"><span>Agent finished</span>
+      <input type="checkbox" class="switch" role="switch" name="notify"
+        aria-label="${NOTIFY_LABEL}" aria-describedby="notify-hint"></label></div>
+    <p class="hint" id="notify-hint">Only this browser. Includes top-level agents and agents you have taken over.</p>
     <p class="msg"></p>`;
   const box = body.querySelector<HTMLInputElement>("input")!;
   const msg = body.querySelector<HTMLElement>(".msg")!;
@@ -73,7 +75,9 @@ export function buildNotificationsSection(body: HTMLElement): void {
   if (!supported()) {
     show(
       "",
-      "This browser can't show notifications. On iPhone or iPad, add Recurse to the Home Screen and open it from there.",
+      !window.isSecureContext
+        ? "Notifications require HTTPS. Open Recurse over HTTPS to turn them on."
+        : "This browser can't show notifications. On iPhone or iPad, add Recurse to the Home Screen and open it from there.",
     );
     return;
   }
@@ -99,7 +103,7 @@ export function buildNotificationsSection(body: HTMLElement): void {
   });
 }
 
-if ("serviceWorker" in navigator) {
+if (window.isSecureContext && "serviceWorker" in navigator) {
   navigator.serviceWorker.addEventListener("message", (event) => {
     const cid = (event.data as { openAgent?: unknown } | null)?.openAgent;
     if (typeof cid === "string")

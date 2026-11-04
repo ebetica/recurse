@@ -3,9 +3,9 @@
 // Recovery verifies identities (see its setsid limit). Run abort stops only
 // foreground; background abort/Stop processes stop tasks.
 
+import { Type } from "typebox";
 import { randomUUID } from "node:crypto";
-import { statSync } from "node:fs";
-import { readdir, rmdir } from "node:fs/promises";
+import { readdir, rmdir, stat } from "node:fs/promises";
 import {
   HAS_PROCESS_TABLE,
   PROC,
@@ -13,7 +13,7 @@ import {
   procText,
 } from "../../../utils/process_table.ts";
 import type { Context } from "@earendil-works/chord";
-import { Type } from "@earendil-works/pi-ai";
+import {} from "@earendil-works/pi-ai";
 import {
   type ConversationId,
   defineExtension,
@@ -148,7 +148,7 @@ type Watch = {
 };
 
 const bashSchema = Type.Object({
-  command: Type.String({ description: "The shell command to run." }),
+  command: Type.String(),
   monitor: Type.Optional(
     Type.Boolean({
       description: "Stream progress batches; set at launch.",
@@ -164,7 +164,7 @@ const bashSchema = Type.Object({
       minimum: 0,
       maximum: 86_400,
       description:
-        "Inactivity reminder delay in seconds (default 1800); set to 0 to explicitly disable reminders for this shell.",
+        "No-output reminder delay in seconds (default 1800); 0 disables.",
     }),
   ),
   limit: Type.Optional(
@@ -177,10 +177,10 @@ const bashSchema = Type.Object({
 });
 
 const BASH_DESCRIPTION =
-  'Run a shell command; foreground calls auto-background after a short wait, with output capped at 2000 lines/50KB and full logs available through read (use limit for less output). background returns immediately; monitor sends batches that cost model turns. For reminders, use a monitored sleep loop, for example `while sleep 600; do echo "check X $(date -u +%T)"; done`; include the check time because repeated identical lines are suppressed. For goals, check a done-condition every few minutes and print a dated reminder only while it is unmet, so the monitor can wake you if you finish a turn early. For watchers, print only when the watched state changes, never heartbeat lines. Stop the monitor’s whole process group when it is no longer needed. Stop reported process groups with kill -- -<pgid>, and at the live-shell limit wait, inspect logs or stop a group instead of launching poll shells.';
+  "Run a shell command; long calls auto-background. Output: 2000 lines/50 KiB; read full logs with read. Monitor batches cost turns: print state changes, not heartbeats; identical lines are suppressed. For reminders, use a monitored sleep loop with dated output; for goals, print only while unmet. Stop unneeded process groups with kill -- -<pgid>. At the live-shell limit, wait, read logs or stop a group; don't launch polling shells.";
 
 const WAIT_DESCRIPTION =
-  "Wait for background shells; successive waits/notices use 5m, 10m, 30m, 1h, 3h, then 6h intervals.";
+  "Wait for background shells; wait/notice intervals: 5m, 10m, 30m, 1h, 3h, then 6h.";
 
 /** Wait-interrupt notice: user input arrived, so the wait ends at once while
  * still-live shells keep their completion notification guarantee. */
@@ -323,9 +323,13 @@ export function createShells(host: ShellsOptions) {
     send(text, opts) {
       if (opts.completion) {
         const id = opts.completion.id;
-        queueMicrotask(() =>
-          registries.get(key)?.completionPersistence()?.acknowledge([id]),
-        );
+        queueMicrotask(() => {
+          void registries
+            .get(key)
+            ?.completionPersistence()
+            ?.acknowledge([id])
+            .catch(report);
+        });
         const watch = watches.get(id);
         if (!watch) return;
         watch.exit = text;
@@ -528,11 +532,13 @@ export function createShells(host: ShellsOptions) {
             continue;
           }
           if (state.noticeAt !== null && now >= state.noticeAt) {
+            const running = await registry.stillRunningText(shell);
+            if (entry.exit !== undefined) continue;
             await post(
               runtime,
               input,
               `running:${state.step}`,
-              withReminder(registry.stillRunningText(shell)),
+              withReminder(running),
               context,
             );
             const step = state.step + 1;
@@ -551,7 +557,10 @@ export function createShells(host: ShellsOptions) {
           if (quietUntil !== undefined && now >= quietUntil) {
             let changedAt = state.quietSince;
             try {
-              changedAt = Math.max(changedAt, statSync(input.logPath).mtimeMs);
+              changedAt = Math.max(
+                changedAt,
+                (await stat(input.logPath)).mtimeMs,
+              );
             } catch {}
             if (changedAt > state.quietSince) {
               await advance({ ...state, quietSince: changedAt });
@@ -591,7 +600,10 @@ export function createShells(host: ShellsOptions) {
       // Invariant: Retain group ownership until the group is proven gone.
       stop: async (task, runtime, context) => {
         const { attempts, retryAt } = task.state.checkpoint;
-        await runtime.sleep(retryAt, context);
+        // Invariant: The wait is a durable sleep: no held invocation, and a
+        // restart resumes it instead of restarting it.
+        if (runtime.now() < retryAt)
+          return runtime.sleepUntil(retryAt, task.state.checkpoint, context);
         const gone = await host.stopGroup(groupOf(task.input));
         const next =
           runtime.now() +
@@ -601,7 +613,8 @@ export function createShells(host: ShellsOptions) {
             gone
               ? done("lost", true)
               : {
-                  status: "running",
+                  status: "sleeping",
+                  until: next,
                   checkpoint: {
                     phase: "stop",
                     attempts: attempts + 1,
@@ -685,6 +698,7 @@ export function createShells(host: ShellsOptions) {
       // Invariant: Tasks own inactivity reminders; keep the registry timer off.
       launching = { launch, callId: api.callId };
       const shell = registry.run(command, mode, scope.cwd, 0);
+      using _output = registry.retainOutput(shell);
       launching = undefined;
       const quietMs = inactivityMs(
         args.inactivityReminderSeconds,
@@ -694,7 +708,7 @@ export function createShells(host: ShellsOptions) {
       if (mode !== "foreground") watch(registry, shell);
       const note = registry.commandHygieneNote(shell);
       if (note) advisories.push(note);
-      await registry.waitForLaunch(shell);
+      await registry.waitForLaunch(shell, context.abortSignal);
       const failure = (text: string) =>
         shell.launchErrorMessage
           ? `Failed to start command in ${scope.cwd}: ${shell.launchErrorMessage}`
@@ -728,6 +742,7 @@ export function createShells(host: ShellsOptions) {
       }
       const detach = async (): Promise<boolean> => {
         if (!owner) return false;
+        await registry.flushPersistence(shell);
         const backgroundedAt = shell.backgroundedAt;
         const input: ShellInput = {
           ...owner,
@@ -787,14 +802,21 @@ export function createShells(host: ShellsOptions) {
       if (signal?.aborted) abortForeground();
       else signal?.addEventListener("abort", abortForeground, { once: true });
       let streamed = 0;
-      const stream = () => {
+      let streaming: Promise<void> | undefined;
+      const readStream = async () => {
         try {
-          const size = fileSize(shell.logPath);
+          const size = await fileSize(shell.logPath);
           if (size <= streamed) return;
           const start = Math.max(streamed, size - OUTPUT_CHUNK_BYTES);
-          api.output(readRange(shell.logPath, start, size - start));
+          api.output(await readRange(shell.logPath, start, size - start));
           streamed = size;
         } catch {}
+      };
+      const stream = () => {
+        streaming ??= readStream().finally(() => {
+          streaming = undefined;
+        });
+        return streaming;
       };
       const timer = setInterval(stream, 100);
       let waited: "exited" | "timeout";
@@ -805,12 +827,15 @@ export function createShells(host: ShellsOptions) {
         );
       } finally {
         clearInterval(timer);
-        stream();
+        await streaming;
+        await stream();
         signal?.removeEventListener("abort", abortForeground);
       }
+      if (shell.completed) waited = "exited";
       const seconds = Math.round(registry.cfg.foregroundWaitMs / 1000);
       if (waited === "exited") {
-        const out = registry.trimmedOutput(shell, args.limit);
+        await registry.flushPersistence(shell);
+        const out = await registry.trimmedOutput(shell, args.limit);
         if (shell.status !== "killed" && shell.exitCode === 0)
           return result(out);
         const status =
@@ -821,7 +846,7 @@ export function createShells(host: ShellsOptions) {
       }
       const capFull = async () => {
         const recovery = registry.liveShellCapMessage();
-        const out = registry.trimmedOutput(shell, args.limit);
+        const out = await registry.trimmedOutput(shell, args.limit);
         const stopped = await registry.discardUnowned(shell);
         return result(
           `Command still running after ${seconds}s, but the live background-shell limit is full; it was not backgrounded. ${stopped ? "The command was stopped." : "Forced termination remains pending."}\n${recovery}\nOutput so far:\n${out}`,
@@ -843,7 +868,7 @@ export function createShells(host: ShellsOptions) {
         return refuse(
           "Command exceeded the foreground window, but its shell task could not be recorded",
         );
-      const out = registry.trimmedOutput(shell, args.limit);
+      const out = await registry.trimmedOutput(shell, args.limit);
       return result(
         `Command still running after ${seconds}s — backgrounded as shell \`${shell.id}\` (pid ${shell.pid}, pgid ${pgid}). ${handoff}${othersReminder()}\nOutput so far:\n${out}`,
         { ...details, mode: "background" },
@@ -933,7 +958,7 @@ export function createShells(host: ShellsOptions) {
         entry.waitStep = Math.max(entry.waitStep ?? 0, stepIndex);
         entry.wake?.();
       }
-      const lines = registry.stillRunningLines();
+      const lines = await registry.stillRunningLines();
       const detail = lines.length > 0 ? `\n${lines.join("\n")}` : "";
       return text(
         `Waited for ${fmtWait(seconds)}. Call wait again to wait longer.${detail}`,
@@ -1032,10 +1057,10 @@ export async function recoverInterruptedCommands(
     const launch = record.memos?.[LAUNCH_MEMO];
     if (typeof launch === "string") launches.add(launch);
   }
-  // Invariant: run writes ownership records synchronously with spawn.
+  // Invariant: Detached handoff settles accepted ownership snapshots.
   for (const key of await readdir(host.stateDir).catch(() => [] as string[])) {
     const store = new RegistryStore(host.stateDir, key);
-    for (const record of store.readAll()) {
+    for (const record of await store.readAll()) {
       if (record.status === "running" && record.pid !== undefined) {
         const group = groupOf({
           pid: record.pid,
@@ -1047,7 +1072,7 @@ export async function recoverInterruptedCommands(
           continue;
         }
       }
-      store.remove(record.id);
+      await store.remove(record.id);
     }
     await rmdir(store.dir).catch(() => undefined);
   }

@@ -6,6 +6,7 @@ import {
   postFixture,
   runBrowserTests,
   type BrowserTest,
+  startNewAgent,
 } from "./common";
 
 export const tests: BrowserTest[] = [
@@ -16,7 +17,7 @@ export const tests: BrowserTest[] = [
       try {
         await gotoRoot(page, base);
         await postFixture(base, "seed-conversation-title");
-        await page.locator("#new-top").click();
+        await startNewAgent(page);
         expect(await page.locator("#conv-title").innerText()).toBe("New agent");
         const created = page.waitForResponse(
           (response) =>
@@ -36,7 +37,10 @@ export const tests: BrowserTest[] = [
         expect(await page.locator("#conv-title").innerText()).toBe(
           recorded.appliedTitle,
         );
-        if (width === 412) await page.locator("#menu-btn").click();
+        if (width === 412) {
+          await page.locator("#input").blur();
+          await page.locator("#menu-btn").click();
+        }
         const row = page.locator(`#agent-list .agent[data-id="${id}"] .title`);
         await row.filter({ hasText: recorded.appliedTitle }).waitFor();
         expect(await row.innerText()).toBe(recorded.appliedTitle);
@@ -45,7 +49,8 @@ export const tests: BrowserTest[] = [
           await page.screenshot({
             path: join(shots, `conversation-title-${width}.png`),
           });
-        if (width === 412) await page.locator("#menu-btn").click();
+        if (width === 412)
+          await page.locator("#sidebar .agent.selected").click();
         await page.locator(".prompt-banner-row").click();
         await page
           .locator(".prompt-banner-body > .prompt-block-head")

@@ -20,9 +20,14 @@ For each agent call to `bash`, `write`, or `edit`, pi-safety sends the reviewer:
 - the working directory and bounded owned-process context;
 - a bounded process-local cache of user messages, completed assistant text, and prior completed tool calls from the active session branch.
 
+Owned-process context uses bounded asynchronous process-file reads. PGID, session
+and leader start-token checks exclude unrelated or reused groups; missing leaders
+remain explicitly uncertain. Only command names are included, never arguments or
+environment values. This context is advisory, not permission to signal.
+
 It deliberately excludes thinking, all tool output, write/edit contents, and the current still-uncompleted tool call. Historical result content is never read; its immutable call id only establishes that pi finalized the matching call. The durable Pi session is authoritative: cold starts rebuild the cache, and any compaction drops all predecessor evidence. Cached current-generation rows and evidence are bounded to 50 MiB; an over-budget branch fails open with a warning that the operator should explicitly compact the conversation.
 
-Canonical evidence is rendered append-only within one deterministic transcript generation, so a cold reviewer process reconstructs the same exact prefix. OpenAI caching remains automatic from those prefix tokens without a Recurse cache key; the managed Claude adapter maps the same blocks to Claude's native cache transport. Provider cache retention is short and remains an external limit, so the first request after expiry is still cold.
+Canonical evidence is rendered append-only within one deterministic transcript generation, so a cold reviewer process reconstructs the same exact prefix. The request sends that evidence as a run of user messages, each cut at the first journal-record boundary at or after 4,096 characters (only the last, still-growing message can be shorter), followed by one message with the proposed action; completed messages stay byte-identical as evidence grows, because the ChatGPT Codex backend reuses its prompt cache only across whole earlier messages, not inside one growing message. The cache key is a per-conversation, per-model `pi-safety-` session id. Anthropic caches only at explicit breakpoints and Pi marks only the last message, so Anthropic requests also mark the last evidence message; the next review then reads every completed evidence message from the cache. Provider cache retention is short and remains an external limit, so the first request after expiry is still cold.
 
 The reviewer answers with exactly `OK` or `DENY: <reason>`. A malformed reply is retried once. Missing credentials, timeouts, provider failures, aborted responses, and a second malformed reply fail open with a stable, bounded warning category; journal capacity warnings say to explicitly compact the conversation, and raw provider text is never forwarded.
 
@@ -51,7 +56,9 @@ No configuration is required. To add organization- or machine-specific rules, cr
 
 Custom rules are **additive**. They cannot remove the built-in policy. That is the only configuration surface; the family-routed reviewer and effort, 60-second timeout, reviewed tools, and three-denial circuit breaker are intentional defaults.
 
-Reload pi with `/reload` after changing the file.
+The next run reloads the optional JSON and Markdown rules asynchronously. Trusted
+workspace roots are also resolved asynchronously for each run; action targets
+are still checked afresh before bypassing review.
 
 ## What a denial looks like
 

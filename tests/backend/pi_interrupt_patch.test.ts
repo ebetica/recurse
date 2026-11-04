@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -8,7 +9,6 @@ import {
 } from "../../src/agents/durable/sqlite_worker.ts";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
-  Type,
   createModels,
   fauxProvider,
   fauxAssistantMessage,

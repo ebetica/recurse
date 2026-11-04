@@ -229,13 +229,17 @@ export async function publishedCallIndex(
 export async function publishedCallFiles(
   collection: string,
   owner: string,
-): Promise<Record<string, Manifest[]>> {
+): Promise<{ files: Record<string, Manifest[]>; complete: boolean }> {
   const index: Record<string, Manifest[]> = Object.create(null);
+  let complete = true;
   try {
     const fd = await openCollection(collection);
     try {
-      if (!(await collectionIdentityMatches(collection, fd))) return index;
-      const manifests = (await iterManifests(fd, owner))
+      if (!(await collectionIdentityMatches(collection, fd)))
+        return { files: {}, complete: false };
+      const manifests = (
+        await iterManifests(fd, owner, () => (complete = false))
+      )
         .map(([, manifest]) => manifest)
         .sort((a, b) => Number(a.created_at) - Number(b.created_at));
       for (const manifest of manifests) {
@@ -243,13 +247,16 @@ export async function publishedCallFiles(
         if (manifest.published === true && typeof call === "string")
           (index[call] ??= []).push(publicMetadata(manifest));
       }
+      if (!(await collectionIdentityMatches(collection, fd)))
+        return { files: {}, complete: false };
     } finally {
       await fd.close();
     }
   } catch (error) {
     if (!(error instanceof AttachmentError)) throw error;
+    return { files: {}, complete: false };
   }
-  return index;
+  return { files: index, complete };
 }
 export async function publishedFiles(
   collection: string,

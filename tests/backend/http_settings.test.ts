@@ -26,6 +26,7 @@ import { ProcessLifecycle } from "../../src/process_lifecycle";
 import { RecurseUpdates } from "../../src/recurse_update";
 import { Router } from "../../src/web/router";
 import { registerSettingsRoutes } from "../../src/web/settings";
+import { UsageLimits } from "../../src/extensions/extra/usage-limits/usage-limits.ts";
 import { Refs, runRefCases, type RefCase } from "./http_refs";
 import { serveOpen } from "./http_open_app";
 import corpus from "./fixtures/http_settings/cases.json";
@@ -208,6 +209,7 @@ describe("corpus", () => {
       openrouter,
       credentials: store,
       providers: snapshot,
+      usageLimits: new UsageLimits(join(agent, "usage-limits.json")),
       piAgentDir: async () => agent,
       mutateExternalStorage: (work) => work(),
       modelUpdates: {
@@ -319,16 +321,14 @@ describe("corpus", () => {
       const status = await fetch(url);
       expect(status.status).toBe(200);
       expect(await status.json()).toMatchObject({
-        skipped:
-          "Updates are off for isolated test installs (RECURSE_ISOLATED_ROOT).",
+        skipped: "Updates are unavailable in test installations.",
         checking: false,
         checked_at: null,
       });
       const apply = await fetch(url, { method: "POST" });
       expect(apply.status).toBe(409);
       expect(await apply.json()).toMatchObject({
-        detail:
-          "Updates are off for isolated test installs (RECURSE_ISOLATED_ROOT).",
+        detail: "Updates are unavailable in test installations.",
       });
       expect(existsSync(join(root, "update-check.json"))).toBe(false);
     } finally {

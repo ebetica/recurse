@@ -1,9 +1,11 @@
 import { expect } from "bun:test";
 import type { Route } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   gotoRoot,
   mockConversation,
+  postFixture,
   routeArtifacts,
   runBrowserTests,
   type BrowserTest,
@@ -113,13 +115,15 @@ async function runTokenlessStopLookupRace(
   await page.route(`${base}api/conversations/other**`, (route: Route) =>
     route.fulfill({ json: running("idle", null) }),
   );
+  await mockConversation(page, base, "main", () => runningState);
   await page.route(`${base}api/conversations/main**`, (route: Route) => {
     const requestUrl = new URL(route.request().url());
     if (requestUrl.pathname !== "/api/conversations/main")
-      return route.continue();
+      return route.fallback();
     const purpose = requestUrl.searchParams.get("purpose");
     const focused = requestUrl.searchParams.get("focused") === "1";
-    const traced = requestUrl.searchParams.has("switch_trace");
+    const traced =
+      route.request().headers()["x-recurse-client-dispatch-ms"] !== undefined;
     if (
       phase.name === "hold-a" &&
       (purpose === "stop" || (focused && !traced))
@@ -588,6 +592,85 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
+  // Regression: #2964 a departed conversation's pending row read cannot replace a draft.
+  async function test_draft_survives_departed_conversation_rows(browser, base) {
+    const { agent } = await postFixture(base, "seed-durable-clear");
+    const page = await browser.newPage();
+    let release = () => {};
+    const held = new Promise<void>((resolve) => (release = resolve));
+    let requested = () => {};
+    const rowRequested = new Promise<void>((resolve) => (requested = resolve));
+    await page.route(
+      (url) => url.pathname === `/api/conversations/${agent}/events`,
+      (route) => route.abort(),
+    );
+    await page.route(`**/api/conversations/${agent}/view?**`, async (route) => {
+      requested();
+      await held;
+      await route.continue();
+    });
+    try {
+      expect(
+        (
+          await page.request.post(`${base}api/conversations/${agent}/deliver`, {
+            data: { content: "Reply before I start a new draft." },
+          })
+        ).ok(),
+      ).toBeTrue();
+      await browserExpect
+        .poll(async () =>
+          (
+            await page.request.get(`${base}api/conversations/${agent}/view`)
+          ).text(),
+        )
+        .toContain("Before Durable clear.");
+      const metadata = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === `/api/conversations/${agent}`,
+      );
+      await page.goto(`${base}#agent=${agent}`);
+      await (await metadata).finished();
+      await rowRequested;
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            const browser = globalThis as any;
+            browser.requestAnimationFrame(() =>
+              browser.requestAnimationFrame(() => resolve()),
+            );
+          }),
+      );
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("t");
+      await page.keyboard.press("t");
+      await page.locator("#draft-model-host").waitFor();
+      await page.locator("#input").fill("Keep my new draft");
+      const rows = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname ===
+          `/api/conversations/${agent}/view`,
+      );
+      release();
+      expect(await (await rows).text()).toContain("Before Durable clear.");
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) => {
+            const browser = globalThis as any;
+            browser.requestAnimationFrame(() =>
+              browser.requestAnimationFrame(() => resolve()),
+            );
+          }),
+      );
+      expect(await page.locator("#draft-model-host").isVisible()).toBeTrue();
+      expect(await page.locator("#input").inputValue()).toBe(
+        "Keep my new draft",
+      );
+    } finally {
+      release();
+      await page.unrouteAll({ behavior: "ignoreErrors" });
+      await page.close();
+    }
+  },
   // Regression: #2009 confirmed Stop stays pending until its response
   async function test_stop_request_id_fallback_dispatches_once(browser, base) {
     const context = await browser.newContext({
@@ -682,14 +765,9 @@ export const tests: BrowserTest[] = [
     await page.route(`${base}api/tree`, (route) =>
       route.fulfill({ json: tree() }),
     );
-    await page.route(`${base}api/conversations/main**`, (route) => {
-      const requestUrl = new URL(route.request().url());
-      if (requestUrl.pathname !== "/api/conversations/main")
-        return route.continue();
-      return route.fulfill({
-        json: running("running", resolved),
-      });
-    });
+    await mockConversation(page, base, "main", () =>
+      running("running", resolved),
+    );
     await page.route(`${base}api/conversations/main/deliver`, (route) => {
       const body = route.request().postDataJSON();
       posts.push(body);

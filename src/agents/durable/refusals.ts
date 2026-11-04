@@ -1,7 +1,6 @@
 // Omit refused runs from later requests, retaining stored entries for the view.
 // Never omit system messages or compaction summaries, or edit in-flight input.
-// If a crash precedes the refusal's commit, replay restores its own omission.
-// See README.md for the task-walk and crash-recovery boundaries.
+// If a crash precedes the refusal's commit, restore before the next request.
 import type { Context } from "@earendil-works/chord";
 import type {
   ContextEdit,
@@ -59,6 +58,42 @@ async function ownOmission(
   return undefined;
 }
 
+/** Restore an omission whose refused assistant entry never committed. */
+async function restoreOmission(
+  conversation: Conversation,
+  context: Context,
+): Promise<boolean> {
+  const page = await conversation.entries({}, 8, undefined, context);
+  const marker = page.items.find((entry) => entry.kind.startsWith(KIND));
+  if (marker?.kind !== KIND) return false;
+  const task = (marker.data as { task?: unknown } | undefined)?.task;
+  if (
+    page.items.some(
+      (entry) =>
+        entry.id > marker.id &&
+        entry.byTaskId === task &&
+        entry.model?.some(
+          (message) => message.role === "assistant" && isRefusal(message),
+        ),
+    )
+  )
+    return false;
+  await conversation.commit(async (tx) => {
+    const edits: ContextEdit[] = [];
+    for (const { target: id } of marker.edits ?? []) {
+      const original = await tx.entry(id);
+      if (original?.model)
+        edits.push({ target: id, action: "replace", messages: original.model });
+    }
+    await tx.appendEntry(conversation.id, {
+      kind: `${KIND}-undone`,
+      data: marker.data,
+      edits,
+    });
+  }, context);
+  return true;
+}
+
 export function refusalsExtension(
   conversation: (id: Conversation["id"]) => Promise<Conversation>,
 ) {
@@ -66,29 +101,16 @@ export function refusalsExtension(
     name: "recurse-refusals",
     hooks: [
       hook(GenerationTask, {
-        afterResponse: async (message, api, context) => {
-          const refused = isRefusal(message);
+        beforeRequest: async (_request, api, context) => {
           const target = await conversation(api.conversationId);
-          const orphan = await ownOmission(target, api.taskId, context);
-          if (orphan && !refused)
-            await target.commit(async (tx) => {
-              const edits: ContextEdit[] = [];
-              for (const { target: id } of orphan.edits ?? []) {
-                const original = await tx.entry(id);
-                if (original?.model)
-                  edits.push({
-                    target: id,
-                    action: "replace",
-                    messages: original.model,
-                  });
-              }
-              await tx.appendEntry(target.id, {
-                kind: `${KIND}-undone`,
-                data: { task: api.taskId },
-                edits,
-              });
-            }, context);
-          if (!refused || orphan) return;
+          if (await restoreOmission(target, context))
+            return { messages: (await target.context(context)).messages };
+          return undefined;
+        },
+        afterResponse: async (message, api, context) => {
+          if (!isRefusal(message)) return;
+          const target = await conversation(api.conversationId);
+          if (await ownOmission(target, api.taskId, context)) return;
           await target.commit(async (tx) => {
             const omit: EntryId[] = [];
             const marker = await tx.latestHeadMarker(target.id);

@@ -13,12 +13,14 @@ import {
   renderDocumentMarkdown,
 } from "../document-markdown.js";
 import { setNotice } from "./artifact-detail.js";
+import { invalidatePaneCache } from "../panes.js";
 import { watchPageErrors } from "./page-errors.js";
 import { cancelSelectionComment } from "./selection-comments.js";
 import type { ArtifactInfo } from "./model.js";
 import type { ArtifactEl } from "./artifact-state.js";
 
 window.addEventListener("recurse:theme-changed", () => {
+  invalidatePaneCache("report");
   // Spec: Theme changes reload pages, resetting app input/scroll/counters.
   for (const frame of document.querySelectorAll<HTMLIFrameElement>(
     "iframe.artifact-embed-page[src]",

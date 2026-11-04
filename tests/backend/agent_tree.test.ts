@@ -1,5 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
 import {
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -7,6 +8,7 @@ import {
   readdirSync,
   renameSync,
   rmSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -26,7 +28,9 @@ import {
 } from "../../src/observability/runtime_logging";
 import { PiSessionRetirement } from "../../src/pi_session_retirement";
 import { pyCompactJson } from "../../src/utils/py_compact_json";
+import { Cancelled } from "../../src/utils/tasks";
 import { buildWorld, counter } from "./fixtures/agent_node/world";
+import { switchoverWorld, until } from "./fixtures/durable_host/host";
 
 type Json = any;
 const WALL = 1_700_000_000.0;
@@ -164,16 +168,13 @@ function setup() {
         ...((script.uncertain ?? {})[cid] ?? []),
       ],
     },
-    agentStore: Object.assign(
-      {
-        submit: world.agentStore.submit.bind(world.agentStore),
-        retire: world.agentStore.retire.bind(world.agentStore),
-        close: world.agentStore.close.bind(world.agentStore),
-        dbPaths: world.agentStore.dbPaths.bind(world.agentStore),
-        forget: world.agentStore.forget.bind(world.agentStore),
-      },
-      { baseDir: join(root, "agents") },
-    ),
+    agentStore: {
+      submit: world.agentStore.submit.bind(world.agentStore),
+      retire: world.agentStore.retire.bind(world.agentStore),
+      close: world.agentStore.close.bind(world.agentStore),
+      retireFiles: world.agentStore.retireFiles.bind(world.agentStore),
+      forget: world.agentStore.forget.bind(world.agentStore),
+    },
     lifecycle: {
       guardAsync: async (_s: string, _c: unknown, fn: Json) =>
         fn({} as never, null),
@@ -206,7 +207,6 @@ function setup() {
           model: o.model ?? null,
           muted: o.muted,
           parent: o.parent ?? null,
-          pinned: o.pinned,
           spawn_request_id: o.spawnRequestId,
           title: o.title,
         };
@@ -290,13 +290,132 @@ test("integral-float effort is accepted (named difference)", async () => {
   expect(o.level).toBe(2);
 });
 
+// Regression: #3127 empty queues sleep without losing receipt deadlines.
+test("startup receipts recover, empty queues sleep, and activity preserves cleanup deadlines", async () => {
+  const t = setup();
+  mkdirSync(t.outcomeDir);
+  const expired = (cid: string) => {
+    const file = join(t.outcomeDir, `${cid}.json`);
+    writeFileSync(file, JSON.stringify({ id: cid, status: "accepted" }));
+    utimesSync(file, WALL - 120, WALL - 120);
+    return file;
+  };
+  const startup = expired("startup");
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(startup)).toBe(false);
+  t.clock.mono += 3;
+  await t.tree.processSpawnOutcomes();
+
+  const silent = expired("silent");
+  for (let i = 0; i < 20; i++) {
+    t.clock.mono += 3;
+    await t.tree.processSpawnOutcomes();
+  }
+  expect(existsSync(silent)).toBe(true);
+
+  await t.deps.spawnOutcomes.write("fresh", "accepted", { parent: null });
+  const fresh = join(t.outcomeDir, "fresh.json");
+  utimesSync(fresh, WALL, WALL);
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(silent)).toBe(false);
+  expect(existsSync(fresh)).toBe(true);
+  writeFileSync(join(t.outcomeDir, "fresh.observed"), "");
+  t.tree.markSpawnOutcomesDue();
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(fresh)).toBe(false);
+  expect(existsSync(join(t.outcomeDir, "fresh.observed"))).toBe(false);
+
+  await t.deps.spawnOutcomes.write("deadline", "accepted", { parent: null });
+  const deadline = join(t.outcomeDir, "deadline.json");
+  utimesSync(deadline, WALL, WALL);
+  await t.tree.processSpawnOutcomes();
+  t.clock.mono += 3;
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(deadline)).toBe(true);
+  utimesSync(deadline, WALL - 120, WALL - 120);
+  t.clock.mono += 3;
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(deadline)).toBe(false);
+});
+
+// Regression: #3127 rejection notices still reach their parent.
+test("pending rejection notices still reach the parent through the fake provider", async () => {
+  const w = await switchoverWorld();
+  try {
+    const { tree, reconciler, create, durable } = w.instance;
+    await create.create({
+      cid: "parent",
+      title: "Parent",
+      model: "recurse-test/scripted",
+    });
+    await tree.processSpawnOutcomes();
+    await reconciler.writeSpawnOutcome("rejected", "rejected", {
+      parent: "parent",
+      code: "rejected",
+    });
+    const receipt = join(w.root, "data/spawn_outcomes/rejected.json");
+    await tree.processSpawnOutcomes();
+    expect(existsSync(receipt)).toBe(true);
+    expect(w.requests).toHaveLength(0);
+    const expired = new Date(Date.now() - 10_000);
+    utimesSync(receipt, expired, expired);
+    await until(async () => {
+      await tree.processSpawnOutcomes();
+      return !existsSync(receipt);
+    });
+    await until(
+      () =>
+        w.requests.length > 0 && durable.metadata("parent").status === "idle",
+    );
+    expect(JSON.stringify(w.requests)).toContain(
+      "[Subagent creation failed] rejected:",
+    );
+    expect(JSON.stringify(await durable.view("parent"))).toContain(
+      "CUSTOM-SWITCHED",
+    );
+  } finally {
+    await w.close();
+  }
+}, 30_000);
+
+// Regression: #3127 incomplete scans must retry instead of sleeping forever.
+test("unavailable queues and aborted scans retain receipt recovery", async () => {
+  const t = setup();
+  writeFileSync(t.outcomeDir, "not a directory");
+  await t.tree.processSpawnOutcomes();
+  rmSync(t.outcomeDir);
+  mkdirSync(t.outcomeDir);
+  const receipt = join(t.outcomeDir, "recovered.json");
+  writeFileSync(
+    receipt,
+    JSON.stringify({ id: "recovered", status: "accepted" }),
+  );
+  utimesSync(receipt, WALL - 120, WALL - 120);
+  t.clock.mono += 3;
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(receipt)).toBe(false);
+
+  await t.deps.spawnOutcomes.write("aborted", "accepted", { parent: null });
+  const aborted = join(t.outcomeDir, "aborted.json");
+  utimesSync(aborted, WALL - 120, WALL - 120);
+  const controller = new AbortController();
+  controller.abort();
+  await expect(
+    t.tree.processSpawnOutcomes(controller.signal),
+  ).rejects.toBeInstanceOf(Cancelled);
+  expect(existsSync(aborted)).toBe(true);
+  t.clock.mono += 3;
+  await t.tree.processSpawnOutcomes();
+  expect(existsSync(aborted)).toBe(false);
+});
+
 test("outcome scan stops at the row cap and warns", async () => {
   const t = setup();
   mkdirSync(t.outcomeDir, { recursive: true });
   for (let i = 0; i < 300; i++)
     writeFileSync(join(t.outcomeDir, `x${i}.json`), "{}");
   const [outcomes, observed, overflow] =
-    await t.tree.boundedSpawnOutcomeEntries();
+    (await t.tree.boundedSpawnOutcomeEntries())!;
   expect([outcomes.length, observed.length, overflow]).toEqual([256, 0, true]);
   t.tree.markSpawnOutcomesDue();
   await t.tree.processSpawnOutcomes();
@@ -320,7 +439,7 @@ test("recorded spawn: rejection retires its record and orphan database", async (
   await t.tree.recordSpawnIntent(item);
   expect(typeof item.store_id).toBe("string");
   expect(await t.world.agentStore.flush("r1", 5)).toBe(true);
-  const db = t.world.agentStore.dbPaths("r1");
+  const db = await t.world.agentStore.dbPaths("r1");
   expect(db.length).toBeGreaterThan(0);
   await t.tree.applySpawns();
   expect(t.tree.pendingSpawns).toEqual([]);

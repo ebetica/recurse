@@ -1,7 +1,12 @@
 import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { gotoRoot, runBrowserTests, type BrowserTest } from "./common";
+import {
+  gotoRoot,
+  runBrowserTests,
+  startNewAgent,
+  type BrowserTest,
+} from "./common";
 
 export const tests: BrowserTest[] = [
   // Regression: #2744 the sent message may paint after its new row is current. (also #2480 j moves the cursor without opening another conversation.; #2480 the displayed agent's trash cannot confirm another cursor's delete.; #2480 a vanished armed cursor must not confirm deletion of the displayed agent.)
@@ -26,7 +31,7 @@ export const tests: BrowserTest[] = [
       const selected = page.locator('.agent[aria-current="page"]');
       await selected.waitFor();
       if (width === 1280) await selected.focus();
-      await page.locator("#new-top").click();
+      await startNewAgent(page);
       await page.locator(".draft-row.cursor").waitFor();
       expect(
         await page.locator('.agent[data-id][aria-current="page"]').count(),
@@ -55,6 +60,16 @@ export const tests: BrowserTest[] = [
           hasText: "Focus newly created agent",
         })
         .waitFor();
+      await page.waitForFunction((id) => {
+        let section = "";
+        for (const el of (globalThis as any).document.querySelectorAll(
+          "#agent-list .tree-section-header, #agent-list .agent[data-id]",
+        )) {
+          if (el.dataset.section) section = el.dataset.section;
+          else if (el.dataset.id === id) return section === "Inbox";
+        }
+        return false;
+      }, newId);
       await page.locator("#input").press("Escape");
       if (width === 1280) await selected.focus();
       const order = await page
@@ -96,10 +111,6 @@ export const tests: BrowserTest[] = [
       expect(await page.locator(".agent:focus").getAttribute("data-id")).toBe(
         target,
       );
-      if (width === 412) {
-        await page.locator("#menu-btn").click();
-        await page.keyboard.press("Escape");
-      }
       await page
         .locator("#messages:not([inert])")
         .waitFor({ state: "attached" });
@@ -254,12 +265,16 @@ export const tests: BrowserTest[] = [
       await pending;
       expect(await page.locator(".agent.cursor").count()).toBe(0);
       expect(page.url()).toContain(dying);
-      if (width === 412) await page.locator("#menu-btn").click();
+      if (width === 412) {
+        await page.locator("#menu-btn").click();
+        await page.locator("#sidebar.open").waitFor();
+      }
       release();
       await page
         .locator(`.agent[data-id="${next}"][aria-current="page"].cursor`)
         .waitFor();
-      expect(page.url()).toContain(next);
+      if (width === 412) expect(new URL(page.url()).hash).toBe("");
+      else expect(page.url()).toContain(next);
       expect(await page.locator(`.agent[data-id="${dying}"]`).count()).toBe(0);
       await page
         .locator("#messages:not([inert])")
@@ -288,7 +303,7 @@ export const tests: BrowserTest[] = [
           path: join(evidence, `delete-focus-${width}.png`),
         });
       }
-      if (width === 412) await page.locator("#menu-btn").click();
+      if (width === 412) await page.locator("#sidebar .agent.selected").click();
       for (const neighbour of [previous, parent]) {
         await page
           .locator("#messages:not([inert])")
@@ -347,8 +362,9 @@ export const tests: BrowserTest[] = [
         await page.locator("#agent-list").evaluate((list) => {
           list.scrollTop = list.scrollHeight;
         });
-        if (width === 412) await page.locator("#menu-btn").click();
-        if (start !== "keyboard") await page.locator("#new-top").click();
+        if (width === 412)
+          await page.locator("#sidebar .agent.selected").click();
+        if (start !== "keyboard") await startNewAgent(page);
         else {
           await page.locator("#input").press("Escape");
           await page.keyboard.press("t");
@@ -407,7 +423,10 @@ export const tests: BrowserTest[] = [
         await row.waitFor({ state: "attached" });
         expect(await row.getAttribute("aria-current")).toBe("page");
         expect(await row.getAttribute("class")).toContain("cursor");
-        if (width === 412) await page.locator("#menu-btn").click();
+        if (width === 412) {
+          await page.locator("#input").blur();
+          await page.locator("#menu-btn").click();
+        }
         await page.waitForFunction((id) => {
           const browser = globalThis as any;
           const row = browser.document
@@ -430,7 +449,8 @@ export const tests: BrowserTest[] = [
           });
         }
         await page.unroute(`${base}api/tree`);
-        if (width === 412) await page.locator("#menu-btn").click();
+        if (width === 412)
+          await page.locator("#sidebar .agent.selected").click();
       }
       await context.close();
     }

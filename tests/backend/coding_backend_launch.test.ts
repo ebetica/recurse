@@ -154,6 +154,13 @@ describe("skill discovery", () => {
         cwd: ROOT,
         skillPaths: [skill],
       }),
-    ).toEqual([{ name: "inspection", description: "Inspect a fixture" }]);
+    ).toEqual([
+      { name: "inspection", description: "Inspect a fixture" },
+      {
+        name: "recurse-settings",
+        description:
+          "Manage Recurse effort levels, remotes, themes, app name/icon and sidebar settings.",
+      },
+    ]);
   });
 });

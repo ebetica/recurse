@@ -193,8 +193,9 @@ export class AnthropicAuth {
     await this.store.removeCredentials([PROVIDER]);
   }
 
-  /** Persist a PKCE verifier and return the authorize URL; state = verifier. */
-  async startLogin(): Promise<{ url: string }> {
+  /** Persist a PKCE verifier and return the authorize URL (state = verifier)
+   * and the redirect address whose unreachable page the user pastes back. */
+  async startLogin(): Promise<{ url: string; redirectUrl: string }> {
     const verifier = b64url((this.options.randomBytes ?? defaultRandom)(32));
     const challenge = b64url(sha256(verifier));
     await this.store.writePending(PENDING_FILE_NAME, { verifier });
@@ -208,7 +209,7 @@ export class AnthropicAuth {
       code_challenge_method: "S256",
       state: verifier,
     });
-    return { url: `${AUTHORIZE_URL}?${query}` };
+    return { url: `${AUTHORIZE_URL}?${query}`, redirectUrl: REDIRECT_URI };
   }
 
   private async pendingVerifier(): Promise<string> {

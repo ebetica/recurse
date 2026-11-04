@@ -1,5 +1,5 @@
 // Request-boundary detached prompt snapshots; renderers have no clock.
-// customPrompt replaces Pi defaults; context rendering derives from Pi 1.3.0.
+// customPrompt replaces Pi defaults; context rendering derives from Pi 1.4.0.
 // Omit elapsed idle ages to avoid a system delta caused by wall-clock passage.
 // Resource loading is separate and uses the request cwd.
 
@@ -46,14 +46,15 @@ export interface PromptSnapshot extends PromptResources {
 }
 
 /** Reuse today's renderers; memory is the host's already captured snapshot. */
-export function snapshotRecursePrompt(
+export async function snapshotRecursePrompt(
   prompts: Prompts,
   conv: Conv,
   digest: DigestInputs,
   cwd: string,
   memory: string,
   resources: PromptResources,
-): PromptSnapshot {
+): Promise<PromptSnapshot> {
+  const tools = await prompts.recurseToolsSection();
   return slowSpan("prompt_render", String(conv.id), () => ({
     ...resources,
     foreword: prompts.foreword(),
@@ -65,7 +66,7 @@ export function snapshotRecursePrompt(
     recurse_tree: escapeReminderMarkers(
       prompts.treeDigestSnapshot(conv, digest, false),
     ),
-    recurse_tools: escapeReminderMarkers(prompts.recurseToolsSection()),
+    recurse_tools: escapeReminderMarkers(tools),
   }));
 }
 

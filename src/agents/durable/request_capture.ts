@@ -1,10 +1,11 @@
-// Capture exact requests after hooks, before auth, not HTTP payloads; refuse
-// auth overrides; omit callbacks and AbortSignal. One uncapped capture per live
-// conversation, images included, forgotten on reap; once idle it moves exactly
-// to its file, which a newer request removes, so restarts read only the latest.
+// Capture exact requests after hooks, before auth, not HTTP payloads.
+// Refuse credential overrides; omit callbacks and AbortSignal from snapshots.
+// A Worker encodes one uncapped capture per live conversation, images included.
+// Forget on reap; idle captures move to files, which a newer request removes.
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
-import type { Models } from "@earendil-works/pi-ai";
+import type { Api, Context, Model, Models } from "@earendil-works/pi-ai";
 import { slowSpan } from "../../observability/slow_span";
+import { RequestCaptureWorker } from "./request_capture_worker";
 
 export interface RequestCapture {
   sessionId: string;
@@ -20,8 +21,12 @@ export interface CaptureFiles {
   failed(conversationId: string, error: unknown): void;
 }
 
+type PendingCapture = Omit<RequestCapture, "json"> & { json: Promise<string> };
+
 export class RequestCaptures {
-  private readonly captures = new Map<string, RequestCapture>();
+  private readonly captures = new Map<string, PendingCapture>();
+  private readonly serializer: RequestCaptureWorker;
+  private readonly ownsSerializer: boolean;
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Each conversation's file writes and removals, in order. */
   private readonly writes = new Map<string, Promise<void>>();
@@ -33,13 +38,24 @@ export class RequestCaptures {
       sessionId: string,
     ) => string | undefined,
     private readonly files?: CaptureFiles,
-  ) {}
+    private readonly onRequest?: (
+      cid: string,
+      capture: Pick<RequestCapture, "sessionId" | "method">,
+      model: Model<Api>,
+      context: Context,
+      options?: Record<string, unknown>,
+    ) => void,
+    serializer?: RequestCaptureWorker,
+  ) {
+    this.serializer = serializer ?? new RequestCaptureWorker();
+    this.ownsSerializer = serializer === undefined;
+  }
   conversationId(sessionId: string): string | undefined {
     return this.conversationForSession(sessionId);
   }
   async latest(conversationId: string): Promise<RequestCapture | undefined> {
     const capture = this.captures.get(conversationId);
-    if (capture) return { ...capture };
+    if (capture) return { ...capture, json: await capture.json };
     if (!this.files) return undefined;
     await this.writes.get(conversationId);
     const text = await readFile(this.files.path(conversationId), "utf8").catch(
@@ -66,6 +82,8 @@ export class RequestCaptures {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();
     await Promise.all(this.writes.values());
+    await Promise.allSettled([...this.captures.values()].map((c) => c.json));
+    if (this.ownsSerializer) await this.serializer.close();
   }
   private queue(conversationId: string, write: () => Promise<void>): void {
     const done = (this.writes.get(conversationId) ?? Promise.resolve())
@@ -101,6 +119,7 @@ export class RequestCaptures {
       if (!capture || this.closed) return;
       this.queue(conversationId, async () => {
         if (this.closed) return;
+        const json = await capture.json;
         const tmp = `${path}.tmp`;
         const head = JSON.stringify({
           sessionId: capture.sessionId,
@@ -109,7 +128,7 @@ export class RequestCaptures {
         // Invariant: Never create the directory: a deleted or cleared
         // conversation's storage must not reappear.
         try {
-          await writeFile(tmp, `${head}\n${capture.json}`, { mode: 0o600 });
+          await writeFile(tmp, `${head}\n${json}`, { mode: 0o600 });
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
           throw error;
@@ -150,17 +169,33 @@ export class RequestCaptures {
         "Request capture requires Models-owned authentication and headers",
       );
     const modelRef = model as { provider?: string; id?: string };
-    const serializableOptions = options && { ...options };
-    if (serializableOptions) delete serializableOptions.signal;
-    const json = slowSpan("request_capture", cid, () =>
-      JSON.stringify({
+    const serializableOptions = { ...options };
+    delete serializableOptions.signal;
+    const json = slowSpan("request_capture_snapshot", cid, () => {
+      // Invariant: Only options are normalized here: their nested telemetry
+      // callbacks cannot cross threads. Context and images are worker-encoded.
+      const snapshot = JSON.parse(
+        JSON.stringify({ options: serializableOptions }),
+      ) as { options?: unknown };
+      return this.serializer.serialize({
         model: { provider: modelRef.provider, modelId: modelRef.id },
         context,
-        options: serializableOptions,
-      }),
-    );
-    this.captures.set(cid, { sessionId, method, json });
+        options: snapshot.options,
+      });
+    });
+    const capture = { sessionId, method, json };
+    this.captures.set(cid, capture);
+    void json.catch((error) => {
+      if (this.captures.get(cid) === capture) this.files?.failed(cid, error);
+    });
     this.kept(cid);
+    this.onRequest?.(
+      cid,
+      capture,
+      model as Model<Api>,
+      context as Context,
+      options,
+    );
   }
 }
 

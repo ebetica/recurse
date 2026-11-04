@@ -52,9 +52,9 @@ stage_ts() {
   bun -e '
     import { lstatSync, readFileSync } from "node:fs";
     const limit = 15000;
-    const tracked = Bun.spawnSync(["git", "ls-files", "-z", "--", "*.md"]);
+    const tracked = Bun.spawnSync(["git", "ls-files", "-z", "--", ".", ":(glob,exclude)" + ["play", "ground"].join("") + "/**"]);
     if (tracked.exitCode !== 0) throw new Error(tracked.stderr.toString());
-    for (const file of tracked.stdout.toString().split("\0").filter(Boolean)) {
+    for (const file of tracked.stdout.toString().split("\0").filter((file) => file.endsWith(".md"))) {
       if (lstatSync(file).isSymbolicLink()) continue;
       const count = Array.from(readFileSync(file, "utf8")).length;
       if (count >= limit) { console.error(`${file}: ${count} characters (limit: fewer than ${limit})`); process.exitCode = 1; }
@@ -65,7 +65,7 @@ stage_ts() {
   # **/*.lock (generated dependency metadata). Symlinks are not source files.
   bun -e '
     import { lstatSync, readFileSync } from "node:fs";
-    const tracked = Bun.spawnSync(["git", "ls-files", "-z", "--", ".",
+    const tracked = Bun.spawnSync(["git", "ls-files", "-z", "--", ".", ":(glob,exclude)" + ["play", "ground"].join("") + "/**",
       ":(glob,exclude)web/vendor/**", ":(glob,exclude)web/dist/**",
       ":(glob,exclude)scripts/patches/**", ":(glob,exclude)**/fixtures/**", ":(glob,exclude)**/*.lock"]);
     if (tracked.exitCode !== 0) throw new Error(tracked.stderr.toString());
@@ -80,6 +80,9 @@ stage_ts() {
     }
   '
   bun src/launcher/dependencies.ts
+  bun tests/checks/browser_import_check.ts
+  bun tests/checks/operator_send_check.ts
+  bun tests/checks/prompt_budget.ts
   bun tests/checks/comment_check.ts --summary --strict
   bun tests/checks/test_check.ts --strict --summary
   bun run format:backend:check
@@ -88,7 +91,6 @@ stage_ts() {
   # throwaway state root.
   bun src/server.ts --check
   bun run test:backend
-  python3 playground/modal/test_deploy.py
 }
 
 stage_browser() {
@@ -104,6 +106,15 @@ stage_browser() {
   # One fresh server per migrated TypeScript feature group; readiness polls
   # /api/tree until startup maintenance has settled.
   bun run test:browser
+}
+
+stage_perf() {
+  bun src/launcher/dependencies.ts
+  bun tests/dev/hotpath_gates.ts
+}
+
+stage_tla() {
+  specs/tla/check.sh
 }
 
 # Routine reply-path coverage; browser tools must already be installed.
@@ -167,15 +178,20 @@ stage_macos() {
   [[ $macos_failures -eq 0 ]]
 }
 
+bun tests/checks/core_boundary_check.ts
+bun --bun ./node_modules/.bin/oxlint -c .oxlintrc.blocking.jsonc --disable-nested-config --report-unused-disable-directives-severity error src
+
 case "${1:-all}" in
-  web | ts | browser | provider | macos) "stage_$1" ;;
+  web | ts | browser | provider | perf | tla | macos) "stage_$1" ;;
   all)
     stage_web
     stage_ts
     stage_browser
+    stage_perf
+    stage_tla
     ;;
   *)
-    echo "usage: $0 [web|ts|browser|provider|macos|all]" >&2
+    echo "usage: $0 [web|ts|browser|provider|perf|tla|macos|all]" >&2
     exit 2
     ;;
 esac

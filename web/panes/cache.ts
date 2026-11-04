@@ -44,6 +44,7 @@ export class PaneInstanceCache<T extends HTMLElement = HTMLElement> {
     try {
       entry.policy.dispose?.(entry.value, entry.context);
     } catch {}
+    if (entry.value.dataset.paneParked === "true") entry.value.remove();
   }
 
   private remove(cacheKey: string, expected?: Entry<T>): void {

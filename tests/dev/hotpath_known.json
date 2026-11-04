@@ -1,0 +1,6 @@
+[
+  {
+    "site": "fs.readFileSync | at procStartTime (src/extensions/core/shells/persist.ts) | <no library frame>",
+    "reason": "Capture the unreaped child's start identity and recheck PID reuse immediately before group signals; an await would open a reap/reuse gap."
+  }
+]

@@ -16,7 +16,10 @@ live updates, one bounded page at a time.
 Pi Durable's SQLite store is the history. The view merges live Harness updates
 with stored pages by entry identity, so each entry shows once whether it arrived
 live, from storage, or both. Old Pi JSONL sessions can still be read, but there
-is no second live transcript.
+is no second live transcript. Thinking rows retain a presence flag even when
+the provider supplies only encrypted or redacted thinking; titles remain
+readable text only. Script calls beyond the display cap retain grouped names
+and statistics without their arguments.
 
 The supervisor keeps one collection of resident views. Each entry owns its rows,
 history position, revision and the lock that synchronizes them together; evicting it drops the entry, and the
@@ -24,10 +27,24 @@ next read rebuilds it from storage. Deleting the agent drops its entries.
 
 Reads run off the event loop, one page at a time. After every await the reader
 checks the agent and session are still the same, so a stale read never updates
-a view that was deleted or rebound. Compaction summaries keep their history
-positions, so scrolling back past a compaction works. A retained user message
+a view that was deleted or rebound. Compaction summaries are included in view
+rows and keep their history positions, so scrolling back past a compaction works. A retained user message
 sits after its summary marker, keeping it out of the compacted activity group;
 tool-only assistant cuts still seat the marker before their tool rows.
+
+Legacy message-detail scans reuse the asynchronous JSONL reader and pin the
+session's descriptor identity between bounded pages.
+
+A change page (`since` a revision) lists only rows that changed after it.
+Paging older history does not advance the revision for newly backfilled rows;
+reconciliation that changes an already-held row remains a live change. When
+the caller asks for text deltas (`text_deltas=true` on `/view` and `/events`),
+an assistant row whose earlier text is still its prefix carries only the
+appended text, `text_from` (the length it follows) and `text_hash` (the
+`textHash` of that prefix), so a streaming reply is not resent whole on every
+poll. The browser appends only when its held prefix has that hash, so reads
+that land out of order cannot splice onto rewritten text; otherwise it rereads
+in full.
 
 ## Rules for changes
 

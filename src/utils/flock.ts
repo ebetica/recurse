@@ -1,9 +1,10 @@
-// Cross-process advisory file lock using flock(2) from ./libc, polled
-// asynchronously: never park Bun's event loop on a contended descriptor. The
-// caller owns the descriptor and closes it after unlocking. There is no
-// lockfile emulation or FIFO guarantee.
+// Cross-process flock(2), asynchronously polled; caller owns the descriptor.
+// Nonblocking attempts never wait for contention on Bun's event loop.
+// No lockfile emulation or FIFO guarantee; caller closes after unlocking.
+// Wall spans cover native attempts/unlocks, not asynchronous retry waits.
 import { constants } from "node:os";
 import { errno, libc } from "./libc";
+import { slowSpan } from "../observability/slow_span";
 
 const LOCK_EX = 2;
 const LOCK_NB = 4;
@@ -44,16 +45,21 @@ export async function flockExclusive(
       throw new TreeLifecycleBusy(`tree lifecycle is busy: ${path}`);
     }
     attempted = true;
-    if (libc.flock(fd, LOCK_EX | LOCK_NB) === 0) {
+    const [result, code] = slowSpan("file_lock_try", undefined, () => {
+      const result = libc.flock(fd, LOCK_EX | LOCK_NB);
+      return [result, result === 0 ? 0 : errno()] as const;
+    });
+    if (result === 0) {
       logWait(options, path, performance.now() - start, "held");
       let released = false;
       return () => {
         if (released) return;
-        if (libc.flock(fd, LOCK_UN) !== 0) throw flockError(path);
+        slowSpan("file_lock_release", undefined, () => {
+          if (libc.flock(fd, LOCK_UN) !== 0) throw flockError(path);
+        });
         released = true;
       };
     }
-    const code = errno();
     if (code !== EAGAIN && code !== EINTR) throw flockError(path, code);
     const elapsed = performance.now() - start;
     if (elapsed >= timeout) {

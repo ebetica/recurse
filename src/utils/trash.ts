@@ -3,13 +3,7 @@
 // Fail closed without them; never fall back to pathname recursive deletion.
 // Inputs supply paths/limits only, not config/agent state or retention policy.
 import fs from "node:fs";
-import {
-  closeSync,
-  constants as fsConstants,
-  fstatSync,
-  lstatSync,
-  mkdirSync,
-} from "node:fs";
+import { constants as fsConstants } from "node:fs";
 import { basename, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 import {
@@ -73,24 +67,28 @@ function filesystemPath(path: string): string {
 function openVerified(root: string, dirFd?: number): number {
   const path = filesystemPath(root);
   const visible = () =>
-    dirFd === undefined ? lstatSync(path) : lstatAtSync(dirFd, root);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    dirFd === undefined ? fs.lstatSync(path) : lstatAtSync(dirFd, root);
   const before = visible();
   if (!before.isDirectory()) {
     throw systemError("ENOTDIR", "trash root is not a directory", root);
   }
   const fd =
     dirFd === undefined
-      ? fs.openSync(path, DIR_FLAGS)
+      ? // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+        fs.openSync(path, DIR_FLAGS)
       : openAtSync(dirFd, root, DIR_FLAGS);
   try {
-    const opened = fstatSync(fd);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    const opened = fs.fstatSync(fd);
     const after = visible();
     if (!sameDirectory(opened, before) || !sameDirectory(after, before)) {
       throw systemError("ESTALE", "trash root changed while opening", root);
     }
     return fd;
   } catch (error) {
-    closeSync(fd);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    fs.closeSync(fd);
     throw error;
   }
 }
@@ -100,7 +98,8 @@ function openRoot(root: string): number {
     return openVerified(root);
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
-    mkdirSync(filesystemPath(root), { recursive: true });
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    fs.mkdirSync(filesystemPath(root), { recursive: true });
     return openVerified(root);
   }
 }
@@ -142,7 +141,8 @@ export function retire(path: string, root: string): boolean {
   try {
     return retireAt(parent, basename(source), root);
   } finally {
-    closeSync(parent);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    fs.closeSync(parent);
   }
 }
 
@@ -217,7 +217,8 @@ function retireEntry(
     // copy-deletes.
     renameAtSync(dirFd, name, rootFd, randomBytes(16).toString("hex"));
   } finally {
-    closeSync(rootFd);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    fs.closeSync(rootFd);
   }
   return true;
 }
@@ -231,7 +232,8 @@ function removeTreeAt(parentFd: number, name: string): void {
 
   const childFd = openVerified(name, parentFd);
   try {
-    const opened = fstatSync(childFd);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    const opened = fs.fstatSync(childFd);
     if (!sameDirectory(opened, before)) {
       throw systemError(
         "ESTALE",
@@ -243,7 +245,8 @@ function removeTreeAt(parentFd: number, name: string): void {
       removeTreeAt(childFd, entry);
     }
   } finally {
-    closeSync(childFd);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    fs.closeSync(childFd);
   }
   // Invariant: This path is resolved through the pinned parent; if the entry
   // was swapped for a symlink, rmdir fails rather than following it.
@@ -272,7 +275,8 @@ export function sweep(root: string, limit: number): number {
       }
     }
   } finally {
-    closeSync(rootFd);
+    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+    fs.closeSync(rootFd);
   }
   return removed;
 }

@@ -145,6 +145,7 @@ test("a refusal after an overflow compaction leaves the retained message out", a
   await host.close();
 }, 60_000);
 
+// Regression: #3013 a refusal omission interrupted before commit restores before the next model request.
 test("a crash between the omission and the refusal restores the message", async () => {
   const dir = mkdtempSync(join(root, "c-"));
   const child = Bun.spawn(
@@ -168,9 +169,16 @@ test("a crash between the omission and the refusal restores the message", async 
   );
   await host.open("c1");
   await until(idle(host), 30_000);
+  expect(requests).toHaveLength(0);
   await host.send("c1", operator("next message"), "op:3");
   await until(idle(host));
   expect(said(requests[0]!)).toContain("REFUSED MESSAGE");
+  expect(
+    ((await host.prompt("c1")).request as { context: ModelContext }).context
+      .messages,
+  ).toEqual(requests[0]!.messages);
+  await host.send("c1", operator("another message"), "op:4");
+  await until(idle(host));
   expect(said(requests[1]!)).toContain("Answer after restart.");
   expect(said(requests[1]!)).toContain("REFUSED MESSAGE");
   await host.close();

@@ -70,7 +70,10 @@ try {
     if (doc?.compactions?.length) live.compacting ??= doc;
     if (inbox?.items.length) live.queued ??= { live: doc, inbox: inbox };
   };
-  harness.subscribeCommits(() => queueMicrotask(() => void seen()));
+  harness.observeCommits({
+    advance: () => queueMicrotask(() => void seen()),
+    end: () => {},
+  });
   const say = (content: string, requestId: string) =>
     conversation.submit(
       { type: "input", content, requestId, whenBusy: "followUp" },

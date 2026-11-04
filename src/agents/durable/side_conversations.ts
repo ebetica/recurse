@@ -2,8 +2,11 @@
 // Harness, keeping the parent's prompt, tools and provider session (README.md).
 // Spec: the fork and its root mapping commit together at the parent's newest
 // entry with no open tool call; only return_to_main reaches the parent.
+import { Type } from "typebox";
+import { remapServerCompaction } from "../../extensions/core/context/server-compaction";
+import type { Message } from "@earendil-works/pi-ai";
 import { setImmediate } from "node:timers/promises";
-import { Type, type Models } from "@earendil-works/pi-ai";
+import { type Models } from "@earendil-works/pi-ai";
 import {
   AgentDoc,
   ToolTask,
@@ -116,6 +119,7 @@ export const SideDoc = defineDoc<{
   history: "latest",
   fork: "initial",
   initial: () => ({ sides: {} }),
+  checkpointWhen: () => false,
 });
 
 /** Promoted copy: each tool result entry id → its assistant call's entry id. */
@@ -126,6 +130,7 @@ export const CopiedCallsDoc = defineDoc<{ calls: Record<string, number> }>({
   history: "latest",
   fork: "initial",
   initial: () => ({ calls: {} }),
+  checkpointWhen: () => false,
 });
 
 const FORK_SCAN = 256;
@@ -237,7 +242,7 @@ const COPY_PAGE = 64;
 
 // Promotion: copy `fork`'s visible history, agent and outgoing provider
 // session id into `target`'s new root; refuse unless both next-request
-// contexts are JSON-identical.
+// contexts are JSON-identical except remapped server-compaction boundaries.
 export async function copyFork(
   harness: Harness,
   fork: Conversation,
@@ -261,6 +266,23 @@ export async function copyFork(
       throw new Error("the side conversation's history refers outside itself");
     return to;
   };
+  const remapMessage = (message: Message): Message =>
+    message.role !== "user"
+      ? message
+      : {
+          ...message,
+          content:
+            typeof message.content === "string"
+              ? remapServerCompaction(message.content, copied)
+              : message.content.map((part) =>
+                  part.type === "text"
+                    ? {
+                        ...part,
+                        text: remapServerCompaction(part.text, copied),
+                      }
+                    : part,
+                ),
+        };
   let cursor: Parameters<Conversation["entries"]>[2];
   do {
     const page = await fork.entries(
@@ -281,6 +303,9 @@ export async function copyFork(
         } = entry;
         const draft = await tx.appendEntry(root.id, {
           ...rest,
+          ...(entry.kind === "pi.compaction" && {
+            model: entry.model?.map(remapMessage),
+          }),
           ...(head !== undefined && {
             head: head === id ? ("self" as const) : copied(head),
           }),
@@ -306,11 +331,15 @@ export async function copyFork(
     (await tx.doc(CopiedCallsDoc, root.id)).calls = calls;
   }, ctx);
   const [want, got] = await Promise.all([fork.context(ctx), root.context(ctx)]);
+  const headMessages =
+    want.head?.kind === "pi.compaction" ? (want.contributions[0] ?? []) : [];
   if (
     want.messages.length !== got.messages.length ||
     want.messages.some(
       (message, index) =>
-        JSON.stringify(message) !== JSON.stringify(got.messages[index]),
+        JSON.stringify(
+          headMessages.includes(message) ? remapMessage(message) : message,
+        ) !== JSON.stringify(got.messages[index]),
     )
   )
     throw new Error("the copied history would change the next request");

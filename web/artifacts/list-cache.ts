@@ -13,7 +13,7 @@ import {
   shouldPreserveArtifactView,
   stableArtifactView,
 } from "./pane-state.js";
-import { fetchPaneData, invalidatePaneCache } from "../panes.js";
+import { fetchPaneData } from "../panes.js";
 import { renderShell } from "./pane.js";
 import { showArtifact } from "./artifact-detail.js";
 import { DRAFT, state } from "../state.js";
@@ -101,10 +101,9 @@ export async function refreshList(
   if (signal?.aborted) abort();
   else signal?.addEventListener("abort", abort, { once: true });
   cache.controller = controller;
-  const preserveBeforeFetch = stableArtifactView(
-    artifactMount.current?._rs ?? null,
-    agentId,
-  );
+  const preserveBeforeFetch =
+    !artifactMount.current?._rs.revalidating &&
+    stableArtifactView(artifactMount.current?._rs ?? null, agentId);
   if (artifactMount.current?._rs.agentId === agentId && !preserveBeforeFetch)
     renderShell(artifactMount.current);
   const pending = (async () => {
@@ -117,6 +116,7 @@ export async function refreshList(
       const next = normalizeArtifactList(await response.json());
       const preserve =
         artifactMount.current?._rs.agentId === agentId &&
+        !artifactMount.current._rs.revalidating &&
         shouldPreserveArtifactView(
           artifactViewSnapshot(artifactMount.current._rs, agentId),
           next.map((item) => item.id),
@@ -191,7 +191,6 @@ function onMutation(event: Event): void {
   // Invariant: Versioned payloads are immutable. Only current-revision content
   // needs an explicit mutation signal to become eligible for another request.
   contentCache.invalidateMutable(id);
-  invalidatePaneCache("report", id);
   if (artifactMount.current?._rs.agentId === id) {
     // Invariant: A mutation is also the explicit retry boundary for a prior
     // transient content failure. Ordinary pane refreshes remain cache/error

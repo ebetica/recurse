@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { LoopLag } from "../../src/observability/loop_lag";
-import { slowSpan } from "../../src/observability/slow_span";
+import { slowSpan, startSlowSpan } from "../../src/observability/slow_span";
 import {
   logger,
   type RuntimeLogRecord,
@@ -12,56 +12,54 @@ function sampler(
   running: string[],
   summaryMs?: number,
   now?: () => number,
-  memoryUsage?: () => NodeJS.MemoryUsage,
+  conversations?: () => readonly string[],
 ) {
   const records: RuntimeLogRecord[] = [];
   const loopLag = new LoopLag({
     logger: logger("loop_lag", { write: (record) => records.push(record) }),
     runningCount: () => running.length,
-    runningConversations: () => running,
+    runningConversations: conversations ?? (() => running),
     ...(summaryMs === undefined ? {} : { summaryMs }),
     ...(now === undefined ? {} : { now }),
-    ...(memoryUsage === undefined ? {} : { memoryUsage }),
   });
   return { loopLag, records };
 }
 
-// Feature: #2640 completed blocking spans must survive until stall sampling. (also Feature #2623 HTTP stall logs include main-thread CPU attribution.; #2631 slow stall diagnostics must not inflate sampled CPU.)
+// Regression: #3018 stall logs omit native accounting and exclude diagnostics from lag windows. (also Feature #2640 bounded completed spans; #2631 diagnostics stay outside sampling.)
 test("a CPU-blocking request logs one stall with bounded completed spans", async () => {
-  let preDiagnosticsCpuMs = 0;
+  let preDiagnosticsWindowMs = 0;
   const { loopLag, records } = sampler(["c1"], undefined, undefined, () => {
-    const cpu = (
-      process as NodeJS.Process & { threadCpuUsage(): NodeJS.CpuUsage }
-    ).threadCpuUsage();
-    const start = (loopLag as unknown as { mainCpuStart: number }).mainCpuStart;
-    preDiagnosticsCpuMs = Math.round((cpu.user + cpu.system - start) / 1000);
+    const state = loopLag as unknown as {
+      expected: number;
+      intervalMs: number;
+    };
+    preDiagnosticsWindowMs = Math.round(
+      performance.now() - state.expected + state.intervalMs,
+    );
     const until = performance.now() + 400;
     while (performance.now() < until) {}
-    return process.memoryUsage();
+    return ["c1"];
   });
   const router = new Router();
   router.get("/api/block/{name}", async () => {
     slowSpan("blocking_route", "c1", () => {
       for (let i = 0; i < 6; i++)
         slowSpan("view_projection", "abcdef012345", () => {
-          const usage = (
-            process as NodeJS.Process & {
-              threadCpuUsage(): NodeJS.CpuUsage;
-            }
-          ).threadCpuUsage;
-          const start = usage();
-          for (;;) {
-            const cpu = usage();
-            if (cpu.user + cpu.system - start.user - start.system >= 60_000)
-              break;
-          }
+          const until = performance.now() + 60;
+          while (performance.now() < until) {}
         });
+      const finish = startSlowSpan("paired_route", "c1");
+      const until = performance.now() + 60;
+      while (performance.now() < until) {}
+      finish();
+      finish();
     });
     return jsonResponse({ ok: true });
   });
   const log = logger("http", { write: () => {} });
   const server = startServer({
     logger: log,
+    port: 0,
     handler: composeApp({ router, logger: log, loopLag }),
     shutdown: async () => {},
   });
@@ -88,24 +86,23 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
   console.log(stalls[0]!.message);
   expect(stalls[0]!.message).toContain(" routes=/api/block/:name");
   expect(stalls[0]!.message).toContain(" conversations=c1");
+  expect(stalls[0]!.message).not.toMatch(
+    / (?:cpu_ms|main_cpu_ms|heap_mb|rss_mb)=/,
+  );
   const spans = / spans=(\S+)/.exec(stalls[0]!.message)?.[1];
-  expect(spans).toMatch(/blocking_route:c1:\d+:\d+/);
+  expect(spans).toMatch(/(?:^|,)blocking_route:c1:\d+(?:,|$)/);
   expect(spans?.split(",")).toHaveLength(3);
   expect(spans).toContain("view_projection:abcdef012345:");
-  const mainCpu = Number(/ main_cpu_ms=(\d+)/.exec(stalls[0]!.message)?.[1]);
-  expect(Number.isInteger(mainCpu)).toBe(true);
-  expect(mainCpu).toBeGreaterThan(0);
+  expect(
+    spans?.split(",").filter((span) => span.startsWith("paired_route:c1:")),
+  ).toHaveLength(1);
   const windowMs = Number(/ window_ms=(\d+)/.exec(stalls[0]!.message)?.[1]);
   expect(windowMs).toBeGreaterThan(ms);
-  expect(mainCpu).toBeLessThanOrEqual(preDiagnosticsCpuMs);
+  expect(windowMs).toBeLessThanOrEqual(preDiagnosticsWindowMs);
   const diagnosticsMs = Number(
     / diagnostics_ms=(\d+)/.exec(stalls[0]!.message)?.[1],
   );
-  expect(diagnosticsMs).toBeGreaterThan(0);
-  const heap = Number(/ heap_mb=(\d+)/.exec(stalls[0]!.message)![1]);
-  const rss = Number(/ rss_mb=(\d+)/.exec(stalls[0]!.message)![1]);
-  expect(heap).toBeGreaterThan(0);
-  expect(rss).toBeGreaterThan(heap);
+  expect(diagnosticsMs).toBeGreaterThanOrEqual(400);
 });
 
 // Feature: #2502 summary windows use an injected clock independent of scheduler contention.

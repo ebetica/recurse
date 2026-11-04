@@ -1,14 +1,14 @@
-// Advisory process context, never permission to signal. Bound /proc
-// scans/output and revalidate owned detached groups by PGID/session. Missing
+// Advisory process context, never permission to signal. Async /proc reads
+// bound scans/output and revalidate owned groups by PGID/session. Missing
 // leaders retain descendants with uncertainty; mismatched leader start tokens
 // exclude reused groups.
-import { closeSync, openSync, readSync } from "node:fs";
+import { open, type FileHandle } from "node:fs/promises";
 import {
   HAS_PROCESS_TABLE,
   PROCESS_TABLE_EMULATED,
   type ProcFile,
-  procIdsSync,
-  procTextSync,
+  procIds,
+  procText,
 } from "../../../utils/process_table.ts";
 
 const MAX_RECORDS = 100;
@@ -37,48 +37,48 @@ interface RootScan {
   truncated: boolean;
 }
 
-function boundedText(path: string, maxBytes: number): string | undefined {
-  let fd: number | undefined;
+async function boundedText(
+  path: string,
+  maxBytes: number,
+): Promise<string | undefined> {
+  let fd: FileHandle | undefined;
   try {
-    fd = openSync(path, "r");
-    const buffer = Buffer.alloc(maxBytes + 1);
-    const bytes = readSync(
-      fd,
-      buffer as unknown as Uint8Array,
-      0,
-      buffer.length,
-      0,
-    );
-    if (bytes > maxBytes) return undefined;
-    return buffer.subarray(0, bytes).toString("utf8");
+    fd = await open(path, "r");
+    const buffer = new Uint8Array(maxBytes + 1);
+    const { bytesRead } = await fd.read(buffer, 0, buffer.length, 0);
+    if (bytesRead > maxBytes) return undefined;
+    return Buffer.from(buffer.subarray(0, bytesRead)).toString("utf8");
   } catch {
     return undefined;
   } finally {
     if (fd !== undefined) {
       try {
-        closeSync(fd);
+        await fd.close();
       } catch {}
     }
   }
 }
 
-function procFile(
+async function procFile(
   pid: number,
   file: ProcFile,
   maxBytes: number,
-): string | undefined {
+): Promise<string | undefined> {
   if (!PROCESS_TABLE_EMULATED)
     return boundedText(`/proc/${pid}/${file}`, maxBytes);
   try {
-    const text = procTextSync(pid, file);
+    const text = await procText(pid, file);
     return Buffer.byteLength(text) > maxBytes ? undefined : text;
   } catch {
     return undefined;
   }
 }
 
-function statProcess(pid: number, includeCommand = false): Member | undefined {
-  const raw = procFile(pid, "stat", 4096);
+async function statProcess(
+  pid: number,
+  includeCommand = false,
+): Promise<Member | undefined> {
+  const raw = await procFile(pid, "stat", 4096);
   if (!raw) return undefined;
   const end = raw.lastIndexOf(")");
   if (end < 0) return undefined;
@@ -92,7 +92,7 @@ function statProcess(pid: number, includeCommand = false): Member | undefined {
   const sid = Number(fields[3]);
   if (![ppid, pgid, sid].every(Number.isSafeInteger)) return undefined;
   const command = includeCommand
-    ? procFile(pid, "comm", 80)?.trim() || "unknown"
+    ? (await procFile(pid, "comm", 80))?.trim() || "unknown"
     : "";
   return {
     pid,
@@ -103,6 +103,19 @@ function statProcess(pid: number, includeCommand = false): Member | undefined {
     start: fields[19]!,
     command,
   };
+}
+
+async function checkLeader(root: ProcessRoot): Promise<LeaderStatus> {
+  const leader = await statProcess(root.pid);
+  if (!leader) return "missing";
+  if (
+    leader.pid !== root.pid ||
+    leader.pgid !== root.pgid ||
+    leader.sid !== root.pgid ||
+    leader.start !== root.identity
+  )
+    return "reused";
+  return leader.state === "Z" || leader.state === "X" ? "missing" : "verified";
 }
 
 function roots(records: readonly ProcessRoot[]): RootScan | undefined {
@@ -146,9 +159,9 @@ function appendBounded(
 }
 
 /** Bounded, owner/session-scoped ps-like context for the safety reviewer. */
-export function ownedProcessSnapshot(
+export async function ownedProcessSnapshot(
   records: readonly ProcessRoot[] | undefined,
-): string {
+): Promise<string> {
   if (!HAS_PROCESS_TABLE)
     return "Process snapshot: unavailable (this host has no supported process table).";
   const rootsFound = records && roots(records);
@@ -182,23 +195,8 @@ export function ownedProcessSnapshot(
   // Invariant: Check the leader separately; warn if absent, exclude the group
   // if its start token changed (PGID reuse).
   const leaderStatus = new Map<number, LeaderStatus>();
-  for (const root of byGroup.values()) {
-    const leader = statProcess(root.pid);
-    if (!leader) {
-      leaderStatus.set(root.pgid, "missing");
-    } else if (
-      leader.pid !== root.pid ||
-      leader.pgid !== root.pgid ||
-      leader.sid !== root.pgid ||
-      leader.start !== root.identity
-    ) {
-      leaderStatus.set(root.pgid, "reused");
-    } else if (leader.state === "Z" || leader.state === "X") {
-      leaderStatus.set(root.pgid, "missing");
-    } else {
-      leaderStatus.set(root.pgid, "verified");
-    }
-  }
+  for (const root of byGroup.values())
+    leaderStatus.set(root.pgid, await checkLeader(root));
 
   if (
     leaderStatus.size > 0 &&
@@ -219,7 +217,7 @@ export function ownedProcessSnapshot(
 
   let names: string[];
   try {
-    const allNames = procIdsSync();
+    const allNames = await procIds();
     if (allNames.length > MAX_PROC_ENTRIES) {
       return "Process snapshot: unavailable (process table exceeded the safe scan bound).";
     }
@@ -232,7 +230,7 @@ export function ownedProcessSnapshot(
   const members: Member[] = [];
   let memberTruncated = false;
   for (const name of names) {
-    const member = statProcess(Number(name));
+    const member = await statProcess(Number(name));
     if (
       !member ||
       member.state === "Z" ||
@@ -253,9 +251,15 @@ export function ownedProcessSnapshot(
       memberTruncated = true;
       break;
     }
-    member.command = procFile(member.pid, "comm", 80)?.trim() || "unknown";
+    member.command =
+      (await procFile(member.pid, "comm", 80))?.trim() || "unknown";
     members.push(member);
   }
+  // Invariant: Async reads yield; recheck each leader before publishing any
+  // member so an observed replacement excludes the whole group.
+  for (const root of byGroup.values())
+    if (leaderStatus.get(root.pgid) !== "reused")
+      leaderStatus.set(root.pgid, await checkLeader(root));
   members.sort((a, b) => a.pid - b.pid);
   const lines = [
     "Owned background process snapshot (session-scoped; command names only):",
@@ -274,6 +278,7 @@ export function ownedProcessSnapshot(
   }
   let outputTruncated = false;
   for (const member of members) {
+    if (leaderStatus.get(member.pgid) === "reused") continue;
     const line = `pid=${member.pid} ppid=${member.ppid} pgid=${member.pgid} sid=${member.sid} state=${member.state} command=${member.command}`;
     if (!appendBounded(lines, line, output)) {
       outputTruncated = true;

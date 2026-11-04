@@ -286,6 +286,7 @@ export const tests: BrowserTest[] = [
     const openGroup = async () => {
       await page.locator(".activity-group-toggle").first().click();
       await page.locator(".activity-group.open").first().waitFor();
+      await page.locator(".turn-series-toggle").first().waitFor();
       for (const toggle of await page
         .locator('.turn-series-toggle[aria-expanded="false"]')
         .all())
@@ -336,6 +337,14 @@ export const tests: BrowserTest[] = [
         .getAttribute("data-message-offset"),
     ).toBe("-1");
     await page.locator(".activity-group-hide").first().click();
+    await page.waitForFunction(
+      (text) =>
+        document
+          .querySelector(".live-thinking-summary")
+          ?.innerText.replace(/\s+/g, " ")
+          .trim() === text,
+      recordedThinking.thinking.replace(/\s+/g, " ").trim(),
+    );
     await sample("collapsed-live");
     await openGroup();
     await sample("expanded-live");
@@ -492,7 +501,7 @@ export const tests: BrowserTest[] = [
     for (const shown of [
       "#conv-status.running",
       "#send.stop",
-      `#agent-list .agent[data-id="${agent}"] .working, #conv-titlebar .working, #composer-wrap .working, #messages .working`,
+      `#agent-list .agent[data-id="${agent}"] .working, #conv-titlebar .working, #composer-wrap .working`,
     ])
       await page.waitForFunction(
         (selector) => !document.querySelector(selector),
@@ -528,7 +537,7 @@ export const tests: BrowserTest[] = [
         `#conv-status.running, #send.stop, #agent-list .agent[data-id="${agent}"] .working`,
         { timeout: 8_000 },
       );
-      expect(await page.locator("#messages .working").count()).toBe(0);
+      expect(await page.locator("#live-bar .working").count()).toBe(0);
       expect(
         await page
           .locator("#messages")
@@ -712,18 +721,33 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  // Regression: #2357 running controls remain above Thinking with no usage through live updates. (also #2357 a revision refresh keeps the last count and its reserved width.)
+  // Regression: #2357 running controls remain above Thinking with no usage through live updates. (also #2357 and #3115 older backends retain the last count and reserved width during a usage refresh.)
   async function test_durable_turn_streams_and_reloads(browser, base) {
     const { agent } = await postFixture(base, "seed-durable");
     const page = await browser.newPage({
       viewport: { width: 412, height: 915 },
     });
     const errors = captureErrors(page);
+    const eventCodings = new Set<string>();
+    page.on("response", (response) => {
+      if (response.url().includes(`/api/conversations/${agent}/events`))
+        eventCodings.add(response.headers()["content-encoding"] ?? "identity");
+    });
     await page.goto(`${base}#agent=${agent}`, {
       waitUntil: "domcontentloaded",
     });
     await page.locator("#composer, textarea").first().waitFor();
     const token = page.locator("#context-token-label");
+    await page.route(`${base}api/tree`, async (route) => {
+      const response = await route.fetch();
+      const nodes = (await response.json()) as {
+        id: string;
+        agent?: { context?: unknown };
+      }[];
+      for (const node of nodes)
+        if (node.id === agent && node.agent) delete node.agent.context;
+      await route.fulfill({ response, json: nodes });
+    });
     let previous!: string;
     let tokenWidth!: number;
     let releaseRefresh!: () => void;
@@ -768,7 +792,7 @@ export const tests: BrowserTest[] = [
         const block = document.querySelector(".activity-boundary.current");
         if (!block) throw new Error("Running block disappeared");
         const footer = block.querySelector(".turn-foot");
-        const working = block.querySelector(".working");
+        const working = document.querySelector("#live-bar .working");
         samples.push({
           controls: Boolean(footer?.querySelector(".turn-expand")),
           usage: Boolean(footer?.querySelector(".turn-tokens")),
@@ -836,6 +860,36 @@ export const tests: BrowserTest[] = [
         .getByText("This sentence streams slowly so the live answer shows.")
         .count(),
     ).toBe(0);
+    const partial = await (
+      await page.request.get(`${base}api/conversations/${agent}/view?limit=50`)
+    ).json();
+    const next = await page.evaluate(
+      async ({ url, id }) => {
+        const abort = new AbortController();
+        const response = await fetch(url, {
+          headers: { "Last-Event-ID": id },
+          signal: abort.signal,
+        });
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let text = "";
+        while (
+          !/"text_from": ?[1-9]/.test(text) &&
+          !/"turn_status":"(?!running)/.test(text)
+        ) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+        abort.abort();
+        return text;
+      },
+      {
+        url: `${base}api/conversations/${agent}/events?text_deltas=true`,
+        id: `${partial.instance_id}:${partial.revision}`,
+      },
+    );
+    expect(next).toMatch(/"text_from": ?[1-9]/);
     if (shots)
       await page.screenshot({ path: `${shots}/durable-streaming.png` });
     await page
@@ -844,6 +898,15 @@ export const tests: BrowserTest[] = [
       })
       .first()
       .waitFor({ timeout: 15_000 });
+    expect(eventCodings).toContain("gzip");
+    const answer = page
+      .locator(".msg.assistant .content", { hasText: "Durable answer" })
+      .first();
+    expect((await answer.innerText()).trim()).toBe(
+      "Durable answer: the command printed two ticks. " +
+        "It ran in the work directory. ".repeat(12) +
+        "This sentence streams slowly so the live answer shows.",
+    );
     await page.locator("#conv-status.running").waitFor({ state: "detached" });
     const block = page
       .locator("#messages > .activity-boundary")
@@ -1088,7 +1151,23 @@ export const tests: BrowserTest[] = [
           const scroll = document.querySelector("#scroll");
           return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
         });
+      const beforeJump = await page
+        .locator("#scroll")
+        .evaluate((el) => el.scrollTop);
       await page.locator("#scroll-btn.visible").click();
+      await page.waitForFunction((before) => {
+        const scroll = document.querySelector("#scroll");
+        return (
+          scroll.scrollTop > before &&
+          scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 140
+        );
+      }, beforeJump);
+      await postFixture(base, "durable-history-more", {
+        agent,
+        from: 128,
+        to: 129,
+      });
+      await page.getByText("Answer 128", { exact: true }).waitFor();
       await page.waitForFunction(() => {
         const scroll = document.querySelector("#scroll");
         return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 1;
@@ -1096,7 +1175,7 @@ export const tests: BrowserTest[] = [
       await open("main", "Agent");
       await postFixture(base, "durable-history-more", {
         agent,
-        from: 128,
+        from: 129,
         to: 130,
       });
       await open(agent, "Durable history");

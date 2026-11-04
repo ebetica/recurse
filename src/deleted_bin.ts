@@ -1,21 +1,8 @@
 // Retain deleted trees, then rename expired day partitions through trash.
 // EXDEV is refused, never copied. Manifests intentionally omit fsync.
+// Partition expiry runs in the existing trash Worker, never on the event loop.
 import { randomUUID } from "node:crypto";
-import {
-  closeSync,
-  constants,
-  existsSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  renameSync,
-  rmdirSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import fs, { constants } from "node:fs";
 import { basename, dirname, isAbsolute, join, sep } from "node:path";
 import { lstatAtSync, openAtSync, renameAtSync } from "./utils/dir_fd";
 import { parsePythonJson, pyCompactJson } from "./utils/py_compact_json";
@@ -96,7 +83,9 @@ export interface DepositOptions {
 function entryDirs(deletedDir: string): string[] {
   let partitions: string[];
   try {
-    partitions = readdirSync(deletedDir)
+    partitions = fs
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      .readdirSync(deletedDir)
       .filter((name) => fullMatch(PARTITION_RE, name))
       .sort(compareCodePoints);
   } catch (error) {
@@ -108,7 +97,8 @@ function entryDirs(deletedDir: string): string[] {
     const holder = join(deletedDir, partition);
     let names: string[];
     try {
-      names = readdirSync(holder).sort(compareCodePoints);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      names = fs.readdirSync(holder).sort(compareCodePoints);
     } catch (error) {
       if (isSystemError(error)) continue;
       throw error;
@@ -117,8 +107,10 @@ function entryDirs(deletedDir: string): string[] {
       const entry = join(holder, name);
       try {
         if (
-          statSync(join(entry, MANIFEST_NAME)).isFile() &&
-          statSync(join(entry, TREE_NAME)).isDirectory()
+          // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+          fs.statSync(join(entry, MANIFEST_NAME)).isFile() &&
+          // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+          fs.statSync(join(entry, TREE_NAME)).isDirectory()
         )
           found.push(entry);
       } catch (error) {
@@ -132,7 +124,8 @@ function entryDirs(deletedDir: string): string[] {
 function readManifest(entry: string): Record<string, unknown> | null {
   try {
     const value = parsePythonJson(
-      readFileSync(join(entry, MANIFEST_NAME), "utf8"),
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      fs.readFileSync(join(entry, MANIFEST_NAME), "utf8"),
     );
     return value !== null && typeof value === "object" && !Array.isArray(value)
       ? (value as Record<string, unknown>)
@@ -171,7 +164,8 @@ export function deposit(
   const ids = options.ids ?? idsDefault;
   let parent: number;
   try {
-    parent = openSync(dirname(path), DIRECTORY_FLAGS);
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    parent = fs.openSync(dirname(path), DIRECTORY_FLAGS);
   } catch (error) {
     if (missing(error)) return null;
     throw error;
@@ -194,8 +188,10 @@ export function deposit(
 
     let entryId = `${options.kind}-${options.key}`;
     const holder = join(paths.deletedDir, partitionFor(stamp));
-    mkdirSync(holder, { recursive: true });
-    if (statSync(holder).dev !== info.dev) {
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    fs.mkdirSync(holder, { recursive: true });
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    if (fs.statSync(holder).dev !== info.dev) {
       const error = new Error(
         "deleted bin is on a different filesystem",
       ) as SystemError;
@@ -206,7 +202,8 @@ export function deposit(
     let entry = join(holder, entryId);
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
-        mkdirSync(entry, { mode: 0o700 });
+        // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+        fs.mkdirSync(entry, { mode: 0o700 });
         break;
       } catch (error) {
         if (!isCollision(error)) throw error;
@@ -221,7 +218,8 @@ export function deposit(
       }
     }
 
-    const entryFd = openSync(entry, DIRECTORY_FLAGS);
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    const entryFd = fs.openSync(entry, DIRECTORY_FLAGS);
     try {
       const record: Record<string, unknown> = {
         ...options.manifest,
@@ -239,24 +237,28 @@ export function deposit(
         0o600,
       );
       try {
-        writeFileSync(
+        // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+        fs.writeFileSync(
           temporaryFd,
           pyCompactJson(record, { separators: "default" }),
           "utf8",
         );
       } finally {
-        closeSync(temporaryFd);
+        // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+        fs.closeSync(temporaryFd);
       }
       renameAtSync(entryFd, temporary, entryFd, MANIFEST_NAME);
       // Invariant: rename(2) refuses EXDEV; do not replace it with a copy
       // fallback.
       renameAtSync(parent, name, entryFd, TREE_NAME);
     } finally {
-      closeSync(entryFd);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      fs.closeSync(entryFd);
     }
     return entryId;
   } finally {
-    closeSync(parent);
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    fs.closeSync(parent);
   }
 }
 
@@ -299,17 +301,20 @@ export function restore(
       !isDirectory(parent)
     )
       return null;
-    if (existsSync(destination) || lstatIsSymlink(destination)) return null;
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    if (fs.existsSync(destination) || lstatIsSymlink(destination)) return null;
     const tree = join(entry, TREE_NAME);
     if (!isDirectory(tree) || lstatIsSymlink(tree)) return null;
     try {
-      renameSync(tree, destination);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      fs.renameSync(tree, destination);
     } catch (error) {
       if (!isSystemError(error)) throw error;
       return null;
     }
     try {
-      unlinkSync(join(entry, MANIFEST_NAME));
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      fs.unlinkSync(join(entry, MANIFEST_NAME));
     } catch (error) {
       if (!missing(error)) {
         if (!isSystemError(error)) throw error;
@@ -317,7 +322,8 @@ export function restore(
       }
     }
     try {
-      rmdirSync(entry);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+      fs.rmdirSync(entry);
     } catch (error) {
       if (!isSystemError(error)) throw error;
     }
@@ -328,7 +334,8 @@ export function restore(
 
 function lstatIsSymlink(path: string): boolean {
   try {
-    return lstatSync(path).isSymbolicLink();
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    return fs.lstatSync(path).isSymbolicLink();
   } catch (error) {
     if (missing(error)) return false;
     throw error;
@@ -337,7 +344,8 @@ function lstatIsSymlink(path: string): boolean {
 
 function isDirectory(path: string): boolean {
   try {
-    return statSync(path).isDirectory();
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread deleted-entry listing/restore/retirement filesystem operation
+    return fs.statSync(path).isDirectory();
   } catch (error) {
     if (isSystemError(error)) return false;
     throw error;
@@ -345,13 +353,15 @@ function isDirectory(path: string): boolean {
 }
 
 // Retire expired partitions; sweeping trash is a separate bounded operation.
-export function expire(
+export async function expire(
   paths: DeletedBinPaths,
   options: { now?: number; limit?: number } = {},
-): number {
-  return expirePartitions(paths.deletedDir, paths.trashDir, {
-    retentionDays: paths.retentionDays,
-    limit: options.limit ?? paths.expiryLimit,
-    ...(options.now === undefined ? {} : { now: options.now }),
-  }).retired;
+): Promise<number> {
+  return (
+    await expirePartitions(paths.deletedDir, paths.trashDir, {
+      retentionDays: paths.retentionDays,
+      limit: options.limit ?? paths.expiryLimit,
+      ...(options.now === undefined ? {} : { now: options.now }),
+    })
+  ).retired;
 }

@@ -1,4 +1,4 @@
-// GitHub PR identity shared by tool detection and GitHub reads; no credentials.
+// GitHub PR identity shared by linked PRs and GitHub reads; no credentials.
 export function prIdentity(
   url: string,
 ): { repo: string; number: number; url: string } | null {

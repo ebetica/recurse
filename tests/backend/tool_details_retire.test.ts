@@ -2,8 +2,10 @@ import { afterAll, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   rmSync,
   symlinkSync,
@@ -20,7 +22,7 @@ afterAll(() => rmSync(temp, { recursive: true, force: true }));
 const owner = (cid: string) =>
   createHash("sha256").update(cid, "utf8").digest("hex");
 
-test("an owner directory is retired to trash; other shapes are left", () => {
+test("an owner directory is retired to trash; other shapes are left", async () => {
   const details = join(temp, "tool_details");
   const trash = join(temp, "trash");
   mkdirSync(details, { recursive: true });
@@ -30,17 +32,20 @@ test("an owner directory is retired to trash; other shapes are left", () => {
   writeFileSync(join(details, owner("file")), "x");
   symlinkSync(join(details, owner("dir")), join(details, owner("link")));
 
-  retireConversationDetails("file", details, trash);
-  retireConversationDetails("link", details, trash);
-  retireConversationDetails("missing", details, trash);
-  retireConversationDetails("", details, trash);
-  retireConversationDetails("x".repeat(513), details, trash);
+  await retireConversationDetails("file", details, trash);
+  await retireConversationDetails("link", details, trash);
+  await retireConversationDetails("missing", details, trash);
+  await retireConversationDetails("", details, trash);
+  await retireConversationDetails("x".repeat(513), details, trash);
   expect(readdirSync(trash)).toEqual([]);
 
-  retireConversationDetails("dir", details, trash);
+  await retireConversationDetails("dir", details, trash);
   expect(existsSync(join(details, owner("dir")))).toBe(false);
   expect(existsSync(join(details, owner("file")))).toBe(true);
-  expect(readdirSync(trash).length).toBe(1);
+  expect(lstatSync(join(details, owner("link"))).isSymbolicLink()).toBe(true);
+  const retired = readdirSync(trash);
+  expect(retired.length).toBe(1);
+  expect(readFileSync(join(trash, retired[0]!, "payload"), "utf8")).toBe("x");
 });
 
 test("retireDetached hands legacy .reap-* directories to trash", async () => {

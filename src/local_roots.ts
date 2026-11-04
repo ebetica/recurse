@@ -2,14 +2,7 @@
 // Prepare private Pi dir asynchronously; explicit HOME expands only ~/ or ~.
 // Ignore close-on-exec descriptors: Bun internals cannot leak to child tools.
 
-import {
-  fstatSync,
-  lstatSync,
-  readlinkSync,
-  readdirSync,
-  realpathSync,
-  statSync,
-} from "node:fs";
+import fs from "node:fs";
 import { homedir } from "node:os";
 import {
   dirname,
@@ -263,7 +256,8 @@ function resolveConfiguredPath(
     }
     const candidate = join(resolved, part);
     try {
-      resolved = realpathSync(candidate);
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+      resolved = fs.realpathSync(candidate);
     } catch (error) {
       if (!isMissingPath(error)) {
         if (isSymlinkLoop(error)) {
@@ -273,8 +267,10 @@ function resolveConfiguredPath(
       }
       let target: string | null = null;
       try {
-        if (lstatSync(candidate).isSymbolicLink()) {
-          target = readlinkSync(candidate);
+        // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+        if (fs.lstatSync(candidate).isSymbolicLink()) {
+          // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+          target = fs.readlinkSync(candidate);
         }
       } catch (linkError) {
         if (!isMissingPath(linkError)) {
@@ -399,7 +395,8 @@ function isRegularFile(mode: bigint): boolean {
 
 function descriptorNames(): string[] {
   try {
-    return readdirSync(DESCRIPTOR_DIRECTORY);
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+    return fs.readdirSync(DESCRIPTOR_DIRECTORY);
   } catch (error) {
     throw new RootError(
       `cannot verify isolated file descriptors: ${pythonOSError(error)}`,
@@ -421,8 +418,10 @@ function validLockDescriptor(
   const chatDataDir = envValue(env, "CHAT_DATA_DIR");
   if (!Number.isSafeInteger(fd) || fd < 0 || !chatDataDir) return null;
   try {
-    const opened = fstatSync(fd, { bigint: true });
-    const onDisk = lstatSync(join(chatDataDir, ".recurse-supervisor.lock"), {
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+    const opened = fs.fstatSync(fd, { bigint: true });
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+    const onDisk = fs.lstatSync(join(chatDataDir, ".recurse-supervisor.lock"), {
       bigint: true,
     });
     const uid = process.getuid?.();
@@ -444,7 +443,8 @@ function inheritedDescriptorNames(allowedFd: number | null): string[] {
   const result: string[] = [];
   let urandom: BigIntStats | null = null;
   try {
-    urandom = statSync("/dev/urandom", { bigint: true });
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+    urandom = fs.statSync("/dev/urandom", { bigint: true });
   } catch {
     // Invariant: If unavailable, no descriptor can match the process-local
     // exception.
@@ -455,7 +455,8 @@ function inheritedDescriptorNames(allowedFd: number | null): string[] {
     if (fd <= 2 || fd === allowedFd) continue;
     let opened;
     try {
-      opened = fstatSync(fd, { bigint: true });
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+      opened = fs.fstatSync(fd, { bigint: true });
     } catch {
       continue;
     }
@@ -488,8 +489,10 @@ export function validateIsolatedEnvironment(environ: Environment): void {
   let resolvedRoot: string;
   let rootInfo;
   try {
-    resolvedRoot = realpathSync(root);
-    rootInfo = lstatSync(root, { bigint: true });
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+    resolvedRoot = fs.realpathSync(root);
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread local-root/process descriptor validation; not assumed startup-only
+    rootInfo = fs.lstatSync(root, { bigint: true });
   } catch (error) {
     throw new RootError(
       `unsafe RECURSE_ISOLATED_ROOT: ${pythonOSError(error)}`,

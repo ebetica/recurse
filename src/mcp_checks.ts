@@ -12,7 +12,7 @@ import {
 import { McpConfigError } from "./mcp_config";
 import type { ProcessLifecycle } from "./process_lifecycle";
 import { AbortScope, type TaskSet } from "./utils/tasks";
-import { retire } from "./utils/trash";
+import { retirePath } from "./utils/trash_sweep";
 
 interface CheckOptions {
   configPath: string;
@@ -84,7 +84,7 @@ export class McpChecks {
       return await servers.resolve(value);
     } finally {
       while (!(await servers.close().catch(() => false))) await Bun.sleep(1000);
-      retire(cwd, this.options.trashDir);
+      await retirePath(cwd, this.options.trashDir);
     }
   }
 
@@ -142,7 +142,7 @@ export class McpChecks {
         this.cleanupIncomplete = true;
         await Bun.sleep(1000);
       }
-      retire(cwd, options.trashDir);
+      await retirePath(cwd, options.trashDir);
     }
   }
 }

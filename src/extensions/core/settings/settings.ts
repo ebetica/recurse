@@ -1,7 +1,8 @@
-// Deferred native settings use shared validation without Settings HTTP access.
-// Pi codemode searchTools/describeTool expose metadata only on demand.
+// Deferred settings share validation and connection operations with Settings.
+// The bundled recurse-settings skill holds usage; schemas load on demand.
 // Mutations require an operator request; file paths use the tool cwd.
 // Tree links name local roots without granting access or changing state.
+import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import {
@@ -10,7 +11,7 @@ import {
   readIcon,
   writeBrand,
 } from "../../../branding";
-import { Type } from "@earendil-works/pi-ai";
+import {} from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { Config, EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL } from "../../../config";
 import {
@@ -19,6 +20,7 @@ import {
   writeThemeSettings,
   type ThemePalette,
 } from "../../../themes";
+import type { SidebarScript } from "../../../sidebar_script";
 
 function levels(config: Config) {
   const ladder = config.effortLevels();
@@ -81,6 +83,11 @@ function required<T>(value: T | undefined, name: string): T {
 export function createSettings(
   config: Config,
   loadConversation: (cid: string) => Record<string, unknown> | null,
+  sidebar?: { script: SidebarScript; by: string },
+  remotes?: {
+    request(label: string, url: string): Promise<void>;
+    list(): unknown;
+  },
 ) {
   return defineExtension({
     name: "recurse-settings",
@@ -89,15 +96,11 @@ export function createSettings(
         name: "recurse_settings",
         deferred: true,
         description:
-          "View effort levels and colour themes. Change settings, including the app name and icon, only when the operator asks. " +
-          "set_name uses name; set_icon imports a PNG or SVG file up to 1 MiB from path. reset_name and reset_icon restore defaults. Name and icon changes appear after reload. " +
-          "set_level retunes every conversation on that level from its next turn, including the level-1 safety reviewer. " +
-          "Copy model ids exactly from Pi's model list; never invent ids. Unreachable levels fail until their provider/model is available. " +
-          "add_theme imports a Ghostty palette file with background, foreground and all 16 palette slots; other keys are ignored. " +
-          "Theme changes reach open pages without a restart. No settings HTTP or credential access. " +
-          "share_link with conversations returns a sign-in-required link to their complete root trees.",
+          "Change Recurse settings; read the recurse-settings skill first.",
         parameters: Type.Object({
           action: Type.Union([
+            Type.Literal("add_remote"),
+            Type.Literal("list_remotes"),
             Type.Literal("set_name"),
             Type.Literal("reset_name"),
             Type.Literal("set_icon"),
@@ -109,7 +112,23 @@ export function createSettings(
             Type.Literal("select_theme"),
             Type.Literal("add_theme"),
             Type.Literal("remove_theme"),
+            Type.Literal("sidebar_script"),
+            Type.Literal("set_sidebar_script"),
+            Type.Literal("undo_sidebar_script"),
+            Type.Literal("reset_sidebar_script"),
           ]),
+          label: Type.Optional(
+            Type.String({ description: "Remote label for add_remote." }),
+          ),
+          url: Type.Optional(
+            Type.String({ description: "Remote URL for add_remote." }),
+          ),
+          script: Type.Optional(
+            Type.String({
+              description:
+                "The complete sidebar script for set_sidebar_script, inline.",
+            }),
+          ),
           conversations: Type.Optional(
             Type.Array(Type.String(), {
               minItems: 1,
@@ -168,7 +187,30 @@ export function createSettings(
         executionMode: "sequential",
         async execute(args, api) {
           let result: unknown;
-          if (args.action === "share_link") {
+          if (args.action === "add_remote" || args.action === "list_remotes") {
+            if (!remotes) throw new Error("Remote settings are unavailable.");
+            if (args.action === "add_remote") {
+              const label = required(args.label, "label");
+              const url = required(args.url, "url");
+              await remotes.request(label, url);
+              result = {
+                ok: true,
+                note: `Backend ${label} (${url}) needs sign-in: ask the operator to enter its password in Settings → Remotes.`,
+              };
+            } else result = remotes.list();
+          } else if (args.action.endsWith("sidebar_script")) {
+            if (!sidebar) throw new Error("The sidebar script is unavailable.");
+            const { script, by } = sidebar;
+            if (args.action === "set_sidebar_script")
+              result = {
+                sections: await script.set(required(args.script, "script"), by),
+              };
+            else if (args.action === "reset_sidebar_script")
+              await script.set(null, by);
+            else if (args.action === "undo_sidebar_script")
+              await script.undo(by);
+            result ??= await script.view();
+          } else if (args.action === "share_link") {
             const conversations = required(args.conversations, "conversations");
             if (!conversations.length || conversations.length > 100)
               throw new Error("conversations must contain 1-100 ids.");
@@ -223,19 +265,11 @@ export function createSettings(
             );
           } else if (args.action === "levels") result = levels(config);
           else if (args.action === "set_level") {
-            const level = required(args.level, "level");
-            if (
-              !Number.isInteger(level) ||
-              level < EFFORT_MIN_LEVEL ||
-              level > EFFORT_MAX_LEVEL
-            )
-              throw new Error("level must be 1-5");
-            const document = levels(config);
-            document.levels[String(level)] = {
-              model: required(args.model, "model"),
-              reasoning: required(args.reasoning, "reasoning"),
-            };
-            result = config.setEffortLevels(document);
+            result = await config.setEffortLevel(
+              required(args.level, "level"),
+              required(args.model, "model"),
+              required(args.reasoning, "reasoning"),
+            );
           } else {
             const path = config.paths.THEMES_FILE;
             let settings = await readThemeSettings(path);

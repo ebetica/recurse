@@ -1,0 +1,42 @@
+{
+  "cold-load": {
+    "bytes": 323731,
+    "requests": 33
+  },
+  "warm-reload": {
+    "bytes": 13469,
+    "requests": 31
+  },
+  "long-conversation": {
+    "bytes": 53426,
+    "requests": 36
+  },
+  "images": {
+    "bytes": 2621660,
+    "requests": 84
+  },
+  "artifact-markdown": {
+    "bytes": 135849,
+    "requests": 52
+  },
+  "artifact-app": {
+    "bytes": 103558,
+    "requests": 40
+  },
+  "switch": {
+    "bytes": 50395,
+    "requests": 94
+  },
+  "idle": {
+    "bytes": 25426,
+    "requests": 77
+  },
+  "streaming-reply": {
+    "bytes": 35053,
+    "requests": 80
+  },
+  "background-turn": {
+    "bytes": 14586,
+    "requests": 22
+  }
+}

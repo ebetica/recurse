@@ -1,7 +1,57 @@
-// Bounded backend calls never follow redirects or expose transport errors.
-// Only pre-connect failures are definitely unsent; other errors are uncertain.
-// Stream responses with allowed headers, sandboxing and echoed-key redaction.
+// Bounded backend calls refuse redirects; only pre-connect failure is unsent.
+// Stream with allowed headers and sandboxing; redact echoed keys.
+// API v1 JSON is bounded and decoded before redaction, including escaped keys.
 // Trusted agent markers require keys; never derive them from operator headers.
+import { slowSpan } from "../observability/slow_span";
+
+export interface RemoteTiming {
+  route_class: string;
+  total_ms: number;
+  headers_ms: number | null;
+  remote_server_ms: number | null;
+  connect_ms: null;
+  tls_ms: null;
+  status: number | null;
+}
+
+/** Transport timing excludes secrets, request bodies and target identifiers. */
+function timing(path: string, report?: (fields: RemoteTiming) => void) {
+  const started = performance.now();
+  let headersMs: number | null = null;
+  let response: Response | undefined;
+  let done = false;
+  return {
+    headers(value: Response) {
+      response = value;
+      headersMs = performance.now() - started;
+    },
+    finish() {
+      if (done) return;
+      done = true;
+      const duration = response?.headers
+        .get("server-timing")
+        ?.match(/(?:^|,)\s*recurse;dur=(\d+(?:\.\d+)?)(?:\s*(?:,|$))/)?.[1];
+      report?.({
+        route_class: path.startsWith("/api/v1/")
+          ? "api_v1"
+          : path.endsWith("/deliver")
+            ? "deliver"
+            : path.startsWith("/api/relay/requests")
+              ? "relay"
+              : path.includes("transcript") ||
+                  path === "/api/subagent-tool/read"
+                ? "transcript"
+                : (path.split(/[/?]/)[2] ?? "other"),
+        total_ms: performance.now() - started,
+        headers_ms: headersMs,
+        remote_server_ms: duration === undefined ? null : Number(duration),
+        connect_ms: null,
+        tls_ms: null,
+        status: response?.status ?? null,
+      });
+    },
+  };
+}
 
 const PROXY_REQUEST_HEADERS = [
   "content-type",
@@ -12,6 +62,7 @@ const PROXY_REQUEST_HEADERS = [
   "last-event-id",
   "accept",
   "x-recurse-trace",
+  "x-recurse-client-dispatch-ms",
 ];
 const PROXY_RESPONSE_HEADERS = [
   "content-type",
@@ -23,6 +74,8 @@ const PROXY_RESPONSE_HEADERS = [
   "cache-control",
   "content-disposition",
   "retry-after",
+  "x-recurse-run-state-clock",
+  "x-recurse-api",
 ];
 
 /** Stream proxy responses, redacting credentials even if a peer echoes them. */
@@ -32,13 +85,16 @@ export async function remoteStream(
   request: Request,
   longRunning: boolean,
   agent?: string,
+  report?: (fields: RemoteTiming) => void,
 ): Promise<Response> {
+  const span = timing(path, report);
   const controller = new AbortController();
   const abort = () => controller.abort();
   const timer = longRunning ? undefined : setTimeout(abort, 30_000);
   const cleanup = () => {
     clearTimeout(timer);
     request.signal.removeEventListener("abort", abort);
+    span.finish();
   };
   if (request.signal.aborted) abort();
   request.signal.addEventListener("abort", abort, { once: true });
@@ -92,10 +148,18 @@ export async function remoteStream(
       redirect: "manual",
       signal: controller.signal,
     });
+    span.headers(response);
     const outgoing = new Headers({ "x-content-type-options": "nosniff" });
     for (const name of PROXY_RESPONSE_HEADERS) {
       const value = response.headers.get(name);
-      if (value !== null && !(backend.key && value.includes(backend.key)))
+      if (
+        value !== null &&
+        !(backend.key && value.includes(backend.key)) &&
+        (name !== "x-recurse-run-state-clock" ||
+          /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:\d{1,12}(?:\.\d{1,17})?$/i.test(
+            value,
+          ))
+      )
         outgoing.set(name, value);
     }
     const policy = response.headers.get("content-security-policy");
@@ -108,6 +172,75 @@ export async function remoteStream(
       "content-security-policy",
       safePolicy ? policy : "default-src 'none'; sandbox",
     );
+    const pathname = path.split("?", 1)[0]!;
+    if (
+      pathname === "/api/v1" ||
+      pathname.startsWith("/api/v1/") ||
+      pathname === "/api/subagent-tool/read" ||
+      pathname === "/api/subagent-tool/search"
+    ) {
+      const retryAfter = outgoing.get("retry-after");
+      for (const name of [...outgoing.keys()]) outgoing.delete(name);
+      outgoing.set("x-content-type-options", "nosniff");
+      outgoing.set("content-security-policy", "default-src 'none'; sandbox");
+      outgoing.set("cache-control", "no-store");
+      if (retryAfter && /^\d{1,8}$/.test(retryAfter))
+        outgoing.set("retry-after", retryAfter);
+      if (
+        request.method === "HEAD" ||
+        response.status === 204 ||
+        response.status === 401 ||
+        (response.status >= 300 && response.status < 400)
+      ) {
+        await response.body?.cancel();
+        cleanup();
+        return new Response(null, {
+          status: response.status,
+          headers: outgoing,
+        });
+      }
+      outgoing.set("content-type", "application/json");
+      const reader = response.body?.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        if (reader) {
+          while (true) {
+            const chunk = await reader.read();
+            if (chunk.done) break;
+            size += chunk.value.byteLength;
+            if (size > 2 * 1024 * 1024)
+              return Response.json(
+                {
+                  detail:
+                    pathname === "/api/subagent-tool/read" ||
+                    pathname === "/api/subagent-tool/search"
+                      ? "backend response exceeds 2 MiB; try a smaller --limit, or read on the remote directly if one line is too large"
+                      : pathname.endsWith("/messages")
+                        ? "backend response exceeds 2 MiB; try a smaller --limit, or read on the remote directly if one entry is too large"
+                        : "backend response exceeds 2 MiB; narrow the subtree, or read the agent list on the remote directly",
+                },
+                { status: 502, headers: outgoing },
+              );
+            chunks.push(chunk.value);
+          }
+        }
+        const value = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        const json = JSON.stringify(value);
+        return new Response(
+          backend.key ? json.replaceAll(backend.key, "[redacted]") : json,
+          { status: response.status, headers: outgoing },
+        );
+      } catch {
+        return Response.json(
+          { detail: "invalid remote API response" },
+          { status: 502, headers: outgoing },
+        );
+      } finally {
+        await reader?.cancel().catch(() => {});
+        cleanup();
+      }
+    }
     const reader = response.body?.getReader();
     if (!reader) {
       cleanup();
@@ -201,9 +334,18 @@ export async function remoteCall(
     body?: unknown;
     timeoutMs?: number;
     maxResponseBytes?: number;
+    ifNoneMatch?: string;
     signal?: AbortSignal;
+    report?: (fields: RemoteTiming) => void;
   } = {},
-): Promise<{ status: number; retryAfter: string | null; data: unknown }> {
+): Promise<{
+  status: number;
+  retryAfter: string | null;
+  etag: string | null;
+  data: unknown;
+  api: string | null;
+}> {
+  const span = timing(path, options.report);
   if (!/^\/api\/[A-Za-z0-9/_-]+$/.test(path))
     throw new Error("invalid backend API path");
   const controller = new AbortController();
@@ -227,6 +369,9 @@ export async function remoteCall(
         headers: {
           ...(backend.key ? { authorization: `Bearer ${backend.key}` } : {}),
           "content-type": "application/json",
+          ...(options.ifNoneMatch
+            ? { "if-none-match": options.ifNoneMatch }
+            : {}),
           ...(options.home
             ? {
                 "x-recurse-home": options.home.id,
@@ -236,9 +381,14 @@ export async function remoteCall(
         },
         ...(options.body === undefined
           ? {}
-          : { body: JSON.stringify(options.body) }),
+          : {
+              body: slowSpan("remote_request_encode", undefined, () =>
+                JSON.stringify(options.body),
+              ),
+            }),
       },
     );
+    span.headers(response);
     const reader = response.body?.getReader();
     const chunks: Uint8Array[] = [];
     let size = 0;
@@ -258,18 +408,28 @@ export async function remoteCall(
     }
     let data: unknown = null;
     try {
-      const text = Buffer.concat(chunks).toString("utf8");
-      const parsed = JSON.parse(text);
-      data = backend.key
-        ? JSON.parse(
-            JSON.stringify(parsed).replaceAll(backend.key, "[redacted]"),
-          )
-        : parsed;
+      data = slowSpan("remote_response_decode", undefined, () => {
+        const text = Buffer.concat(chunks).toString("utf8");
+        const parsed = JSON.parse(text);
+        return backend.key
+          ? JSON.parse(
+              JSON.stringify(parsed).replaceAll(backend.key, "[redacted]"),
+            )
+          : parsed;
+      });
     } catch {}
     const retry = response.headers.get("retry-after");
+    const etag = response.headers.get("etag");
     return {
       status: response.status,
+      api: response.headers.get("x-recurse-api"),
       retryAfter: retry && /^\d{1,8}$/.test(retry) ? retry : null,
+      etag:
+        etag &&
+        etag.length <= 256 &&
+        !(backend.key && etag.includes(backend.key))
+          ? etag
+          : null,
       data,
     };
   } catch (error) {
@@ -284,5 +444,6 @@ export async function remoteCall(
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener("abort", abort);
+    span.finish();
   }
 }

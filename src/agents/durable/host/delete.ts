@@ -3,7 +3,7 @@
 // archived and retired; a failed or slow close defers retirement to a retry.
 // A side conversation's fork is withdrawn from its parent's Harness.
 import { join } from "node:path";
-import * as trash from "../../../utils/trash";
+import { retirePath } from "../../../utils/trash_sweep";
 import type { DurableHost } from "../host.ts";
 import { closeHarness } from "./close.ts";
 import type { Opened } from "./open.ts";
@@ -16,8 +16,11 @@ export async function retire(
   cid: string,
   timeoutMs: number,
 ): Promise<boolean> {
+  host.invalidatePromptCache(cid);
+  host.viewChanged(cid);
   const parent = host.deps.load(cid, ["side_of"])?.side_of;
   if (typeof parent === "string") return retireSide(host, cid, parent);
+  // Spec: @tla fence tlaDeleted(host,cid)
   const opened = host.opened.get(cid);
   if (opened === undefined && !host.owns(host.deps.load(cid, ["backend"])))
     return true;
@@ -52,9 +55,12 @@ export async function retire(
   host.retiring.delete(cid);
   host.clears.delete(cid);
   const key = host.deps.load(cid, ["tmp_key"])?.tmp_key;
-  if (typeof key === "string" && !(await host.keepStore(cid, "reap", key)))
-    return false;
-  return retireStore(host, cid);
+  return host.keepStore(
+    cid,
+    "reap",
+    typeof key === "string" ? key : undefined,
+    () => retireStore(host, cid),
+  );
 }
 
 /** Delete a side conversation: withdraw its fork's input, stop its run and
@@ -86,9 +92,10 @@ async function retireSide(
   return retireStore(host, cid);
 }
 
-function retireStore(host: DurableHost, cid: string): boolean {
+async function retireStore(host: DurableHost, cid: string): Promise<boolean> {
   try {
-    trash.retire(
+    // Spec: @tla rename {paths:[host.storagePath(cid)]}
+    await retirePath(
       join(host.deps.dataDir, "conversations", cid),
       host.deps.trashDir,
     );
@@ -105,6 +112,7 @@ export async function forgetFork(
   main: Opened,
   cid: string,
 ): Promise<void> {
+  host.invalidatePromptCache(cid);
   host.opened.delete(cid);
   await (await main.attached.get(cid)?.catch(() => null))?.close();
   main.attached.delete(cid);

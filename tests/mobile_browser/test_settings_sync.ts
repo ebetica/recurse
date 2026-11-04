@@ -120,21 +120,29 @@ export const tests: BrowserTest[] = [
       await page.goto(base);
       await page.locator("#settings-btn").click();
       await page.locator('#settings-nav button[data-cat="account"]').click();
-      const section = page.locator(".settings-section").filter({
+      const overview = page.locator(".settings-section").filter({
         has: page.getByRole("heading", {
           name: "Remotes",
           exact: true,
         }),
       });
-      await section
-        .getByRole("button", { name: "Add a remote", exact: true })
-        .click();
-      await section.locator('input[name="label"]').fill("SyncPeer");
-      await section.locator('input[name="url"]').fill(remote.base);
-      await section.locator('input[name="password"]').fill(LOGIN);
-      await section
+      const add = page.getByRole("region", {
+        name: "Add a remote",
+        exact: true,
+      });
+      await add.locator('input[name="label"]').fill("SyncPeer");
+      await add.locator('input[name="url"]').fill(remote.base);
+      await add.locator('input[name="password"]').fill(LOGIN);
+      await add
         .getByRole("button", { name: "Connect remote", exact: true })
         .click();
+      await browserExpect(add.locator('input[name="password"]')).toHaveValue(
+        "",
+      );
+      const section = overview.getByRole("region", {
+        name: "SyncPeer",
+        exact: true,
+      });
       await section
         .getByRole("button", { name: "Sync settings from home", exact: true })
         .click();

@@ -6,7 +6,7 @@ import type {
 import { trimOutput } from "./search-trim.ts";
 
 /** Search tools whose result text is allowed to consume the model's context. */
-export const SEARCH_TOOL_NAMES = new Set(["grep", "find", "multi_grep"]);
+export const SEARCH_TOOL_NAMES = new Set(["grep", "find"]);
 
 function isTextBlock(
   block: ToolResultEvent["content"][number],

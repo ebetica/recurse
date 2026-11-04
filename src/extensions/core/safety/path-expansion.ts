@@ -7,7 +7,6 @@ const PATH_FIELDS: Readonly<Record<string, readonly string[]>> = {
   write: ["path"],
   grep: ["path"],
   find: ["path"],
-  multi_grep: ["constraints"],
   artifact: ["from_file"],
 };
 

@@ -1,6 +1,8 @@
-// Owns thread assembly, paint state, change keys and where the reader left
-// each thread. Chrome/fetch invoke paint/renderConv but never mutate this
-// presentation state.
+// Owns thread assembly, paint state, change keys and saved reading viewports.
+// Chrome/fetch invoke paint/renderConv but never mutate presentation state.
+// Repaints hold the reader through live-reply replacement and height clamps.
+// Phone thread drags blur the field; scrolling/composer gestures do not.
+import { commentOutbox } from "../artifacts/comment-outbox.js";
 import { showModelResponse } from "../model-response.js";
 import { activeDescendantCount } from "../active-agents.js";
 import {
@@ -22,7 +24,8 @@ import {
   prepareLiveReveal,
   revealActivityBoundary,
 } from "./disclosure.js";
-import { msgsEl, scrollEl } from "../dom.js";
+import { liveBarEl, msgsEl, scrollEl } from "../dom.js";
+import { phoneNavigation } from "../phone-nav.js";
 import {
   BOTTOM_FOLLOW_THRESHOLD_PX,
   captureViewport,
@@ -86,6 +89,30 @@ import { type ViewBlock } from "../row-thread-state/view-blocks.js";
 import { type TemplateResult, html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { beginCopyFeedback, copyFeedbackIsCurrent } from "./copy.js";
+
+const pausedImages = new WeakMap<
+  HTMLImageElement,
+  { owner: string; src: string }
+>();
+
+window.addEventListener("recurse:selection-change", () => {
+  const owner = state.selectedId;
+  if (!owner) return;
+  const pending = Array.from(
+    msgsEl.querySelectorAll<HTMLImageElement>("img[src]"),
+  )
+    .filter((image) => !image.complete)
+    .map((image) => ({ image, src: image.getAttribute("src")! }));
+  queueMicrotask(() => {
+    if (state.selectedId === owner) return;
+    for (const { image, src } of pending) {
+      if (image.getAttribute("src") !== src || image.complete) continue;
+      if (image.isConnected && toolDetailConversation !== owner) continue;
+      pausedImages.set(image, { owner, src });
+      image.removeAttribute("src");
+    }
+  });
+});
 
 msgsEl.addEventListener("dragstart", (event) => {
   if (event.target instanceof HTMLImageElement) event.preventDefault();
@@ -201,7 +228,7 @@ window.addEventListener("recurse:tree-authoritative", () => {
 });
 
 let toolDetailConversation: string | null = null;
-// Follows a new selection to bottom until the reader gestures or jumps.
+// Follows a new selection or explicit jump until the reader gestures.
 let bottomFollowConversation: string | null = null;
 let followedScrollTop = 0;
 function scrollToBottom(): void {
@@ -217,13 +244,116 @@ type ViewportHold = SavedViewport & { conversation: string; revealed: boolean };
 let viewportHold: ViewportHold | null = null;
 let heldScrollTop = 0;
 let heldRowSearch: SavedViewport | null = null;
+type SendPin = {
+  conversation: string;
+  row: string | null;
+  frozenTop: number | null;
+  held: boolean;
+};
+// Follows the reply's bottom only until the operator's send reaches the top.
+let sendPin: SendPin | null = null;
 export function releaseBottomFollow(): void {
   bottomFollowConversation = null;
   viewportHold = null;
+  if (sendPin) sendPin.held = false;
   cancelThreadBottom();
 }
-export function releaseViewportHold(): void {
+/** Keeps repaints following a jump instead of holding it mid-scroll. */
+export function followLatestReply(): void {
   viewportHold = null;
+  if (sendPin) sendPin.held = false;
+  bottomFollowConversation = toolDetailConversation;
+  followedScrollTop = scrollEl.scrollTop;
+}
+const rowElement = (row: string) =>
+  msgsEl.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(row)}"]`);
+// Operator messages after the row: stored ones, then queued copies.
+function sendsAfter(row: HTMLElement | null): [HTMLElement[], HTMLElement[]] {
+  const after = [...msgsEl.querySelectorAll<HTMLElement>(".msg.user")].filter(
+    (bubble) =>
+      !row ||
+      row.compareDocumentPosition(bubble) & Node.DOCUMENT_POSITION_FOLLOWING,
+  );
+  return [
+    after.filter((bubble) => bubble.dataset.rowId),
+    after.filter((bubble) => !bubble.dataset.rowId),
+  ];
+}
+/**
+ * Follows a send to the viewport top without scrolling past it: the newest
+ * operator message after the last stored row at send time, until a queued send.
+ */
+export function pinOperatorSend(conversation: string): void {
+  bottomFollowConversation = null;
+  viewportHold = null;
+  cancelThreadBottom();
+  const last =
+    conversation === toolDetailConversation
+      ? [...msgsEl.querySelectorAll<HTMLElement>("[data-row-id]")].at(-1)
+      : undefined;
+  sendPin = {
+    conversation,
+    row: last?.dataset.rowId ?? null,
+    frozenTop: null,
+    held: true,
+  };
+  applySendPin();
+}
+/**
+ * A send queued behind a running turn keeps the reader's view: their topmost
+ * row is held in place, as on returning to a thread, until they scroll.
+ */
+export function holdQueuedSend(conversation: string): void {
+  if (conversation !== toolDetailConversation) return;
+  const pin = sendPin;
+  // Invariant: A queued send freezes the current view, even before the first
+  // send reaches the top or its stored row arrives.
+  if (pin?.conversation === conversation && pin.held) {
+    pin.frozenTop = scrollEl.scrollTop;
+    return;
+  }
+  const top = scrollEl.getBoundingClientRect().top;
+  const rows = [...msgsEl.querySelectorAll<HTMLElement>("[data-row-id]")];
+  const row =
+    rows.find((element) => element.getBoundingClientRect().bottom > top) ??
+    rows.at(-1);
+  if (!row?.dataset.rowId) return;
+  bottomFollowConversation = null;
+  cancelThreadBottom();
+  viewportHold = {
+    conversation,
+    row: row.dataset.rowId,
+    offset: row.getBoundingClientRect().top - top,
+    revealed: true,
+  };
+  heldScrollTop = scrollEl.scrollTop;
+}
+/** Only reader input releases a pin, never an offset clamped by a reflow. */
+const pinHeld = () =>
+  sendPin?.held === true && sendPin.conversation === toolDetailConversation;
+// Spec: Follow the natural bottom until the start of the sent message reaches
+// the viewport top, then hold there. Short replies never add scrollable space.
+function applySendPin(): void {
+  const pin = sendPin;
+  if (!pin || !pinHeld()) return;
+  if (pin.frozenTop !== null) {
+    scrollEl.scrollTop = pin.frozenTop;
+    return;
+  }
+  const row = pin.row ? rowElement(pin.row) : null;
+  const [stored, queued] = sendsAfter(row);
+  const sent = stored.at(-1) ?? queued.at(-1);
+  // Invariant: Until the sent message shows, or while the row it follows is
+  // folded away, nothing moves.
+  if (!sent || (pin.row && !row)) return;
+  const top =
+    scrollEl.scrollTop +
+    sent.getBoundingClientRect().top -
+    scrollEl.getBoundingClientRect().top;
+  scrollEl.scrollTop = Math.max(
+    0,
+    Math.min(top, scrollEl.scrollHeight - scrollEl.clientHeight),
+  );
 }
 function saveViewport(id: string): void {
   if (!scrollEl.clientHeight) return;
@@ -328,6 +458,62 @@ async function pageToHeldRow(hold: ViewportHold) {
   bottomFollowConversation = cid;
   scrollToBottom();
 }
+let keyboardDrag: {
+  id: number;
+  x: number;
+  y: number;
+  field: HTMLElement;
+} | null = null;
+scrollEl.addEventListener(
+  "touchstart",
+  (event) => {
+    keyboardDrag = null;
+    const field = document.activeElement;
+    if (
+      !phoneNavigation() ||
+      event.touches.length !== 1 ||
+      !(field instanceof HTMLElement) ||
+      !field.closest("#main") ||
+      !(field.matches("input, textarea") || field.isContentEditable) ||
+      (event.target instanceof Element &&
+        event.target.closest("input, textarea, [contenteditable]"))
+    )
+      return;
+    const touch = event.touches[0];
+    keyboardDrag = {
+      id: touch.identifier,
+      x: touch.clientX,
+      y: touch.clientY,
+      field,
+    };
+  },
+  { passive: true },
+);
+scrollEl.addEventListener(
+  "touchmove",
+  (event) => {
+    const drag = keyboardDrag;
+    if (!drag) return;
+    const touch = [...event.touches].find(
+      (touch) => touch.identifier === drag.id,
+    );
+    if (!touch || event.touches.length !== 1) {
+      keyboardDrag = null;
+      return;
+    }
+    const dy = Math.abs(touch.clientY - drag.y);
+    if (dy < 10 || dy <= Math.abs(touch.clientX - drag.x)) return;
+    keyboardDrag = null;
+    if (phoneNavigation() && document.activeElement === drag.field)
+      drag.field.blur();
+  },
+  { passive: true },
+);
+for (const event of ["touchend", "touchcancel"])
+  scrollEl.addEventListener(event, () => (keyboardDrag = null), {
+    passive: true,
+  });
+
 for (const event of ["pointerdown", "touchmove", "wheel", "keydown"])
   scrollEl.addEventListener(event, releaseBottomFollow, { passive: true });
 scrollEl.addEventListener(
@@ -356,6 +542,8 @@ scrollEl.addEventListener(
 
 if (typeof ResizeObserver !== "undefined") {
   const bottomFollowResize = new ResizeObserver(() => {
+    applySendPin();
+    if (pinHeld()) return;
     const id = bottomFollowConversation ?? viewportHold?.conversation ?? null;
     if (id === null || id !== state.selectedId || toolDetailConversation !== id)
       return;
@@ -368,8 +556,11 @@ if (typeof ResizeObserver !== "undefined") {
 
 // Keys loaded turns and pending bubbles by identity to preserve their DOM.
 // Working turns remain visible before turn_start; cancelling a pending item
-// cannot transfer its hidden DOM node to a queued sibling.
-function threadTemplate(conv: Conversation): TemplateResult {
+// cannot transfer its hidden DOM node to a queued sibling. The live bar is
+// built after the thread renders: it reads which thinking the thread shows.
+function threadTemplate(
+  conv: Conversation,
+): [TemplateResult, (() => TemplateResult) | null] {
   const running = conv.status === "running" || conv.status === "interrupting";
   // Invariant: A conversation the server is deleting has no Pi history to read
   // back: its session is already retired, so say what is happening instead of
@@ -428,7 +619,9 @@ function threadTemplate(conv: Conversation): TemplateResult {
   // tool rows.
   const accepted = acceptedOptimisticEntries(optPending(conv.id));
   const last = blocks.length - 1;
-  const acceptedBefore = last >= 0 && boundaryIsLive(blocks[last]) ? last : -1;
+  const liveBlock =
+    last >= 0 && boundaryIsLive(blocks[last]) ? blocks[last] : undefined;
+  const acceptedBefore = liveBlock ? last : -1;
   const acceptedT = repeat(
     accepted,
     (o) => "acc:" + o.seq,
@@ -455,7 +648,12 @@ function threadTemplate(conv: Conversation): TemplateResult {
     !queued &&
     blocks.length === 0 &&
     activityStatusKind(false, tailShells, tailAgents) === "waiting";
-  return html` ${promptBanner(conv)} ${piHistoryNotice}
+  const liveBar = liveBlock
+    ? () => workingT(conv, liveBlock)
+    : running && !queuedPanel && !currentTurnOpen
+      ? () => workingT(conv)
+      : null;
+  const thread = html` ${promptBanner(conv)} ${piHistoryNotice}
   ${repeat(
     blocks,
     (block) => `${renderedLogGeneration}:${block.key}`,
@@ -464,7 +662,6 @@ function threadTemplate(conv: Conversation): TemplateResult {
       ${activityBoundaryT(conv, block, index === last, queued)}`,
   )}
   ${acceptedBefore < 0 ? acceptedT : nothing}
-  ${running && !queuedPanel && !currentTurnOpen ? workingT(conv) : nothing}
   ${tailWaiting ? waitingPanelT(conv) : nothing}
   ${queuedPanel ? queuedT(conv) : nothing}
   ${running ? nothing : shellUnavailableT(conv)}
@@ -475,6 +672,7 @@ function threadTemplate(conv: Conversation): TemplateResult {
         latestCompaction.text === "Compacting…") ||
         latestCompaction === latestEntry),
   )}
+  ${commentOutbox(conv.id)}
   ${repeat(
     pending,
     (m, i) => m.id ?? i,
@@ -485,6 +683,7 @@ function threadTemplate(conv: Conversation): TemplateResult {
     (o) => "opt:" + o.seq,
     (o) => optimisticBubble(conv, o),
   )}`;
+  return [thread, liveBar];
 }
 
 export function paint(conv: Conversation): void {
@@ -507,6 +706,12 @@ export function paint(conv: Conversation): void {
       ? { ...saved, conversation: conv.id, revealed: false }
       : null;
     bottomFollowConversation = saved ? null : conv.id;
+    // Invariant: A send that opened this conversation (a new agent) keeps
+    // its pin; any other pin belongs to the thread being left.
+    if (sendPin?.conversation === conv.id && sendPin.held) {
+      viewportHold = null;
+      bottomFollowConversation = null;
+    } else sendPin = null;
     // Invariant: A bottom follow the outgoing thread queued must not land here.
     cancelThreadBottom();
     // Invariant: The outgoing thread's offsets mean nothing here; a scroll
@@ -527,19 +732,44 @@ export function paint(conv: Conversation): void {
   const nearBottom =
     scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <
     BOTTOM_FOLLOW_THRESHOLD_PX;
+  if (
+    !viewportHold &&
+    !pinHeld() &&
+    !nearBottom &&
+    !replacingConversation &&
+    bottomFollowConversation === null
+  ) {
+    const saved = captureViewport(scrollEl, [
+      ...msgsEl.querySelectorAll<HTMLElement>("[data-row-id]"),
+    ]);
+    if (saved)
+      viewportHold = { ...saved, conversation: conv.id, revealed: true };
+  }
   const followBottom =
     !viewportHold &&
+    !pinHeld() &&
     shouldFollowConversationBottom(
       previousConversation,
       conv.id,
       nearBottom,
       bottomFollowConversation,
     );
-  render(threadTemplate(conv), msgsEl);
+  const [threadT, liveBar] = threadTemplate(conv);
+  render(threadT, msgsEl);
+  render(liveBar ? liveBar() : nothing, liveBarEl);
+  liveBarEl.hidden = !liveBar;
+  for (const image of msgsEl.querySelectorAll<HTMLImageElement>("img")) {
+    const paused = pausedImages.get(image);
+    if (!paused) continue;
+    pausedImages.delete(image);
+    if (paused.owner === conv.id && !image.hasAttribute("src"))
+      image.setAttribute("src", paused.src);
+  }
   paintShellSurface(conv);
   paintAgentSurface(conv);
   renderMermaidIn(msgsEl);
   renderMathIn(msgsEl);
+  applySendPin();
   if (viewportHold) applyViewportHold();
   else if (followBottom) scrollToBottom();
   updateScrollBtn();
@@ -564,6 +794,9 @@ export function convHash(conv: Conversation): string {
   const shellItems = conv.shells?.items.map((item) =>
     includeElapsed ? item : { ...item, elapsed_seconds: null },
   );
+  const cachedContext = (
+    state.nodes[conv.id] ?? state.sides.find((node) => node.id === conv.id)
+  )?.agent?.context;
   return JSON.stringify([
     conv.thread_generation,
     conv.message_log_generation,
@@ -574,6 +807,8 @@ export function convHash(conv: Conversation): string {
     conv.active_run,
     conv.retry_notice,
     ...contextUsageKey(conv),
+    cachedContext !== undefined,
+    cachedContext,
     rowThreads.get(conv.id)?.instanceId,
     rowThreads.get(conv.id)?.revision,
     conv.compacting,
@@ -615,5 +850,7 @@ export function takeToolDetailConversation(): string | null {
   const current = toolDetailConversation;
   if (current) saveViewport(current);
   toolDetailConversation = null;
+  render(nothing, liveBarEl);
+  liveBarEl.hidden = true;
   return current;
 }

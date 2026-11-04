@@ -2,6 +2,7 @@
 // handles, live rows and per-conversation order; host/ holds the lifecycles
 // (open, registry, send, clear, delete, close, title, import, reads). Settings
 // owns auth. Reap, clear and recovery verify group cleanup before retiring.
+import { runStateClock } from "../run_state_clock";
 import { ServerStoppingError } from "./stopping_error";
 import { IdleHarnesses } from "./idle_harnesses";
 import { ReportHolds } from "./report_holds";
@@ -13,6 +14,7 @@ import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ImageContent, MutableModels } from "@earendil-works/pi-ai";
 import type { CustomProviderSpec } from "./models";
 import type { Config } from "../../config";
+import type { SidebarScript } from "../../sidebar_script";
 import type { LiveState } from "@earendil-works/pi-durable";
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
 import type { DurableViews, PageOptions } from "./durable_rows.ts";
@@ -26,16 +28,20 @@ import {
 import type { ReviveState } from "./revive_doc.ts";
 import type { FffWorker } from "../../extensions/extra/fff/fff_worker.ts";
 import type { TranscriptQuery } from "./transcript.ts";
+import { RequestCaptureWorker } from "./request_capture_worker.ts";
 import type {
   PromptResources,
   PromptResourcesWorker,
 } from "./prompt_resources.ts";
 import type { DurableReport, ReportOutcome } from "./report.ts";
+import type { ConnectedBackends } from "../../backends/connected";
 import type { ShellGroup } from "../../extensions/core/shells/shells.ts";
 import type { OwnedProcess } from "../../process_lifecycle.ts";
 import type { EnvironmentChange } from "../../extensions/core/environment/managed_tools.ts";
+import type { UsageLimits } from "../../extensions/extra/usage-limits/usage-limits.ts";
 import type { LiveRow } from "./follow.ts";
 import { WARNING } from "../../observability/runtime_logging";
+import { MessageSearch, type SearchTarget } from "../../search/index";
 import { timed, timingDetail } from "../../observability/request_timing";
 import type { PiImportOptions, PiImportResult } from "./import_pi_session";
 import { runtime, type Runtime } from "./host/load.ts";
@@ -48,7 +54,6 @@ import { closeAll, closeHarness } from "./host/close.ts";
 import { importArchive, importPi, supportsImport } from "./host/import.ts";
 import {
   contextUsage,
-  markerSummary,
   prompt,
   thinking,
   toolDetails,
@@ -66,6 +71,8 @@ export interface DurableHostDeps extends PromotionRecord {
   dataDir: string;
   /** The instance's settings, restricted by the native settings adapter. */
   config?: Config;
+  /** The sidebar script the settings tool views and changes. */
+  sidebarScript?: SidebarScript;
   /** Where retire() moves a deleted conversation's storage. */
   trashDir: string;
   piAgentDir: string;
@@ -81,6 +88,8 @@ export interface DurableHostDeps extends PromotionRecord {
   liveIds(): string[];
   /** Protect a managed checkout before a cwd change commits. */
   claimWorkdir?(cid: string, cwd: string, signal?: AbortSignal): Promise<void>;
+  /** The existing file collection, without loading the tool environment. */
+  collectionPath?(conv: Rec): string;
   /** The environment the conversation's tools run with. */
   agentEnv(
     conv: Rec,
@@ -94,9 +103,13 @@ export interface DurableHostDeps extends PromotionRecord {
   promptSnapshot(conv: Rec, cwd: string): Promise<PromptSnapshot>;
   // Verified stop of one shell's process group; true once it is proven gone.
   stopGroup(group: ShellGroup): Promise<boolean>;
-  /** Record a detached MCP process group (mcp.ts) for the conversation. */
-  ownProcess(proc: OwnedProcess, cid: string): Promise<void>;
-  /** Verified stop of a recorded MCP group; true once it is proven gone. */
+  /** Record a detached MCP or host-shared search process group. */
+  ownProcess(
+    proc: OwnedProcess,
+    cid: string | null,
+    kind?: "mcp" | "file-search",
+  ): Promise<void>;
+  /** Verified stop of a recorded group; true once it is proven gone. */
   releaseProcess(proc: OwnedProcess): Promise<boolean>;
   /** Monotonic milliseconds for open diagnostics. */
   openClock?(): number;
@@ -108,6 +121,8 @@ export interface DurableHostDeps extends PromotionRecord {
   safetyChanged?(cid: string): void;
   // The conversation's run or live shells changed; its tree row should refresh.
   rowChanged?(cid: string): void;
+  /** A tool call printed the URLs of pull requests it created. */
+  prsCreated?(cid: string, urls: string[], since: number): void;
   /** Effort-1 settings for best-effort top-level conversation naming. */
   titleSettings?(): [string, string];
   /** Apply only while the original default title has not been renamed. */
@@ -123,6 +138,8 @@ export interface DurableHostDeps extends PromotionRecord {
   /** The Settings cap on a model's context window. */
   maximumContextWindow?(): number;
   models?: MutableModels;
+  /** Records the subscription usage limits that model responses report. */
+  usageLimits?: Pick<UsageLimits, "login" | "record">;
   /** Settings' custom providers (model-providers.json), from Config's cache. */
   customProviders?(): Record<string, CustomProviderSpec>;
   /** The server environment's value of a custom provider's own env_key. */
@@ -131,6 +148,8 @@ export interface DurableHostDeps extends PromotionRecord {
   warmSettings?(): void;
   /** How long a latest request stays in memory before it moves to its file. */
   captureIdleMs?: number;
+  /** Inject the warming scheduler; other Durable clocks stay real. */
+  warmingClock?: import("../../extensions/extra/cache-warm/cache-warm").WarmingClock;
   /** How long an unused Harness stays open after its last activity. */
   harnessIdleMs?: number;
 }
@@ -139,12 +158,15 @@ export interface DurableHostDeps extends PromotionRecord {
  * exclude two processes opening the same conversation storage. Members
  * without `private` are shared with the lifecycles in ./host/. */
 export class DurableHost {
+  /** Shared connection operations, installed by the app before runs start. */
+  remoteSettings?: Pick<ConnectedBackends, "request" | "listForAgents">;
   private worker: SqliteWorker | null = null;
   private images: Promise<ImageProcessor> | null = null;
   private searchWorker: FffWorker | null = null;
   /** A search thread a failed warm-up dropped; shutdown waits for it. */
   private retiredSearch: Promise<void> = Promise.resolve();
   private promptWorker: PromptResourcesWorker | null = null;
+  readonly captureWorker = new RequestCaptureWorker();
   /** Focused opens in flight, with their conversation ids. */
   private readonly onDemand = new Map<Promise<Opened>, string>();
   /** Background conversation naming (host/title.ts), by conversation. */
@@ -154,17 +176,48 @@ export class DurableHost {
   >();
   /** Each conversation's open handle, or the open or rotation making it. */
   readonly opened = new Map<string, Promise<Opened>>();
+  private readonly readyOpened = new WeakMap<Promise<Opened>, Opened>();
   readonly idle: IdleHarnesses<Opened>;
   /** Side conversations' promotions to subagents (promotion.ts). */
   readonly promotions: Promotions;
   /** Verified closes after idle or a failed session; opens wait for them. */
   readonly recovering = new Map<string, Promise<void>>();
   private modelsValue: MutableModels | null = null;
+  private catalogRefresh: Promise<unknown> | null = null;
   private syncCustom:
     | ((providers: Record<string, CustomProviderSpec>) => void)
     | null = null;
   /** Synchronous reads share the row owned by each open handle. */
   readonly liveRows = new Map<string, LiveRow>();
+  readonly cacheWarmers = new Set<ReturnType<Runtime["createCacheWarm"]>>();
+
+  /** API v1 idle reasons: run, inbox or shell, including descendants. */
+  cacheWarmBusy(cid: string): boolean {
+    for (const [other, row] of this.liveRows) {
+      if (!row.runId && !row.queued && !row.shells.size) continue;
+      let id: string | undefined = other;
+      const seen = new Set<string>();
+      while (id && !seen.has(id)) {
+        if (id === cid) return true;
+        seen.add(id);
+        const record = this.deps.load(id, ["parent", "side_of"]);
+        id =
+          !record?.side_of && typeof record?.parent === "string"
+            ? record.parent
+            : undefined;
+      }
+    }
+    return false;
+  }
+
+  invalidatePromptCache(cid: string): void {
+    for (const warmer of this.cacheWarmers) warmer.cancel(cid);
+  }
+
+  reconcileCacheWarmers(): void {
+    for (const warmer of this.cacheWarmers) warmer.reconcile();
+  }
+  private readonly viewListeners = new Map<string, Set<() => void>>();
   views: DurableViews | null = null;
   /** Harness closes started by retire(), awaited again by a retry. */
   readonly retiring = new Map<string, Promise<unknown>>();
@@ -184,11 +237,26 @@ export class DurableHost {
   private closingTask: Promise<void> | null = null;
   /** Stores kept at reap and clear, for revive. */
   readonly archive: AgentArchive;
+  readonly messageSearch: MessageSearch;
+  readonly storageReads = new Map<
+    string,
+    Set<{
+      done: Promise<void>;
+      cid: string;
+      page: string;
+      started: number;
+    }>
+  >();
 
   constructor(
     readonly deps: DurableHostDeps,
     readonly focusWaitMs = FOCUS_WAIT_MS,
   ) {
+    this.messageSearch = new MessageSearch(deps.log, async (target) =>
+      this.worker?.hasDatabase(target.path)
+        ? this.worker.syncSearch(target)
+        : undefined,
+    );
     this.promotions = new Promotions({
       ...deps,
       stopping: (cid) => this.closing || this.deleting(cid),
@@ -196,7 +264,9 @@ export class DurableHost {
       open: (cid) => this.open(cid),
       storage: async (path) => {
         const rt = await runtime();
-        return rt.openWorkerSqliteStorage(this.sqlite(rt), path);
+        return this.messageSearch.withStores([path], () =>
+          rt.openWorkerSqliteStorage(this.sqlite(rt), path),
+        );
       },
       models: () => this.models(),
       forget: (cid, main) => forgetFork(this, main, cid),
@@ -228,10 +298,28 @@ export class DurableHost {
     this.archive = new AgentArchive(
       join(deps.dataDir, "agent-archive"),
       async (path) => this.sqlite(await runtime()).openDatabase(path),
+      (paths, operation) => this.messageSearch.withStores(paths, operation),
     );
   }
 
-  /** The shared SQLite thread; `rt` is loaded first so one thread is made. */
+  /** Subscribe to one conversation's live changes; the caller unsubscribes. */
+  subscribeView(cid: string, listener: () => void): () => void {
+    let listeners = this.viewListeners.get(cid);
+    if (!listeners) this.viewListeners.set(cid, (listeners = new Set()));
+    listeners.add(listener);
+    return () => {
+      listeners.delete(listener);
+      if (!listeners.size && this.viewListeners.get(cid) === listeners)
+        this.viewListeners.delete(cid);
+    };
+  }
+
+  /** Wake only subscribers of the changed conversation. */
+  viewChanged(cid: string): void {
+    for (const listener of this.viewListeners.get(cid) ?? []) listener();
+  }
+
+  /** The SQLite worker owner, loaded with the runtime. */
   sqlite(rt: Runtime): SqliteWorker {
     return (this.worker ??= new rt.SqliteWorker());
   }
@@ -243,36 +331,72 @@ export class DurableHost {
       ));
   }
 
-  // Archive a closed store as cid.key; true also for intentional skips.
+  private async waitStorageReads(cid?: string): Promise<void> {
+    const readers =
+      cid === undefined
+        ? [...this.storageReads.values()].flatMap((leases) => [...leases])
+        : [...(this.storageReads.get(this.storagePath(cid)) ?? [])];
+    if (!readers.length) return;
+    const started = performance.now();
+    const holders = readers.map(({ cid, page, started: since }) => ({
+      cid,
+      page,
+      held_ms: Math.round(started - since),
+    }));
+    this.deps.log("durable_storage_read_wait", { cid, holders });
+    await Promise.all(readers.map((reader) => reader.done));
+    this.deps.log("durable_storage_read_wait_done", {
+      cid,
+      holders,
+      wait_ms: Math.round(performance.now() - started),
+    });
+  }
+
+  // Archive eligible storage, then finish retirement under the reader fence.
   // Failure logs its cause at WARNING and returns false.
   async keepStore(
     cid: string,
     reason: ArchiveReason,
-    key: string,
+    key: string | undefined,
+    finish: () => boolean | Promise<boolean>,
   ): Promise<boolean> {
     const conv = this.deps.load(cid);
-    if (conv === null || conv.service_principal != null) return true;
-    const parent = typeof conv.parent === "string" ? conv.parent : null;
-    const text = (value: unknown) => (typeof value === "string" ? value : null);
+    const retained =
+      conv !== null && conv.service_principal == null && key !== undefined
+        ? { conv, key }
+        : null;
     try {
-      await this.archive.keep(join(this.storagePath(cid), ".."), {
-        archive_id: `${cid}.${key}`,
-        cid,
-        reason,
-        title: text(conv.title),
-        parent,
-        parent_title: parent
-          ? text(this.deps.load(parent, ["title"])?.title)
-          : null,
-        top_level: parent === null,
-        model: text(conv.model),
-        effort: text(conv.effort),
-        level: typeof conv.level === "number" ? conv.level : null,
-        workdir: text(conv.workdir),
-        created: typeof conv.created === "number" ? conv.created : null,
-        archived: Date.now() / 1000,
-      });
-      return true;
+      await this.waitStorageReads(cid);
+      const move = async () => {
+        if (retained) {
+          const { conv, key } = retained;
+          const parent = typeof conv.parent === "string" ? conv.parent : null;
+          const text = (value: unknown) =>
+            typeof value === "string" ? value : null;
+          await this.archive.keep(join(this.storagePath(cid), ".."), {
+            archive_id: `${cid}.${key}`,
+            cid,
+            reason,
+            title: text(conv.title),
+            parent,
+            parent_title: parent
+              ? text(this.deps.load(parent, ["title"])?.title)
+              : null,
+            top_level: parent === null,
+            model: text(conv.model),
+            effort: text(conv.effort),
+            level: typeof conv.level === "number" ? conv.level : null,
+            workdir: text(conv.workdir),
+            created: typeof conv.created === "number" ? conv.created : null,
+            archived: Date.now() / 1000,
+          });
+        }
+        return finish();
+      };
+      const target = this.searchTarget(cid);
+      return retained
+        ? await this.messageSearch.rotate(target, move)
+        : await this.messageSearch.withStores([target.path], move);
     } catch (error) {
       this.deps.log(
         "durable_archive_failed",
@@ -308,12 +432,18 @@ export class DurableHost {
     return conv?.backend === "durable";
   }
 
-  /** The shared Models, with Settings' current custom providers. */
+  /** Settings' shared models, custom providers and stored catalog. */
   async models(): Promise<MutableModels> {
     if (this.modelsValue === null) {
       const rt = await runtime();
-      this.modelsValue ??=
-        this.deps.models ?? rt.durableModels(this.deps.piAgentDir);
+      if (this.modelsValue === null) {
+        const models =
+          this.deps.models ?? rt.durableModels(this.deps.piAgentDir);
+        const { usageLimits } = this.deps;
+        this.modelsValue = usageLimits
+          ? rt.observeUsageLimits(models, usageLimits)
+          : models;
+      }
       this.syncCustom ??= rt.customProviderSync(this.modelsValue, (provider) =>
         this.deps.customProviderEnvValue?.(provider),
       );
@@ -323,6 +453,14 @@ export class DurableHost {
     } catch {
       // Invariant: An unreadable model-providers.json keeps the last providers.
     }
+    if (!this.deps.models) {
+      this.catalogRefresh ??= this.modelsValue
+        .refresh({ allowNetwork: false })
+        .finally(() => {
+          this.catalogRefresh = null;
+        });
+      await this.catalogRefresh;
+    }
     return this.modelsValue;
   }
 
@@ -330,6 +468,11 @@ export class DurableHost {
    * MCP servers; undefined when signed out. */
   async providerToken(provider: string): Promise<string | undefined> {
     return (await runtime()).providerToken(await this.models(), provider);
+  }
+
+  /** A root conversation's search store, without opening its Harness. */
+  searchTarget(cid: string): SearchTarget {
+    return { cid, path: this.storagePath(cid) };
   }
 
   storagePath(cid: string): string {
@@ -451,9 +594,9 @@ export class DurableHost {
   private watchFailure(cid: string, opened: Promise<Opened>): void {
     void opened.then(
       (handle) => {
+        this.readyOpened.set(opened, handle);
         void handle.harness.closed.then((end) => {
-          if (end.reason !== "failed" || this.opened.get(cid) !== opened)
-            return;
+          if (end.kind !== "failed" || this.opened.get(cid) !== opened) return;
           this.deps.log("durable_session_failed", {
             cid,
             error: String(end.error),
@@ -569,6 +712,7 @@ export class DurableHost {
     )
       return;
     this.rotating.add(cid);
+    // Spec: @tla fence {p:this.storagePath(cid), k:"page"}
     this.deps.log("durable_clear", { cid, held: clear.held.length });
     // Invariant: Rotation retires the storage that holds the forks.
     this.deps.clearingSides?.(cid);
@@ -579,7 +723,9 @@ export class DurableHost {
         return await openHarness(this, cid);
       } finally {
         this.rotating.delete(cid);
+        // Spec: @tla unfence {p:this.storagePath(cid), k:"page"}
         this.idle.retain(cid);
+        this.viewChanged(cid);
       }
     })();
     this.opened.set(cid, rotation);
@@ -591,7 +737,7 @@ export class DurableHost {
   }
 
   /** Queued rows, then the rows a clear holds. */
-  private pendingRows(cid: string): Rec[] {
+  pendingRows(cid: string): Rec[] {
     const held = (this.clears.get(cid)?.held ?? []).map((item) => {
       const [origin, sender, senderName, content] = splitPiUserText(
         item.content,
@@ -613,7 +759,7 @@ export class DurableHost {
   }
 
   /** ["clear"] while a requested clear waits. */
-  private pendingActions(cid: string): string[] {
+  pendingActions(cid: string): string[] {
     return this.clears.has(cid) ? ["clear"] : [];
   }
 
@@ -629,6 +775,7 @@ export class DurableHost {
    */
   async stop(cid: string, expectedRun?: string): Promise<boolean> {
     const { harness } = await this.open(cid);
+    this.invalidatePromptCache(cid);
     const run = (await this.live(cid))?.run;
     if (run === undefined) return false;
     if (expectedRun !== undefined && String(run.taskId) !== expectedRun)
@@ -781,11 +928,15 @@ export class DurableHost {
   }
 
   searchService(Worker: typeof FffWorker): FffWorker {
-    return (this.searchWorker ??= new Worker(process.env));
+    return (this.searchWorker ??= new Worker(process.env, {
+      own: (proc) => this.deps.ownProcess(proc, null, "file-search"),
+      release: (proc) => this.deps.releaseProcess(proc),
+      log: (fields) => this.deps.log("file_search_crashed", fields, WARNING),
+    }));
   }
 
-  /** Start the search thread and import pi-fff on it, so the first open
-   * waits for neither. Best-effort: on failure it logs, drops that thread,
+  /** Start the search child and import pi-fff in it, so the first open
+   * waits for neither. Best-effort: on failure it logs, drops that child,
    * and the next open starts one the lazy way. */
   warmSearch(): void {
     let worker: FffWorker | undefined;
@@ -839,16 +990,27 @@ export class DurableHost {
   private async publishedFiles(
     cid: string,
     callIds: readonly string[],
-  ): Promise<Record<string, unknown[]>> {
+  ): Promise<{ files: Record<string, unknown[]>; complete: boolean }> {
     const { publishedCallFiles } =
       await import("../runtime/attachments/published.ts");
-    const env = await this.deps.agentEnv(this.deps.load(cid)!);
-    const files = await publishedCallFiles(this.collection(cid, env), cid);
-    return Object.fromEntries(
-      callIds
-        .filter((id) => Object.hasOwn(files, id))
-        .map((id) => [id, files[id]!]),
-    );
+    const conv = this.deps.load(cid)!;
+    const path = this.deps.collectionPath
+      ? this.deps.collectionPath(conv)
+      : this.collection(cid, {});
+    const lookup = await publishedCallFiles(path, cid);
+    const result: Record<string, unknown[]> = Object.create(null);
+    // Invariant: Pi names nested calls by appending /key to their parent id.
+    for (const [call, items] of Object.entries(lookup.files)) {
+      let owner: string | undefined;
+      for (const id of callIds)
+        if (
+          (call === id || call.startsWith(`${id}/`)) &&
+          (owner === undefined || id.length > owner.length)
+        )
+          owner = id;
+      if (owner !== undefined) (result[owner] ??= []).push(...items);
+    }
+    return { files: result, complete: lookup.complete };
   }
 
   /** A prompt's context files and skills, read off the event loop. */
@@ -873,20 +1035,45 @@ export class DurableHost {
 
   /** The /view page of a Durable conversation. */
   async view(cid: string, options: PageOptions = {}): Promise<Rec> {
-    const { conversation, harness } = await this.open(cid);
-    const { DurableViews } = await runtime();
-    return (this.views ??= new DurableViews()).page(
-      cid,
-      harness,
-      conversation,
-      context,
-      {
-        pending: this.pendingRows(cid),
-        pending_actions: this.pendingActions(cid),
-      },
-      options,
-      (callIds) => this.publishedFiles(cid, callIds),
-    );
+    if (this.closing) throw new ServerStoppingError("server is stopping");
+    if (this.deleting(cid))
+      throw new Error(`conversation is being deleted: ${cid}`);
+    const pending = this.opened.get(cid);
+    let opened =
+      pending &&
+      !this.recovering.has(cid) &&
+      !this.rotating.has(cid) &&
+      !this.clears.has(cid)
+        ? this.readyOpened.get(pending)
+        : undefined;
+    if (opened) this.idle.retain(cid);
+    const files = (callIds: readonly string[]) =>
+      this.publishedFiles(cid, callIds);
+    const { storageView } = await import("./host/view");
+    let page = opened ? null : await storageView(this, cid, options, files);
+    if (page === null) {
+      opened ??= await this.open(cid);
+      const { DurableViews } = await runtime();
+      page = await (this.views ??= new DurableViews()).page(
+        cid,
+        opened.harness,
+        opened.conversation,
+        context,
+        {
+          pending: this.pendingRows(cid),
+          pending_actions: this.pendingActions(cid),
+        },
+        options,
+        files,
+      );
+    }
+    const state = this.metadata(cid);
+    return {
+      ...page,
+      turn_status: state.status,
+      active_run: state.active_run,
+      run_state_clock: state.run_state_clock,
+    };
   }
 
   // Overlay live run, queue and safety state on metadata. Review hooks read
@@ -894,6 +1081,7 @@ export class DurableHost {
   metadata(cid: string): {
     status: string;
     active_run: string | null;
+    run_state_clock: [string, number];
     pending: Rec[];
     pending_actions: string[];
     safety_off: boolean;
@@ -906,6 +1094,7 @@ export class DurableHost {
     return {
       status: run === null ? "idle" : "running",
       active_run: run,
+      run_state_clock: runStateClock(),
       pending: this.pendingRows(cid),
       pending_actions: this.pendingActions(cid),
       safety_off: off,
@@ -946,6 +1135,11 @@ export class DurableHost {
     return transcriptWindow(conversation, options, context);
   }
 
+  /** Last usage committed while followed; null for cold or unsampled agents. */
+  cachedContextUsage(cid: string): Rec | null {
+    return this.liveRows.get(cid)?.contextUsage ?? null;
+  }
+
   /** One 64-entry usage page and the latest bounded request capture. */
   contextUsage(cid: string): Promise<Rec> {
     return contextUsage(this, cid);
@@ -961,11 +1155,6 @@ export class DurableHost {
     return turnPrompt(this, cid, offset);
   }
 
-  /** The summary of the compaction entry at `offset`. */
-  markerSummary(cid: string, offset: number): Promise<Rec | null> {
-    return markerSummary(this, cid, offset);
-  }
-
   // Stop recorded groups before Harness close, even for abort-ignoring tools.
   // Refuse later opens; pending close keeps storage under the directory lock.
   // Shell tasks survive for restart notices; reject naming any surviving pids.
@@ -975,11 +1164,14 @@ export class DurableHost {
 
   private async shutdown(): Promise<void> {
     const failures = await closeAll(this);
+    await this.waitStorageReads();
+    await this.messageSearch.close();
     await this.archive.close().catch(() => undefined);
-    this.worker?.close();
+    await this.worker?.close();
     await this.searchWorker?.close();
     await this.retiredSearch;
     await this.promptWorker?.close();
+    await this.captureWorker.close();
     if (failures.length)
       throw new Error(
         `shell processes survived shutdown: ${failures.join("; ")}`,

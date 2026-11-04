@@ -12,6 +12,8 @@ import { open, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
+import { RECURSE_SETTINGS_SKILL } from "../../coding_backend/skills";
+import { slowSpan } from "../../observability/slow_span";
 
 export interface PromptResources {
   contextFiles: Array<{ path: string; content: string }>;
@@ -97,8 +99,12 @@ export async function loadPromptResources(
       loadProjectContextFiles({ cwd, agentDir }),
       agentDir,
     ),
-    skills: loadSkills({ cwd, agentDir, skillPaths, includeDefaults: true })
-      .skills,
+    skills: loadSkills({
+      cwd,
+      agentDir,
+      skillPaths: [RECURSE_SETTINGS_SKILL, ...skillPaths],
+      includeDefaults: true,
+    }).skills,
   };
 }
 
@@ -114,13 +120,20 @@ export class PromptResourcesWorker {
   constructor(
     private readonly onFallback: (error: Error) => void,
     private readonly url = new URL(
-      "./prompt_resources_thread.ts",
+      "./prompt_resources.worker.ts",
       import.meta.url,
     ),
   ) {}
 
   private start(): Thread {
-    const thread: Thread = { worker: new Worker(this.url), waiting: [] };
+    const thread: Thread = {
+      worker: slowSpan(
+        "prompt_resources_worker_create",
+        undefined,
+        () => new Worker(this.url),
+      ),
+      waiting: [],
+    };
     const failed = (error: Error) => {
       if (this.thread === thread) this.thread = undefined;
       for (const waiter of thread.waiting.splice(0)) waiter.reject(error);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -61,22 +61,22 @@ afterEach(() => {
 });
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-async function waitFor(pred: () => boolean, timeoutMs = 4000): Promise<void> {
+async function waitFor(
+  pred: () => boolean | Promise<boolean>,
+  timeoutMs = 4000,
+): Promise<void> {
   const start = Date.now();
-  while (!pred()) {
+  while (!(await pred())) {
     if (Date.now() - start > timeoutMs) throw new Error("waitFor timed out");
     await sleep(15);
   }
-}
-function readOne(store: RegistryStore, id: string): ShellRecord | undefined {
-  return store.readAll().find((r) => r.id === id);
 }
 
 test("a transient initial ownership-write failure retries from a monitor tick", async () => {
   const { logDir, stateBase } = testDirs();
   class FlakyStore extends RegistryStore {
     attempts = 0;
-    override write(record: ShellRecord): boolean {
+    override async write(record: ShellRecord): Promise<boolean> {
       this.attempts++;
       if (this.attempts === 1) return false;
       return super.write(record);
@@ -92,20 +92,21 @@ test("a transient initial ownership-write failure retries from a monitor tick", 
     store,
   );
   const shell = reg.run("sleep 1", "background", process.cwd());
-  assert.equal(
-    readOne(store, shell.id),
-    undefined,
-    "first atomic write was unavailable",
+  await reg.waitForLaunch(shell);
+  assert.equal(store.attempts, 1, "first atomic write was unavailable");
+  await waitFor(
+    async () => (await store.readRecord(shell.id))?.status === "running",
   );
-  await waitFor(() => readOne(store, shell.id)?.status === "running");
-  const record = readOne(store, shell.id)!;
+  const record = (await store.readRecord(shell.id))!;
   assert.ok(record.identity, "retried ownership record is identity verified");
   assert.equal(record.pid, shell.pid);
   assert.equal(record.pgid, shell.pgid);
-  store.remove(shell.id);
-  assert.equal(readOne(store, shell.id), undefined);
-  await waitFor(() => readOne(store, shell.id)?.status === "running");
-  assert.equal(readOne(store, shell.id)?.identity, record.identity);
+  await store.remove(shell.id);
+  assert.equal(await store.readRecord(shell.id), undefined);
+  await waitFor(
+    async () => (await store.readRecord(shell.id))?.status === "running",
+  );
+  assert.equal((await store.readRecord(shell.id))?.identity, record.identity);
   await reg.shutdown();
 });
 
@@ -114,14 +115,19 @@ test("spawning writes a running record; completion updates it to exited", async 
   const store = new RegistryStore(stateBase, "sess");
   const reg = new ShellRegistry(new FakeNotifier(), cfg(logDir), store);
   const shell = reg.run("echo hi; sleep 0.2", "background", process.cwd());
-  await waitFor(() => readOne(store, shell.id)?.status === "running");
-  const running = readOne(store, shell.id)!;
+  await reg.waitForLaunch(shell);
+  await waitFor(
+    async () => (await store.readRecord(shell.id))?.status === "running",
+  );
+  const running = (await store.readRecord(shell.id))!;
   assert.equal(running.pid, shell.pid);
   assert.equal(running.pgid, shell.pgid);
   assert.equal(running.command, "echo hi; sleep 0.2");
   assert.equal(running.mode, "background");
-  await waitFor(() => readOne(store, shell.id)?.status === "exited");
-  assert.equal(readOne(store, shell.id)!.exitCode, 0);
+  await waitFor(
+    async () => (await store.readRecord(shell.id))?.status === "exited",
+  );
+  assert.equal((await store.readRecord(shell.id))!.exitCode, 0);
 });
 
 test("an external kill updates the record to killed with the signal", async () => {
@@ -129,14 +135,18 @@ test("an external kill updates the record to killed with the signal", async () =
   const store = new RegistryStore(stateBase, "sess");
   const reg = new ShellRegistry(new FakeNotifier(), cfg(logDir), store);
   const shell = reg.run("sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   await waitFor(
-    () =>
-      shell.pid !== undefined && readOne(store, shell.id)?.status === "running",
+    async () =>
+      shell.pid !== undefined &&
+      (await store.readRecord(shell.id))?.status === "running",
   );
   process.kill(-shell.pgid!, "SIGKILL");
-  await waitFor(() => readOne(store, shell.id)?.status === "killed");
-  assert.equal(readOne(store, shell.id)!.signal, "SIGKILL");
-  const pending = store.loadPendingCompletions();
+  await waitFor(
+    async () => (await store.readRecord(shell.id))?.status === "killed",
+  );
+  assert.equal((await store.readRecord(shell.id))!.signal, "SIGKILL");
+  const pending = await store.loadPendingCompletions();
   assert.equal(pending.length, 1);
   assert.match(pending[0].message, /killed by SIGKILL/);
 });
@@ -146,19 +156,68 @@ test("eviction removes old terminated records and their files", async () => {
   const store = new RegistryStore(stateBase, "sess");
   const reg = new ShellRegistry(
     new FakeNotifier(),
-    cfg(logDir, { maxTrackedShells: 3 }),
+    cfg(logDir, { maxTrackedShells: 1 }),
     store,
   );
   for (let i = 0; i < 12; i++) {
-    const s = reg.run(`echo run-${i}`, "background", process.cwd());
-    // eslint-disable-next-line no-await-in-loop
-    await waitFor(() => s.completed);
-    assert.ok(reg.completionPersistence()!.acknowledge([s.id]));
+    const a = reg.run(
+      `echo run-${i}; sleep 0.025`,
+      "background",
+      process.cwd(),
+    );
+    await reg.waitForLaunch(a);
+    const b = reg.run(
+      `echo overlap-${i}; sleep 0.025`,
+      "background",
+      process.cwd(),
+    );
+    await reg.waitForLaunch(b);
+    await waitFor(async () => a.completed && b.completed);
+    await waitFor(async () => {
+      const pending = await store.loadPendingCompletions();
+      return [a, b].every((shell) =>
+        pending.some((record) => record.id === shell.id),
+      );
+    });
+    const pending = await store.loadPendingCompletions();
+    assert.ok(
+      pending
+        .find((record) => record.id === a.id)!
+        .message.endsWith(`\nrun-${i}\n`),
+      JSON.stringify(pending.find((record) => record.id === a.id)!.message),
+    );
+    assert.ok(
+      pending
+        .find((record) => record.id === b.id)!
+        .message.endsWith(`\noverlap-${i}\n`),
+      JSON.stringify(pending.find((record) => record.id === b.id)!.message),
+    );
+    assert.equal(reg.get(a.id), a);
+    assert.equal(reg.get(b.id), b);
+    const heldA = reg.retainOutput(a);
+    const nestedA = reg.retainOutput(a);
+    const heldB = reg.retainOutput(b);
+    assert.ok(await reg.completionPersistence()!.acknowledge([a.id, b.id]));
+    assert.ok(existsSync(a.logPath));
+    assert.ok(existsSync(b.logPath));
+    heldA[Symbol.dispose]();
+    heldA[Symbol.dispose]();
+    assert.equal(reg.get(a.id), a);
+    nestedA[Symbol.dispose]();
+    assert.equal(reg.get(a.id), undefined);
+    assert.equal(existsSync(a.logPath), false);
+    assert.equal(reg.get(b.id), b);
+    heldB[Symbol.dispose]();
   }
   const files = readdirSync(store.dir).filter((n) => n.endsWith(".json"));
   assert.ok(files.length <= 3, `record files bounded (got ${files.length})`);
+  assert.ok(
+    files.length <= 1,
+    `single-record cap retained (got ${files.length})`,
+  );
 });
 
+// Regression: #3066 await the shell commit before reading durable failure records.
 test("a failed background spawn is durably queued for delivery", async () => {
   const { logDir, stateBase } = testDirs();
   const store = new RegistryStore(stateBase, "sess");
@@ -168,9 +227,11 @@ test("a failed background spawn is durably queued for delivery", async () => {
     store,
   );
   const shell = reg.run("echo never", "background", process.cwd());
-  await waitFor(() => shell.completed);
-  assert.equal(readOne(store, shell.id)?.status, "failed");
-  const pending = store.loadPendingCompletions();
+  await reg.waitForLaunch(shell);
+  await waitFor(async () => shell.completed);
+  await store.flush(shell.id);
+  assert.equal((await store.readRecord(shell.id))?.status, "failed");
+  const pending = await store.loadPendingCompletions();
   assert.equal(pending.length, 1);
   assert.match(pending[0].message, /failed to start/);
 });
@@ -180,14 +241,17 @@ test("teardown freezes records as running so a resume can recover them", async (
   const store = new RegistryStore(stateBase, "sess");
   const reg = new ShellRegistry(new FakeNotifier(), cfg(logDir), store);
   const shell = reg.run("sleep 30", "background", process.cwd());
-  await waitFor(() => readOne(store, shell.id)?.status === "running");
+  await reg.waitForLaunch(shell);
+  await waitFor(
+    async () => (await store.readRecord(shell.id))?.status === "running",
+  );
   await reg.shutdown();
   await waitFor(
-    () =>
+    async () =>
       !!shell.child &&
       (shell.child.exitCode !== null || shell.child.signalCode !== null),
   );
-  assert.equal(readOne(store, shell.id)?.status, "running");
+  assert.equal((await store.readRecord(shell.id))?.status, "running");
 });
 
 test("verifySignalIdentity passes the owner, refuses strangers", async () => {
@@ -198,8 +262,9 @@ test("verifySignalIdentity passes the owner, refuses strangers", async () => {
     new RegistryStore(stateBase, "s"),
   );
   const shell = reg.run("sleep 30", "background", process.cwd());
+  await reg.waitForLaunch(shell);
   try {
-    await waitFor(() => shell.pid !== undefined);
+    await waitFor(async () => shell.pid !== undefined);
     assert.equal(verifySignalIdentity(shell), true);
     assert.equal(verifySignalIdentity({ ...shell, identity: "0" }), false);
     assert.equal(

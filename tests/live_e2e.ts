@@ -189,10 +189,10 @@ export async function waitModels(
 
 export async function secondModelTurn(
   base: string,
-  privateRoot: string,
-  output: string,
+  _privateRoot: string,
+  _output: string,
   model: string,
-): Promise<void> {
+): Promise<string> {
   const cid = String(
     (await request(base, "api/conversations", { parent: null, model })).id,
   );
@@ -205,16 +205,7 @@ export async function secondModelTurn(
   )
     throw new Error("second-model admission failed");
   await waitSettled(base, cid, null, 600);
-  const rows = await retainSession(
-    privateRoot,
-    cid,
-    join(output, "second-model-session.jsonl"),
-  );
-  const replies = rows
-    .flatMap((row) => row.model ?? [])
-    .filter((message: Json) => message.role === "assistant");
-  validateSecondModelReplies(replies, model);
-  console.log(`second model ${model}: ${replies.length} replies on that route`);
+  return cid;
 }
 
 function argValue(args: string[], name: string): string | undefined {
@@ -245,6 +236,7 @@ export async function run(args = process.argv.slice(2)): Promise<void> {
   const logFd = openServerLog(log);
   let server: LiveProcess | null = null;
   let cid: string | null = null;
+  let secondValidation: { cid: string; model: string } | undefined;
   let evidenceError: unknown = null;
   let cleanupError: unknown = null;
   let authError: unknown = null;
@@ -320,7 +312,11 @@ export async function run(args = process.argv.slice(2)): Promise<void> {
       await browser.close();
       console.log(`phase ${index + 1} screenshot saved`);
     }
-    if (second) await secondModelTurn(base, privateRoot, output, second);
+    if (second)
+      secondValidation = {
+        cid: await secondModelTurn(base, privateRoot, output, second),
+        model: second,
+      };
     console.log(`VERIFY base=${base} cid=${cid} evidence=${output}`);
     if (verifyLive) {
       const deadline = Date.now() + 3_600_000;
@@ -342,7 +338,6 @@ export async function run(args = process.argv.slice(2)): Promise<void> {
       try {
         const pages = await viewPages(base, cid);
         await writeFile(join(output, "view-pages.json"), JSON.stringify(pages));
-        await retainSession(privateRoot, cid, join(output, "session.jsonl"));
       } catch (error) {
         evidenceError = error;
       }
@@ -350,6 +345,22 @@ export async function run(args = process.argv.slice(2)): Promise<void> {
     if (server) {
       try {
         await stopServer(server);
+        if (cid)
+          await retainSession(privateRoot, cid, join(output, "session.jsonl"));
+        if (secondValidation) {
+          const rows = await retainSession(
+            privateRoot,
+            secondValidation.cid,
+            join(output, "second-model-session.jsonl"),
+          );
+          const replies = rows
+            .flatMap((row) => row.model ?? [])
+            .filter((message: Json) => message.role === "assistant");
+          validateSecondModelReplies(replies, secondValidation.model);
+          console.log(
+            `second model ${secondValidation.model}: ${replies.length} replies on that route`,
+          );
+        }
       } catch (error) {
         cleanupError = error;
       }

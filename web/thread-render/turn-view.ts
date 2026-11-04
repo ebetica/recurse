@@ -403,8 +403,27 @@ export function codemodeScript(args: string): string {
 
 /** Script row label counts all nested calls, including those past the cap. */
 export function codemodeHeaderLabel(calls: readonly CodemodeCall[]): string {
-  const count = calls.reduce((n, call) => n + (call.omitted ?? 1), 0);
-  return count === 0 ? "Ran a script" : `Ran a script · ${count} tools`;
+  const counts = new Map<string, number>();
+  const add = (name: string, count: number) => {
+    name = codemodeCallName(name || "tool");
+    counts.set(name, (counts.get(name) ?? 0) + count);
+  };
+  for (const call of calls) {
+    if (call.omitted !== undefined) {
+      let remaining = call.omitted;
+      for (const item of call.summary ?? []) {
+        add(item.name, item.count);
+        remaining -= item.count;
+      }
+      if (remaining > 0) add("tool", remaining);
+    } else add(call.name, 1);
+  }
+  const sorted = [...counts].sort((a, b) => b[1] - a[1]);
+  if (!sorted.length) return "Ran a script";
+  const parts = sorted.slice(0, 2).map(([name, count]) => `${count} ${name}`);
+  const rest = sorted.slice(2).reduce((sum, [, count]) => sum + count, 0);
+  if (rest) parts.push(`+${rest} more`);
+  return `Ran a script · ${parts.join(", ")}`;
 }
 
 // Read from the error text pi-safety writes. A server's own error that starts

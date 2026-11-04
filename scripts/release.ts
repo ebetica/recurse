@@ -1,6 +1,8 @@
 #!/usr/bin/env bun
 // Build releases in a private temporary clone; retained refs and a saved plan
-// separate review from interactive publication. No caller checkout is changed.
+// separate review from interactive publication. Publication attaches install.sh
+// from the release tree; replacements recreate the GitHub Release. No caller
+// checkout is changed.
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -15,9 +17,11 @@ const HELP = `usage: bun scripts/release.ts X.Y.Z [--notes FILE] [--replace]
 Build from a fresh recurse-dev main clone, edit notes in $VISUAL/$EDITOR
 (default vi) in a terminal, and show commits, tree diff and notes. Nothing
 is pushed. The printed DIR retains the clone, notes and built refs.
---push publishes that saved build only, after typing X.Y.Z in a terminal.
+--push publishes that saved build and its install.sh release asset, after
+  typing X.Y.Z in a terminal.
 --replace rebuilds against the existing public release's parent (or main's
-parent without that tag); publication uses exact force-with-lease checks.
+  parent without that tag); publication uses exact force-with-lease checks and
+  recreates an existing GitHub Release.
 --dev-remote URL / --public-remote URL override the GitHub remotes.
 -h, --help show this help.
 `;
@@ -161,6 +165,16 @@ async function publish(dir: string, version: string) {
   ]);
   const notes = join(dir, "published-notes.md");
   await Bun.write(notes, plan.notes);
+  const asset = join(dir, "install.sh");
+  await run([
+    "sh",
+    "-c",
+    'git -C "$1" show "$2:install.sh" > "$3"',
+    "release-asset",
+    repo,
+    plan.commit,
+    asset,
+  ]);
   if (
     plan.replace &&
     (await run([
@@ -178,28 +192,28 @@ async function publish(dir: string, version: string) {
     await run([
       "gh",
       "release",
-      "edit",
+      "delete",
       `v${version}`,
       "--repo",
       "ebetica/recurse",
-      "--notes-file",
-      notes,
-    ]);
-  } else {
-    await run([
-      "gh",
-      "release",
-      "create",
-      `v${version}`,
-      "--repo",
-      "ebetica/recurse",
-      "--verify-tag",
-      "--title",
-      `Recurse v${version}`,
-      "--notes-file",
-      notes,
+      "--yes",
     ]);
   }
+  await run([
+    "gh",
+    "release",
+    "create",
+    `v${version}`,
+    asset,
+    "--repo",
+    "ebetica/recurse",
+    "--verify-tag",
+    "--latest",
+    "--title",
+    `Recurse v${version}`,
+    "--notes-file",
+    notes,
+  ]);
 }
 
 async function main() {

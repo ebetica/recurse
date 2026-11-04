@@ -275,7 +275,7 @@ async function run(): Promise<void> {
       );
       await turn(
         "S1-native-tools",
-        "Use codemode searchTools to discover the deferred Artifact tool and effort levels and colour themes tool, then describeTool to inspect each. Reply exactly NATIVE_TOOLS_PRESENT if artifact and recurse_settings are available, otherwise NATIVE_TOOLS_MISSING.",
+        "Use codemode searchTools to discover the deferred Artifact tool and recurse_settings tool, then describeTool to inspect each. Reply exactly NATIVE_TOOLS_PRESENT if artifact and recurse_settings are available, otherwise NATIVE_TOOLS_MISSING.",
         (reply) => reply.trim() === "NATIVE_TOOLS_PRESENT",
       );
       await turn(

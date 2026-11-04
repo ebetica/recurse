@@ -1,0 +1,90 @@
+[
+  {
+    "name": "grep",
+    "description": "Search file contents; literal/regex auto-detected, git-aware. Smart-case ignores case for lowercase patterns. Files are ranked; matches stay in source order. Skips files >=256 KiB; use rg in bash.",
+    "parameters": {
+      "type": "object",
+      "required": ["pattern"],
+      "properties": {
+        "pattern": {
+          "description": "Literal text or regex.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Filter full repo-relative paths: directory prefix (src/), filename (main.ts), or glob (**/*.ts). Absolute, ~/ and ../ paths may search outside cwd.",
+          "type": "string"
+        },
+        "exclude": {
+          "description": "Exclude using path syntax; comma/space-separated or array. Leading ! is ignored.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "caseSensitive": {
+          "description": "Override smart-case.",
+          "type": "boolean"
+        },
+        "context": {
+          "description": "Lines before/after each match (0-20).",
+          "type": "number"
+        },
+        "limit": {
+          "description": "Max matches (default 20).",
+          "type": "number"
+        },
+        "cursor": {
+          "description": "Previous result's cursor.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  {
+    "name": "find",
+    "description": "Search whole repo-relative paths by fuzzy terms or glob; multi-word terms are unordered AND. Explore concepts/features/symbols with this first, before ls/find/bash; use ls/read only for directory layout or no matches.",
+    "parameters": {
+      "type": "object",
+      "required": ["pattern"],
+      "properties": {
+        "pattern": {
+          "description": "Fuzzy terms or glob.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Filter full repo-relative paths: directory prefix (src/), filename (main.ts), or glob (**/*.ts). Absolute, ~/ and ../ paths may search outside cwd.",
+          "type": "string"
+        },
+        "exclude": {
+          "description": "Exclude using path syntax; comma/space-separated or array. Leading ! is ignored.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          ]
+        },
+        "limit": {
+          "description": "Results/page (default 30).",
+          "type": "number"
+        },
+        "cursor": {
+          "description": "Previous result's cursor.",
+          "type": "string"
+        }
+      }
+    }
+  }
+]

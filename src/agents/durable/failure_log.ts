@@ -1,6 +1,6 @@
 // Log terminal generation/compaction failures and scheduler crashes once.
 // Ordinary failed tools remain model-readable results, not warning logs.
-// Faulted/orphaned tasks never resume; lostTasks supplies their error rows.
+// Faulted/orphaned tasks and interrupted replies get visible error rows.
 // Errors redact from the first credential-shaped token and cap at 200 chars.
 import type { CommitPublication } from "@earendil-works/pi-durable";
 import { redactSecrets } from "../../tool_projection/redaction";
@@ -36,9 +36,19 @@ export function lostTasks(
       continue;
     const { id, kind } = change.value;
     const outcome = change.value.state.outcome;
-    const text = LOST_TEXT[kind];
+    let text = LOST_TEXT[kind];
     if (text === undefined) continue;
-    if (outcome.status !== "faulted" && outcome.status !== "orphaned") continue;
+    if (outcome.status === "failed") {
+      const reason = (outcome.error.detail as Rec | undefined)?.reason;
+      if (reason !== "restart_limit" && reason !== "interrupted") continue;
+      text =
+        kind === "pi.compaction"
+          ? "The compaction stopped after repeated server restarts; retry with /compact."
+          : reason === "restart_limit"
+            ? "The reply stopped after repeated server restarts; send again to retry."
+            : "The reply was interrupted when the server restarted; send again to retry.";
+    } else if (outcome.status !== "faulted" && outcome.status !== "orphaned")
+      continue;
     const cause =
       outcome.status === "orphaned" ? outcome.reason : outcome.error.message;
     const shown = [...redactSecrets(String(cause)).trim()]

@@ -73,14 +73,15 @@ then stops without pushing. It retains the clone and built refs and prints a
 separate `X.Y.Z --push --prepared DIR` command. This command shows the saved
 build again and requires typing the version in an interactive terminal;
 noninteractive publication is refused. It pushes the development tag and any
-version bump, atomically pushes public main and tag, then creates the GitHub
-Release. A failure after a push is reported, not rolled back across repositories.
+version bump, atomically pushes public main and tag, then creates the latest GitHub
+Release with `install.sh` from the release tree as an asset. A failure after a
+push is reported, not rolled back across repositories.
 
 Use `--replace` when building to replace an existing release: the new public
 commit uses that release's parent (or main's parent when the tag is absent),
 including a root commit for the first release. Publishing checks exact saved
-remote SHAs with force-with-lease; replacing an existing GitHub Release updates
-its notes. `--dev-remote URL` and `--public-remote URL` override clone/push remotes;
+remote SHAs with force-with-lease; replacing an existing GitHub Release deletes
+and recreates it with fresh notes, asset and release date. `--dev-remote URL` and `--public-remote URL` override clone/push remotes;
 GitHub Release publication targets ebetica/recurse. See `--help` for the short
 command reference. The retained temporary directory can be deleted after use.
 

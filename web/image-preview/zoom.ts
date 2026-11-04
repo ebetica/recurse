@@ -1,12 +1,27 @@
 // Image-local zoom for the Files gallery. The frame, including box marks,
 // transforms as one unit, so normalized comment coordinates remain unchanged.
-// At fit, drag/hold belongs to gallery navigation and box comments. Zoomed
-// one-finger drags draw boxes; two fingers pan/pinch. Shift-drag pans by mouse.
+// Drag pans when zoomed; touch and pen hold before drawing a box, while
+// mouse comments require the platform modifier. Wheel and pinch zoom.
+export function imageCommentHint(pointer?: string): string {
+  if (pointer ? pointer !== "mouse" : matchMedia("(pointer: coarse)").matches)
+    return "Hold to comment";
+  return `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"}-drag to comment`;
+}
+
 export function installImageZoom(image: HTMLImageElement): void {
   const frame = image.closest<HTMLElement>(".files-image-frame");
   const viewport = frame?.parentElement;
   if (!frame || !viewport || viewport.dataset.imageZoom) return;
   viewport.dataset.imageZoom = "1";
+  const updateHint = (event: PointerEvent) => {
+    const pane = viewport.closest<HTMLElement>(".image-popout-body");
+    if (!pane || !event.pointerType) return;
+    pane.dataset.imagePointer = event.pointerType;
+    const hint = pane.querySelector<HTMLElement>("[data-image-comment-hint]");
+    if (hint) hint.textContent = imageCommentHint(event.pointerType);
+  };
+  viewport.addEventListener("pointerdown", updateHint);
+  viewport.addEventListener("pointermove", updateHint);
   let scale = 1,
     x = 0,
     y = 0;
@@ -28,8 +43,6 @@ export function installImageZoom(image: HTMLImageElement): void {
     y = Math.max(-limitY, Math.min(limitY, y));
     frame.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
     viewport.dataset.zoomed = String(scale > 1);
-    viewport.title =
-      scale > 1 ? "Drag to comment; Shift+drag or two fingers to move" : "";
     reset.hidden = scale === 1;
   };
   const zoom = (next: number, cx: number, cy: number) => {
@@ -51,7 +64,6 @@ export function installImageZoom(image: HTMLImageElement): void {
   viewport.addEventListener(
     "wheel",
     (event) => {
-      if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       zoom(
         scale * Math.exp(-event.deltaY * 0.01),
@@ -69,7 +81,7 @@ export function installImageZoom(image: HTMLImageElement): void {
   viewport.addEventListener("pointerdown", (event) => {
     if ((event.target as Element).closest("button") || event.button !== 0)
       return;
-    lastPointerTouch = event.pointerType === "touch";
+    lastPointerTouch = event.pointerType !== "mouse";
     if (!pointers.size) {
       moved = false;
       pinched = false;
@@ -79,12 +91,7 @@ export function installImageZoom(image: HTMLImageElement): void {
       pinched = true;
       tap.time = 0;
     }
-    if (event.pointerType === "touch")
-      viewport.setPointerCapture(event.pointerId);
-    if (scale > 1 && event.pointerType !== "touch" && event.shiftKey) {
-      event.stopPropagation();
-      viewport.setPointerCapture(event.pointerId);
-    }
+    viewport.setPointerCapture(event.pointerId);
   });
   viewport.addEventListener("pointermove", (event) => {
     const old = pointers.get(event.pointerId);
@@ -108,7 +115,11 @@ export function installImageZoom(image: HTMLImageElement): void {
       x += dx / 2;
       y += dy / 2;
       paint();
-    } else if (scale > 1 && event.pointerType !== "touch" && event.shiftKey) {
+    } else if (
+      scale > 1 &&
+      !frame.hasPointerCapture(event.pointerId) &&
+      !(event.pointerType === "mouse" && (event.ctrlKey || event.metaKey))
+    ) {
       x += dx;
       y += dy;
       paint();
@@ -119,7 +130,7 @@ export function installImageZoom(image: HTMLImageElement): void {
     if (!pointers.delete(event.pointerId)) return;
     if (
       event.type === "pointerup" &&
-      event.pointerType === "touch" &&
+      event.pointerType !== "mouse" &&
       !moved &&
       !pinched &&
       !frame.hasPointerCapture(event.pointerId)

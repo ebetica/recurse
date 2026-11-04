@@ -1,6 +1,6 @@
 // Page bounded owner metadata newest-first; load previews only when visible.
 // Share inert reply rendering; cache text in a bounded LRU, images in browser.
-// Image dialogs preserve pane/thread; Files retains versions and actions.
+// Image dialogs leave their history step before opening Files; share originals.
 // Viewers navigate oldest-first; background availability probes are throttled.
 import { html, nothing, render, type TemplateResult } from "lit";
 import {
@@ -37,6 +37,8 @@ import { commentMount, type CommentPane } from "./artifacts/artifact-state.js";
 import { renderComments } from "./artifacts/comment-bar.js";
 import {
   claimComments,
+  closeSelectionCommentFromKeyboard,
+  handleCommentShortcut,
   reanchor,
   syncSelectionDraft,
 } from "./artifacts/selection-comments.js";
@@ -89,6 +91,7 @@ interface CacheEntry {
   inflight: boolean;
   pending?: Promise<void>;
   error: string | null;
+  failedDeletion: SessionFile | null;
   request: number;
   controller: AbortController | null;
   previews: Map<string, FilePreviewState>;
@@ -173,9 +176,13 @@ function openImage(cid: string, file: SessionFile): void {
     };
     dialog.append(body);
     document.body.append(dialog);
+    dialog.addEventListener("keydown", (event) =>
+      handleCommentShortcut(event, body),
+    );
     dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
-      if (!closeDrawingFromKeyboard()) closeImage();
+      if (!closeDrawingFromKeyboard() && !closeSelectionCommentFromKeyboard())
+        closeImage();
     });
     let outside: { x: number; y: number } | null = null;
     dialog.addEventListener("pointerdown", (event) => {
@@ -200,7 +207,7 @@ function openImage(cid: string, file: SessionFile): void {
       outside = null;
     });
     installBoxComments(body);
-    body.addEventListener("comments-sent", () => {
+    body.addEventListener("comments-submitting", () => {
       if (popout?.body !== body) return;
       closeImage();
       scrollToLatest();
@@ -245,43 +252,55 @@ function renderImage(): void {
     group.some((candidate) => candidate.key === file.key),
   );
   render(
-    html`<header class="image-popout-bar">
-        <span class="files-name">${file.name}</span>
-        ${iconButton(
-          "Previous image",
-          PREVIOUS_ICON,
-          () => stepImage(-1),
-          "",
-          index <= 0,
-        )}
-        <span class="files-position">${index + 1} of ${groups.length}</span>
-        ${iconButton(
-          "Next image",
-          NEXT_ICON,
-          () => stepImage(1),
-          "",
-          index === groups.length - 1,
-        )}
+    html`<header class="viewer-topbar image-popout-bar">
+        <span class="files-name" title=${file.name}>${file.name}</span>
+        ${groups.length > 1
+          ? html`${iconButton(
+                "Previous image",
+                PREVIOUS_ICON,
+                () => stepImage(-1),
+                "",
+                index <= 0,
+              )}
+              <span class="files-position"
+                >${index + 1} of ${groups.length}</span
+              >
+              ${iconButton(
+                "Next image",
+                NEXT_ICON,
+                () => stepImage(1),
+                "",
+                index === groups.length - 1,
+              )}`
+          : nothing}
+        ${downloadHref(cid, file)
+          ? iconButton(
+              "Download",
+              DOWNLOAD_ICON,
+              () => void downloadImage(cid, file),
+            )
+          : nothing}
         ${iconButton(
           "Draw",
           DRAW_ICON,
           () => drawOn(detailImage(), closeImage),
           "files-draw",
         )}
-        <button
-          class="btn sm"
-          aria-label="Open in Files"
-          @click=${() => {
-            closeImage();
+        ${iconButton("Open in Files", unsafeHTML(FILES_ICON), () => {
+          const open = () => {
             selections.set(cid, { key: file.key });
             if (paneEl) paneEl._filesHash = undefined;
             repaint();
             openPane(PANE_ID);
-          }}
-        >
-          <span class="image-wide-label">Open in Files</span
-          ><span class="image-compact-label">Files</span>
-        </button>
+          };
+          if (history.state?.imagePopout) {
+            window.addEventListener("popstate", open, { once: true });
+            closeImage();
+          } else {
+            closeImage();
+            open();
+          }
+        })}
         ${iconButton("Close image", unsafeHTML(CLOSE_ICON), closeImage)}
       </header>
       <article
@@ -367,6 +386,7 @@ function entry(id: string): CacheEntry {
     capped: false,
     inflight: false,
     error: null,
+    failedDeletion: null,
     request: 0,
     controller: null,
     previews: new Map(),
@@ -536,7 +556,7 @@ document.querySelector("#messages")?.addEventListener("click", (event) => {
   const match =
     image &&
     !image.closest("button, a") &&
-    /^\/api\/conversations\/([\w-]+)\/attachments\/([\w.-]+)\/preview$/.exec(
+    /^\/api\/conversations\/([\w-]+)\/attachments\/([\w.-]+)\/(?:preview|thumbnail)$/.exec(
       image.getAttribute("src") ?? "",
     );
   if (match && match[1] === state.selectedId)
@@ -605,8 +625,8 @@ export function invalidateFiles(id: string): void {
   value.conversationVersion = null;
   value.refreshPending = true;
   if (paneEl?.isConnected && shownId === id && !document.hidden) {
-    if (value.initialized) revalidate(value, value.generation);
-    if (!value.inflight) void loadPage(id);
+    revalidate(value, value.generation);
+    void loadPage(id);
   }
 }
 
@@ -631,8 +651,11 @@ function loadPage(id: string, signal?: AbortSignal): Promise<void> | void {
     .then(async (response) => {
       if (
         !currentFilesRequest(lastSelectedId || id, id, value.request, request)
-      )
+      ) {
+        // Invariant: An unread body holds its connection open; release it.
+        void response.body?.cancel().catch(() => {});
         return;
+      }
       if (!response.ok) throw new Error(`files ${response.status}`);
       const page = (await response.json()) as FilesPage;
       if (
@@ -768,18 +791,43 @@ function badge(ctx: PaneContext): string | number | null {
   return value.complete && !value.capped ? count : `${count}+`;
 }
 
-function deleteHref(cid: string, file: SessionFile): string | null {
+function downloadHref(cid: string, file: SessionFile): string | null {
   if (!file.id || file.unavailable) return null;
   return backendFor(cid).url(
     `/api/conversations/${encodeURIComponent(cid)}/attachments/${encodeURIComponent(file.id)}`,
   );
 }
 
-function downloadHref(cid: string, file: SessionFile): string | null {
-  if (!file.id || file.unavailable) return null;
-  return backendFor(cid).url(
-    `/api/conversations/${encodeURIComponent(cid)}/attachments/${encodeURIComponent(file.id)}`,
-  );
+async function downloadImage(cid: string, file: SessionFile): Promise<void> {
+  const href = downloadHref(cid, file);
+  if (!href) return;
+  if (
+    matchMedia("(pointer: coarse)").matches &&
+    navigator.share &&
+    navigator.canShare
+  ) {
+    try {
+      const response = await fetch(href);
+      if (!response.ok) throw new Error("Image download failed");
+      const original = new File([await response.blob()], file.name, {
+        type: file.media_type,
+      });
+      const files = [original];
+      if (navigator.canShare({ files })) {
+        await navigator.share({ files });
+        return;
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+    }
+  }
+  const link = document.createElement("a");
+  link.href = href;
+  link.download = file.name;
+  link.dataset.bytes = String(file.size);
+  document.body.append(link);
+  link.click();
+  link.remove();
 }
 
 function imageHref(cid: string, file: SessionFile): string | null {
@@ -864,7 +912,7 @@ function loadTextPreview(id: string, file: SessionFile): void {
 }
 
 async function deleteFile(cid: string, file: SessionFile): Promise<void> {
-  const href = deleteHref(cid, file);
+  const href = downloadHref(cid, file);
   if (!href) return;
   if (!confirm(`Delete ${file.name}? This cannot be undone.`)) return;
   const value = entry(cid);
@@ -872,10 +920,11 @@ async function deleteFile(cid: string, file: SessionFile): Promise<void> {
     const response = await backendFor(cid).api(href, { method: "DELETE" });
     if (!response.ok) throw new Error(`delete ${response.status}`);
   } catch {
-    value.error = "Couldn’t delete the file. Retry from the Files pane.";
+    value.failedDeletion = file;
     repaint();
     return;
   }
+  if (value.failedDeletion?.key === file.key) value.failedDeletion = null;
   value.files.delete(file.key);
   value.displayFiles?.delete(file.key);
   value.previews.delete(file.key);
@@ -893,10 +942,12 @@ function previewTemplate(
   const image = imageHref(cid, file);
   const preview = cache.get(cid)?.previews.get(file.key);
   if (image) {
+    // Invariant: The list shows the thread-sized thumbnail; detail views load
+    // the original, which box comments, crops and drawing measure.
     const img = html`<img
       class="files-image"
       alt=${file.name}
-      src=${image}
+      src=${detail ? image : image.replace(/\/preview$/, "/thumbnail")}
       loading=${detail ? "eager" : "lazy"}
       decoding="async"
       @load=${(event: Event) => {
@@ -1070,7 +1121,8 @@ function markdownPreview(
       )?.[0];
       return sibling
         ? image
-          ? imageHref(cid, sibling)
+          ? (imageHref(cid, sibling)?.replace(/\/preview$/, "/thumbnail") ??
+            null)
           : downloadHref(cid, sibling)
         : null;
     },
@@ -1105,7 +1157,7 @@ function iconButton(
   disabled = false,
 ): TemplateResult {
   return html`<button
-    class=${`artifact-icon-btn ${extraClass}`}
+    class=${`icon-btn lg ${extraClass}`}
     type="button"
     aria-label=${label}
     title=${label}
@@ -1224,7 +1276,7 @@ function detailTemplate(
           : nothing}
         ${href
           ? html`<a
-              class="artifact-icon-btn"
+              class="icon-btn lg"
               href=${href}
               download=${file.name}
               data-bytes=${file.size}
@@ -1233,7 +1285,7 @@ function detailTemplate(
               >${DOWNLOAD_ICON}</a
             >`
           : nothing}
-        ${deleteHref(cid, file)
+        ${downloadHref(cid, file)
           ? iconButton("Delete", TRASH_ICON, () => void deleteFile(cid, file))
           : nothing}
       </div>
@@ -1362,6 +1414,7 @@ function renderPane(element: FilesEl, id: string): void {
     capped: value.capped,
     inflight: value.inflight,
     error: value.error,
+    failedDeletion: value.failedDeletion?.key,
     files: all.map((file) => [
       file.key,
       file.references,
@@ -1382,21 +1435,28 @@ function renderPane(element: FilesEl, id: string): void {
     : !files.length && value.complete
       ? html`<div class="files-state">No files in this conversation.</div>`
       : nothing;
-  const errorBanner = value.error
-    ? html`<div class="files-error" role="alert">
-        ${value.error}
-        <button
-          class="btn sm"
-          type="button"
-          @click=${() => {
-            value.error = null;
-            void loadPage(id);
-          }}
-        >
-          Retry
-        </button>
-      </div>`
-    : nothing;
+  const errorBanner =
+    value.failedDeletion || value.error
+      ? html`<div class="files-error" role="alert">
+          ${value.failedDeletion
+            ? `Couldn’t delete ${value.failedDeletion.name}.`
+            : value.error}
+          <button
+            class="btn sm"
+            type="button"
+            @click=${() => {
+              if (value.failedDeletion)
+                void deleteFile(id, value.failedDeletion);
+              else {
+                value.error = null;
+                void loadPage(id);
+              }
+            }}
+          >
+            Retry
+          </button>
+        </div>`
+      : nothing;
   if (selections.has(id)) {
     render(
       shown

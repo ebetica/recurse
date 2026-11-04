@@ -13,6 +13,7 @@ import {
   unlinkAt,
 } from "../../../utils/dir_fd";
 import { flockExclusive, type FlockOptions } from "../../../utils/flock";
+import { cropBarrier, cropMarkers } from "./crop";
 import {
   AttachmentError,
   CALL_ID_REGEX,
@@ -226,6 +227,8 @@ export async function cleanupDebris(
   } catch {
     return [];
   }
+  await cropMarkers(ownerFd);
+  await cropBarrier(ownerFd);
   const manifests = new Set<string>();
   const valid: Manifest[] = [];
   for (const name of names) {
@@ -326,11 +329,13 @@ export async function withLockedCollection<T>(
 export async function iterManifests(
   fd: FileHandle,
   owner: string,
+  incomplete?: () => void,
 ): Promise<Array<[string, Manifest]>> {
   let names: string[];
   try {
     names = await readdirAt(fd.fd);
   } catch {
+    incomplete?.();
     return [];
   }
   const out: Array<[string, Manifest]> = [];
@@ -338,6 +343,7 @@ export async function iterManifests(
     if (name.endsWith(".json") && FILE_ID_REGEX.test(name.slice(0, -5))) {
       const manifest = await readManifest(fd, owner, name.slice(0, -5));
       if (manifest) out.push([name.slice(0, -5), manifest]);
+      else incomplete?.();
     }
   return out;
 }

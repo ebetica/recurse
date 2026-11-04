@@ -11,7 +11,6 @@ import {
   type RuntimeLogger,
 } from "../observability/runtime_logging";
 import type { TranscriptQuery } from "../agents/durable/transcript";
-import type { EnvironmentChange } from "../extensions/core/environment/managed_tools";
 import { conditionalJson } from "./caching";
 import { jsonDictBody } from "./login";
 import { TEMP_ID_RE } from "./conversations";
@@ -141,13 +140,6 @@ export interface TreeRoutesDeps extends DeliverStopDeps {
   cliIndex(): Promise<Rec[]>;
   /** DurableHost.transcript; null for an unknown conversation. */
   transcript(cid: string, options: TranscriptQuery): Promise<Rec | null>;
-  /** DurableHost.changeEnvironment; null for a non-Durable conversation. */
-  changeEnvironment(
-    cid: string,
-    change: EnvironmentChange,
-  ): Promise<
-    { names: string[]; absent: string[] } | { refused: string } | null
-  >;
   readonly stopDiagnostics: StopDiagnosticBuckets;
   /** The agent archive (src/agents/supervisor/revive.ts). */
   readonly revive?: {
@@ -396,36 +388,6 @@ export function registerTreeRoutes(router: Router, deps: TreeRoutesDeps): void {
       },
     },
   );
-
-  // Invariant: Only the calling agent's environment overrides are exposed.
-  // Responses name variables only; values never leave the server.
-  const environment = async (ex: Exchange, change: EnvironmentChange) => {
-    if (!deps.loopbackAuthenticated(ex)) throw new HttpError(403);
-    const cid = ex.request.headers.get("x-recurse-agent");
-    if (cid === null || !TEMP_ID_RE.test(cid))
-      throw new HttpError(422, "x-recurse-agent must name the calling agent");
-    const result = await deps.changeEnvironment(cid, change);
-    if (result === null) throw new HttpError(404, "conversation not found");
-    if ("refused" in result) throw new HttpError(422, result.refused);
-    return jsonResponse(result);
-  };
-  router.get("/api/agent-environment", (ex) =>
-    environment(ex, { set: {}, unset: [] }),
-  );
-  router.post("/api/agent-environment", async (ex) => {
-    if (!deps.loopbackAuthenticated(ex)) throw new HttpError(403);
-    const { set = {}, unset = [], ...rest } = await jsonDictBody(ex);
-    const strings = (values: unknown) =>
-      Array.isArray(values) && values.every((v) => typeof v === "string");
-    const named = typeof set === "object" && set && !Array.isArray(set);
-    const values = named ? Object.values(set) : [0];
-    if (Object.keys(rest).length || !strings(values) || !strings(unset))
-      throw new HttpError(422, "expected {set: {NAME: VALUE}, unset: [NAME]}");
-    return environment(ex, {
-      set: set as Record<string, string>,
-      unset: unset as string[],
-    });
-  });
 
   router.get(
     "/api/agent-archive",

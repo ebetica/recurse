@@ -1,5 +1,6 @@
 import { expect } from "bun:test";
 import type { Page } from "playwright";
+import { test_history_survives_poll } from "./test_history_paging";
 import {
   captureErrors,
   fixtureRows,
@@ -373,17 +374,29 @@ async function test_background_shells_inline_details_and_scoped(
     expect(await surface.innerText()).toContain(
       "Showing 3 of 4 active background shells",
     );
-    const sb = await surface.boundingBox(),
-      tb = await page.locator("#topbar").boundingBox(),
-      cb = await page.locator("#composer-wrap").boundingBox();
-    expect(Boolean(sb && tb && cb)).toBeTrue();
+    const bounds = await page.waitForFunction(() => {
+      const { document } = globalThis as any;
+      const box = (selector: string) =>
+        document.querySelector(selector)?.getBoundingClientRect().toJSON();
+      const sb = box(".shell-surface"),
+        tb = box("#topbar"),
+        cb = box("#composer-wrap");
+      return sb &&
+        tb &&
+        cb &&
+        sb.y >= tb.y + tb.height &&
+        sb.y + sb.height <= cb.y + 1
+        ? { sb, tb, cb }
+        : null;
+    });
+    const { sb, tb, cb } = (await bounds.jsonValue())!;
     expect(sb!.width).toBeLessThanOrEqual(mobile ? 390 : 1280);
     expect(sb!.y).toBeGreaterThanOrEqual(tb!.y + tb!.height);
     expect(sb!.y + sb!.height).toBeLessThanOrEqual(cb!.y + 1);
     const close = surface.locator(".shell-surface-close");
     await close.focus();
     await (
-      await page.waitForResponse(`${base}api/conversations/main/events`)
+      await page.waitForResponse(`${base}api/conversations/main/events?*`)
     ).finished();
     expect(
       await page.evaluate(
@@ -1147,7 +1160,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
       await openThread(page, base, thread);
       const target = page.locator(".activity-boundary.turn").first();
       await target.locator(".turn-foot-actions").waitFor();
-      if (running) await target.locator(".live-panel").waitFor();
+      if (running) await page.locator("#live-bar .live-panel").waitFor();
       if (shape === "short" || shape === "running")
         await target.locator(".content > p").last().waitFor();
       const measure = () =>
@@ -1196,7 +1209,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
             summary: block.querySelector(".activity-group .turn-summary")
               ?.textContent,
             text,
-            panel: rect(block.querySelector(".live-panel")),
+            panel: rect(doc.querySelector("#live-bar .live-panel")),
             lineHeight: reply
               ? parseFloat(
                   (globalThis as any).getComputedStyle(reply).lineHeight,
@@ -1205,7 +1218,8 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
             icons: Array.from(actions.querySelectorAll("svg")).map(rect),
             targets: Array.from(actions.children).map(rect),
             usage: actions.querySelectorAll(".activity-usage").length,
-            label: block.querySelector(".live-thinking-title")?.textContent,
+            label: doc.querySelector("#live-bar .live-thinking-title")
+              ?.textContent,
           };
         });
       if (shape === "image")
@@ -1265,7 +1279,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
         t.segments[1].assistant.live = false;
         t.segments[2].assistant.live = false;
         await page
-          .locator(".turn.current .live-panel")
+          .locator("#live-bar .live-panel")
           .waitFor({ state: "hidden" });
         await page.locator(".turn.current .content > p").last().waitFor();
         (metrics as any).transitions = [revealing, await measure()];
@@ -1452,6 +1466,7 @@ async function test_changes_marks_a_truncated_summary(
 }
 
 export const tests: BrowserTest[] = [
+  test_history_survives_poll,
   test_background_completion_renders_as_platform_message,
   test_response_eyes_keyboard_shortcut,
   test_turn_footer_controls_keep_order_and_hover_guard,

@@ -2,6 +2,7 @@ import type { AgentTreeStatus, TreeNode } from "./types.js";
 
 export const UI_REFRESH_EVENT = "recurse:ui-refresh";
 export const ARTIFACTS_REFRESH_EVENT = "recurse:artifacts-refresh";
+export const PRS_REFRESH_EVENT = "recurse:prs-refresh";
 export const UI_STATUS_EVENT = "recurse:ui-status";
 
 const ACTIVE_TURN_STATUSES: ReadonlySet<AgentTreeStatus> = new Set([
@@ -51,6 +52,13 @@ export function requestUiRefresh(agentId: string): void {
 export function requestArtifactsRefresh(agentId: string): void {
   window.dispatchEvent(
     new CustomEvent(ARTIFACTS_REFRESH_EVENT, { detail: { agentId } }),
+  );
+}
+
+/** Reread linked pull requests after the server saved new snapshots. */
+export function requestPrsRefresh(agentId: string): void {
+  window.dispatchEvent(
+    new CustomEvent(PRS_REFRESH_EVENT, { detail: { agentId } }),
   );
 }
 

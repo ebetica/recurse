@@ -27,4 +27,15 @@ export function setPaneLoading(
   if (controls) controls.inert = loading;
   const status = parent?.querySelector<HTMLElement>(".pane-loading-status");
   if (status) status.textContent = loading ? "Loading panel…" : "";
+  if (
+    !loading &&
+    body.dataset?.paneFocusWhenReady === "true" &&
+    body.isConnected &&
+    typeof getComputedStyle !== "undefined" &&
+    getComputedStyle(body as HTMLElement).visibility !== "hidden"
+  ) {
+    delete body.dataset.paneFocusWhenReady;
+    if (active === parent?.querySelector(".pane-title"))
+      body.focus?.({ preventScroll: true });
+  }
 }

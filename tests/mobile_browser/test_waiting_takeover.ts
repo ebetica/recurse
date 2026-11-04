@@ -39,7 +39,7 @@ async function treeWithStatusRows(route: Route): Promise<void> {
       queued: 3,
       preview: "",
       muted: true,
-      pinned: true,
+      taken_over: true,
     },
     {
       id: "shot-held-waiting",
@@ -51,7 +51,7 @@ async function treeWithStatusRows(route: Route): Promise<void> {
       queued: 0,
       preview: "",
       muted: false,
-      pinned: true,
+      taken_over: true,
     },
     {
       id: "shot-held-idle",
@@ -63,7 +63,7 @@ async function treeWithStatusRows(route: Route): Promise<void> {
       queued: 0,
       preview: "",
       muted: true,
-      pinned: true,
+      taken_over: true,
     },
     {
       id: "shot-idle",
@@ -215,6 +215,7 @@ export const tests: BrowserTest[] = [
         const active = await style();
         expect(active.color).not.toBe(idle.color);
         expect(active.background).not.toBe(idle.background);
+        if (width === 390) await page.locator("#pane-fab").click();
         await button.click();
         await page.waitForFunction(() => {
           const el = (globalThis as any).document.querySelector(
@@ -229,10 +230,10 @@ export const tests: BrowserTest[] = [
       try {
         await page.evaluate(async (agent) => {
           const url = `/api/conversations/${agent}`;
-          await fetch(`${url}/pin`, {
+          await fetch(`${url}/take-over`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ pinned: false }),
+            body: JSON.stringify({ taken_over: false }),
           });
           const deleted = await fetch(url, { method: "DELETE" });
           if (!deleted.ok) throw new Error(`Cleanup failed: ${deleted.status}`);

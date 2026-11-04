@@ -174,7 +174,7 @@ export async function recurseSections(
     recurse_tree: escapeReminderMarkers(
       prompts.treeDigestSnapshot(self, { convs, live: {} }),
     ),
-    recurse_tools: escapeReminderMarkers(prompts.recurseToolsSection()),
+    recurse_tools: escapeReminderMarkers(await prompts.recurseToolsSection()),
   };
 }
 

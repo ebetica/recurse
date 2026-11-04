@@ -1,7 +1,7 @@
-diff --git a/src/pi_auth_worker.mjs b/src/pi_auth_worker.mjs
+diff --git a/src/pi_auth.worker.mjs b/src/pi_auth.worker.mjs
 index 822958158..30c1ba1d1 100644
---- a/src/pi_auth_worker.mjs
-+++ b/src/pi_auth_worker.mjs
+--- a/src/pi_auth.worker.mjs
++++ b/src/pi_auth.worker.mjs
 @@ -1,18 +1,8 @@
  #!/usr/bin/env bun
 -/** Bounded JSONL adapter for Pi 1.1.0's public auth API.

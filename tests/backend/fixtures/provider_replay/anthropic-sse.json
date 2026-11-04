@@ -3,7 +3,8 @@
     "date": "2026-10-14",
     "model": "claude-haiku-5-5",
     "pi": "1.1.0",
-    "scenario": "plain public reply"
+    "scenario": "plain public reply",
+    "requestCompatibility": "Pi 1.5.0 uses low top-level effort for mid-conversation effort models; recorded response unchanged."
   },
   "model": {
     "id": "claude-haiku-5-5",
@@ -84,7 +85,7 @@
         },
         "max_tokens": 128000,
         "output_config": {
-          "effort": "high"
+          "effort": "low"
         },
         "tools": [
           {
@@ -302,36 +303,6 @@
               },
               "required": [
                 "pattern"
-              ]
-            }
-          },
-          {
-            "name": "multi_grep",
-            "eager_input_streaming": true,
-            "input_schema": {
-              "type": "object",
-              "properties": {
-                "patterns": {
-                  "type": "array",
-                  "items": {
-                    "type": "string"
-                  }
-                },
-                "constraints": {
-                  "type": "string"
-                },
-                "context": {
-                  "type": "number"
-                },
-                "limit": {
-                  "type": "number"
-                },
-                "cursor": {
-                  "type": "string"
-                }
-              },
-              "required": [
-                "patterns"
               ]
             }
           },

@@ -32,8 +32,7 @@ kills the monitor.
 ```
 
 The same script with a cadence: it prints the task every interval, skipping
-intervals while the agent is still busy. Goal and loop are in
-[`playground/skills/`](../playground/skills/README.md); each is one `SKILL.md` and a sixty-line script, and the
+intervals while the agent is still busy. Goal and loop are in the optional playground skills; each is one `SKILL.md` and a sixty-line script, and the
 README there says how to link them into a project.
 
 ## Graphs of agents
@@ -92,5 +91,4 @@ Skills and extensions are Pi's; Pi's documentation on
 Recurse is open source. Run `recurse` with no argument to work on Recurse
 itself, and ask the agent for the change you want. The rules agents follow
 when they change Recurse are in [`docs/agents/`](agents/develop.md). Recurse runs on Linux and on
-Apple Silicon Macs ([macOS notes](../src/utils/macos.md)); to run it on a server, see
-[Deploy on Modal](../playground/modal/deploy.md).
+Apple Silicon Macs ([macOS notes](../src/utils/macos.md)); an optional Modal deployment lives in playground/modal.

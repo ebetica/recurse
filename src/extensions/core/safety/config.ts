@@ -1,4 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
+// Reload additive operator rules asynchronously at each new run.
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export type SafetyConfig = {
@@ -50,25 +51,29 @@ export function safetyPromptPath(configDir: string): string {
   return join(configDir, "pi-safety.md");
 }
 
-function loadSafetyPrompt(configDir: string): {
+async function loadSafetyPrompt(configDir: string): Promise<{
   text?: string;
   error?: string;
-} {
+}> {
   const path = safetyPromptPath(configDir);
-  if (!existsSync(path)) return {};
   try {
-    const text = readFileSync(path, "utf8").trim();
+    const text = (await readFile(path, "utf8")).trim();
     return text ? { text } : {};
   } catch (error) {
+    if (isMissing(error)) return {};
     const detail = error instanceof Error ? error.message : String(error);
     return { error: `${path}: could not load (${detail})` };
   }
 }
 
-export function loadSafetyConfig(configDir: string): SafetyConfig {
+export async function loadSafetyConfig(
+  configDir: string,
+): Promise<SafetyConfig> {
   const path = safetyConfigPath(configDir);
-  const prompt = loadSafetyPrompt(configDir);
-  const config = loadJsonConfig(path);
+  const [prompt, config] = await Promise.all([
+    loadSafetyPrompt(configDir),
+    loadJsonConfig(path),
+  ]);
   if (config.error || prompt.error)
     return { ...config, error: config.error ?? prompt.error };
   return prompt.text
@@ -76,11 +81,15 @@ export function loadSafetyConfig(configDir: string): SafetyConfig {
     : config;
 }
 
-function loadJsonConfig(path: string): SafetyConfig {
-  if (!existsSync(path)) return { additionalRules: [], path };
+function isMissing(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT";
+}
+
+async function loadJsonConfig(path: string): Promise<SafetyConfig> {
   try {
-    return parseSafetyConfig(JSON.parse(readFileSync(path, "utf8")), path);
+    return parseSafetyConfig(JSON.parse(await readFile(path, "utf8")), path);
   } catch (error) {
+    if (isMissing(error)) return { additionalRules: [], path };
     const detail = error instanceof Error ? error.message : String(error);
     return {
       additionalRules: [],

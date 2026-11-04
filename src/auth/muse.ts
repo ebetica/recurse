@@ -326,7 +326,7 @@ export class MuseAuth {
       key: apiKey,
     });
     await this.store.clearPending(PENDING_FILE_NAME);
-    this.config.upsertCustomProvider(PROVIDER, MUSE_CODE_CATALOG_ENTRY);
+    await this.config.upsertCustomProvider(PROVIDER, MUSE_CODE_CATALOG_ENTRY);
     return this.authStatus();
   }
 

@@ -13,6 +13,16 @@ export type AgentStatus =
 export type AgentTreeStatus = AgentStatus | "working" | "waiting" | "unknown";
 
 export interface TreeNode {
+  agent?: import("../src/web/api_v1/schema.js").Agent & {
+    context?: import("../src/web/api_v1/schema.js").AgentStatus["context"];
+  };
+  status_reason?: string | null;
+  workdir?: string | null;
+  effort?: number | null;
+  error?: boolean;
+  prs?: import("./sidebar/rows.js").SidebarRow["prs"];
+  branch?: string;
+  cwd?: string;
   id: string;
   parent: string | null;
   title: string;
@@ -24,6 +34,8 @@ export interface TreeNode {
   updated: number;
   // Opaque owner Artifact mutation stamp, independent of turn state.
   artifacts_revision?: string | null;
+  // Opaque stamp of the saved linked pull requests; absent without any.
+  prs_revision?: string;
   operator_message_at?: number | null;
   // subagent count
   children: number;
@@ -33,7 +45,13 @@ export interface TreeNode {
   // automatic reports to the parent are suppressed
   muted: boolean;
   // agents cannot delete this conversation
+  taken_over?: boolean;
+  // The name for taken_over on a backend older than the rename.
   pinned?: boolean;
+  // Sidebar tags: name to {at, by, until?}; absent on older backends.
+  tags?: Record<string, { at: number; by: string; until?: number }>;
+  // When its latest turn finished (epoch seconds).
+  replied_at?: number | null;
   // Restart-interrupted; active parked work may resume automatically.
   restart_parked?: boolean;
   // Desired review-off state, applies next turn.
@@ -450,6 +468,8 @@ export interface Conversation {
   title?: string;
   parent?: string | null;
   muted?: boolean;
+  taken_over?: boolean;
+  // The name for taken_over on a backend older than the rename.
   pinned?: boolean;
   // Desired review-off state, applies next turn.
   safety_off?: boolean;
@@ -487,6 +507,7 @@ export interface Conversation {
   // Active physical JSONL generation; advances on compact.
   message_log_generation?: number;
   active_run?: string | null;
+  run_state_clock?: [string, number];
   retry_notice?: string | null;
 }
 
@@ -567,6 +588,7 @@ export interface PaneViewStateDef {
 export interface PaneCacheDef {
   version: number;
   key(ctx: PaneContext): string | null;
+  keepConnected?: boolean;
   // Unknown generations refuse rendered-body reuse.
   generation?(ctx: PaneContext): string | null | undefined;
   resume?(el: HTMLElement, ctx: PaneContext): void;

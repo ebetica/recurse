@@ -46,7 +46,6 @@
  * Keep TMPDIR short (for example /tmp/perf): Unix socket paths must stay under
  * 107 bytes. Never point --data at a live instance.
  */
-import { pbkdf2Sync, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -55,11 +54,16 @@ import { parseArgs } from "node:util";
 import { toolHelp } from "../../tools/_help.ts";
 import { retire } from "../../src/utils/trash";
 import * as artifacts from "../../src/artifacts";
+import {
+  killDataDirGroups,
+  privateEnv,
+  scriptedModel,
+  startPrivateServer,
+  stopPrivateServer,
+  type PrivateServer,
+} from "./private_server";
 
 const ROOT = resolve(import.meta.dir, "../..");
-/** A fresh operator login per run, for this private server only. */
-const PASSWORD = randomBytes(18).toString("base64url");
-const SALT = randomBytes(16).toString("hex");
 const PLAN_RE = /PERF-PLAN:([A-Za-z0-9_-]+)/;
 const sleep = (ms: number) => Bun.sleep(ms);
 const now = () => performance.now();
@@ -443,33 +447,9 @@ function freePort(): number {
 }
 
 function serverEnv(paths: Paths, port: number): Record<string, string> {
-  const env: Record<string, string> = {};
-  for (const name of ["PATH", "LANG", "TERM", "USER", "TZ"])
-    if (process.env[name] !== undefined) env[name] = process.env[name]!;
-  const hash = pbkdf2Sync(
-    PASSWORD,
-    new Uint8Array(Buffer.from(SALT, "hex")),
-    600_000,
-    32,
-    "sha256",
-  ).toString("hex");
-  return Object.assign(env, {
-    HOME: join(paths.root, "home"),
-    CHAT_DATA_DIR: paths.data,
-    CHAT_REPO_URL: join(paths.root, "repo"),
-    RECURSE_HOME: join(paths.root, "settings"),
-    PI_CODING_AGENT_DIR: join(paths.root, "settings", "pi-agent"),
-    RECURSE_TEMP_ROOT: join(paths.root, "scratch"),
-    PI_BG_SHELL_STATE_DIR: join(paths.root, "pi-bg"),
-    RECURSE_FRONTEND_LIVE: "0",
+  return privateEnv(paths.root, paths.data, {
     PORT: String(port),
     RECURSE_PERF_KEY: "loopback-only",
-    CHAT_AUTH_SALT: SALT,
-    CHAT_AUTH_HASH: hash,
-    GIT_AUTHOR_NAME: "Perf",
-    GIT_AUTHOR_EMAIL: "perf@example.invalid",
-    GIT_COMMITTER_NAME: "Perf",
-    GIT_COMMITTER_EMAIL: "perf@example.invalid",
   });
 }
 
@@ -477,30 +457,7 @@ function serverEnv(paths: Paths, port: number): Record<string, string> {
 async function prepare(paths: Paths, providerPort: number, fresh: boolean) {
   for (const dir of ["home", "settings/pi-agent", "scratch", "pi-bg", "wt"])
     await mkdir(join(paths.root, dir), { recursive: true, mode: 0o700 });
-  await mkdir(join(paths.data, "config"), { recursive: true });
-  const level = { model: "perf/scripted", reasoning: "low" };
-  await writeFile(
-    join(paths.data, "config", "effort-levels.json"),
-    JSON.stringify({
-      default_level: 3,
-      levels: { 1: level, 2: level, 3: level, 4: level, 5: level },
-      version: 1,
-    }),
-  );
-  await writeFile(
-    join(paths.data, "config", "model-providers.json"),
-    JSON.stringify({
-      default: "perf/scripted",
-      providers: {
-        perf: {
-          base_url: `http://127.0.0.1:${providerPort}/v1`,
-          env_key: "RECURSE_PERF_KEY",
-          wire_api: "completions",
-          models: [{ id: "scripted", context_window: 1_000_000 }],
-        },
-      },
-    }),
-  );
+  await scriptedModel(paths.data, "perf", providerPort, "RECURSE_PERF_KEY");
   if (!fresh) return;
   const source = join(paths.root, "source");
   await mkdir(join(source, "src"), { recursive: true });
@@ -539,109 +496,42 @@ async function prepare(paths: Paths, providerPort: number, fresh: boolean) {
     );
 }
 
-interface Server {
-  proc: { pid: number; exited: Promise<number>; exitCode: number | null };
-  base: string;
-  cookie: string;
-  started: number;
-  listeningMs: number;
-}
+type Server = PrivateServer;
+/** The running server's process, recorded before startup can fail. */
+let owned: { pid: number; exited: Promise<number> } | undefined;
+const stopping = new AbortController();
+let starting: Promise<unknown> = Promise.resolve();
 
 async function startServer(
   paths: Paths,
   env: Record<string, string>,
   label: string,
 ): Promise<Server> {
-  const logFile = join(paths.out, `server-${label}.log`);
   const profiles = join(paths.out, "profiles");
-  const prof = flags["cpu-prof"]
-    ? [
-        "--cpu-prof",
-        "--cpu-prof-md",
-        `--cpu-prof-dir=${profiles}`,
-        `--cpu-prof-name=${label}`,
-      ]
-    : [];
-  await writeFile(logFile, "");
-  const started = now();
-  const proc = Bun.spawn(
-    [
-      process.execPath,
-      ...prof,
-      join(ROOT, "src", "server.ts"),
-      "--host",
-      "127.0.0.1",
-      "--port",
-      env.PORT!,
-    ],
-    {
-      cwd: ROOT,
-      env,
-      stdout: Bun.file(logFile),
-      stderr: Bun.file(logFile),
-      detached: true,
-    },
-  );
-  let base = "";
-  while (!base) {
-    if (now() - started > 120_000 || proc.exitCode !== null)
-      throw new Error(`server did not listen; see ${logFile}`);
-    base =
-      (await readFile(logFile, "utf8").catch(() => "")).match(
-        /listening on (http:\/\/127\.0\.0\.1:\d+)/,
-      )?.[1] ?? "";
-    if (!base) await sleep(20);
-  }
-  const listeningMs = now() - started;
-  const login = await fetch(`${base}/login`, {
-    method: "POST",
-    redirect: "manual",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: `password=${encodeURIComponent(PASSWORD)}`,
+  const start = startPrivateServer({
+    env,
+    logFile: join(paths.out, `server-${label}.log`),
+    port: Number(env.PORT),
+    owned: (pid, exited) => (owned = { pid, exited }),
+    signal: stopping.signal,
+    bunArgs: flags["cpu-prof"]
+      ? [
+          "--cpu-prof",
+          "--cpu-prof-md",
+          `--cpu-prof-dir=${profiles}`,
+          `--cpu-prof-name=${label}`,
+        ]
+      : [],
   });
-  const cookie = login.headers.get("set-cookie")?.split(";")[0];
-  if (login.status !== 303 || !cookie)
-    throw new Error(`login failed: ${login.status}`);
-  return { proc, base, cookie, started, listeningMs };
+  starting = start.catch(() => undefined);
+  return start;
 }
 
-async function stopServer(server: Server): Promise<number> {
-  const started = now();
-  try {
-    process.kill(server.proc.pid, "SIGTERM");
-  } catch {}
-  const timer = setTimeout(() => {
-    try {
-      process.kill(-server.proc.pid, "SIGKILL");
-    } catch {}
-  }, 60_000);
-  await server.proc.exited;
-  clearTimeout(timer);
-  return now() - started;
-}
-
-/** Kill every process group (shells, Pi workers) in our data directory. */
-async function killDataDirGroups(data: string): Promise<number> {
-  const needle = `CHAT_DATA_DIR=${data}\0`;
-  const groups = new Set<number>();
-  const pgidOf = (stat: string) =>
-    Number(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[2]);
-  const own = pgidOf(await readFile("/proc/self/stat", "utf8"));
-  for (const name of await readdir("/proc")) {
-    if (!/^\d+$/.test(name) || Number(name) === process.pid) continue;
-    try {
-      if (!(await readFile(`/proc/${name}/environ`, "latin1")).includes(needle))
-        continue;
-      const stat = await readFile(`/proc/${name}/stat`, "utf8");
-      groups.add(pgidOf(stat));
-    } catch {}
-  }
-  groups.delete(own);
-  for (const group of groups)
-    try {
-      process.kill(-group, "SIGKILL");
-    } catch {}
-  return groups.size;
+async function stopServer(): Promise<number> {
+  if (!owned) return 0;
+  const stopped = await stopPrivateServer(owned.pid, owned.exited);
+  owned = undefined;
+  return stopped;
 }
 
 let server: Server;
@@ -1102,7 +992,7 @@ interface Usage {
 
 /** Server CPU (process and main thread), RSS and threads from /proc. */
 function sampleServer(stopAt: number): Promise<Usage> {
-  const pid = server.proc.pid;
+  const pid = server.pid;
   const ticks = async (path: string) => {
     const stat = await readFile(path, "utf8");
     const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
@@ -1249,7 +1139,7 @@ async function coldStart(
   world: World,
 ) {
   log("cold start: stopping the server");
-  const stopMs = await stopServer(server);
+  const stopMs = await stopServer();
   phase = new Phase("cold-start");
   const spawned = Date.now();
   server = await startServer(paths, env, "cold");
@@ -1498,8 +1388,15 @@ async function main(): Promise<void> {
     process.on(signal, () => {
       void (async () => {
         log(`${signal}: stopping`);
-        if (server) await stopServer(server).catch(() => undefined);
-        await killDataDirGroups(paths.data);
+        stopping.abort();
+        await starting;
+        try {
+          await stopServer();
+          await killDataDirGroups(paths.data);
+        } catch (error) {
+          log(`cleanup failed, data kept at ${root}: ${error}`);
+          process.exit(1);
+        }
         discard();
         process.exit(130);
       })();
@@ -1532,9 +1429,14 @@ async function main(): Promise<void> {
     if (flags["cold-start"]) await coldStart(paths, env, world);
     if (flags.browser) await browserPhase(paths, world);
   } finally {
-    if (server) await stopServer(server).catch(() => undefined);
-    const killed = await killDataDirGroups(paths.data);
-    if (killed) log(`killed ${killed} leftover process groups`);
+    let cleanup: unknown;
+    try {
+      await stopServer();
+      const killed = await killDataDirGroups(paths.data);
+      if (killed) log(`killed ${killed} leftover process groups`);
+    } catch (error) {
+      cleanup = error;
+    }
     provider.stop(true);
     const meta = {
       options: opts,
@@ -1555,6 +1457,10 @@ async function main(): Promise<void> {
     );
     await writeFile(join(out, "report.md"), markdownReport(meta));
     log(`report: ${join(out, "report.md")}`);
+    if (cleanup) {
+      log(`cleanup failed, data kept at ${root}`);
+      throw cleanup;
+    }
     discard();
   }
 }

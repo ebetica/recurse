@@ -21,11 +21,12 @@ export function agentAttachmentHref(
   );
 }
 
-export function agentAttachmentPreviewHref(
+/** Thread-sized image; opening it full-screen loads the original. */
+export function agentAttachmentThumbnailHref(
   conversationId: string,
   attachmentId: string,
 ): string {
-  return `${agentAttachmentHref(conversationId, attachmentId)}/preview`;
+  return `${agentAttachmentHref(conversationId, attachmentId)}/thumbnail`;
 }
 
 type AttachmentSummary = {
@@ -67,8 +68,7 @@ function downloadLabel(name: string, size: string): string {
   return `Download ${name}${size ? `, ${size}` : ""}`;
 }
 
-// Keep image metadata available to assistive technology and the download
-// action, but omit the visible filename/size fields that file cards need.
+/** Image controls share the published filename with their visible caption. */
 export function agentAttachmentView(
   conversationId: string,
   item: AttachmentSummary,
@@ -90,7 +90,7 @@ export function agentAttachmentView(
       kind: "image",
       id: item.id,
       href,
-      previewHref: agentAttachmentPreviewHref(conversationId, item.id),
+      previewHref: agentAttachmentThumbnailHref(conversationId, item.id),
       alt,
       previewLabel: `Open ${alt}`,
       downloadName: item.name || "download",

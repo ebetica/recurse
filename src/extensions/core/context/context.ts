@@ -12,6 +12,7 @@ import {
 import {
   compactionPolicy,
   createDurableCompaction,
+  type DurableCompactionHost,
 } from "./durable-compaction.ts";
 
 export interface ContextOptions {
@@ -22,6 +23,7 @@ export interface ContextOptions {
     id: Conversation["id"],
   ): { conversation: Conversation; harness: Harness } | null;
   report(event: string, error: unknown): void;
+  providerCompaction?: DurableCompactionHost["providerCompaction"];
 }
 
 /** Cap the registered window; the provider still serves its own window. */
@@ -126,6 +128,9 @@ export function createContext(options: ContextOptions) {
           );
         },
         report: options.report,
+        ...(options.providerCompaction
+          ? { providerCompaction: options.providerCompaction }
+          : {}),
       }),
     ],
   };

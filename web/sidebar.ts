@@ -1,6 +1,7 @@
 // Opening a conversation snaps its keyboard cursor; j/k only move that cursor.
 // Keyed forest rows preserve DOM/scroll; tree_projection owns reveal policy.
 // Rename/swipe gestures freeze repaint until completion.
+// Rows keep title, badges and time on one line; models stay in the composer.
 import { startDraft } from "./composer.js";
 import { sharedTrees, reloadChangedTreeLink } from "./shared-trees.js";
 import { copyText } from "./tool_details.js";
@@ -54,6 +55,11 @@ import { beginPaneVisit, syncPanes } from "./panes.js";
 import { openArtifactLink } from "./artifacts/pane.js";
 import { guardLeaveComments } from "./comments.js";
 import {
+  phoneNavigation,
+  phoneListEntry,
+  syncPhoneSelection,
+} from "./phone-nav.js";
+import {
   agentLinkUrl,
   treeLinkUrl,
   historyDisposition,
@@ -70,7 +76,6 @@ import {
 } from "./composer/view-state.js";
 import { conversationUiState } from "./conversation-ui-state/store.js";
 import { TitleActionOrder } from "./title-actions.js";
-import { focusFirst, installFocusTrap } from "./focus_trap.js";
 import {
   ancestorIds,
   descendantIds,
@@ -90,10 +95,26 @@ import {
 } from "./tree_projection.js";
 import { canDrop, isValidDropTarget, reparentValidity } from "./reparent.js";
 import type { TreeNode } from "./types.js";
+import type { Action, Section } from "./sidebar/arrangement.js";
+import { SIDEBAR_CHANGE, shownTags } from "./sidebar/actions.js";
+import { holdOpen, moveHold, openHold, releaseHold } from "./sidebar/hold.js";
+import {
+  arrange,
+  isFolded,
+  rowActions,
+  rowButtons,
+  rowHoldItems,
+  sectionHeader,
+  sectionHoldItems,
+} from "./sidebar/sections.js";
 
 interface TreeEntry {
   n?: TreeNode;
   draftRow?: boolean;
+  /** A backend section's header row. */
+  header?: Section;
+  /** A top-level row's actions. */
+  actions?: Action[];
   depth: number;
   relationship?: TreeRelationship;
   hasChildren?: boolean;
@@ -107,6 +128,7 @@ let treeSnapshotKnown = false;
 // Marks correction rather than reader navigation for historyDisposition.
 let correctingHistory = false;
 let selectedRowReveal = requestSelectedRowReveal("");
+let openSection = { id: "", section: "" };
 
 const INDENT = 10;
 const MAX_VISUAL_DEPTH = 6;
@@ -167,32 +189,98 @@ function stableOrder(list: TreeNode[]): TreeNode[] {
 // Parent edges drive indentation and collapse, but roots are still peers in
 // one stable activity order. A draft sits after the selected row when possible.
 function visibleTree(): TreeEntry[] {
-  const out: TreeEntry[] = projectAgentForest(
-    stableOrder(Object.values(state.nodes)).sort((a, b) => {
-      const labels = backends().map((backend) => backend.label);
-      return (
-        labels.indexOf(parseConversationId(a.id).label) -
-        labels.indexOf(parseConversationId(b.id).label)
-      );
-    }),
-    state.selectedId,
-    {
-      collapsed: collapsedAnchor ? new Set([collapsedAnchor]) : undefined,
-      autoCollapseDepth: DEFAULT_FOLD_DEPTH,
-    },
-  ).map((e) => ({
-    n: e.node,
-    depth: e.depth,
-    relationship: e.relationship,
-    hasChildren: e.hasChildren,
-    collapsed: e.collapsed,
-  }));
+  const out: TreeEntry[] =
+    sharedTrees === null
+      ? sectioned()
+      : projectAgentForest(
+          stableOrder(Object.values(state.nodes)),
+          state.selectedId,
+          {
+            collapsed: collapsedAnchor ? new Set([collapsedAnchor]) : undefined,
+            autoCollapseDepth: DEFAULT_FOLD_DEPTH,
+          },
+        ).map((e) => ({
+          n: e.node,
+          depth: e.depth,
+          relationship: e.relationship,
+          hasChildren: e.hasChildren,
+          collapsed: e.collapsed,
+        }));
   if (state.draft) {
     const current = out.findIndex((e) => e.n?.id === state.selectedId);
     out.splice(current >= 0 ? current + 1 : 0, 0, {
       draftRow: true,
       depth: current >= 0 ? out[current].depth + 1 : 0,
     });
+  }
+  return out;
+}
+
+let sectionsByTitle = new Map<string, Section>();
+const actionsById = new Map<string, Action[]>();
+/**
+ * Explicit script rows become display roots with their unplaced descendants.
+ * A folded section keeps its header, plus the open conversation's tree.
+ */
+function sectioned(): TreeEntry[] {
+  const blocks = new Map<string, TreeEntry[]>();
+  let block: TreeEntry[] | null = null;
+  const nodes = stableOrder(Object.values(state.nodes));
+  const sections = arrange(nodes);
+  const explicit = new Set(sections.flatMap((section) => section.ids));
+  for (const entry of projectAgentForest(
+    nodes.map((node) =>
+      explicit.has(node.id) ? { ...node, parent: null } : node,
+    ),
+    state.selectedId,
+    {
+      collapsed: collapsedAnchor ? new Set([collapsedAnchor]) : undefined,
+      autoCollapseDepth: DEFAULT_FOLD_DEPTH,
+    },
+  )) {
+    const row: TreeEntry = {
+      n: state.nodes[entry.node.id]!,
+      depth: entry.depth,
+      relationship: entry.relationship,
+      hasChildren: entry.hasChildren,
+      collapsed: entry.collapsed,
+    };
+    if (entry.depth === 0) blocks.set(entry.node.id, (block = []));
+    block!.push(row);
+  }
+  sectionsByTitle.clear();
+  actionsById.clear();
+  const out: TreeEntry[] = [];
+  for (const { label } of backends()) {
+    const owns = (id: string) => parseConversationId(id).label === label;
+    if (label && !nodes.some((node) => owns(node.id))) continue;
+    const writable = (id: string) => !label || !!state.nodes[id]?.agent?.tags;
+    for (const original of sections) {
+      const section = {
+        ...original,
+        backend: label,
+        ids: original.ids.filter(owns),
+        actions: original.actions
+          .map((a) => ({
+            ...a,
+            ids: a.ids.filter((id) => owns(id) && writable(id)),
+          }))
+          .filter((a) => a.ids.length),
+      };
+      sectionsByTitle.set(`${label}/${section.title}`, section);
+      out.push({ header: section, depth: 0 });
+      for (const id of section.ids) {
+        const rows = blocks.get(id);
+        if (!rows?.length) continue;
+        rows[0]!.actions = writable(id) ? rowActions(section, id) : [];
+        actionsById.set(id, rows[0]!.actions);
+        if (
+          !isFolded(section) ||
+          rows.some((e) => e.n!.id === state.selectedId)
+        )
+          out.push(...rows);
+      }
+    }
   }
   return out;
 }
@@ -256,13 +344,15 @@ function announceMove(text: string): void {
 }
 
 // Agent ids key real rows; one fixed sentinel keys the draft row.
-const rowKey = (e: TreeEntry): string => (e.draftRow ? "__draft__" : e.n!.id);
+const rowKey = (e: TreeEntry): string =>
+  e.header ? `section:${e.header.title}` : e.draftRow ? "__draft__" : e.n!.id;
 
 // One row: the not-yet-created draft placeholder, or a real agent node.
 function rowT(
   e: TreeEntry,
   open?: (event: Event, id: string) => void,
 ): TemplateResult {
+  if (e.header) return sectionHeader(e.header, renderSidebar);
   const visualDepth = Math.min(e.depth, MAX_VISUAL_DEPTH);
   const indentPx = 8 + visualDepth * INDENT;
   const pad = styleMap(
@@ -275,7 +365,7 @@ function rowT(
       role="treeitem"
       aria-label="New agent draft"
       @click=${() => {
-        closeMobileSidebar();
+        syncHistoryToSelection();
         inputEl.focus();
       }}
     >
@@ -315,7 +405,6 @@ function rowT(
     if (n.id !== state.selectedId && !guardLeaveComments()) return;
     state.cursorId = n.id;
     selectAgent(n.id);
-    closeMobileSidebar();
   };
   const onDbl = () => {
     if (n.id !== state.selectedId && !guardLeaveComments()) return;
@@ -356,13 +445,6 @@ function rowT(
       ${n.safety_off ? SAFETY_OFF_TAG : nothing}
       <span class="title">${n.title}</span>
       ${
-        n.model
-          ? html`<span class="agent-model" title=${n.model}
-              >${n.model.split("/").at(-1)}</span
-            >`
-          : nothing
-      }
-      ${
         n.children
           ? html`<span
               class="badge accent kids"
@@ -371,6 +453,12 @@ function rowT(
             >`
           : nothing
       }
+      ${Object.keys(shownTags(n.id, Date.now() / 1000))
+        .filter((name) => !["pinned", "snoozed", "archived"].includes(name))
+        .map(
+          (name) =>
+            html`<span class="badge" title=${`Tag: ${name}`}>${name}</span>`,
+        )}
       ${showTakeoverTag ? TAKEN_OVER_TAG : nothing}
       ${
         n.queued
@@ -383,6 +471,11 @@ function rowT(
               <span aria-hidden="true">${queuedLabel(n.queued)}</span>
               ${unsafeHTML(MESSAGE_ICON)}
             </span>`
+          : nothing
+      }
+      ${
+        e.actions
+          ? rowButtons(e.actions, n.id, n.title, n.id === state.cursorId)
           : nothing
       }
       <span class="time" title="Last activity ${relTime(n.updated)}"
@@ -452,7 +545,9 @@ export function renderSidebar(): void {
           entries.filter((e) =>
             e.draftRow
               ? (state.draft?.backendLabel ?? "") === label
-              : parseConversationId(e.n!.id).label === label,
+              : e.header
+                ? e.header.backend === label
+                : parseConversationId(e.n!.id).label === label,
           ),
           rowKey,
           (entry) => rowT(entry),
@@ -488,8 +583,21 @@ export function renderSidebar(): void {
     listEl,
   );
 
-  // Invariant: Opening gets one centring pass after keyed row creation. Polls
-  // never recenter or override scrolling; DOM focus remains untouched.
+  // Invariant: Opening gets one centring pass after keyed row creation, and
+  // again when the open row moves to another section. Polls never otherwise
+  // recenter or override scrolling; DOM focus remains untouched.
+  let section: string | null = null;
+  let title = "";
+  for (const entry of entries) {
+    if (entry.header) title = entry.header.title;
+    else if (entry.n?.id === state.selectedId) section = title;
+  }
+  if (section !== null) {
+    const { id, section: before } = openSection;
+    if (id === state.selectedId && before !== section)
+      selectedRowReveal = requestSelectedRowReveal(id);
+    openSection = { id: state.selectedId, section };
+  }
   selectedRowReveal = applySelectedRowReveal(
     selectedRowReveal,
     rows.map((n) => n.id),
@@ -500,6 +608,8 @@ export function renderSidebar(): void {
 }
 
 window.addEventListener("recurse:stop-pending", () => renderSidebar());
+window.addEventListener(SIDEBAR_CHANGE, () => renderSidebar());
+setInterval(() => renderSidebar(), 60_000);
 
 export function selectAgent(
   id: string,
@@ -530,13 +640,13 @@ export function selectAgent(
   if (state.nodes[id]) announceNode(state.nodes[id], "Opened conversation");
   selectedRowReveal = requestSelectedRowReveal(id);
   state.openConvHash = "";
+  // Invariant: Cancel departed work before registering the new visit's probes.
+  // Re-selecting the same conversation keeps still-relevant work.
+  if (id !== outgoing) abandonBackgroundWarming();
   // Invariant: Retarget panels at selection before any cold/failed fetch.
   // Withhold mismatched currentConv; render panels only after their thread data
   // so prior-agent controls and late responses never act on a new selection.
   beginPaneVisit(id);
-  // Invariant: Navigation aborts departed warming/probes to free focused reads.
-  // Re-selecting the same conversation keeps still-relevant work.
-  if (id !== outgoing) abandonBackgroundWarming();
   // Invariant: Only a navigation that will read this conversation is an
   // interaction worth timing. Reclaiming a deleted selection passes
   // refetch=false, and recording it would put a switch nobody asked for into
@@ -586,13 +696,11 @@ export function goUp(): boolean {
   const target = currentParent();
   if (!target) return false;
   if (!guardLeaveComments()) return false;
-  closeMobileSidebar();
   selectAgent(target);
   return true;
 }
 
-// One history entry per opened view supports sharing, Back and Forward. Default
-// Back leaves the app; goUp remains the explicit parent climb.
+// Desktop keeps each opened view; phones keep one conversation above the list.
 function currentHistoryView(): HistoryView {
   if (state.draft || state.selectedId === DRAFT)
     return { agent: currentParent() || "", draft: true };
@@ -601,19 +709,25 @@ function currentHistoryView(): HistoryView {
 
 export function syncHistoryToSelection(): void {
   const next = currentHistoryView();
-  const entry = readHistoryView(history.state, location.hash);
-  const base =
-    history.state && typeof history.state === "object" ? history.state : {};
-  const stamped = { ...base, recurseView: next };
   const url = agentLinkUrl(location.href, next.agent, correctingHistory);
+  if (syncPhoneSelection(next, url, correctingHistory)) return;
+  const entry = readHistoryView(history.state, location.hash);
+  const {
+    phoneScreen: _screen,
+    phonePane: _pane,
+    ...base
+  } = history.state && typeof history.state === "object" ? history.state : {};
+  const stamped = { ...base, recurseView: next };
   try {
     // Invariant: A frame's entries would join the parent page's Back stack.
     if (
       !embedded &&
       historyDisposition(entry, next, correctingHistory) === "push"
-    )
-      history.pushState(stamped, "", url);
-    else history.replaceState(stamped, "", url);
+    ) {
+      // Invariant: A new entry is not one of Settings' Back steps.
+      const { settings: _settings, ...fresh } = stamped;
+      history.pushState(fresh, "", url);
+    } else history.replaceState(stamped, "", url);
   } catch {}
 }
 
@@ -673,7 +787,7 @@ function openWhenListed(id: string, traversed: boolean): void {
   void poll();
 }
 function openHistoryEntry(traversed: boolean, listed = false): void {
-  if (reloadChangedTreeLink()) return;
+  if (reloadChangedTreeLink() || phoneListEntry()) return;
   // Invariant: Before the first tree read nothing can be resolved, and boot
   // restore will consume whatever the URL says. Leave both the selection and
   // the URL alone rather than reporting an agent unavailable that was simply
@@ -719,7 +833,6 @@ function openHistoryEntry(traversed: boolean, listed = false): void {
     else history.back();
     return;
   }
-  closeMobileSidebar();
   asHistoryCorrection(() => selectAgent(target));
   if (known) openArtifactLink();
   if (!known) {
@@ -1013,7 +1126,9 @@ export function killAgent(dying: string | null | undefined): void {
             new Set(Object.keys(state.nodes)),
           );
           if (target) {
-            selectAgent(target);
+            if (phoneListEntry())
+              asHistoryCorrection(() => selectAgent(target));
+            else selectAgent(target);
           } else if (
             selection?.selectedId === state.selectedId &&
             !Object.keys(state.nodes).length
@@ -1027,7 +1142,8 @@ export function killAgent(dying: string | null | undefined): void {
             } catch {}
             renderEmptyAgentList();
             renderSidebar();
-            syncHistoryToSelection();
+            if (phoneListEntry()) canonicalizeAgentUrl();
+            else syncHistoryToSelection();
             refreshUpBtn();
           }
           renderSidebar();
@@ -1164,8 +1280,6 @@ shareBtn.onclick = async () => {
 };
 
 // ---------------- up-to-parent button (visible twin of the phone back button)
-const upBtn = $("#up-btn")!;
-upBtn.onclick = goUp;
 const upTop = $("#up-top")!;
 upTop.onclick = goUp;
 
@@ -1203,7 +1317,6 @@ trashBtn.onclick = () => {
 export function refreshUpBtn(authoritativeTree = false): void {
   if (authoritativeTree) treeSnapshotKnown = true;
   const hasParent = currentParent() !== null;
-  upBtn.classList.toggle("on", hasParent);
   upTop.classList.toggle("on", hasParent);
   const selectedSaved = !!state.selectedId && state.selectedId !== DRAFT;
   const cachedSelection = selectedSaved
@@ -1223,75 +1336,20 @@ export function refreshUpBtn(authoritativeTree = false): void {
   trashHold.sync();
 }
 
-// ---------------- mobile: off-canvas sidebar
-const sidebar = $("#sidebar")!,
-  backdrop = $("#backdrop")!;
+// The phone list is a screen, not a dismissible drawer.
+const sidebar = $("#sidebar")!;
 const menuBtn = $<HTMLButtonElement>("#menu-btn")!;
-const mobileMedia = window.matchMedia("(max-width: 700px)");
-function syncMobileSidebarAccess(): void {
-  if (!window.matchMedia("(max-width: 700px)").matches) {
-    sidebar.inert = false;
-    sidebar.removeAttribute("aria-hidden");
-    sidebar.classList.remove("open");
-    backdrop.classList.remove("on");
-    menuBtn.setAttribute(
-      "aria-expanded",
-      String(!sidebar.classList.contains("desktop-hidden")),
-    );
-    return;
-  }
-  const open = sidebar.classList.contains("open");
-  sidebar.inert = !open;
-  sidebar.setAttribute("aria-hidden", String(!open));
-}
-function restoreSidebarFocus(): void {
-  if (window.matchMedia("(max-width: 700px)").matches) menuBtn.focus();
-}
-// Instant close commits before mobile input focus can freeze a transition.
-// Normal backdrop closes retain animation; keyboard resize must not leave the
-// sidebar half-open.
 export function mobileSidebarOpen(): boolean {
-  return sidebar.classList.contains("open");
-}
-export function closeMobileSidebar(instant?: boolean, restore = false): void {
-  const wasOpen = mobileSidebarOpen();
-  const focusInside = wasOpen && sidebar.contains(document.activeElement);
-  if (instant) sidebar.style.transition = "none";
-  sidebar.classList.remove("open");
-  backdrop.classList.remove("on");
-  menuBtn.setAttribute("aria-expanded", "false");
-  syncMobileSidebarAccess();
-  if (instant) {
-    void sidebar.offsetWidth;
-    sidebar.style.transition = "";
-  }
-  if (wasOpen && (focusInside || restore)) restoreSidebarFocus();
-}
-function openMobileSidebar(): void {
-  sidebar.classList.add("open");
-  backdrop.classList.add("on");
-  menuBtn.setAttribute("aria-expanded", "true");
-  syncMobileSidebarAccess();
-  focusFirst(sidebar);
+  return phoneListEntry();
 }
 menuBtn.onclick = () => {
-  if (!mobileMedia.matches) {
-    const hidden = sidebar.classList.toggle("desktop-hidden");
-    menuBtn.setAttribute("aria-expanded", String(!hidden));
+  if (phoneNavigation()) {
+    if (!phoneListEntry() && guardLeaveComments()) history.back();
     return;
   }
-  mobileSidebarOpen() ? closeMobileSidebar() : openMobileSidebar();
+  const hidden = sidebar.classList.toggle("desktop-hidden");
+  menuBtn.setAttribute("aria-expanded", String(!hidden));
 };
-
-installFocusTrap(sidebar, mobileSidebarOpen);
-mobileMedia.addEventListener("change", syncMobileSidebarAccess);
-window.addEventListener("resize", syncMobileSidebarAccess, { passive: true });
-window.visualViewport?.addEventListener("resize", syncMobileSidebarAccess, {
-  passive: true,
-});
-
-syncMobileSidebarAccess();
-backdrop.onclick = () => closeMobileSidebar(true, true);
 
 // Optimistic F2/touch rename survives polls, waiting for running settle.
 let renaming: string | null = null;
@@ -1403,6 +1461,13 @@ export function startRename(id: string): void {
   };
   finishRename = finish;
   input.addEventListener("blur", () => finish(true));
+  // Invariant: Touch layouts skip the keymap, so the field itself commits
+  // Enter (a phone keyboard's Go); a desktop keymap commit wins first.
+  input.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" || e.isComposing) return;
+    e.preventDefault();
+    finish(true);
+  });
   // Invariant: a click/press in the field must not bubble to the row (which
   // would open it)
   input.addEventListener("click", (e) => e.stopPropagation());
@@ -1413,7 +1478,7 @@ const rowOf = (e: Event): HTMLElement | null =>
   (e.target as HTMLElement | null)?.closest<HTMLElement>(".agent") || null;
 let touchActionHandled = false;
 let longPressTimer = 0;
-// Hold renames; left swipe deletes; native scrolling retains pan-y ownership.
+// Hold opens the action menu; left swipe deletes; native scrolling keeps pan-y.
 const SWIPE_START = 12;
 const DISMISS_MIN = 90;
 interface Swipe {
@@ -1426,6 +1491,7 @@ interface Swipe {
   armed: boolean;
 }
 let swipe: Swipe | null = null;
+let pressAt = [0, 0];
 
 function resetRow(row: HTMLElement | null, animate: boolean): void {
   if (!row) return;
@@ -1442,12 +1508,23 @@ listEl.addEventListener(
   "touchstart",
   (e: TouchEvent) => {
     if (renaming || e.touches.length > 1) return;
+    const t = e.touches[0];
+    const header = (e.target as HTMLElement | null)?.closest<HTMLElement>(
+      ".tree-section-header",
+    );
+    const section = sectionsByTitle.get(header?.dataset.sectionKey ?? "");
+    clearTimeout(longPressTimer);
+    pressAt = [t.clientX, t.clientY];
+    if (section?.actions.length)
+      longPressTimer = setTimeout(
+        () => openHold(sectionHoldItems(section), t.clientX, t.clientY),
+        450,
+      ) as unknown as number;
     const row = (e.target as HTMLElement | null)?.closest<HTMLElement>(
       ".agent",
     );
     if (!row) return;
     const id = row.dataset.id;
-    const t = e.touches[0];
     swipe = {
       row,
       id,
@@ -1458,16 +1535,17 @@ listEl.addEventListener(
       armed: false,
     };
     touchActionHandled = false;
-    clearTimeout(longPressTimer);
-    // Invariant: long-press → rename in place. The row's own tap-open is
-    // swallowed afterwards. A draft row has no real agent to rename, so skip
-    // it.
+    // Invariant: Holding opens the row's action menu, Rename last; the row's
+    // own tap-open is swallowed afterwards. A draft row has no actions.
     if (id && id !== DRAFT)
       longPressTimer = setTimeout(() => {
         if (!swipe || swipe.active) return;
         touchActionHandled = true;
         swipe = null;
-        startRename(id);
+        const items = rowHoldItems(actionsById.get(id) ?? [], id, () =>
+          startRename(id),
+        );
+        openHold(items, t.clientX, t.clientY);
       }, 450) as unknown as number;
   },
   { passive: true },
@@ -1476,8 +1554,15 @@ listEl.addEventListener(
 listEl.addEventListener(
   "touchmove",
   (e: TouchEvent) => {
-    if (!swipe) return;
     const t = e.touches[0];
+    if (holdOpen()) {
+      e.preventDefault();
+      return moveHold(t.clientX, t.clientY);
+    }
+    const [x, y] = pressAt;
+    if (Math.hypot(t.clientX - x, t.clientY - y) > SWIPE_START)
+      clearTimeout(longPressTimer);
+    if (!swipe) return;
     const dx = t.clientX - swipe.x0,
       dy = t.clientY - swipe.y0;
     if (!swipe.active) {
@@ -1535,8 +1620,21 @@ function endSwipe(): void {
     resetRow(s.row, true);
   }
 }
-listEl.addEventListener("touchend", endSwipe);
+listEl.addEventListener("touchend", (e: TouchEvent) => {
+  const t = e.changedTouches[0];
+  // Invariant: A hold's release never also taps the row or header under it.
+  if (holdOpen() && t) {
+    e.preventDefault();
+    releaseHold(t.clientX, t.clientY);
+  }
+  endSwipe();
+});
+listEl.addEventListener("contextmenu", (e) => {
+  // Invariant: A touch hold's context menu would cancel the touch and menu.
+  if (holdOpen() || swipe) e.preventDefault();
+});
 listEl.addEventListener("touchcancel", () => {
+  // Invariant: A cancelled hold keeps its menu open for a tap.
   clearTimeout(longPressTimer);
   if (swipe && swipe.active) resetRow(swipe.row, true);
   swipe = null;
@@ -1567,8 +1665,9 @@ function endDrag(): void {
 listEl.addEventListener("dragstart", (e: DragEvent) => {
   const row = rowOf(e);
   const id = row?.dataset.id;
-  // Invariant: A draft is not a saved agent and cannot be moved.
-  if (!id || id === DRAFT || !state.nodes[id]) {
+  // Invariant: A draft is not a saved agent and cannot be moved. Touch holds
+  // open the action menu instead of dragging.
+  if (!id || id === DRAFT || !state.nodes[id] || holdOpen() || swipe) {
     e.preventDefault();
     return;
   }

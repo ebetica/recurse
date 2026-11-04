@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import { EventEmitter, once } from "node:events";
-import type { Browser, Locator, Route } from "playwright";
+import type { Browser, Locator, Page, Route } from "playwright";
 import {
   captureErrors,
   closeWithRoutes,
@@ -8,6 +8,7 @@ import {
   gotoRoot,
   postFixture,
   runBrowserTests,
+  showAgentList,
   themeColors,
   type BrowserTest,
 } from "./common";
@@ -32,6 +33,37 @@ interface Fixture {
 interface ImageNavigationFixture {
   demo: string;
   image_ids: string[];
+}
+
+async function retryColdFiles(
+  page: Page,
+  pane: Locator,
+  base: string,
+  cid: string,
+  coldUrl: string,
+  coldFailed: Route[],
+): Promise<void> {
+  await pane
+    .locator(".files-error", { hasText: "Couldn’t load files" })
+    .waitFor();
+  expect(await pane.getByRole("button", { name: "Retry" }).count()).toBe(1);
+  await page.unroute(coldUrl);
+  expect(
+    (await page.request.post(base + "__browser-test/append-empty-file")).ok(),
+  ).toBeTrue();
+  const retryBefore = await page.evaluate("window.__filesFetchOrder.length");
+  const retryResponse = page.waitForResponse((r) =>
+    r.url().includes(`/conversations/${cid}/files?`),
+  );
+  await pane.getByRole("button", { name: "Retry" }).click();
+  await page.waitForFunction(
+    `window.__filesFetchOrder.length > ${retryBefore}`,
+    null,
+    { timeout: 15_000 },
+  );
+  await pane.locator(".files-card", { hasText: "empty-agent.txt" }).waitFor();
+  await (await retryResponse).finished();
+  expect(coldFailed).toHaveLength(1);
 }
 
 async function runningTree(route: Route, runningCid: string): Promise<void> {
@@ -82,6 +114,10 @@ async function mobileFiles(
   const errors = captureErrors(page);
   await page.route("**/api/tree", (route) => runningTree(route, fixture.empty));
   await page.route(`**/api/conversations/${fixture.empty}?*`, runningView);
+  await page.route(
+    (url) => url.pathname === `/api/conversations/${fixture.empty}/events`,
+    (route) => route.abort(),
+  );
   await page.addInitScript(`
     window.__filesFetchOrder = []; window.__filesClockOffset = 0;
     const realNow = performance.now.bind(performance); performance.now = () => realNow() + window.__filesClockOffset;
@@ -115,27 +151,7 @@ async function mobileFiles(
   expect(coldFailed).toHaveLength(1);
   await menu.evaluate((element) => (element as { click: () => void }).click());
   let pane = page.locator('.pane-col[data-pane="files"]');
-  await pane
-    .locator(".files-error", { hasText: "Couldn’t load files" })
-    .waitFor();
-  expect(await pane.getByRole("button", { name: "Retry" }).count()).toBe(1);
-  await page.unroute(coldUrl);
-  expect(
-    (await page.request.post(base + "__browser-test/append-empty-file")).ok(),
-  ).toBeTrue();
-  const retryBefore = await page.evaluate("window.__filesFetchOrder.length");
-  const retryResponse = page.waitForResponse((r) =>
-    r.url().includes(`/conversations/${fixture.empty}/files?`),
-  );
-  await pane.getByRole("button", { name: "Retry" }).click();
-  await page.waitForFunction(
-    `window.__filesFetchOrder.length > ${retryBefore}`,
-    null,
-    { timeout: 15_000 },
-  );
-  await pane.locator(".files-card", { hasText: "empty-agent.txt" }).waitFor();
-  await (await retryResponse).finished();
-  expect(coldFailed).toHaveLength(1);
+  await retryColdFiles(page, pane, base, fixture.empty, coldUrl, coldFailed);
   const heldRequests = heldRoutes();
   const held = heldRequests.routes;
   const filesUrl = `**/api/conversations/${fixture.empty}/files?*`;
@@ -185,7 +201,7 @@ async function mobileFiles(
     await page.evaluate("document.activeElement?.id === 'menu-btn'"),
   ).toBeTrue();
   await page.unroute(filesUrl);
-  await page.locator("#menu-btn").click();
+  await showAgentList(page);
   await page.locator(`.agent[data-id="${fixture.demo}"]`).click();
   await page.locator("#conv-title", { hasText: "Files demo agent" }).waitFor();
   expect(
@@ -358,27 +374,7 @@ export const tests: BrowserTest[] = [
     expect(await page.locator('.pane-col[data-pane="files"]').count()).toBe(0);
     await filesButton.click();
     let pane = page.locator('.pane-col[data-pane="files"]');
-    await pane
-      .locator(".files-error", { hasText: "Couldn’t load files" })
-      .waitFor();
-    expect(await pane.getByRole("button", { name: "Retry" }).count()).toBe(1);
-    await page.unroute(coldUrl);
-    expect(
-      (await page.request.post(base + "__browser-test/append-empty-file")).ok(),
-    ).toBeTrue();
-    const retryBefore = await page.evaluate("window.__filesFetchOrder.length");
-    const retryResponse = page.waitForResponse((r) =>
-      r.url().includes(`/conversations/${fixture.empty}/files?`),
-    );
-    await pane.getByRole("button", { name: "Retry" }).click();
-    await page.waitForFunction(
-      `window.__filesFetchOrder.length > ${retryBefore}`,
-      null,
-      { timeout: 15_000 },
-    );
-    await pane.locator(".files-card", { hasText: "empty-agent.txt" }).waitFor();
-    await (await retryResponse).finished();
-    expect(coldFailed).toHaveLength(1);
+    await retryColdFiles(page, pane, base, fixture.empty, coldUrl, coldFailed);
     await pane.locator(".pane-title").focus();
     await page.locator(`.agent[data-id="${fixture.demo}"]`).click();
     await page
@@ -815,10 +811,10 @@ export const tests: BrowserTest[] = [
       .locator("#conv-title", { hasText: "Files image navigation" })
       .waitFor();
     await page.locator('#messages img[alt="nav-2.png"]').click();
-    await page
-      .locator("dialog.image-popout")
-      .getByRole("button", { name: "Open in Files" })
-      .click();
+    const viewer = page.locator("dialog.image-popout");
+    await viewer.waitFor();
+    expect(await viewer.locator(".files-position").count()).toBe(0);
+    await viewer.getByRole("button", { name: "Open in Files" }).click();
     const pane = page.locator('.pane-col[data-pane="files"]');
     const detail = pane.locator(".files-detail");
     await pane.locator('.files-detail[aria-label="nav-2.png"]').waitFor();
@@ -848,10 +844,7 @@ export const tests: BrowserTest[] = [
       await pane.locator(".files-card").first().getAttribute("aria-label"),
     ).toBe(last);
     await pane.locator(".files-thumb").first().click();
-    await page
-      .locator("dialog.image-popout")
-      .getByRole("button", { name: "Open in Files" })
-      .click();
+    await viewer.getByRole("button", { name: "Open in Files" }).click();
     expect(await position.textContent()).toBe("3 of 3");
     await page.waitForFunction(
       "document.querySelector('.files-detail img')?.naturalWidth > 0",
@@ -1053,6 +1046,10 @@ export const tests: BrowserTest[] = [
       page.on("request", (request) => {
         if (!request.url().startsWith(base)) remote.push(request.url());
       });
+      if (width === 390)
+        await page.route("**/attachments/*/thumbnail", (route) =>
+          route.fulfill({ status: 404, body: "not found" }),
+        );
       try {
         await page.goto(`${base}#agent=${fixture.demo}`, {
           waitUntil: "domcontentloaded",
@@ -1096,6 +1093,9 @@ export const tests: BrowserTest[] = [
           .waitFor();
         const image = detail.locator(
           '.files-markdown img[alt="Local diagram"]',
+        );
+        expect(await image.getAttribute("src")).toMatch(
+          width === 390 ? /\/preview$/ : /\/thumbnail$/,
         );
         expect((await image.boundingBox())!.height).toBeGreaterThan(360);
         expect((await image.boundingBox())!.width).toBeGreaterThan(0);
@@ -1470,6 +1470,8 @@ export const tests: BrowserTest[] = [
     };
     const listing = `**/api/conversations/${demo}/files?*`;
     let firstListing: string | null = null;
+    const refreshStarted = Promise.withResolvers<void>();
+    const releaseRefresh = Promise.withResolvers<void>();
     await page.route(listing, async (route) => {
       firstListing ??= await (await route.fetch()).text();
       await route.fulfill({
@@ -1522,6 +1524,16 @@ export const tests: BrowserTest[] = [
       await pane
         .locator(".files-detail h1", { hasText: failed.name })
         .waitFor({ timeout: 15_000 });
+      await page.route(listing, async (route) => {
+        const response = await route.fetch();
+        refreshStarted.resolve();
+        await releaseRefresh.promise;
+        await route.fulfill({ response });
+      });
+      const newest = (await postFixture(base, "publish-later-file")) as {
+        name: string;
+      };
+      await refreshStarted.promise;
       await page.route(`**/api/conversations/${demo}/attachments/*`, (route) =>
         route.request().method() === "DELETE"
           ? route.fulfill({ status: 500, body: "{}" })
@@ -1529,16 +1541,45 @@ export const tests: BrowserTest[] = [
       );
       page.once("dialog", (dialog) => void dialog.accept());
       await pane.getByRole("button", { name: "Delete" }).click();
+      const deletionError = `Couldn’t delete ${failed.name}.`;
       await pane
-        .locator(".files-error", { hasText: "Couldn’t delete the file" })
+        .locator(".files-error", { hasText: deletionError })
         .waitFor({ timeout: 15_000 });
       expect(
         await pane
           .locator(".files-detail h1", { hasText: failed.name })
           .count(),
       ).toBe(1);
+      releaseRefresh.resolve();
+      await pane.locator(".files-position", { hasText: "of 4" }).waitFor();
+      expect(
+        await pane
+          .locator(".files-error", { hasText: deletionError })
+          .isVisible(),
+      ).toBeTrue();
+      await page.unroute(`**/api/conversations/${demo}/attachments/*`);
+      await pane.getByRole("button", { name: "Next file" }).click();
+      await pane
+        .locator(".files-detail h1", { hasText: newest.name })
+        .waitFor();
+      page.once("dialog", (dialog) => void dialog.accept());
+      await pane.getByRole("button", { name: "Delete" }).click();
+      await pane.locator(".files-summary", { hasText: "3 files" }).waitFor();
+      expect(
+        await pane
+          .locator(".files-error", { hasText: deletionError })
+          .isVisible(),
+      ).toBeTrue();
+      page.once("dialog", (dialog) => void dialog.accept());
+      await pane.getByRole("button", { name: "Retry" }).click();
+      await pane.locator(".files-summary", { hasText: "2 files" }).waitFor();
+      expect(await pane.locator(".files-error").count()).toBe(0);
+      expect(
+        await pane.locator(".files-card", { hasText: failed.name }).count(),
+      ).toBe(0);
       expect(errors.filter((error) => !error.includes("500"))).toEqual([]);
     } finally {
+      releaseRefresh.resolve();
       await closeWithRoutes(context);
     }
   },
@@ -1746,8 +1787,15 @@ export const tests: BrowserTest[] = [
       });
       if (mobile) {
         const menu = page.locator('.pane-menu-item[data-pane="files"]');
-        await menu.waitFor({ state: "attached" });
-        await page.locator("#pane-fab").click();
+        await page.waitForFunction(
+          `(/Files \\(\\d+\\)/).test(document.querySelector('.pane-menu-item[data-pane="files"]')?.textContent || '')`,
+        );
+        const more = page.locator("#pane-fab");
+        expect(await more.getAttribute("aria-label")).toBe("More actions");
+        expect(await more.getAttribute("title")).toBe("More actions");
+        expect(await more.locator(".badge").count()).toBe(0);
+        await more.click();
+        expect(await menu.innerText()).toMatch(/Files \(\d+\)/);
         await menu.click();
       } else await page.locator('.rail-btn[data-pane="files"]').click();
       const pane = page.locator('.pane-col[data-pane="files"]');
@@ -1862,15 +1910,10 @@ export const tests: BrowserTest[] = [
       response.url().endsWith(`/api/conversations/${demo}/deliver`),
     );
     await page.getByRole("button", { name: "Submit comments" }).click();
-    await page.getByRole("button", { name: "Submitting…" }).waitFor();
-    await page.getByRole("button", { name: "All files" }).click();
-    await page.locator(".report-bar").waitFor({ state: "detached" });
+    await page.locator("[data-comment-send]").getByRole("status").waitFor();
+    await page.locator(".report-bar").waitFor({ state: "hidden" });
     release();
     expect((await delivered).ok()).toBeTrue();
-    await page
-      .getByRole("button", { name: "Open review.diff", exact: true })
-      .click();
-    await page.getByRole("button", { name: "Submit comments" }).waitFor();
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -2102,6 +2145,7 @@ export const tests: BrowserTest[] = [
         image.x + image.width * 0.2,
         image.y + image.height * 0.25,
       );
+      await page.keyboard.down("Control");
       await page.mouse.down();
       await page.mouse.move(
         image.x + image.width * 0.6,
@@ -2109,10 +2153,30 @@ export const tests: BrowserTest[] = [
         { steps: 8 },
       );
       await page.mouse.up();
+      await page.keyboard.up("Control");
     };
     await drawImageBox();
     let popover = page.locator(".report-comment-popover");
     await popover.waitFor();
+    await popover.locator("textarea").fill("Unsent draft");
+    await page.keyboard.press("Escape");
+    await popover.waitFor({ state: "hidden" });
+    expect(await pane.locator(".report-comment-input").inputValue()).toBe(
+      "Unsent draft",
+    );
+    await page.keyboard.press("Escape");
+    await pane.waitFor({ state: "detached" });
+    await page.locator('.rail-btn[data-pane="files"]').click();
+    pane = page.locator('.pane-col[data-pane="files"]');
+    await pane
+      .locator('.files-detail[aria-label="browser-image.png"]')
+      .waitFor();
+    await pane.locator(".report-comment-input").waitFor();
+    expect(await pane.locator(".report-comment-input").inputValue()).toBe(
+      "Unsent draft",
+    );
+    await pane.locator(".report-comment-del").click();
+    await drawImageBox();
     await popover.locator("textarea").fill("Unsent draft");
     await pane.getByRole("button", { name: "Previous file" }).click();
     await popover.waitFor({ state: "hidden" });
@@ -2136,8 +2200,18 @@ export const tests: BrowserTest[] = [
     expect(await pane.locator("mark.report-cbox").count()).toBe(0);
     await pane.getByRole("button", { name: "Next file" }).click();
     await pane.locator(".files-image-frame mark.report-cbox").waitFor();
+    await drawImageBox();
+    await popover.locator("textarea").fill("Another region");
+    await popover.getByRole("button", { name: "Comment" }).click();
     await page.route(`${base}api/attachments`, (route) =>
-      route.fulfill({ status: 503, json: { error: "Upload unavailable" } }),
+      route.request().postData()?.includes("browser-image-box-2.jpg")
+        ? route.fulfill({ status: 503, json: { error: "Upload unavailable" } })
+        : route.continue(),
+    );
+    const cleanup = page.waitForResponse(
+      (response) =>
+        response.request().method() === "DELETE" &&
+        response.url().includes("/attachment-crops/"),
     );
     const natural = await pane
       .locator(".files-detail img")
@@ -2149,11 +2223,12 @@ export const tests: BrowserTest[] = [
       request.url().endsWith(`/api/conversations/${fixture.demo}/deliver`),
     );
     await pane.getByRole("button", { name: "Submit comments" }).click();
+    const failure = page.locator("[data-comment-send]").getByRole("alert");
+    await failure.getByRole("button", { name: "Send without images" }).click();
     let content = (await delivered).postDataJSON().content as string;
+    expect((await cleanup).ok()).toBeTrue();
     expect(content).toStartWith('Comments on file "browser-image.png" (id: ');
-    expect(content).toContain(
-      "(crop unavailable; coordinates only):\nCrop this",
-    );
+    expect(content).toContain(":\nCrop this");
     const coordinates = /box 1, x=(\d+) y=(\d+) w=(\d+) h=(\d+) px/.exec(
       content,
     )!;
@@ -2169,7 +2244,7 @@ export const tests: BrowserTest[] = [
     expect(content).toContain(
       `px in the ${natural.width}×${natural.height} original (x,y = top-left)`,
     );
-    expect(content).not.toContain("![browser-image-box-1.png](");
+    expect(content).not.toContain("![browser-image-box-1.jpg](");
     expect(errors).toEqual([]);
     await desktop.close();
 
@@ -2227,11 +2302,11 @@ export const tests: BrowserTest[] = [
     content = (await delivered).postDataJSON().content as string;
     expect(content).toStartWith('Comments on file "slides.pdf" (id: ');
     expect(content).toContain(
-      "- box 1 (page 2), x=0.10 y=0.20 w=0.60 h=0.30 (fractions of width and height; x,y = top-left), attached as slides-box-1.png:",
+      "- box 1 (page 2), x=0.10 y=0.20 w=0.60 h=0.30 (fractions of width and height; x,y = top-left), attached as slides-box-1.jpg:",
     );
     expect(content).toContain("Label this");
-    expect(content).toContain("![slides-box-1.png](");
-    const cropUrl = /!\[slides-box-1\.png\]\(([^)]+)\)/.exec(content)![1]!;
+    expect(content).toContain("![slides-box-1.jpg](");
+    const cropUrl = /!\[slides-box-1\.jpg\]\(([^)]+)\)/.exec(content)![1]!;
     const crop = await page.evaluate(async (url) => {
       const image = new (globalThis as any).Image();
       image.src = /^\/api\/conversations\/[^/]+\/attachments\/[^/]+$/.test(url)

@@ -196,12 +196,10 @@ describe("live E2E session ownership", () => {
     try {
       await host.send("c1", "Reply with SECOND_MODEL_OK", "r1");
       await until(idle(host));
+      const session = String((await host.view("c1", { limit: 50 })).session);
+      await host.close();
       const entries = await readDurableEntries(root, "c1");
-      const exported = await ownSession(
-        root,
-        "c1",
-        String((await host.view("c1", { limit: 50 })).session),
-      );
+      const exported = await ownSession(root, "c1", session);
       expect(
         (await readFile(exported, "utf8"))
           .trim()

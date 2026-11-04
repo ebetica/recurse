@@ -1,6 +1,6 @@
-// Draw selection-comment boxes on Files images/PDFs: mouse/pen drag,
-// touch drag when zoomed, otherwise hold then drag to preserve swipes/scrolls.
-// Touch taps explain the gesture; native cancel abandons it.
+// Draw selection-comment boxes on Files images/PDFs. Image mouse comments
+// require a modifier; touch and pen hold before dragging. PDF mouse drag is
+// unchanged. Touch taps explain the gesture; native cancel abandons it.
 import type { CommentBox } from "../artifacts/artifact-state.js";
 import { offerBoxComment, placeBox } from "../artifacts/selection-comments.js";
 
@@ -62,9 +62,7 @@ export function installBoxComments(pane: HTMLElement): void {
     hint = document.createElement("span");
     hint.className = "files-box-hint";
     hint.setAttribute("role", "status");
-    hint.textContent = frame.closest('[data-zoomed="true"]')
-      ? "Drag to comment; use two fingers to move the image"
-      : "Hold, then drag to comment on an area";
+    hint.textContent = "Hold, then drag to comment on an area";
     const { width, height } = frame.getBoundingClientRect();
     hint.style.left = `${Math.max(8, Math.min(point.x * width - 140, width - 288))}px`;
     hint.style.top = `${Math.max(40, point.y * height - 12)}px`;
@@ -93,6 +91,11 @@ export function installBoxComments(pane: HTMLElement): void {
       ".report-box-frame",
     );
     if (!event.isPrimary || event.button !== 0 || !frame?.offsetHeight) return;
+    const image = !!frame.closest(".image-zoom-viewport");
+    if (image && event.pointerType === "mouse") {
+      const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+      if (!(mac ? event.metaKey : event.ctrlKey)) return;
+    }
     const current: Press = {
       id: event.pointerId,
       frame,
@@ -100,7 +103,10 @@ export function installBoxComments(pane: HTMLElement): void {
       client: { x: event.clientX, y: event.clientY },
     };
     press = current;
-    if (event.pointerType !== "touch") {
+    if (
+      event.pointerType === "mouse" ||
+      (!image && event.pointerType !== "touch")
+    ) {
       event.preventDefault();
       frame.setPointerCapture(event.pointerId);
       begin(current);
@@ -125,14 +131,8 @@ export function installBoxComments(pane: HTMLElement): void {
         ) <= SLOP_PX
       )
         return;
-      if (!press.frame.closest('[data-zoomed="true"]')) {
-        cancel();
-        return;
-      }
-      clearTimeout(press.timer);
-      touchDrew = true;
-      press.frame.setPointerCapture(press.id);
-      begin(press);
+      cancel();
+      return;
     }
     if (
       press.mark!.classList.contains("files-box-start") &&
@@ -154,7 +154,7 @@ export function installBoxComments(pane: HTMLElement): void {
     clearTimeout(timer);
     press = null;
     if (!mark) {
-      if (event.pointerType === "touch") showHint(frame, from);
+      if (event.pointerType !== "mouse") showHint(frame, from);
       return;
     }
     const box = boxOf(frame, from, pointIn(frame, event));

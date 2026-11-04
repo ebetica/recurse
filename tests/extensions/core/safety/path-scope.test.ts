@@ -30,56 +30,74 @@ beforeAll(() => {
 afterAll(() => rmSync(base, { recursive: true, force: true }));
 
 const env = { [WORKSPACE_ROOT_ENV]: workspace } as NodeJS.ProcessEnv;
-const scoped = (
+const scoped = async (
   tool: string,
   path: unknown,
   cwd = workspace,
   customEnv = env,
-) => allowedByPathScope(tool, { path }, cwd, loadTrustedPathScope(customEnv));
+) =>
+  allowedByPathScope(
+    tool,
+    { path },
+    cwd,
+    await loadTrustedPathScope(customEnv),
+  );
 
 describe("file action path scope", () => {
-  test("allows existing and nonexistent workspace files for file-scoped tools", () => {
-    expect(scoped("write", "src/existing.ts")).toBe(true);
-    expect(scoped("edit", "src/new/deep/file.ts")).toBe(true);
+  test("allows existing and nonexistent workspace files for file-scoped tools", async () => {
+    expect(await scoped("write", "src/existing.ts")).toBe(true);
+    expect(await scoped("edit", "src/new/deep/file.ts")).toBe(true);
   });
 
-  test("allows /tmp and the runner-owned per-agent scratch directory", () => {
+  test("allows /tmp and the runner-owned per-agent scratch directory", async () => {
     const scratch = mkdtempSync(join(base, "agent-scratch-"));
     try {
       const withScratch = {
         ...env,
         RECURSE_AGENT_TMPDIR: scratch,
       } as NodeJS.ProcessEnv;
-      expect(scoped("write", "/tmp/new-file", workspace, withScratch)).toBe(
-        true,
-      );
       expect(
-        scoped("edit", join(scratch, "new-file"), workspace, withScratch),
+        await scoped("write", "/tmp/new-file", workspace, withScratch),
+      ).toBe(true);
+      expect(
+        await scoped("edit", join(scratch, "new-file"), workspace, withScratch),
       ).toBe(true);
     } finally {
       rmSync(scratch, { recursive: true, force: true });
     }
   });
 
-  test("uses fixed source roots rather than widening scope with cwd", () => {
+  test("uses fixed source roots rather than widening scope with cwd", async () => {
     const fixed = {
       [WORKSPACE_ROOT_ENV]: workspace,
       [WORKTREES_ROOT_ENV]: worktrees,
     } as NodeJS.ProcessEnv;
-    expect(scoped("write", "checkout/new.ts", worktrees, fixed)).toBe(true);
-    expect(scoped("write", ".markers/checkout.json", worktrees, fixed)).toBe(
-      false,
+    expect(await scoped("write", "checkout/new.ts", worktrees, fixed)).toBe(
+      true,
     );
     expect(
-      scoped("write", ".managed/checkout/HOLDERS/agent.json", worktrees, fixed),
+      await scoped("write", ".markers/checkout.json", worktrees, fixed),
     ).toBe(false);
     expect(
-      scoped("write", "TO_REAP/staged/checkout/file.ts", worktrees, fixed),
+      await scoped(
+        "write",
+        ".managed/checkout/HOLDERS/agent.json",
+        worktrees,
+        fixed,
+      ),
     ).toBe(false);
-    expect(scoped("write", "new.ts", outside, fixed)).toBe(false);
+    expect(
+      await scoped(
+        "write",
+        "TO_REAP/staged/checkout/file.ts",
+        worktrees,
+        fixed,
+      ),
+    ).toBe(false);
+    expect(await scoped("write", "new.ts", outside, fixed)).toBe(false);
   });
 
-  test("protects worktree metadata when the roots are nested", () => {
+  test("protects worktree metadata when the roots are nested", async () => {
     const state = join(workspace, "nested-state");
     const nestedWorktrees = join(state, "worktrees");
     mkdirSync(join(nestedWorktrees, ".markers"), { recursive: true });
@@ -90,7 +108,7 @@ describe("file action path scope", () => {
       CHAT_DATA_DIR: state,
     } as NodeJS.ProcessEnv;
     expect(
-      scoped(
+      await scoped(
         "write",
         "nested-state/worktrees/checkout/new.ts",
         workspace,
@@ -98,7 +116,7 @@ describe("file action path scope", () => {
       ),
     ).toBe(true);
     expect(
-      scoped(
+      await scoped(
         "write",
         "nested-state/worktrees/.markers/checkout.json",
         workspace,
@@ -107,25 +125,25 @@ describe("file action path scope", () => {
     ).toBe(false);
   });
 
-  test("reviews outside and sibling-prefix paths", () => {
-    expect(scoped("write", join(outside, "file"))).toBe(false);
-    expect(scoped("write", `${workspace}-evil/file`)).toBe(false);
-    expect(scoped("write", "/tmpfoo/file")).toBe(false);
+  test("reviews outside and sibling-prefix paths", async () => {
+    expect(await scoped("write", join(outside, "file"))).toBe(false);
+    expect(await scoped("write", `${workspace}-evil/file`)).toBe(false);
+    expect(await scoped("write", "/tmpfoo/file")).toBe(false);
   });
 
-  test("reviews traversal and symlink escapes", () => {
+  test("reviews traversal and symlink escapes", async () => {
     const escape = join(workspace, "escape");
     symlinkSync(outside, escape);
-    expect(scoped("write", "src/../../outside/file")).toBe(false);
-    expect(scoped("write", "escape/file")).toBe(false);
+    expect(await scoped("write", "src/../../outside/file")).toBe(false);
+    expect(await scoped("write", "escape/file")).toBe(false);
 
     mkdirSync(join(outside, "bridge"));
     symlinkSync(join(workspace, "src"), join(outside, "bridge", "return"));
     symlinkSync(join(outside, "bridge"), join(workspace, "out-and-back"));
-    expect(scoped("edit", "out-and-back/return/existing.ts")).toBe(false);
+    expect(await scoped("edit", "out-and-back/return/existing.ts")).toBe(false);
     symlinkSync(join(workspace, "src"), join(outside, "back-inside"));
     symlinkSync(join(outside, "back-inside"), join(workspace, "double-link"));
-    expect(scoped("edit", "double-link/existing.ts")).toBe(false);
+    expect(await scoped("edit", "double-link/existing.ts")).toBe(false);
 
     mkdirSync(join(workspace, "a"));
     mkdirSync(join(workspace, "x", "y"), { recursive: true });
@@ -137,15 +155,15 @@ describe("file action path scope", () => {
       join(workspace, "a"),
       join(workspace, "x", "y", "parent-alias"),
     );
-    expect(scoped("edit", "x/y/parent-alias/relative-link/existing.ts")).toBe(
-      false,
-    );
+    expect(
+      await scoped("edit", "x/y/parent-alias/relative-link/existing.ts"),
+    ).toBe(false);
 
     mkdirSync(join(outside, "deep"));
     symlinkSync(join(outside, "deep"), join(workspace, "a", "hop"));
     symlinkSync(join(workspace, "src"), join(outside, "back-dotdot"));
     symlinkSync("hop/../back-dotdot", join(workspace, "a", "dotdot-link"));
-    expect(scoped("edit", "a/dotdot-link/existing.ts")).toBe(false);
+    expect(await scoped("edit", "a/dotdot-link/existing.ts")).toBe(false);
 
     const data = join(workspace, ".recurse-data-1", "conversations");
     mkdirSync(data, { recursive: true });
@@ -160,30 +178,34 @@ describe("file action path scope", () => {
       recursive: true,
     });
     symlinkSync(data, stateEscape);
-    expect(scoped("edit", join(stateEscape, "conversation.json"))).toBe(false);
+    expect(await scoped("edit", join(stateEscape, "conversation.json"))).toBe(
+      false,
+    );
   });
 
-  test("reviews a dangling symlink rather than treating it as a new file", () => {
+  test("reviews a dangling symlink rather than treating it as a new file", async () => {
     symlinkSync(join(outside, "missing"), join(workspace, "dangling"));
-    expect(scoped("write", "dangling")).toBe(false);
-    expect(scoped("write", "dangling/child")).toBe(false);
+    expect(await scoped("write", "dangling")).toBe(false);
+    expect(await scoped("write", "dangling/child")).toBe(false);
   });
 
-  test("allows exact managed checkout subtrees but reviews other Recurse state", () => {
-    expect(scoped("edit", ".recurse-data-1/worktrees/agent/src/file.ts")).toBe(
+  test("allows exact managed checkout subtrees but reviews other Recurse state", async () => {
+    expect(
+      await scoped("edit", ".recurse-data-1/worktrees/agent/src/file.ts"),
+    ).toBe(true);
+    expect(await scoped("write", ".recurse-data-1/repo/src/file.ts")).toBe(
       true,
     );
-    expect(scoped("write", ".recurse-data-1/repo/src/file.ts")).toBe(true);
-    expect(scoped("edit", ".recurse-data-1/conversations/agent.json")).toBe(
-      false,
-    );
-    expect(scoped("write", ".recurse-data-1/agent_attachments/blob")).toBe(
-      false,
-    );
-    expect(scoped("write", ".recurse-data-1/repo-evil/file")).toBe(false);
+    expect(
+      await scoped("edit", ".recurse-data-1/conversations/agent.json"),
+    ).toBe(false);
+    expect(
+      await scoped("write", ".recurse-data-1/agent_attachments/blob"),
+    ).toBe(false);
+    expect(await scoped("write", ".recurse-data-1/repo-evil/file")).toBe(false);
   });
 
-  test("protects an exact custom Recurse data root, including under /tmp", () => {
+  test("protects an exact custom Recurse data root, including under /tmp", async () => {
     const customState = join(workspace, "state");
     mkdirSync(join(customState, "conversations"), { recursive: true });
     mkdirSync(join(customState, "repo", "src"), { recursive: true });
@@ -195,18 +217,30 @@ describe("file action path scope", () => {
       CHAT_DATA_DIR: customState,
     } as NodeJS.ProcessEnv;
     expect(
-      scoped("edit", "state/conversations/agent.json", workspace, customEnv),
+      await scoped(
+        "edit",
+        "state/conversations/agent.json",
+        workspace,
+        customEnv,
+      ),
     ).toBe(false);
     expect(
-      scoped("write", "state/attachments/blob", workspace, customEnv),
+      await scoped("write", "state/attachments/blob", workspace, customEnv),
     ).toBe(false);
     expect(
-      scoped("write", "state/repo/src/file.ts", workspace, customEnv),
+      await scoped("write", "state/repo/src/file.ts", workspace, customEnv),
     ).toBe(true);
     expect(
-      scoped("edit", "state/worktrees/agent/src/file.ts", workspace, customEnv),
+      await scoped(
+        "edit",
+        "state/worktrees/agent/src/file.ts",
+        workspace,
+        customEnv,
+      ),
     ).toBe(true);
-    expect(scoped("write", "state-evil/file", workspace, customEnv)).toBe(true);
+    expect(await scoped("write", "state-evil/file", workspace, customEnv)).toBe(
+      true,
+    );
 
     const tmpState = mkdtempSync("/tmp/pi-safety-state-");
     try {
@@ -214,7 +248,7 @@ describe("file action path scope", () => {
       mkdirSync(join(tmpState, "worktrees", "agent"), { recursive: true });
       const tmpEnv = { ...env, CHAT_DATA_DIR: tmpState } as NodeJS.ProcessEnv;
       expect(
-        scoped(
+        await scoped(
           "edit",
           join(tmpState, "conversations", "agent.json"),
           workspace,
@@ -222,7 +256,7 @@ describe("file action path scope", () => {
         ),
       ).toBe(false);
       expect(
-        scoped(
+        await scoped(
           "edit",
           join(tmpState, "worktrees", "agent", "file.ts"),
           workspace,
@@ -234,7 +268,7 @@ describe("file action path scope", () => {
     }
   });
 
-  test("reviews git internals and credential dotfiles everywhere", () => {
+  test("reviews git internals and credential dotfiles everywhere", async () => {
     for (const path of [
       ".git/config",
       "src/.env",
@@ -244,28 +278,28 @@ describe("file action path scope", () => {
       ".recurse-data-1/worktrees/agent/.git/config",
       ".recurse-data-1/worktrees/agent/src/.env.production",
     ])
-      expect(scoped("edit", path)).toBe(false);
+      expect(await scoped("edit", path)).toBe(false);
   });
 
-  test("fails closed without a valid runner-provided workspace root", () => {
-    expect(scoped("write", "src/existing.ts", workspace, {})).toBe(false);
-    expect(scoped("write", "/tmp/file", workspace, {})).toBe(false);
+  test("fails closed without a valid runner-provided workspace root", async () => {
+    expect(await scoped("write", "src/existing.ts", workspace, {})).toBe(false);
+    expect(await scoped("write", "/tmp/file", workspace, {})).toBe(false);
     expect(
-      scoped("write", "/tmp/file", workspace, {
+      await scoped("write", "/tmp/file", workspace, {
         [WORKSPACE_ROOT_ENV]: join(base, "missing"),
       }),
     ).toBe(false);
     expect(
-      scoped("write", "src/existing.ts", workspace, {
+      await scoped("write", "src/existing.ts", workspace, {
         ...env,
         CHAT_DATA_DIR: join(base, "missing-state"),
       }),
     ).toBe(false);
   });
 
-  test("never bypasses bash or unknown/non-static tool inputs", () => {
-    expect(scoped("bash", "src/existing.ts")).toBe(false);
-    const scope = loadTrustedPathScope(env);
+  test("never bypasses bash or unknown/non-static tool inputs", async () => {
+    expect(await scoped("bash", "src/existing.ts")).toBe(false);
+    const scope = await loadTrustedPathScope(env);
     expect(allowedByPathScope("write", { path: 123 }, workspace, scope)).toBe(
       false,
     );

@@ -23,6 +23,7 @@ export const ReplyTimesDoc = defineDoc<{ finished: Record<string, number> }>({
   history: "latest",
   fork: "initial",
   initial: () => ({ finished: {} }),
+  checkpointWhen: () => false,
 });
 
 // Record replies' finish times in `tx`: `replies` pairs a reply message's start

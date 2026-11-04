@@ -1,7 +1,7 @@
-// Draft effort applies at creation; existing choices persist until next
-// message. Running turns keep launched models. Instance ladder maps levels to
-// model/ reasoning; unreachable choices explain why, without duplicate
-// controls. A remote agent or draft uses that remote's ladder.
+// Draft effort applies on creation; existing choices wait for the next turn.
+// Running turns keep launched models; each backend owns its effort ladder.
+// Unreachable choices explain why, without duplicate controls.
+// Context reuses cached tree usage; older servers use selected-view reads.
 import {
   backendFor,
   conversationId,
@@ -79,12 +79,11 @@ let retryTimer = 0;
 const saving = new Set<string>();
 let contextFallbackKey: string | null = null;
 const contextFallbackGate = new ContextFallbackGate();
-let contextFallback: {
-  session: string;
-  key: string;
-  used: number;
-  max: number | null;
-} | null = null;
+/** Latest fallback reading per session; Durable keys carry the row revision. */
+const contextFallbacks = new Map<
+  string,
+  { key: string; used: number; max: number | null }
+>();
 
 function contextFallbackSession(c: Conversation): string {
   return JSON.stringify([c.id, rowThreadContextKey(c.id)]);
@@ -130,15 +129,18 @@ async function fetchContextFallback(
       contextFallbackIdentity(conv) !== key
     )
       return;
-    contextFallback = {
-      session: contextFallbackSession(target),
+    const session = contextFallbackSession(target);
+    contextFallbacks.delete(session);
+    contextFallbacks.set(session, {
       key,
       used: used as number,
       max:
         Number.isSafeInteger(max) && (max as number) > 0
           ? (max as number)
           : null,
-    };
+    });
+    if (contextFallbacks.size > 64)
+      contextFallbacks.delete(contextFallbacks.keys().next().value!);
     showContextTokens(conv);
   } catch {
   } finally {
@@ -383,6 +385,23 @@ function paintSlider(disabled: boolean): void {
 }
 
 function showContextTokens(c: Conversation | null): void {
+  if (c?.backend === "durable") {
+    const cached = (
+      state.nodes[c.id] ?? state.sides.find((node) => node.id === c.id)
+    )?.agent?.context;
+    if (
+      cached &&
+      Number.isSafeInteger(cached.tokens) &&
+      cached.tokens >= 0 &&
+      (cached.window === null ||
+        (Number.isSafeInteger(cached.window) && cached.window > 0))
+    ) {
+      contextFallbackGate.reset();
+      contextFallbackKey = null;
+      showConversationContextFallback(c, cached.tokens, cached.window);
+      return;
+    }
+  }
   const label = c?.backend === "durable" ? null : conversationContextLabel(c);
   const selectedModel = c?.model;
   const contextWindow =
@@ -391,13 +410,12 @@ function showContextTokens(c: Conversation | null): void {
       : null;
   if (c && label === null) {
     const key = contextFallbackIdentity(c);
-    if (contextFallback?.session === contextFallbackSession(c)) {
-      showConversationContextFallback(
-        c,
-        contextFallback.used,
-        contextFallback.max,
-      );
-      if (contextFallback.key === key) return;
+    const held = contextFallbacks.get(contextFallbackSession(c));
+    if (held) {
+      showConversationContextFallback(c, held.used, held.max);
+      // Invariant: Only a Durable key proves the reading is current: it
+      // carries the held row revision, so a switch back reuses it.
+      if (held.key === key && c.backend === "durable") return;
     } else {
       showConversationContext(c, null, null);
     }
@@ -409,7 +427,6 @@ function showContextTokens(c: Conversation | null): void {
   }
   contextFallbackGate.reset();
   contextFallbackKey = null;
-  contextFallback = null;
   showConversationContext(
     c,
     label,

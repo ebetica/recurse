@@ -1,5 +1,5 @@
 /** A replacement generation acquires the existing directory lock before storage. */
-import { acquireSupervisorLock } from "../../../../src/launcher/lock.ts";
+import { acquireSupervisorLock } from "../../../../src/launcher/lock.cli.ts";
 import { fauxHost } from "./host.ts";
 const root = process.argv[2]!;
 const lock = await acquireSupervisorLock(root).catch((error) => {

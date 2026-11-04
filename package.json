@@ -1,6 +1,6 @@
 {
   "name": "recurse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A coding harness for agents that work on their own, and a web app for working with many of them at once.",
   "license": "MIT",
   "repository": {
@@ -13,9 +13,9 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "bun build web/app.ts --splitting --outdir web/dist --target=browser --minify --define process.env.NODE_ENV='\"production\"' && bun run build:assets",
+    "build": "bun build web/app.ts web/sidebar-worker.ts --splitting --outdir web/dist --target=browser --minify --define process.env.NODE_ENV='\"production\"' && bun run build:assets",
     "build:assets": "bun src/launcher/frontend_assets.ts",
-    "dev": "bun build web/app.ts --splitting --outdir web/dist --target=browser --sourcemap=inline --watch & bun run build:assets && wait",
+    "dev": "bun build web/app.ts web/sidebar-worker.ts --splitting --outdir web/dist --target=browser --sourcemap=inline --watch & bun run build:assets && wait",
     "format:check": "prettier --check \"web/*.ts\" \"tests/web/*.ts\"",
     "format:backend": "prettier --write \"tests/checks/*.ts\" \"tests/dev/*.ts\" \"src/**/*.ts\" \"tests/extensions/**/*.ts\" \"tests/backend/**/*.ts\" \"tests/mobile_browser/*.ts\" \"tests/live_e2e*.ts\" \"tests/backend/live_e2e.test.ts\" \"tools/*.ts\" \"scripts/*.ts\" \"tsconfig.backend.json\"",
     "format:backend:check": "prettier --check \"tests/checks/*.ts\" \"tests/dev/*.ts\" \"tests/extensions/**/*.ts\" \"src/**/*.ts\" \"tests/backend/**/*.ts\" \"tests/mobile_browser/*.ts\" \"tests/live_e2e*.ts\" \"tests/backend/live_e2e.test.ts\" \"tools/*.ts\" \"scripts/*.ts\" \"tsconfig.backend.json\"",
@@ -27,15 +27,15 @@
     "test:browser": "bun tests/mobile_browser/index.ts"
   },
   "dependencies": {
-    "@earendil-works/chord": "1.3.0",
-    "@earendil-works/pi-agent-core": "1.3.0",
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-codemode": "1.3.0",
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@earendil-works/pi-durable": "1.3.0",
-    "@earendil-works/pi-mcp": "1.3.0",
-    "@earendil-works/pi-telemetry": "1.3.0",
-    "@earendil-works/pi-tui": "1.3.0",
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-codemode": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
+    "@earendil-works/pi-telemetry": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0",
     "@excalidraw/excalidraw": "0.18.1",
     "@ff-labs/pi-fff": "0.11.0",
     "@git-diff-view/core": "0.1.7",
@@ -47,7 +47,8 @@
     "mermaid": "11",
     "pdfjs-dist": "6.4.299",
     "react": "18.3.1",
-    "react-dom": "18.3.1"
+    "react-dom": "18.3.1",
+    "typebox": "1.3.27"
   },
   "devDependencies": {
     "@types/bun": "1.1.14",
@@ -60,20 +61,21 @@
     "typescript": "5.7.3"
   },
   "overrides": {
-    "@earendil-works/chord": "1.3.0",
-    "@earendil-works/pi-agent-core": "1.3.0",
-    "@earendil-works/pi-ai": "1.3.0",
-    "@earendil-works/pi-codemode": "1.3.0",
-    "@earendil-works/pi-coding-agent": "1.3.0",
-    "@earendil-works/pi-durable": "1.3.0",
-    "@earendil-works/pi-mcp": "1.3.0",
-    "@earendil-works/pi-telemetry": "1.3.0",
-    "@earendil-works/pi-tui": "1.3.0"
+    "@earendil-works/chord": "1.5.0",
+    "@earendil-works/pi-agent-core": "1.5.0",
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-codemode": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-durable": "1.5.0",
+    "@earendil-works/pi-mcp": "1.5.0",
+    "@earendil-works/pi-telemetry": "1.5.0",
+    "@earendil-works/pi-tui": "1.5.0"
   },
   "patchedDependencies": {
     "@git-diff-view/lowlight@0.1.7": "scripts/patches/@git-diff-view%2Flowlight@0.1.7.patch",
     "@ff-labs/pi-fff@0.11.0": "scripts/patches/@ff-labs%2Fpi-fff@0.11.0.patch",
-    "@earendil-works/pi-durable@1.3.0": "scripts/patches/@earendil-works%2Fpi-durable@1.3.0.patch",
-    "@earendil-works/pi-ai@1.3.0": "scripts/patches/@earendil-works%2Fpi-ai@1.3.0.patch"
+    "@earendil-works/pi-durable@1.5.0": "scripts/patches/@earendil-works%2Fpi-durable@1.5.0.patch",
+    "@earendil-works/pi-ai@1.5.0": "scripts/patches/@earendil-works%2Fpi-ai@1.5.0.patch",
+    "@earendil-works/pi-coding-agent@1.5.0": "scripts/patches/@earendil-works%2Fpi-coding-agent@1.5.0.patch"
   }
 }

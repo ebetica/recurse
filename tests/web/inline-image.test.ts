@@ -122,10 +122,10 @@ describe("scoped preview derivation", () => {
   // test-check-allow: T9 Local attachment capabilities reject unsafe URLs.
   test("derives the validated preview beside a scoped upload", () => {
     expect(scopedAttachmentPreviewHref(scoped("main"))).toBe(
-      `${scoped("main")}/preview`,
+      `${scoped("main")}/thumbnail`,
     );
     expect(scopedAttachmentPreviewHref(scoped("main", `${id32}.png`))).toBe(
-      `${scoped("main", `${id32}.png`)}/preview`,
+      `${scoped("main", `${id32}.png`)}/thumbnail`,
     );
   });
 

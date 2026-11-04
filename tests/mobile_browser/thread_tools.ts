@@ -95,7 +95,7 @@ export const toolsTests: BrowserTest[] = [
       );
       let eventsLast: any = null;
       let eventsRevision = 0;
-      await page.route(`${base}api/conversations/main/events`, (route) => {
+      await page.route(`${base}api/conversations/main/events?*`, (route) => {
         if (rows !== eventsLast) {
           eventsLast = rows.map((row) => ({ ...row }));
           eventsRevision++;
@@ -275,7 +275,7 @@ export const toolsTests: BrowserTest[] = [
             },
           }),
         );
-        await page.route(`${base}api/conversations/main/events`, (route) => {
+        await page.route(`${base}api/conversations/main/events?*`, (route) => {
           if (eventsRows !== rows) {
             eventsRows = rows.map((row) => ({ ...row }));
             eventsRevision++;

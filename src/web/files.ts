@@ -17,12 +17,19 @@ import {
   inlineRasterMediaType,
   type Manifest,
 } from "../agents/runtime/attachments/base";
+import {
+  CropConflict,
+  cropOperation,
+  type CropOperation,
+} from "../agents/runtime/attachments/crop";
 import type { OpenedDownload } from "../agents/runtime/attachments/preview";
 import { contentDisposition } from "../agents/runtime/attachments/published";
 import { parsePythonJson } from "../utils/py_compact_json";
 import { parseUrlencoded } from "./login";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse, type OpenedFile } from "./static";
+import { conditionalBytes, PRIVATE_REVALIDATE } from "./caching";
+import { resizable, thumbnail } from "./thumbnails";
 
 /** Image extensions render inline; any other upload is a download. */
 export const ATTACH_TYPES: Readonly<Record<string, string>> = {
@@ -86,7 +93,10 @@ export interface FilesRoutesDeps {
       owner: string | null,
       data: Uint8Array,
       filename: string,
+      crop?: CropOperation,
     ): Promise<Record<string, unknown>>;
+    cancelConversationCrop(owner: string, crop: CropOperation): Promise<void>;
+    checkConversationCropOwner(owner: string): Promise<void>;
     /** The caller closes the returned blob. */
     composeFileDownload(
       cid: string,
@@ -117,6 +127,7 @@ const keyErrorText = (error: Error) =>
 /** Map a store AttachmentError to its honest HTTP status. */
 export function attachmentErrorResponse(error: Error): HttpError {
   const text = error.message;
+  if (error instanceof CropConflict) return new HttpError(409, text);
   if (text.includes("unavailable"))
     return new HttpError(503, "service_storage_unavailable");
   if (
@@ -237,19 +248,29 @@ async function servedBody(
 ): Promise<Uint8Array | OpenedFile> {
   if (opened.size > BUFFERED_DOWNLOAD_MAX_BYTES)
     return { handle: opened.blob, size: opened.size };
+  return readWhole(opened);
+}
+
+/** A checked download's whole body; the blob stays open. */
+async function readAll(opened: OpenedDownload): Promise<Uint8Array> {
+  const data = new Uint8Array(opened.size);
+  for (let at = 0; at < data.length; ) {
+    const { bytesRead } = await opened.blob.read(
+      data,
+      at,
+      data.length - at,
+      at,
+    );
+    if (!bytesRead) throw new HttpError(404, "attachment not found");
+    at += bytesRead;
+  }
+  return data;
+}
+
+/** A checked download's whole body; the blob is closed afterwards. */
+async function readWhole(opened: OpenedDownload): Promise<Uint8Array> {
   try {
-    const data = new Uint8Array(opened.size);
-    for (let at = 0; at < data.length; ) {
-      const { bytesRead } = await opened.blob.read(
-        data,
-        at,
-        data.length - at,
-        at,
-      );
-      if (!bytesRead) throw new HttpError(404, "attachment not found");
-      at += bytesRead;
-    }
-    return data;
+    return await readAll(opened);
   } finally {
     await opened.blob.close();
   }
@@ -519,6 +540,25 @@ export function registerFileRoutes(
       const file = formFile(form);
       const owner = formString(form, "owner");
       const draft = formString(form, "draft");
+      let crop: CropOperation | undefined;
+      if (form.has("crop_key") || form.has("crop_expires")) {
+        if (
+          draft ||
+          form.get("crop_key")?.length !== 1 ||
+          form.get("crop_expires")?.length !== 1
+        )
+          throw new HttpError(422, "invalid crop operation");
+        try {
+          crop = cropOperation(
+            formString(form, "crop_key"),
+            formString(form, "crop_expires"),
+          );
+        } catch (error) {
+          if (error instanceof AttachmentError)
+            throw attachmentErrorResponse(error);
+          throw error;
+        }
+      }
       const data = file.data;
       if (data.length > ATTACH_MAX_BYTES)
         throw new HttpError(413, "file too large (max 25 MB)");
@@ -541,6 +581,7 @@ export function registerFileRoutes(
             owner,
             data,
             file.filename,
+            crop,
           );
           url = `/api/conversations/${owner}/attachments/${String(saved.id)}`;
         }
@@ -559,6 +600,41 @@ export function registerFileRoutes(
       });
     },
     { longRunning: true },
+  );
+
+  router.get("/api/conversations/{cid}/attachment-crops", async (ex) => {
+    deps.requireActionReady();
+    try {
+      await deps.files.checkConversationCropOwner(ex.params.cid!);
+    } catch (error) {
+      if (error instanceof Error && error.name === "KeyError")
+        throw new HttpError(404, keyErrorText(error));
+      throw error;
+    }
+    return jsonResponse({ idempotent: true, now: Date.now() }, 200, {
+      "cache-control": "private, no-store",
+    });
+  });
+
+  router.delete(
+    "/api/conversations/{cid}/attachment-crops/{key}",
+    async (ex) => {
+      deps.requireActionReady();
+      try {
+        const expiries = ex.url.searchParams.getAll("expires");
+        if (expiries.length !== 1)
+          throw new HttpError(422, "invalid crop operation");
+        const crop = cropOperation(ex.params.key, expiries[0]);
+        await deps.files.cancelConversationCrop(ex.params.cid!, crop);
+      } catch (error) {
+        if (error instanceof Error && error.name === "KeyError")
+          throw new HttpError(404, keyErrorText(error));
+        if (error instanceof AttachmentError)
+          throw attachmentErrorResponse(error);
+        throw error;
+      }
+      return ok();
+    },
   );
 
   router.delete(
@@ -646,40 +722,67 @@ export function registerFileRoutes(
     },
   );
 
+  const PREVIEW_HEADERS = {
+    "cache-control": "private, max-age=31536000, immutable",
+    "x-content-type-options": "nosniff",
+  };
+  const preview = async (ex: Exchange, sized: boolean) => {
+    // Invariant: Inline only when the immutable bytes match the raster
+    // allowlist, or the filename names an SVG, audio, or video format. Media
+    // answers Range requests so players can seek.
+    const opened = await download(ex);
+    const { manifest } = opened;
+    let media: string | null = null;
+    let body: Uint8Array | OpenedFile | null = null;
+    let busy = false;
+    try {
+      const head = new Uint8Array(16);
+      const { bytesRead } = await opened.blob.read(head, 0, 16, 0);
+      const raster = inlineRasterMediaType(head.subarray(0, bytesRead));
+      media =
+        raster !== null && raster === manifest.inline_media_type
+          ? raster
+          : inlineMediaType(String(manifest.name));
+      if (!media) throw new HttpError(404, "preview not available");
+      // Invariant: A thumbnail that is not sent streams the original from the
+      // still-open blob, so no slot hands a buffered original to a slow client.
+      // An original sent while busy is never cached as the thumbnail.
+      if (sized && raster === media && resizable(media, opened.size)) {
+        const signal = ex.request.signal;
+        const small = await thumbnail(() => readAll(opened), signal);
+        if (signal.aborted) throw new HttpError(499, "request cancelled");
+        if (small instanceof Uint8Array)
+          return bytesResponse(small, "image/webp", {
+            ...PREVIEW_HEADERS,
+            "content-security-policy": PREVIEW_CSP,
+          });
+        busy = small === "busy";
+      }
+      body = await servedBody(opened);
+    } finally {
+      if (body === null) await opened.blob.close().catch(() => {});
+    }
+    return rangedResponse(ex.request, body, {
+      ...PREVIEW_HEADERS,
+      "content-security-policy":
+        media === "image/svg+xml" ? SVG_PREVIEW_CSP : PREVIEW_CSP,
+      "accept-ranges": "bytes",
+      "content-length": String(opened.size),
+      "content-type": mediaHeader(media),
+      ...(busy ? { "cache-control": "no-store" } : {}),
+    });
+  };
   router.add(
     ["GET", "HEAD"],
     "/api/conversations/{cid}/attachments/{attachment_id}/preview",
-    async (ex) => {
-      // Invariant: Inline only when the immutable bytes match the raster
-      // allowlist, or the filename names an SVG, audio, or video format. Media
-      // answers Range requests so players can seek.
-      const opened = await download(ex);
-      const { manifest } = opened;
-      let media: string | null = null;
-      let body: Uint8Array | OpenedFile | null = null;
-      try {
-        const head = new Uint8Array(16);
-        const { bytesRead } = await opened.blob.read(head, 0, 16, 0);
-        const raster = inlineRasterMediaType(head.subarray(0, bytesRead));
-        media =
-          raster !== null && raster === manifest.inline_media_type
-            ? raster
-            : inlineMediaType(String(manifest.name));
-        if (!media) throw new HttpError(404, "preview not available");
-        body = await servedBody(opened);
-      } finally {
-        if (body === null) await opened.blob.close().catch(() => {});
-      }
-      return rangedResponse(ex.request, body, {
-        "cache-control": "private, max-age=31536000, immutable",
-        "content-security-policy":
-          media === "image/svg+xml" ? SVG_PREVIEW_CSP : PREVIEW_CSP,
-        "x-content-type-options": "nosniff",
-        "accept-ranges": "bytes",
-        "content-length": String(opened.size),
-        "content-type": mediaHeader(media),
-      });
-    },
+    (ex) => preview(ex, false),
+  );
+  // Invariant: The thread and Files list show this; full-screen views and
+  // downloads use the original bytes.
+  router.add(
+    ["GET", "HEAD"],
+    "/api/conversations/{cid}/attachments/{attachment_id}/thumbnail",
+    (ex) => preview(ex, true),
   );
 
   router.get("/api/attachments/{name}", async () => {
@@ -770,7 +873,16 @@ export function registerFileRoutes(
                 ),
               )
             : raw;
-        return bytesResponse(new Uint8Array(served), media, headers);
+        const body = new Uint8Array(served);
+        return /^[0-9a-f]{40}$/i.test(str(ex, "version") || "")
+          ? conditionalBytes(
+              ex.request,
+              body,
+              media,
+              PRIVATE_REVALIDATE,
+              headers,
+            )
+          : bytesResponse(body, media, headers);
       } catch (error) {
         if (error instanceof artifacts.ArtifactError) artifactFailure(error);
         throw error;
@@ -798,20 +910,26 @@ export function registerFileRoutes(
           ex.params.artifact_id!,
           { version: str(ex, "version") },
         );
-        return bytesResponse(
-          new TextEncoder().encode(
-            artifactPreview(
-              raw.toString("utf8"),
-              (await readTheme(deps.themesFile)).css,
-            ),
+        const body = new TextEncoder().encode(
+          artifactPreview(
+            raw.toString("utf8"),
+            (await readTheme(deps.themesFile)).css,
           ),
-          "text/html",
-          {
-            ...ARTIFACT_SAFE_HEADERS,
-            "content-disposition": 'inline; filename="index.html"',
-            "content-security-policy": artifacts.ARTIFACT_ACTIVE_CSP,
-          },
         );
+        const headers = {
+          ...ARTIFACT_SAFE_HEADERS,
+          "content-disposition": 'inline; filename="index.html"',
+          "content-security-policy": artifacts.ARTIFACT_ACTIVE_CSP,
+        };
+        return /^[0-9a-f]{40}$/i.test(str(ex, "version") || "")
+          ? conditionalBytes(
+              ex.request,
+              body,
+              "text/html",
+              PRIVATE_REVALIDATE,
+              headers,
+            )
+          : bytesResponse(body, "text/html", headers);
       } catch (error) {
         if (error instanceof artifacts.ArtifactError) artifactFailure(error);
         throw error;

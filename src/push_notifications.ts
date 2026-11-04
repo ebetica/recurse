@@ -1,7 +1,7 @@
-// Web Push when a top-level or taken-over agent finishes. The VAPID key pair
-// (made once) and devices live 0600 in Pi's credential dir; only the public key
-// leaves the server. RFC 8291 aes128gcm payloads, RFC 8292 VAPID JWTs. Sends
-// are detached, bounded and timed out; failures log; a 404/410 drops a device.
+// Web Push for finished top-level/taken-over agents. VAPID keys and devices
+// live 0600 in Pi's credential dir. RFC 8291 encryption; RFC 8292 JWTs.
+// Sends are detached, bounded and timed out; 404/410 drops a device.
+// Visible main-conversation streams suppress sends, never received pushes.
 
 import {
   createECDH,
@@ -156,6 +156,7 @@ function encrypt(device: Device, payload: Uint8Array): Uint8Array {
 export class PushNotifications {
   private stored: Promise<Stored> | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  private readonly viewers = new Map<string, number>();
 
   constructor(
     private readonly deps: {
@@ -261,8 +262,27 @@ export class PushNotifications {
     );
   }
 
+  /** Register a visible main-conversation stream until its cleanup. */
+  addViewer(cid: string): () => void {
+    this.viewers.set(cid, (this.viewers.get(cid) ?? 0) + 1);
+    let closed = false;
+    return () => {
+      if (closed) return;
+      closed = true;
+      const count = this.viewers.get(cid)! - 1;
+      if (count) this.viewers.set(cid, count);
+      else this.viewers.delete(cid);
+    };
+  }
+
+  /** Whether any device is currently showing this conversation. */
+  hasViewer(cid: string): boolean {
+    return this.viewers.has(cid);
+  }
+
   /** Send `notice` to every device on a detached task; never throws. */
   notify(notice: Notice): void {
+    if (this.hasViewer(notice.cid)) return;
     this.deps.spawn(`agent-notification:${notice.cid}`, async (signal) => {
       let stored: Stored;
       try {
@@ -275,7 +295,7 @@ export class PushNotifications {
         );
         return;
       }
-      if (!stored.devices.length) return;
+      if (!stored.devices.length || this.hasViewer(notice.cid)) return;
       this.deps.log("agent_notification", {
         cid: notice.cid,
         devices: stored.devices.length,

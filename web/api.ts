@@ -1,6 +1,7 @@
 // Centralizes fetch/auth and connection health. Only core unavailable traffic
 // begins outages; authenticated successes recover. Deliberate aborts, 4xx and
 // optional failures are neutral. Health is per-client; only home 401 reloads.
+// Caller cancellation owns streamed bodies even after headers settle health.
 import { ConnectionHealth, type RequestOutcome } from "./connection/health.js";
 import { interactionTrace } from "./interaction-timing.js";
 
@@ -61,11 +62,14 @@ async function apiRequest<T>(
   try {
     const headers = new Headers(opts.headers);
     const trace = interactionTrace();
-    if (trace) headers.set("x-recurse-trace", trace);
+    if (trace && !headers.has("x-recurse-trace"))
+      headers.set("x-recurse-trace", trace);
     const response = await fetch(path, {
       ...opts,
       headers,
-      signal: controller.signal,
+      signal: callerSignal
+        ? AbortSignal.any([callerSignal, controller.signal])
+        : controller.signal,
     });
     // Invariant: Keep timeout/abort ownership through body consumption. Headers
     // cannot settle health or release a probe whose body is stuck.

@@ -83,56 +83,6 @@ export class ConfigActions {
     return pyTruthy(conv.muted);
   }
 
-  /** Set the wake-policy mute flag as one guarded record write. */
-  requestMute(
-    cid: string,
-    muted: unknown,
-    tokens?: [ConversationGuardToken, ConversationGuardToken],
-  ): Promise<{ id: string; muted: boolean } | null> {
-    if (typeof muted !== "boolean") return Promise.resolve(null);
-    const { store } = this.deps;
-    return store.withTitleGuard(
-      cid,
-      (titleToken) =>
-        store.withMuteGuard(
-          cid,
-          async () => {
-            const conv = store.load(cid);
-            if (!pyTruthy(conv) || !pyTruthy(conv!.parent)) return null;
-            this.deps.node(cid).muteDesired = muted;
-            if (conv!.status !== "running") {
-              conv!.muted = muted;
-              // Invariant: The settled record is authoritative while idle.
-              this.deps.node(cid).muteDesired = null;
-              await store.save(conv!, titleToken);
-            } else {
-              // Invariant: No save while running: the node cache is the visible
-              // state.
-              store.refreshTreeRow(cid);
-            }
-            return { id: cid, muted };
-          },
-          tokens?.[1],
-        ),
-      tokens?.[0],
-    );
-  }
-
-  /** Flip this conversation's wake-policy mute flag. */
-  toggleMute(cid: string): Promise<{ id: string; muted: boolean } | null> {
-    const { store } = this.deps;
-    return store.withTitleGuard(cid, (titleToken) =>
-      store.withMuteGuard(cid, async (muteToken) => {
-        const conv = store.load(cid);
-        if (!pyTruthy(conv) || !pyTruthy(conv!.parent)) return null;
-        return this.requestMute(cid, !this.mutedLocked(conv!), [
-          titleToken,
-          muteToken,
-        ]);
-      }),
-    );
-  }
-
   /** The node's desired safety state (or null if never overridden). */
   drainSafety(cid: string, nodeToken?: object): Promise<boolean | null> {
     return this.deps.store.withSafetyGuard(

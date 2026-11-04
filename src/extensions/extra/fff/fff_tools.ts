@@ -1,8 +1,6 @@
-// Load patched Pi search on the Worker, without TUI or Harness imports.
-// Notifications cannot throw: fallback finders must return/destroy on errors.
-// Auxiliary roots avoid watches/eager caches and parent reuse; refresh on
-// search and expire when idle. Native work stays off the server thread.
-import { getEnvironmentData } from "node:worker_threads";
+// Load patched Pi search in the child, without TUI or Harness imports.
+// No watches, eager content indexing, or mmaps (grep skips files >=256 KiB).
+// Scans share a slot. FffFlags set refresh (5m) and idle retention (30m) in ms.
 import type { JsonValue } from "@earendil-works/chord";
 import type {
   ExtensionAPI,
@@ -21,19 +19,12 @@ export type FffToolInfo = Pick<
 >;
 export type FffFlags = Record<string, string | boolean>;
 type Lifecycle = (event: unknown, context: ExtensionContext) => unknown;
-export const FFF_IMPORT_COUNT = "recurse-fff-import-count";
 
 type FffModule = { default: (api: ExtensionAPI) => void };
 let fffModule: Promise<FffModule> | undefined;
-// Shared Int32Array counter for this thread's imports.
-const importCount = getEnvironmentData(FFF_IMPORT_COUNT) as
-  | Int32Array
-  | undefined;
-
-/** pi-fff's module, imported once per thread; a failed import is retried. */
+/** pi-fff's module, imported once per child; a failed import is retried. */
 export function importFff(): Promise<FffModule> {
   if (fffModule) return fffModule;
-  if (importCount) Atomics.add(importCount, 0, 1);
   const loading = import(
     import.meta.resolve("@ff-labs/pi-fff/src/index.ts")
   ) as Promise<FffModule>;

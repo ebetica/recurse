@@ -468,16 +468,6 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
           }),
         );
         await mockConversation(page, base, "main", () => thread);
-        const summaryRequests: string[] = [];
-        await page.route(
-          `${base}api/conversations/main/marker-summary**`,
-          (route) => {
-            summaryRequests.push(route.request().url());
-            return route.fulfill({
-              json: { summary: "Exact compacted context" },
-            });
-          },
-        );
         await page.route(
           `${base}api/conversations/main/turn-prompt**`,
           (route) =>
@@ -501,7 +491,6 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         expect(await agent.count()).toBe(0);
         const platformRow = platform.locator(".agent-message-row");
         expect(await marker.locator(".disclosure-body").count()).toBe(0);
-        expect(summaryRequests).toEqual([]);
         const activityBoundary = page
           .locator(".activity-boundary:not(.chunk-turn)")
           .last();
@@ -532,7 +521,6 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         await platformRow.click();
         expect(await platform.locator(".agent-message-body").count()).toBe(0);
         expect(await platformRow.getAttribute("aria-expanded")).toBe("false");
-        expect(summaryRequests).toEqual([]);
         expect(errors).toEqual([]);
       } finally {
         await context.close();

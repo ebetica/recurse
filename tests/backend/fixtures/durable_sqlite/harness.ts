@@ -1,4 +1,5 @@
 /** Durable Harness on Worker SQLite with a faux model: each turn calls one tool that prints 200 lines, then answers. */
+import { Type } from "typebox";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
   createModels,
@@ -6,7 +7,6 @@ import {
   fauxProvider,
   fauxText,
   fauxToolCall,
-  Type,
 } from "@earendil-works/pi-ai";
 import {
   createRegistry,

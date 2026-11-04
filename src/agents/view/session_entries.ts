@@ -1,18 +1,11 @@
 // Bounded Pi reads preserve byte ranges and sender ids/titles without an index.
 // Fresh O_NOFOLLOW descriptors can pin BigInt dev/ino against rotation.
-// Async readers serve live history; sync reads support turn scans.
+// Async readers serve live history and bounded legacy turn scans.
 // JS-number offsets/stat values beyond MAX_SAFE_INTEGER are unsupported.
 
 import { Buffer } from "node:buffer";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readSync,
-} from "node:fs";
-import { open as openAsync, type FileHandle } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open as openAsync, type FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
 
 export type JsonObject = Record<string, unknown>;
@@ -118,108 +111,9 @@ function validOffset(value: unknown): value is number | boolean {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function openSession(
-  path: string,
-  expect?: ExpectedIdentity,
-): { fd: number; info: Stats; identity: ExpectedIdentity } {
-  const flags =
-    constants.O_RDONLY |
-    ((constants as { O_NOFOLLOW?: number }).O_NOFOLLOW ?? 0);
-  const fd = openSync(path, flags);
-  let info: Stats;
-  let identity: ExpectedIdentity;
-  try {
-    info = fstatSync(fd);
-    const exact = fstatSync(fd, { bigint: true });
-    identity = [exact.dev, exact.ino];
-  } catch (error) {
-    closeSync(fd);
-    throw error;
-  }
-  if (!info.isFile() || info.nlink !== 1) {
-    closeSync(fd);
-    throw new Error("Pi session is not a regular file");
-  }
-  if (expect && (identity[0] !== expect[0] || identity[1] !== expect[1])) {
-    closeSync(fd);
-    throw new Error("Pi session changed during the read");
-  }
-  return { fd, info, identity };
-}
-
-/** Read no more than `length` bytes at one exact file position. */
-function readAt(fd: number, offset: number, length: number): Bytes {
-  const chunks: Bytes[] = [];
-  let done = 0;
-  while (done < length) {
-    const chunk = allocBytes(Math.min(CHUNK_BYTES, length - done));
-    const count = readSync(fd, chunk, 0, chunk.length, offset + done);
-    if (count === 0) break;
-    chunks.push(chunk.subarray(0, count));
-    done += count;
-  }
-  return concatBytes(chunks, done);
-}
-
-/** A bounded, positional readline cursor which retains its small read-ahead. */
-class FileCursor {
-  private position: number;
-  private readPosition: number;
-  private buffer = emptyBytes();
-  private used = 0;
-
-  constructor(
-    private readonly fd: number,
-    private readonly size: number,
-    offset: number,
-  ) {
-    this.position = Number(offset);
-    this.readPosition = Number(offset);
-  }
-
-  private fill(maxBytes: number): boolean {
-    if (this.used < this.buffer.length) return true;
-    const remaining = Math.min(maxBytes, this.size - this.readPosition);
-    if (remaining <= 0) return false;
-    const chunk = allocBytes(Math.min(CHUNK_BYTES, remaining));
-    const count = readSync(this.fd, chunk, 0, chunk.length, this.readPosition);
-    if (count <= 0) return false;
-    this.buffer = chunk.subarray(0, count);
-    this.used = 0;
-    this.readPosition += count;
-    return true;
-  }
-
-  readline(maxBytes: number): Bytes {
-    const limit = Math.max(asInt(maxBytes), 0);
-    if (limit === 0) return emptyBytes();
-    const pieces: Bytes[] = [];
-    let length = 0;
-    while (length < limit && this.position < this.size) {
-      if (this.used >= this.buffer.length) {
-        if (!this.fill(limit - length)) break;
-      }
-      const available = Math.min(
-        this.buffer.length - this.used,
-        limit - length,
-      );
-      const newline = indexOfByte(this.buffer, NL, this.used);
-      const count =
-        newline >= this.used && newline < this.used + available
-          ? newline - this.used + 1
-          : available;
-      pieces.push(this.buffer.subarray(this.used, this.used + count));
-      this.used += count;
-      this.position += count;
-      length += count;
-      if (count > 0 && pieces.at(-1)!.at(-1) === 10) break;
-    }
-    return concatBytes(pieces, length);
-  }
-}
-
 interface AsyncOpenSession {
   handle: FileHandle;
+  info: Stats;
   size: number;
   identity: ExpectedIdentity;
 }
@@ -247,7 +141,7 @@ async function openSessionAsync(
     const identity: ExpectedIdentity = [exact.dev, exact.ino];
     if (expect && (identity[0] !== expect[0] || identity[1] !== expect[1]))
       throw new Error("Pi session changed during the read");
-    return { handle, size: info.size, identity };
+    return { handle, info, size: info.size, identity };
   } catch (error) {
     await handle.close();
     throw error;
@@ -407,6 +301,31 @@ export class AsyncJsonlRangeReader {
     const { handle, size, identity } = await openSessionAsync(this.path);
     try {
       return { size, identity };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  /** Session header as byte length, entry and exact descriptor stat. */
+  async header(): Promise<
+    [length: number, entry: JsonObject, stat: SessionStats] | null
+  > {
+    let opened: AsyncOpenSession;
+    try {
+      opened = await openSessionAsync(this.path, this.expectedIdentity);
+    } catch {
+      return null;
+    }
+    const { handle, info, identity } = opened;
+    try {
+      const raw = await new AsyncFileCursor(handle, info.size, 0).readline(
+        HEADER_BYTES + 1,
+      );
+      if (raw.length > HEADER_BYTES || raw.at(-1) !== NL) return null;
+      const value = entry(raw.subarray(0, -1));
+      return value === null
+        ? null
+        : [raw.length, value, Object.assign(info, { identity })];
     } finally {
       await handle.close();
     }
@@ -1011,126 +930,6 @@ async function linesBackwardDetailAsync(
   return [rows, pos > lower || skippedAny];
 }
 
-function linesBackwardDetail(
-  readChunk: (offset: number, length: number) => Bytes,
-  end: number,
-  lower: number,
-  maxBytes: number,
-  maxLineBytes = LINE_BYTES,
-): [Array<[number, Bytes]>, boolean] {
-  let pos = end;
-  let head = emptyBytes();
-  let first = true;
-  let pending = end;
-  let scanned = 0;
-  let skipping = false;
-  let skippedAny = false;
-  const rows: Array<[number, Bytes]> = [];
-  const chunkBytes = maxLineBytes > LINE_BYTES ? VIEW_CHUNK_BYTES : CHUNK_BYTES;
-  while (pos > lower && scanned < maxBytes) {
-    const step = Math.min(chunkBytes, pos - lower, maxBytes - scanned);
-    if (step <= 0) break;
-    pos -= step;
-    scanned += step;
-    let chunk = readChunk(pos, step);
-    if (skipping) {
-      const cut = lastIndexOfByte(chunk, NL);
-      if (cut < 0) continue;
-      pending = pos + cut + 1;
-      chunk = chunk.subarray(0, cut);
-      skipping = false;
-    }
-    let buffer = concatBytes([chunk, head]);
-    if (first) {
-      const cut = lastIndexOfByte(buffer, NL);
-      if (cut < 0) {
-        head = emptyBytes();
-        continue;
-      }
-      pending = pos + cut + 1;
-      buffer = buffer.subarray(0, cut);
-      first = false;
-    }
-    const pieces = splitBuffer(buffer);
-    head = pieces[0]!;
-    const fresh = pieces.slice(1);
-    if (head.length > maxLineBytes) {
-      head = emptyBytes();
-      skipping = true;
-      skippedAny = true;
-    } else if (pos === lower && head.length > 0) {
-      fresh.unshift(head);
-      head = emptyBytes();
-    }
-    for (const line of fresh.reverse()) {
-      const offset = pending - line.length - 1;
-      if (line.length <= maxLineBytes) rows.push([offset, line]);
-      pending = offset;
-    }
-  }
-  return [rows, pos > lower || skippedAny];
-}
-
-/** Synchronous header and bounded reverse reads for legacy turn scans. */
-export class JsonlRangeReader {
-  constructor(private readonly path: string) {}
-
-  private open(expect?: ExpectedIdentity): {
-    fd: number;
-    info: Stats;
-    identity: ExpectedIdentity;
-  } {
-    return openSession(this.path, expect);
-  }
-
-  /** Session header as byte length, entry and stat, or null. */
-  header(): [length: number, entry: JsonObject, stat: SessionStats] | null {
-    let opened: { fd: number; info: Stats; identity: ExpectedIdentity };
-    try {
-      opened = this.open();
-    } catch {
-      return null;
-    }
-    const { fd, info, identity } = opened;
-    try {
-      const raw = new FileCursor(fd, info.size, 0).readline(HEADER_BYTES + 1);
-      if (raw.length > HEADER_BYTES || raw.at(-1) !== 10) return null;
-      const value = entry(raw.subarray(0, -1));
-      return value === null
-        ? null
-        : [raw.length, value, Object.assign(info, { identity })];
-    } finally {
-      closeSync(fd);
-    }
-  }
-
-  /** Newest-first newline-terminated raw rows below end. */
-  backwardLines(
-    end: number,
-    lower: number,
-    maxBytes: number,
-    expect?: ExpectedIdentity,
-    stripImages = false,
-  ): [rows: Array<[number, number, Bytes]>, capped: boolean] {
-    const { fd } = this.open(expect);
-    try {
-      const [lines, capped] = linesBackwardDetail(
-        (offset, length) => readAt(fd, offset, length),
-        end,
-        lower,
-        maxBytes,
-        stripImages ? VIEW_RAW_LINE_BYTES : LINE_BYTES,
-      );
-      return [
-        lines.map(([offset, raw]) => [offset, offset + raw.length + 1, raw]),
-        capped,
-      ];
-    } finally {
-      closeSync(fd);
-    }
-  }
-}
-
 const ORIGIN_LINE_RE =
   /^\[recurse-origin: (operator|agent|scheduled|platform|service)\]$/;
 const SENDER_LINE_RE =
@@ -1201,9 +1000,12 @@ export function splitPiUserText(
   return [null, null, null, text];
 }
 
-function sessionStreamOk(path: string, maxSessionBytes: number): boolean {
+async function sessionStreamOk(
+  path: string,
+  maxSessionBytes: number,
+): Promise<boolean> {
   try {
-    const info = lstatSync(path);
+    const info = await lstat(path);
     return info.isFile() && info.nlink === 1 && info.size <= maxSessionBytes;
   } catch {
     return false;
@@ -1211,7 +1013,7 @@ function sessionStreamOk(path: string, maxSessionBytes: number): boolean {
 }
 
 /** Newest-first active-chain ranges below end for about `want` turns. */
-export function scanSessionTurns(
+export async function scanSessionTurns(
   sessionId: string,
   sessionFile: string,
   sessionCwd: string,
@@ -1222,10 +1024,9 @@ export function scanSessionTurns(
     maxSessionBytes: number;
     mustInclude?: number | null;
   },
-): [rows: JsonlRange[], top: boolean, fence: null, ok: boolean] {
-  const reader = new JsonlRangeReader(sessionFile);
+): Promise<[rows: JsonlRange[], top: boolean, fence: null, ok: boolean]> {
   try {
-    const opened = reader.header();
+    const opened = await new AsyncJsonlRangeReader(sessionFile).header();
     if (opened === null) return [[], false, null, false];
     const [headerLength, header, stat] = opened;
     if (
@@ -1238,7 +1039,7 @@ export function scanSessionTurns(
       return [[], false, null, false];
     const size = stat.size;
     const floor = headerLength;
-    const identity = stat.identity;
+    const reader = new AsyncJsonlRangeReader(sessionFile, stat.identity);
     const maxBytes = options.maxBytes ?? 0;
     const scanMax = maxBytes
       ? Math.min(Math.max(asInt(maxBytes), 1), PI_TURN_SCAN_BYTES)
@@ -1278,11 +1079,10 @@ export function scanSessionTurns(
         : [...chain, ...extra].sort((left, right) => right[0] - left[0]);
     };
     while (true) {
-      const [ranges, capped] = reader.backwardLines(
+      const [ranges, capped] = await reader.backwardLines(
         bottom,
         floor,
         budget,
-        identity,
       );
       let rows = ranges.map(
         ([offset, , raw]) => [offset, raw] as [number, Bytes],
@@ -1315,7 +1115,7 @@ export function scanSessionTurns(
         bottom -= step;
         scanned += step;
         if (pageCapped) budget = Math.min(scanMax, budget * 4);
-        if (!sessionStreamOk(sessionFile, options.maxSessionBytes)) {
+        if (!(await sessionStreamOk(sessionFile, options.maxSessionBytes))) {
           return [[], false, null, false];
         }
         continue;
@@ -1357,7 +1157,7 @@ export function scanSessionTurns(
       }
       if (pageCapped) budget = Math.min(scanMax, budget * 4);
       bottom = Math.min(...Array.from(indexed.values(), (node) => node.offset));
-      if (!sessionStreamOk(sessionFile, options.maxSessionBytes)) {
+      if (!(await sessionStreamOk(sessionFile, options.maxSessionBytes))) {
         return [[], false, null, false];
       }
     }

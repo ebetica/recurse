@@ -1,0 +1,246 @@
+diff --git a/dist/codemode/codemode.d.ts b/dist/codemode/codemode.d.ts
+index 429bfd1e491008edca6b9ff146ab25a50baa1d9e..e3b0cb21eba2ad893e44762b47dac61a5dcfe0ba 100644
+--- a/dist/codemode/codemode.d.ts
++++ b/dist/codemode/codemode.d.ts
+@@ -44,7 +44,7 @@ import { type CodemodeNamespace } from "./describe.ts";
+  * Version of everything in this module that turns stored results into what a script sees: result mapping, globals,
+  * start data. Bump it when that changes, so a call started before an upgrade is not replayed by different code.
+  */
+-export declare const CODEMODE_MODULE_VERSION = 2;
++export declare const CODEMODE_MODULE_VERSION = 3;
+ export declare const CODEMODE_TOOL_NAME = "codemode";
+ /** One tool as the script sees it: `tools.<jsName>`. */
+ /**
+diff --git a/dist/codemode/codemode.js b/dist/codemode/codemode.js
+index 9ef1da0d2b59fd84ee03aae503c308cf73f6d641..38dd11c6aca9a88f40eac02cfc2e7ed63dfb8ce1 100644
+--- a/dist/codemode/codemode.js
++++ b/dist/codemode/codemode.js
+@@ -51,7 +51,7 @@ import { DEFAULT_MAX_OUTPUT_TOKENS, formatResult } from "./output.js";
+  * Version of everything in this module that turns stored results into what a script sees: result mapping, globals,
+  * start data. Bump it when that changes, so a call started before an upgrade is not replayed by different code.
+  */
+-export const CODEMODE_MODULE_VERSION = 2;
++export const CODEMODE_MODULE_VERSION = 3;
+ export const CODEMODE_TOOL_NAME = "codemode";
+ export const CodemodeRunDoc = defineDoc({
+     kind: "pi.codemode.run",
+@@ -129,7 +129,10 @@ export function createCodemodeExtension(options) {
+  * schema-less tool's output, else its error diagnostics.
+  */
+ function outcomeOf(name, structured, result) {
+-    const value = structured ? result.structuredOutput : textOf(result.structuredOutput);
++    // Recurse: module-3 runs started on 1.4 persist read without structured metadata.
++    const value = structured || (name === "read" && !result.isError)
++        ? result.structuredOutput
++        : textOf(result.structuredOutput);
+     if (!result.isError || (structured && value !== undefined))
+         return { ok: true, value };
+     const message = structured ? "" : value;
+diff --git a/dist/harness/generation.js b/dist/harness/generation.js
+index ac42dfe741b20726ab8eb3d8139b1296d664210d..bf34cf270ec52f10f409fff37a9f05b6db83759f 100644
+--- a/dist/harness/generation.js
++++ b/dist/harness/generation.js
+@@ -119,6 +119,8 @@ export const GenerationTask = defineTask({
+             }, context);
+         },
+         request: async (task, runtime, context) => {
++            if (await interruptBoundary(runtime, undefined, context))
++                return;
+             // Charging the attempt may itself be what keeps failing, such as converting a huge partial: the limit ends it.
+             if (cutOffTooOften(task, runtime))
+                 return endCutOff(runtime, task, context);
+@@ -132,7 +134,7 @@ export const GenerationTask = defineTask({
+             await runtime.commit(async (tx) => {
+                 const live = await tx.doc(LiveDoc, conversationId);
+                 await convertPartial(tx, live, conversationId);
+-                live.generation = { attempt };
++                live.generation = { attempt, streaming: true };
+                 return undefined;
+             }, context, PROGRESS_COMMIT);
+             const model = runtime.models.getModel(ref.provider, ref.modelId);
+@@ -154,6 +156,8 @@ export const GenerationTask = defineTask({
+                 onPayload: (payload) => providerPayload(runtime, model, payload, context),
+             };
+             const message = await streamResponse(runtime, model, messages, options, attempt, context);
++            if (await interruptBoundary(runtime, message, context))
++                return;
+             const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
+             await classify(runtime, request, message, context);
+         },
+@@ -509,6 +513,26 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
+     let timer;
+     let inFlight;
+     let stopped = false;
++    let latest;
++    const controller = new AbortController();
++    const stop = () => controller.abort();
++    runtime.signal.addEventListener("abort", stop, { once: true });
++    if (runtime.signal.aborted)
++        stop();
++    const watch = await runtime.watchDoc(LiveDoc, runtime.conversationId, context);
++    const observe = (live) => {
++        if (live?.generation?.interrupted && !controller.signal.aborted) {
++            // Snapshot only at the cut, not every delta: preserve Pi's linear streaming cost.
++            if (latest !== undefined)
++                latest = copyJson(latest, { omitUndefinedProperties: true });
++            controller.abort();
++        }
++    };
++    watch.start((call) => {
++        if (call.kind === "value")
++            observe(call.value);
++    });
++    observe(watch.value);
+     const changes = new PartialChanges();
+     const flush = () => {
+         timer = undefined;
+@@ -546,25 +570,70 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
+         });
+     };
+     try {
+-        const events = runtime.models.streamSimple(model, { messages: [...messages] }, options);
++        const events = runtime.models.streamSimple(model, { messages: [...messages] }, { ...options, signal: controller.signal });
+         for await (const event of events) {
+             // A partial without content, such as pi-ai's opening `start` event, shows nothing; a deferred response
+             // never gets past it, so it never leaves a partial.
+             if (event.type === "done" || event.type === "error" || event.partial.content.length === 0)
+                 continue;
+             changes.observe(event);
++            if (!controller.signal.aborted)
++                latest = event.partial;
+             pending = event.partial;
+             if (timer === undefined && inFlight === undefined)
+                 timer = runtime.setTimer(flush, interval);
+         }
+-        return await events.result();
++        const result = await events.result();
++        return controller.signal.aborted && !runtime.signal.aborted && latest !== undefined ? latest : result;
+     }
+     finally {
+         stopped = true;
+         timer?.();
+         await inFlight;
++        await watch.stop();
++        runtime.signal.removeEventListener("abort", stop);
+     }
+ }
++/**
++ * Recurse Pi patch: rerun tests/backend/pi_interrupt_patch.test.ts on upgrades.
++ * Commit the cut and queued steer atomically without aborting tool tasks.
++ */
++async function interruptBoundary(runtime, partial, context) {
++    let interrupted = false;
++    await runtime.commit(async (tx) => {
++        const boundary = await prepareBoundary(tx, runtime.conversationId, runtime.settings);
++        const live = await tx.doc(LiveDoc, runtime.conversationId);
++        if (!live.generation?.interrupted) {
++            if (partial !== undefined && live.generation !== undefined)
++                delete live.generation.streaming;
++            return undefined;
++        }
++        interrupted = true;
++        const source = partial ?? live.generation.message;
++        if (source !== undefined) {
++            const content = source.content.flatMap((block) => {
++                if (block.type === "text")
++                    return [{ type: "text", text: block.text, ...(block.textSignature === undefined ? {} : { textSignature: block.textSignature }) }];
++                if (block.type === "thinking")
++                    return [{ type: "thinking", thinking: block.thinking, ...(block.thinkingSignature === undefined ? {} : { thinkingSignature: block.thinkingSignature }), ...(block.redacted ? { redacted: true } : {}) }];
++                return [];
++            });
++            const { role, api, provider, model, usage, timestamp, thinkingLevel } = source;
++            await appendAssistant(tx, runtime.conversationId, { role, api, provider, model, usage, timestamp, ...(thinkingLevel === undefined ? {} : { thinkingLevel }), content, stopReason: "interrupted" });
++        }
++        const { users, first, reset } = await applyBoundary(tx, boundary, "postTools", runtime.now());
++        delete live.generation;
++        if (reset) {
++            endRun(tx, live, runtime.taskId, { status: "unanswered", reason: "reset" });
++            if (users.length > 0)
++                await startRun(tx, runtime.conversationId, live, { inputs: users, first });
++            return { status: "terminal", outcome: { status: "completed", result: {} } };
++        }
++        live.run.inputs.push(...users);
++        return { status: "running", checkpoint: { phase: "prepare", attempt: 1 } };
++    }, context);
++    return interrupted;
++}
+ /** Classify a terminal provider message in one commit that also clears the partial. */
+ async function classify(runtime, request, message, context) {
+     // An abort mark or close: the abort invocation or the reopened run handles the committed state.
+diff --git a/dist/harness/submissions.js b/dist/harness/submissions.js
+index 6e882a8c252dda942b8b45e5b1837cf2fee28341..a3af234b06a520ac49b57005832808ee4048fb27 100644
+--- a/dist/harness/submissions.js
++++ b/dist/harness/submissions.js
+@@ -229,10 +229,14 @@ export async function admitSubmission(tx, conversationId, draft, now, queueModes
+         if (draft.type === "write")
+             items.push({ id, mode: "write", entry: value });
+         else {
+-            const mode = draft.whenBusy === "steer" ? "steer" : "followUp";
++            // Recurse Pi patch: rerun tests/backend/pi_interrupt_patch.test.ts on upgrade.
++            // Interrupt is still a durable steer; only an active provider stream is cut.
++            const mode = draft.whenBusy === "steer" || draft.whenBusy === "interrupt" ? "steer" : "followUp";
+             const content = value;
+             const entry = draft.entry === undefined ? {} : { entry: pickInputEntry(draft.entry) };
+             items.push({ id, mode, content, ...entry });
++            if (draft.whenBusy === "interrupt" && live.generation?.streaming)
++                live.generation.interrupted = true;
+         }
+         if (boundary === undefined)
+             return { id, status: "queued" };
+diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
+index eb64e474162b158a43563e6c68d8ffea8c18b74a..517e95a4fb91871492bc8f4fed1536e4ac50b022 100644
+--- a/dist/harness/types.d.ts
++++ b/dist/harness/types.d.ts
+@@ -31,7 +31,8 @@ export type SubmissionDraft = {
+ } & ({
+     readonly type: "input";
+     readonly content: UserInput;
+-    readonly whenBusy?: "steer" | "followUp" | "reject";
++    /** Interrupt only streaming model output; tools keep boundary steering. */
++    readonly whenBusy?: "steer" | "interrupt" | "followUp" | "reject";
+     /**
+      * `reject`: an idle conversation (no run) rejects the input with `ConversationIdle` and writes nothing, so the input
+      * never starts a run of its own. With `whenBusy: "steer"` it steers the current run or is refused; a run that
+diff --git a/dist/storage/sqlite/storage.d.ts b/dist/storage/sqlite/storage.d.ts
+index bdf2b1f550f601fc12f33cf9ab3835772f89e7a7..ad4575c0c892a031636344055fe530f71b17f207 100644
+--- a/dist/storage/sqlite/storage.d.ts
++++ b/dist/storage/sqlite/storage.d.ts
+@@ -8,6 +8,8 @@ export type SqliteStorageOptions = {
+      * SQLite's reserved `sqlite_` prefix. Existing data is not migrated when this changes.
+      */
+     readonly prefix?: string;
++    /** Skip migrations on a read-only database; requires the current schema. */
++    readonly readOnly?: boolean;
+ };
+ /** Portable SQLite implementation of the Pico storage contract. */
+ export declare class SqliteStorage implements Storage {
+diff --git a/dist/storage/sqlite/storage.js b/dist/storage/sqlite/storage.js
+index 890f1428f8855e05f18007ab3ca70218a7a32ef8..8ace074d8abfa0f1be4baf012290f54166f6d1e7 100644
+--- a/dist/storage/sqlite/storage.js
++++ b/dist/storage/sqlite/storage.js
+@@ -2,7 +2,7 @@ import { apply } from "@earendil-works/chord/delta";
+ import { StorageRequestError } from "../../errors.js";
+ import { idFromNumber, seqFromNumber } from "../../ids.js";
+ import { nextCursor, scanStart } from "../scan.js";
+-import { applySqliteMigrationsForSchema } from "./migrations.js";
++import { applySqliteMigrationsForSchema, CURRENT_SQLITE_SCHEMA_VERSION } from "./migrations.js";
+ import { createSqliteSchema } from "./schema.js";
+ const parseJson = (value) => JSON.parse(value);
+ const encodeJson = (value) => JSON.stringify(value);
+@@ -110,7 +110,15 @@ export class SqliteStorage {
+     static async open(db, options = {}) {
+         try {
+             const schema = createSqliteSchema(options.prefix);
+-            await applySqliteMigrationsForSchema(db, schema);
++            if (options.readOnly) {
++                const version = await db.get(`SELECT version FROM ${schema.tables.durableSchema} WHERE singleton = 1`);
++                if (version?.version !== CURRENT_SQLITE_SCHEMA_VERSION)
++                    throw Object.assign(new Error("Durable SQLite storage requires migration before read-only open"), {
++                        code: "PI_SQLITE_MIGRATION_REQUIRED",
++                    });
++            }
++            else
++                await applySqliteMigrationsForSchema(db, schema);
+             const metadata = await db.get(`SELECT next_id, next_seq FROM ${schema.tables.durableMetadata} WHERE singleton = 1`);
+             if (metadata === undefined)
+                 throw new Error("Durable SQLite metadata is missing");

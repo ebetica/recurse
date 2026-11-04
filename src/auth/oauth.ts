@@ -1,4 +1,4 @@
-// Settings provider auth uses Pi's auth.json lock/merge via pi_auth_worker.mjs.
+// Settings provider auth uses Pi's auth.json lock/merge via pi_auth.worker.mjs.
 // This module reads launch selections and persists pending login PKCE state.
 // Credentials cross pipes/target env only, never argv/logs/extra files/errors.
 // Private writes start at 0600; token POST refuses redirects.
@@ -16,7 +16,7 @@ export const HTTP_TIMEOUT_MS = 30_000;
 export const USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-export const WORKER_PATH = join(import.meta.dir, "..", "pi_auth_worker.mjs");
+export const WORKER_PATH = join(import.meta.dir, "..", "pi_auth.worker.mjs");
 const AUTH_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const AUTH_RESOLVE_TIMEOUT_MS = 75_000;
 const WORKER_ENV_STRIP = [

@@ -25,8 +25,15 @@ returns its id, process information, log path, and output so far. Background
 and monitor calls skip that foreground wait.
 
 Each command runs in its own detached process group. Stdout and stderr share a
-log file, so output remains available after a trimmed tool result. Results and
-notifications report the process-group id and a stop hint:
+log file, so output remains available after a trimmed tool result. Log-directory
+preparation and descriptor open/close are asynchronous. The registry registers a
+pending launch immediately; `waitForLaunch` includes preparation and startup.
+Environment and arguments are captured before yielding. The immutable boot token
+is prepared once before spawning; signal checks read only that cached token.
+Process start identity is captured synchronously after spawn and rechecked
+synchronously before signals to avoid PID-reuse gaps. Cancellation or shutdown
+cannot start a late-opened command; shutdown drains pending opens and closes.
+Results and notifications report the process-group id and a stop hint:
 
 ```bash
 kill -- -<pgid>
@@ -59,12 +66,18 @@ Tool output is middle-trimmed to at most 2000 lines and 50 KiB by default,
 retaining head and tail with an omission marker and a Read offset/limit hint.
 Lines longer than 500 characters are shortened. Trimming reads bounded windows
 from the log rather than loading the whole file; the full log is unchanged.
+Log stats and reads are asynchronous. Poll ticks coalesce while a read is pending;
+foreground output and monitor completion drain a final window before delivery.
+Logs remain retained while output is being read or prepared for completion.
 
 Monitor output is coalesced across shells. Complete meaningful lines wake the
 conversation after a short debounce; output arriving during a turn accumulates
 for a later batch. Consecutive repeats and heartbeat matches do not wake the
-model. By default, monitor wakes have a one-minute cooldown, and a batch with
-at least three meaningful lines adds a reminder to print only state changes.
+model. Reminder loops include the check time so repeated output is not suppressed;
+goal loops print only while the goal is unmet. Stop the loop's whole process group
+when it is no longer needed. By default, monitor wakes have a one-minute cooldown,
+and a batch with at least three meaningful lines adds a reminder to print only
+state changes.
 Injected monitor output is length-capped and common credential-shaped values are
 redacted; the on-disk log is not redacted. Completion is still reported when the
 process exits or is killed.
@@ -90,8 +103,14 @@ not lose or duplicate it. The registry's own still-running and inactivity notice
 are suppressed in favor of the Durable task's deadlines.
 
 The host's shell state directory contains one store per conversation scope key,
-with atomic JSON records for live shells. Completed records are acknowledged and
-removed promptly. This store supports recovery; it is not a second conversation
+with atomic JSON records for live shells. Initialization, record reads and commits
+are asynchronous; concurrent updates share the latest pending snapshot, and
+removals stay ordered with writes. Flush waits for initialization and accepted
+snapshots. Registry ownership readback rechecks shutdown and process identity
+after reading its record; it cannot succeed on a read that completes during
+shutdown. Completion delivery also waits for accepted snapshots. Shutdown stops
+groups before draining pending commits. Completed records are acknowledged and removed
+promptly. This store supports recovery; it is not a second conversation
 transcript or the former Pi-extension completion-batch protocol.
 
 - Ordinary model-turn settlement leaves background shells alive. A run abort

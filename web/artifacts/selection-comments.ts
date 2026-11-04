@@ -1,13 +1,26 @@
-// Selection-anchored review comments. This module owns the comment store,
-// quote re-anchoring, the text-selection offer machinery (pointer/touch
-// sequencing, popover, staging), and the displayed-snapshot binding.
+// Selection-anchored review comments: store, quote re-anchoring, pointer/touch
+// offers, popover, staging, and displayed-snapshot binding. Cmd/Ctrl+Enter
+// stages the draft and returns focus to the viewer; the next press sends
+// staged comments without opening the comment list.
 import { selectionCommentRange } from "../comments/selection-text.js";
-import { displayedInfo, renderComments } from "./comment-bar.js";
+import { resizeTextarea } from "../composer/textarea.js";
+import { displayedInfo, renderBar, renderComments } from "./comment-bar.js";
+import { prepareCommentCrop, type PreparedCrop } from "./comment-crops.js";
 import { commentMount } from "./artifact-state.js";
 import type { Comment, CommentBox, CommentPane } from "./artifact-state.js";
 
 // ---- selection comments --------------------------------------------------
 export const comments = new Map<string, Map<string, Comment>>();
+/** Discard a document's staged comments and their crop resources. */
+export function dropComments(id: string): void {
+  for (const comment of comments.get(id)?.values() ?? [])
+    comment.crop?.release();
+  comments.delete(id);
+}
+/** Discard all staged comments and their crop resources. */
+export function dropAllComments(): void {
+  for (const id of comments.keys()) dropComments(id);
+}
 let cidSeq = 0;
 export function cmap(id: string): Map<string, Comment> {
   let map = comments.get(id);
@@ -50,6 +63,13 @@ export function commentRoots(pane: CommentPane): Element[] {
 }
 const activeId = (): string | null =>
   commentMount.current ? currentCommentKey(commentMount.current) : null;
+
+/** Whether the displayed viewer has staged comments to preserve on close. */
+export function hasStagedCommentsIn(root: Element): boolean {
+  const pane = commentMount.current;
+  const id = activeId();
+  return !!pane && root.contains(pane) && !!id && !!comments.get(id)?.size;
+}
 
 export function markRange(range: Range, cid: string): HTMLElement[] {
   const root = range.commonAncestorContainer;
@@ -101,25 +121,25 @@ export function placeBox(
   if (mark.parentNode !== frame) frame.append(mark);
   return mark;
 }
+function unwrapMark(mark: Element): void {
+  const parent = mark.parentNode!;
+  while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+  const box = mark.classList.contains("report-cbox");
+  mark.remove();
+  // Invariant: Normalizing an image frame removes Lit's empty text nodes.
+  if (!box) parent.normalize();
+}
 export function unmark(doc: Element | null, cid: string): void {
   if (!doc) return;
-  for (const mark of [
-    ...doc.querySelectorAll(`mark.report-cmark[data-cid="${cid}"]`),
-  ]) {
-    const parent = mark.parentNode!;
-    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-    mark.remove();
-    parent.normalize();
-  }
+  for (const mark of doc.querySelectorAll(
+    `mark.report-cmark[data-cid="${cid}"]`,
+  ))
+    unwrapMark(mark);
 }
 export function unmarkAll(doc: Element | null): void {
   if (!doc) return;
-  for (const mark of [...doc.querySelectorAll("mark.report-cmark")]) {
-    const parent = mark.parentNode!;
-    while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-    mark.remove();
-    parent.normalize();
-  }
+  for (const mark of doc.querySelectorAll("mark.report-cmark"))
+    unwrapMark(mark);
 }
 export function orderedComments(
   id: string | null,
@@ -164,6 +184,7 @@ interface SelectionDraft {
   range: Range;
   quote: string;
   box?: CommentBox;
+  crop?: PreparedCrop;
   mark?: HTMLElement;
 }
 let selectionDraft: SelectionDraft | null = null;
@@ -201,6 +222,7 @@ export function cancelSelectionComment(): void {
   // in.
   const owned = selectionDraft !== null || !popover.hidden;
   selectionDraft?.mark?.remove();
+  selectionDraft?.crop?.release();
   selectionDraft = null;
   popover.hidden = true;
   popoverInput.value = "";
@@ -210,19 +232,49 @@ export function cancelSelectionComment(): void {
   }
   window.getSelection()?.removeAllRanges();
   selectionRoot = null;
+  if (commentMount.current) renderBar(commentMount.current);
 }
 popoverCancel.addEventListener("click", cancelSelectionComment);
+popoverInput.addEventListener("input", () => {
+  if (popover.classList.contains("composer-box")) resizeTextarea(popoverInput);
+});
 popoverInput.addEventListener("keydown", (event) => {
-  if (event.key === "Escape") {
+  if (event.key === "Escape" && closeSelectionCommentFromKeyboard()) {
     event.preventDefault();
-    cancelSelectionComment();
+    event.stopPropagation();
   }
-  if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+  if (isSendShortcut(event)) {
     event.preventDefault();
-    stageSelectionComment();
+    event.stopPropagation();
+    closeSelectionCommentFromKeyboard();
   }
 });
-popoverComment.addEventListener("click", stageSelectionComment);
+popoverComment.addEventListener("click", () => stageSelectionComment());
+/** Close only the floating editor, retaining a nonempty comment. */
+export function closeSelectionCommentFromKeyboard(): boolean {
+  if (popover.hidden || !selectionDraft) return false;
+  const pane = commentMount.current;
+  stageSelectionComment(true, false);
+  if (!selectionDraft) {
+    const target =
+      pane
+        ?.closest("dialog")
+        ?.querySelector<HTMLElement>('[aria-label="Close image"]') ?? pane;
+    target?.focus({ preventScroll: true });
+  }
+  return true;
+}
+/** Stage a floating draft before submitting the pane's comments. */
+export function stageSelectionForSend(pane: CommentPane): boolean {
+  if (
+    !selectionDraft ||
+    commentMount.current !== pane ||
+    selectionDraft.key !== currentCommentKey(pane)
+  )
+    return true;
+  stageSelectionComment(true);
+  return !selectionDraft;
+}
 // Never stage a draft whose text/box left the page after a file/version swap.
 const draftDetached = (draft: SelectionDraft): boolean =>
   !(draft.mark ?? draft.range.startContainer).isConnected;
@@ -247,7 +299,17 @@ function positionPopover(range = selectionDraft?.range): void {
     popover.hidden = true;
     return;
   }
+  const file = !!commentMount.current.closest(
+    '.image-popout, [data-pane="files"]',
+  );
+  popover.className = file
+    ? "composer-box files-comment-composer report-comment-popover"
+    : "menu form report-comment-popover";
+  popoverInput.className = file ? "composer-input" : "text-field";
+  popoverInput.rows = file ? 1 : 3;
+  popoverInput.style.height = "";
   popover.hidden = false;
+  if (file) resizeTextarea(popoverInput);
   const left = Math.min(rect.right + 8, innerWidth - popover.offsetWidth - 8);
   const below = rect.bottom + 8;
   const top =
@@ -340,6 +402,8 @@ function offerSelectionComment(source: SelectionSource): void {
     selectionDraft.source === selected.source &&
     sameRange(selectionDraft.range, selected.range);
   if (!same) {
+    selectionDraft?.mark?.remove();
+    selectionDraft?.crop?.release();
     selectionDraft = {
       key: id,
       version,
@@ -351,6 +415,7 @@ function offerSelectionComment(source: SelectionSource): void {
     popoverInput.value = "";
   }
   positionPopover(selected.range);
+  renderBar(pane);
 }
 function selectionInteractionActive(source: SelectionSource): boolean {
   return source.pointerIds.size > 0 || source.touch;
@@ -396,16 +461,49 @@ export function offerBoxComment(
     range,
     quote: box.page ? `Box on page ${box.page}` : "Box on image",
     box,
+    crop: prepareCommentCrop(pane, box),
     mark,
   };
   positionPopover(range);
   popoverInput.focus({ preventScroll: true });
 }
+function isSendShortcut(event: KeyboardEvent): boolean {
+  const mac = /Mac|iPhone|iPad/.test(navigator.platform);
+  return (
+    event.key === "Enter" &&
+    !event.isComposing &&
+    !event.altKey &&
+    !event.shiftKey &&
+    (mac ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey)
+  );
+}
+/** Submit the comments belonging to a viewer keyboard surface. */
+export function handleCommentShortcut(
+  event: KeyboardEvent,
+  root: Element,
+): void {
+  if (!isSendShortcut(event)) return;
+  if (
+    commentMount.current === root &&
+    !stageSelectionForSend(commentMount.current)
+  )
+    return;
+  const button = root.querySelector<HTMLButtonElement>(".report-sendbar-send");
+  if (!button || button.disabled) return;
+  event.preventDefault();
+  event.stopPropagation();
+  button.click();
+}
 const commentPanes = new WeakSet<Element>();
 /** Let `pane` take selection comments when a press starts in it, and now
  * unless another shown pane holds them. */
 export function claimComments(pane: CommentPane): void {
-  commentPanes.add(pane);
+  if (!commentPanes.has(pane)) {
+    commentPanes.add(pane);
+    pane.addEventListener("keydown", (event) =>
+      handleCommentShortcut(event, pane),
+    );
+  }
   if (!commentMount.current?.isConnected) commentMount.current = pane;
 }
 function onSelectionPointerDown(
@@ -534,7 +632,7 @@ addEventListener(
   true,
 );
 addEventListener("resize", () => positionPopover());
-function stageSelectionComment(): void {
+function stageSelectionComment(allowEmpty = false, focusCard = true): void {
   const draft = selectionDraft,
     id = activeId();
   const note = popoverInput.value.trim();
@@ -555,7 +653,7 @@ function stageSelectionComment(): void {
     draft.version !== displayed.version
   )
     return;
-  if (!note) {
+  if (!note && !allowEmpty) {
     popoverInput.focus();
     return;
   }
@@ -576,17 +674,20 @@ function stageSelectionComment(): void {
     quote: draft.quote,
     text: note,
     box: draft.box,
+    crop: draft.crop,
   });
+  draft.crop = undefined;
   cancelSelectionComment();
   renderComments(commentMount.current);
-  requestAnimationFrame(() => {
-    const card = commentMount.current?.querySelector<HTMLElement>(
-      `.report-comment[data-cid="${cid}"]`,
-    );
-    card
-      ?.querySelector<HTMLTextAreaElement>("textarea")
-      ?.focus({ preventScroll: true });
-  });
+  if (focusCard)
+    requestAnimationFrame(() => {
+      const card = commentMount.current?.querySelector<HTMLElement>(
+        `.report-comment[data-cid="${cid}"]`,
+      );
+      card
+        ?.querySelector<HTMLTextAreaElement>("textarea")
+        ?.focus({ preventScroll: true });
+    });
 }
 function findQuote(doc: Element, quote: string): Range | null {
   const want = quote.replace(/\s+/g, " ").trim();

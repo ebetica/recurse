@@ -11,12 +11,14 @@ import {
   stopServer,
   runBrowserTests,
   type BrowserTest,
+  openSettingsPanel,
 } from "./common";
 
 export const tests: BrowserTest[] = [
-  // Feature: #2702 Connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures. (also #2793 Remote sends must work through ingresses that reject chunked request bodies.; #2729 The optimistic Queued panel appears before keyboard Stop is available.)
+  // Regression: #3112 cancel stalled discovery bodies after headers; #3067 keep the remote Stop generation live until cancellation. (also Feature #2702 connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures; #2793 remote sends work through ingresses that reject chunked bodies; #2729 the optimistic Queued panel precedes keyboard Stop; #3002 remote sections, tags and tag actions.)
   async function test_remote_sidebar(browser, base) {
     const remote = await startServer({ auth: true });
+    let omitTagSupport = false;
     const ingress = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
@@ -31,12 +33,22 @@ export const tests: BrowserTest[] = [
         const url = new URL(request.url);
         const headers = new Headers(request.headers);
         headers.delete("host");
-        return fetch(remote.base.slice(0, -1) + url.pathname + url.search, {
-          method: request.method,
-          headers,
-          body: request.body ? await request.arrayBuffer() : undefined,
-          redirect: "manual",
-        });
+        if (url.pathname === "/api/tree") headers.delete("if-none-match");
+        const response = await fetch(
+          remote.base.slice(0, -1) + url.pathname + url.search,
+          {
+            method: request.method,
+            headers,
+            body: request.body ? await request.arrayBuffer() : undefined,
+            redirect: "manual",
+          },
+        );
+        if (omitTagSupport && url.pathname === "/api/tree" && response.ok) {
+          const nodes = (await response.json()) as any[];
+          for (const node of nodes) if (node.agent) delete node.agent.tags;
+          return Response.json(nodes);
+        }
+        return response;
       },
     });
     const remoteContext = await browser.newContext();
@@ -44,6 +56,41 @@ export const tests: BrowserTest[] = [
       viewport: { width: 1280, height: 800 },
     });
     const page = await context.newPage();
+    await page.clock.install();
+    await page.addInitScript(() => {
+      const w = globalThis as any;
+      const original = w.fetch;
+      w.fetch = async (...args: Parameters<typeof fetch>) => {
+        const response = await original(...args);
+        if (
+          String(args[0]) !== "/api/backends" ||
+          !w.sessionStorage.getItem("stallRemoteDiscovery") ||
+          !response.body
+        )
+          return response;
+        w.sessionStorage.removeItem("stallRemoteDiscovery");
+        const reader = response.body.getReader();
+        const signal = args[1]?.signal;
+        return new Response(
+          new ReadableStream({
+            async start(controller) {
+              const next = await reader.read();
+              controller.enqueue(next.value.subarray(0, 1));
+              w.remoteDiscoveryStalled = true;
+              const abort = () => {
+                w.remoteDiscoveryCancelled = true;
+                controller.error(new DOMException("Aborted", "AbortError"));
+                void reader.cancel().catch(() => {});
+              };
+              if (signal?.aborted) abort();
+              else signal?.addEventListener("abort", abort, { once: true });
+            },
+            cancel: () => reader.cancel(),
+          }),
+          { status: response.status, headers: response.headers },
+        );
+      };
+    });
     let legacy: Awaited<ReturnType<typeof startServer>> | undefined;
     let legacySource: string | undefined;
     try {
@@ -63,6 +110,15 @@ export const tests: BrowserTest[] = [
           url: remote.base,
         },
       ]);
+      await browserExpect
+        .poll(async () =>
+          (
+            await remoteContext.request.get(
+              remote.base + "__browser-test/ready",
+            )
+          ).status(),
+        )
+        .toBe(200);
       const seed = await remoteContext.request.post(
         remote.base + "__browser-test/seed-provider-replay",
         { data: { name: "openai-codex-read" } },
@@ -326,16 +382,144 @@ export const tests: BrowserTest[] = [
           await context.request.get(base + "api/tree")
         ).json();
         expect(homeNodes.some((node: any) => node.id === id)).toBe(false);
-        if (size === "mobile") await page.locator("#menu-btn").click();
+        if (size === "mobile") {
+          await page.locator("#input").blur();
+          await page.locator("#menu-btn").click();
+        }
         await browserExpect(
           section.locator(`.agent[data-id="${qualified}"]`),
         ).toBeVisible();
+        if (size === "desktop") {
+          const row = section.locator(`.agent[data-id="${qualified}"]`);
+          const sectionOf = () =>
+            row.evaluate((element) => {
+              let previous = element.previousElementSibling;
+              while (previous && !previous.matches(".tree-section-header"))
+                previous = previous.previousElementSibling;
+              return (previous as any)?.dataset.section;
+            });
+          await browserExpect.poll(sectionOf).toBe("Inbox");
+          expect(
+            (
+              await remoteContext.request.post(
+                `${remote.base}api/v1/agents/tags`,
+                { data: { ids: [id], set: { project: null }, clear: [] } },
+              )
+            ).ok(),
+          ).toBe(true);
+          await browserExpect(row.getByTitle("Tag: project")).toBeVisible();
+          await page.clock.pauseAt(
+            await page.evaluate(() => Date.now() + 1000),
+          );
+          const tag = `agent-${size}`;
+          const tagged = Bun.spawn(
+            [
+              process.execPath,
+              join(ROOT, "tools/subagent.ts"),
+              "tag",
+              id,
+              "--add",
+              tag,
+            ],
+            {
+              cwd: ROOT,
+              env: {
+                ...process.env,
+                CHAT_DATA_DIR: join(remote.data, "data"),
+                RECURSE_HOME: join(remote.data, "settings"),
+                RECURSE_AGENT_ID: agent,
+              },
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          );
+          expect(await tagged.exited).toBe(0);
+          await browserExpect(row.getByTitle(`Tag: ${tag}`)).toBeVisible();
+          await page.clock.resume();
+          for (const [action, destination] of [
+            ["Pin", "Pinned"],
+            ["Unpin", "Inbox"],
+            ["Archive", "Archive"],
+            ["Restore", "Inbox"],
+          ]) {
+            const saved = page.waitForResponse(
+              (response) =>
+                response.request().method() === "POST" &&
+                response.url().endsWith("/api/backends/Laptop/v1/agents/tags"),
+            );
+            await row.hover();
+            await row
+              .getByRole("button", {
+                name: new RegExp(`^${action} `),
+              })
+              .click();
+            expect((await saved).ok()).toBe(true);
+            await browserExpect.poll(sectionOf).toBe(destination);
+            const tags = (
+              await (
+                await remoteContext.request.get(
+                  `${remote.base}api/v1/agents/${id}`,
+                )
+              ).json()
+            ).tags;
+            if (action === "Pin") expect(tags.pinned.by).toBe("operator");
+            if (action === "Archive") expect(tags.archived.by).toBe("operator");
+          }
+          await row.hover();
+          await row
+            .getByRole("button", {
+              name: /^Snooze /,
+            })
+            .click();
+          const snoozed = page.waitForResponse(
+            (response) =>
+              response.request().method() === "POST" &&
+              response.url().endsWith("/api/backends/Laptop/v1/agents/tags"),
+          );
+          await page
+            .getByRole("dialog", { name: "Snooze until" })
+            .getByRole("button", { name: "1 hour", exact: true })
+            .click();
+          expect((await snoozed).ok()).toBe(true);
+          await browserExpect.poll(sectionOf).toBe("Archive");
+          const restored = page.waitForResponse(
+            (response) =>
+              response.request().method() === "POST" &&
+              response.url().endsWith("/api/backends/Laptop/v1/agents/tags"),
+          );
+          await row.hover();
+          await row
+            .getByRole("button", {
+              name: /^Restore /,
+            })
+            .click();
+          expect((await restored).ok()).toBe(true);
+          await browserExpect.poll(sectionOf).toBe("Inbox");
+          await page.screenshot({
+            path: join(
+              process.env.RECURSE_SCREENSHOT_DIR ?? tmpdir(),
+              "remote-sections-desktop.png",
+            ),
+            animations: "disabled",
+          });
+          omitTagSupport = true;
+          await page.reload();
+          await browserExpect(row.getByTitle("Tag: project")).toBeVisible();
+          await browserExpect(row.locator(".row-actions button")).toHaveCount(
+            0,
+          );
+          omitTagSupport = false;
+          await page.reload();
+          await browserExpect(row.locator(".row-actions button")).toHaveCount(
+            3,
+          );
+        }
         await page.screenshot({
           path: join(tmpdir(), `remote-new-agent-${size}.png`),
           animations: "disabled",
         });
         if (size === "mobile") {
-          await page.locator("#menu-btn").click();
+          await page.locator("#sidebar .agent.selected").click();
           expect(
             (
               await remoteContext.request.delete(
@@ -373,6 +557,14 @@ export const tests: BrowserTest[] = [
       await browserExpect(
         page.locator(`.agent[data-id="${homeMatch.id}"] .title`),
       ).toHaveText("Remote actions");
+      const homeRoot = (
+        await (await context.request.get(base + "api/tree")).json()
+      ).find(
+        (node: { id: string; parent: string | null }) =>
+          !node.parent && node.id !== homeMatch.id,
+      ).id;
+      await page.locator(`.agent[data-id="${homeRoot}"]`).click();
+      await browserExpect(page.locator("#input")).toBeEnabled();
       await page.locator("#input").fill("can you message @Remote act");
       const options = page.locator("#agent-menu .agent-option");
       await browserExpect(options).toHaveCount(2);
@@ -418,11 +610,18 @@ export const tests: BrowserTest[] = [
       expect(new URL(page.url()).hash).toContain(
         encodeURIComponent(`Laptop/${agent}`),
       );
+      await page.evaluate(() => {
+        (globalThis as any).sessionStorage.setItem("stallRemoteDiscovery", "1");
+      });
       await page.reload();
+      await page.waitForFunction("globalThis.remoteDiscoveryStalled === true");
       await page
         .locator(".msg.assistant")
         .filter({ hasText: "RECORDED_READ_OK" })
         .waitFor();
+      expect(
+        await page.evaluate(() => (globalThis as any).remoteDiscoveryCancelled),
+      ).toBe(true);
       await section.locator(`.agent[data-id="Laptop/${files.demo}"]`).click();
       const image = page.locator('#messages img[alt="browser-image.png"]');
       await browserExpect
@@ -549,7 +748,7 @@ export const tests: BrowserTest[] = [
                     `${remote.base}api/conversations/${writable.id}`,
                   )
                 ).json()
-              ).pinned,
+              ).taken_over,
           )
           .toBe(pressed === "true");
       }
@@ -587,10 +786,37 @@ export const tests: BrowserTest[] = [
         )
         .toBe(404);
       await page.goto(`${base}#agent=Laptop/${stopped.agent}`);
+      const runningTree = page.waitForResponse(async (response) => {
+        if (
+          !response.url().endsWith("/api/backends/Laptop/tree") ||
+          !response.ok()
+        )
+          return false;
+        const nodes = (await response.json()) as {
+          id: string;
+          status: string;
+        }[];
+        return nodes.some(
+          (node) => node.id === stopped.agent && node.status === "running",
+        );
+      });
       await page.locator("#input").fill("Run until stopped");
       await page.locator("#send").click();
       await page.locator(".working.live-panel").waitFor();
       await page.locator("#conv-status.running").waitFor();
+      await runningTree;
+      await browserExpect
+        .poll(async () =>
+          section
+            .locator(`.agent[data-id="Laptop/${stopped.agent}"]`)
+            .evaluate((element) => {
+              let previous = element.previousElementSibling;
+              while (previous && !previous.matches(".tree-section-header"))
+                previous = previous.previousElementSibling;
+              return (previous as any)?.dataset.section;
+            }),
+        )
+        .toBe("Active");
       const stopResponse = page.waitForResponse(
         (response) =>
           response.url().includes(`/conversations/${stopped.agent}/deliver`) &&
@@ -612,9 +838,7 @@ export const tests: BrowserTest[] = [
             ).status,
         )
         .not.toBe("running");
-      if (!(await page.locator("#settings-btn").isVisible()))
-        await page.locator("#menu-btn").click();
-      await page.locator("#settings-btn").click();
+      await openSettingsPanel(page);
       const settingsNav = page.locator("#settings-nav button");
       await browserExpect(settingsNav).toHaveCount(5);
       await page.locator("#settings-backend").selectOption("Laptop");
@@ -638,12 +862,12 @@ export const tests: BrowserTest[] = [
         await loginHeld;
         await route.fulfill({ response });
       });
-      const popups: unknown[] = [];
-      context.on("page", (opened) => popups.push(opened));
-      await page
-        .locator(".settings-section", { hasText: "Claude auth" })
-        .locator(".sub")
-        .click();
+      await settingsNav.getByText("Authentication", { exact: true }).click();
+      const claudeDetails = page.getByRole("region", {
+        name: "Claude",
+        exact: true,
+      });
+      await claudeDetails.locator(".sub").click();
       await loginSeen;
       await page.locator("#settings-backend").selectOption("");
       const loginFinished = page.waitForEvent(
@@ -652,10 +876,15 @@ export const tests: BrowserTest[] = [
       );
       releaseLogin();
       await loginFinished;
+      expect(await page.locator(".paste-sign-in").count()).toBe(0);
       await page.unroute(loginUrl);
       await page.locator("#settings-backend").selectOption("Laptop");
       await settingsNav.getByText("Models", { exact: true }).click();
-      const windowInput = page.locator("#maximum-context-window");
+      const windowDetails = page.getByRole("region", {
+        name: "Maximum context window",
+        exact: true,
+      });
+      const windowInput = windowDetails.locator("#maximum-context-window");
       await browserExpect(windowInput).not.toHaveValue("");
       await windowInput.fill("123456");
       const savedWindow = page.waitForResponse(
@@ -665,9 +894,8 @@ export const tests: BrowserTest[] = [
             .url()
             .endsWith("/api/backends/Laptop/settings/maximum-context-window"),
       );
-      await windowInput
-        .locator("xpath=ancestor::form")
-        .getByRole("button", { name: "Save" })
+      await windowDetails
+        .getByRole("button", { name: "Save", exact: true })
         .click();
       expect((await savedWindow).ok()).toBe(true);
       const windowOf = async (request: typeof context.request, at: string) =>
@@ -679,12 +907,15 @@ export const tests: BrowserTest[] = [
       expect(await windowOf(remoteContext.request, remote.base)).toBe(123456);
       expect(await windowOf(context.request, base)).not.toBe(123456);
       await settingsNav.getByText("MCPs", { exact: true }).click();
-      await page
+      const mcpDetails = page.getByRole("region", {
+        name: "MCP servers",
+        exact: true,
+      });
+      await mcpDetails
         .getByText("Sign in to MCP servers on Laptop from its own page", {
           exact: false,
         })
         .waitFor();
-      expect(popups).toHaveLength(0);
       await page.locator("#settings-backend").selectOption("");
       await browserExpect(settingsNav).toHaveCount(5);
       await page.locator("#settings-close").click();
@@ -693,15 +924,25 @@ export const tests: BrowserTest[] = [
       await page.evaluate(() => {
         (globalThis as any).remoteSidebarNoReload = true;
       });
-      if (!(await remotePage.locator("#settings-btn").isVisible()))
-        await remotePage.locator("#menu-btn").click();
-      await remotePage.locator("#settings-btn").click();
+      await openSettingsPanel(remotePage);
+      await remotePage
+        .locator('#settings-nav button[data-cat="account"]')
+        .click();
       const incoming = remotePage.locator(".remotes-settings .remote-incoming");
+      const homeName = await incoming
+        .locator(".settings-detail-summary .settings-row-label")
+        .innerText();
+      const homeDetails = remotePage.getByRole("region", {
+        name: homeName,
+        exact: true,
+      });
       await browserExpect(
-        incoming.getByText(/^Access allowed · last seen /),
+        homeDetails.getByText(
+          /^Created .+ · last seen .+ · agents here reach it as @/,
+        ),
       ).toBeVisible();
-      await browserExpect(incoming.locator(".hint")).toHaveCount(0);
-      const revoke = incoming.getByRole("button", {
+      await browserExpect(homeDetails.locator(".hint")).toHaveCount(0);
+      const revoke = homeDetails.getByRole("button", {
         name: "Revoke access",
         exact: true,
       });
@@ -722,9 +963,11 @@ export const tests: BrowserTest[] = [
         }),
       ).toBe(true);
       await revoke.click();
+      await browserExpect(homeDetails).not.toBeVisible();
       await browserExpect(
         incoming.getByText("No homes have access."),
       ).toBeVisible();
+      await remotePage.locator("#settings-close").click();
       await page.locator("#input").fill("This send must fail visibly");
       await page.locator("#send").click();
       await page.getByText(/key was revoked.*Retry now/).waitFor();

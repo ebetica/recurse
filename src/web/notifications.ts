@@ -44,7 +44,7 @@ export function registerNotificationRoutes(
       short_name: brand.name,
       start_url: "/",
       scope: "/",
-      display: "standalone",
+      display: "fullscreen",
       icons: brand.icon
         ? [
             {

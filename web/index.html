@@ -29,7 +29,9 @@
     background: var(--bg); color: var(--text);
     font: 0.9375rem/1.6 var(--font-sans);
     display: flex; overscroll-behavior: none;
+    padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
   }
+  @media (min-width: 701px) { body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); } }
 
   /* ---------- sidebar: agent forest ---------- */
   #sidebar {
@@ -108,8 +110,7 @@
     background: color-mix(in srgb, var(--accent) 14%, transparent); }
   .agent.drop-bad { border-color: var(--danger);
     background: color-mix(in srgb, var(--danger) 12%, transparent); cursor: no-drop; }
-  .agent .row1 { display: flex; align-items: center; gap: var(--space-2); min-width: 0;
-    flex-wrap: wrap; }
+  .agent .row1 { display: flex; align-items: center; gap: var(--space-2); min-width: 0; flex-wrap: nowrap; }
   /* A compact colored, shaped marker for each state — no spelled-out word, so
      it stays small on a phone. The shape (filled dot, hollow ring, square,
      diamond) carries the state alongside color, so it never relies on color
@@ -160,7 +161,7 @@
        waiting never collapses into working. */
     .agent .agent-state.waiting .state-mark { forced-color-adjust: none; }
   }
-  .agent .title { flex: 1; min-width: 32px; font-size: 0.84375rem; font-weight: 600;
+  .agent .title { flex: 1; min-width: 0; font-size: 0.84375rem; font-weight: 600;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* inline rename: the title turns into this field in place (F2 or long-press) */
   .agent .rename-input { flex: 1; min-width: 0; font-family: inherit;
@@ -169,9 +170,6 @@
     border-radius: 6px; padding: 1px var(--space-2);
     margin: calc(-1 * var(--space-1)) 0; outline: none; }
   .agent .kids, .agent .queue-badge { max-width: 100%; overflow: hidden; }
-  .agent .agent-model { flex: none; max-width: 45%; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; font-size: 0.65625rem;
-    color: var(--muted); }
   /* the person glyph marking a subagent count ("3 👤") */
   .pico { width: 9px; height: 9px; flex: none; }
   .message-icon { width: 10px; height: 10px; flex: none; }
@@ -221,7 +219,7 @@
   /* ---------- main pane ---------- */
   #main { flex: 1; min-width: 0; min-height: 0; height: 100%;
     display: flex; flex-direction: column; overflow: hidden; }
-  #topbar { height: 48px; flex: none; min-width: 0; display: flex; align-items: center;
+  #topbar, .viewer-topbar { height: 48px; flex: none; min-width: 0; display: flex; align-items: center;
     position: relative; z-index: auto; padding: 0 var(--space-5);
     font-weight: 600; font-size: 0.84375rem; gap: var(--space-2); background: var(--bg); }
   #menu-btn { display: inline-flex; min-width: 44px; min-height: 44px; background: none;
@@ -229,13 +227,6 @@
     margin-left: calc(-1 * var(--space-3)); align-items: center; justify-content: center; }
   #menu-btn svg { width: 20px; height: 20px; }
   #menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
-  /* up-to-parent affordance: shown when the selected agent has a routing parent
-     open, the visible twin of the phone's back button */
-  #up-btn { display: none; background: none; border: 0; color: var(--muted);
-    cursor: pointer; padding: var(--space-2) var(--space-3);
-    margin-left: calc(-1 * var(--space-2)); line-height: 0; }
-  #up-btn.on { display: flex; }
-  #up-btn:hover { color: var(--accent); }
   #up-top { display: none; flex: none; width: 44px; height: 44px;
     padding: 0; border: 0; border-radius: 8px; background: none;
     color: var(--text); align-items: center; justify-content: center; cursor: pointer; }
@@ -365,191 +356,6 @@
   #connection-status button { white-space: nowrap; }
   #connection-status button:disabled { cursor: wait; }
 
-  /* ---------- settings page ----------
-     A registry of sections renders into #settings-sections (see the JS): every
-     entry inherits this styling, so adding a setting is one settingsSection()
-     call with no new CSS. Full page: category nav on the left, the selected
-     category's sections on the right; auth sections show live login state. */
-  #settings-overlay { display: none; position: fixed; inset: 0; z-index: calc(var(--z-dialog) + 2);
-    background: var(--bg); overflow-y: auto; }
-  #settings-overlay.on { display: block; }
-  #settings-modal { max-width: 860px; margin: 0 auto;
-    padding: 0 var(--space-5) 48px; /* space-check: allow clears the page bottom */
-    min-height: 100dvh; box-sizing: border-box;
-    /* Every human-readable inspector field supports drag selection and mobile
-       long-press. Individual controls opt out through their native behavior. */
-    -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }
-  .settings-head { position: sticky; top: 0; z-index: var(--z-raised); display: flex;
-    align-items: baseline; gap: var(--space-4); padding: var(--space-5) 0 var(--space-4);
-    margin-bottom: var(--space-5);
-    background: var(--bg); --edge-bg: var(--bg); }
-  .settings-head h2 { font-size: 1.25rem; font-weight: 700; margin: 0; }
-  .settings-head .icon-btn { margin-left: auto; align-self: center; }
-  #settings-release { min-width: 0; overflow: hidden; text-overflow: ellipsis;
-    color: var(--muted); font-size: 0.78125rem; white-space: nowrap; }
-  #settings-backend { min-width: 0; max-width: 100%; min-height: 44px; background: none; border-color: transparent; text-align: start; }
-  #settings-backend:hover { background: var(--panel-2); }
-  #settings-backend:focus:not(:focus-visible) { border-color: transparent; box-shadow: none; }
-  .settings-cols { display: flex; gap: var(--space-6); align-items: flex-start; }
-  /* Invariant: top is the 72px head less 4, so the nav sticks just under it. */
-  #settings-nav { flex: none; width: 180px; display: flex; flex-direction: column;
-    gap: var(--space-1); position: sticky; top: 68px; }
-  #settings-nav button { background: none; border: 0; border-radius: 8px;
-    padding: var(--space-3) var(--space-4); font: inherit; font-size: 0.84375rem; color: var(--muted);
-    text-align: left; cursor: pointer; }
-  #settings-nav button:hover { color: var(--text); background: var(--panel); }
-  #settings-nav button.on { color: var(--text); background: var(--panel);
-    font-weight: 600; }
-  @media (max-width: 700px) {
-    .settings-cols { flex-direction: column; align-items: stretch; gap: var(--space-4); }
-    #settings-nav { position: static; flex-direction: row; width: auto; max-width: 100%;
-      overflow-x: auto; padding-bottom: var(--space-2); --fade-start: 0px; --fade-end: 0px;
-      mask-image: linear-gradient(to right, transparent calc(var(--fade-start) / 4),
-        var(--bg) var(--fade-start), var(--bg) calc(100% - var(--fade-end)),
-        transparent calc(100% - var(--fade-end) / 4)); }
-    /* Spec: the tab strip fades out at an end only while more tabs lie past it
-       (settings.ts markNavEdges), fully clear over the last quarter of the fade so
-       no sliver of a cut tab shows at the edge; the mask reads alpha only, so --bg
-       just means opaque. */
-    #settings-nav.more-start { --fade-start: 32px; }
-    #settings-nav.more-end { --fade-end: 32px; }
-    #settings-nav button { flex: none; white-space: nowrap; } }
-  #settings-sections { flex: 1; min-width: 0; }
-  .settings-cat[hidden] { display: none; }
-  .settings-section { border: 1px solid var(--border); border-radius: 10px;
-    background: var(--panel); padding: var(--space-5); }
-  .settings-section + .settings-section { margin-top: var(--space-4); }
-  .settings-section .sec-head { display: flex; align-items: center; gap: var(--space-3);
-    margin: 0 0 var(--space-4); }
-  .settings-section .sec-head h3 { font-size: 0.84375rem; font-weight: 600;
-    color: var(--text); margin: 0; }
-  .settings-section .sec-head .state { font-size: 0.78125rem; font-weight: 600; }
-  .settings-section .sec-head .state.ok { color: var(--running); }
-  .settings-section .sec-head .state.off { color: var(--muted); }
-  .settings-section .field { display: flex; flex-direction: column; gap: var(--space-2);
-    margin-bottom: var(--space-4); }
-  .settings-section .hint { font-size: 0.78125rem; color: var(--muted);
-    margin: 0; }
-  .settings-section label { font-size: 0.78125rem; color: var(--muted); }
-  .settings-section input[type="checkbox"], .settings-section input[type="radio"] {
-    accent-color: var(--accent-dim); }
-  .settings-section .row { display: flex; align-items: center;
-    justify-content: space-between; gap: var(--space-3) var(--space-4); margin-top: var(--space-3);
-    flex-wrap: wrap; }
-  .settings-section .row .hint { font-size: 0.78125rem; color: var(--muted); }
-  .settings-section .context-window-controls { display: flex; align-items: center;
-    gap: var(--space-4); margin-bottom: var(--space-4); }
-  .settings-section .context-window-controls input { box-sizing: border-box;
-    height: 36px; min-width: 0; }
-  .settings-section .context-window-controls input[type="range"] {
-    flex: 1; width: 0; padding: 0; border: 0; accent-color: var(--accent); }
-  .settings-section .context-window-controls input[type="number"] {
-    flex: 0 0 112px; width: 112px; }
-  /* checkbox preferences are left-aligned; extras may add a description */
-  .settings-section .row.check { justify-content: flex-start; gap: var(--space-3);
-    cursor: pointer; margin-top: var(--space-3); min-height: 44px; }
-  .settings-section .row.check input { width: auto; margin: 0; flex: none; }
-  .settings-section .row.check > span:first-of-type { color: var(--text);
-    font-size: 0.84375rem; font-weight: 600; }
-  .settings-section .row.effort > span { color: var(--text); font-size: 0.84375rem;
-    font-weight: 600; }
-  .settings-section .row.effort .effort-note { display: block; margin-top: var(--space-1);
-    color: var(--text); font-size: inherit; font-weight: 400; }
-  .settings-section .row.effort select { min-width: 150px; }
-  /* Settings model box: a search field with its result list inline below it
-     (never floating, so a phone keyboard cannot cover the list). */
-  .settings-section .row.effort { align-items: flex-start; }
-  .settings-section .row.effort > span { padding-top: var(--space-3); min-width: 56px; }
-  .settings-section .model-box { flex: 1 1 260px; min-width: 0;
-    display: flex; flex-direction: column; gap: var(--space-2); }
-  .settings-section .model-box-input { width: 100%; box-sizing: border-box; }
-  .settings-section .model-box-list { max-height: 400px; overflow-y: auto;
-    border: 1px solid var(--border); border-radius: 8px;
-    background: var(--panel-2); }
-  .settings-section .model-box-list[hidden] { display: none; }
-  .settings-section .model-box-option { display: grid;
-    grid-template-columns: minmax(0, 1fr) auto; gap: 1px var(--space-3);
-    padding: var(--space-3) var(--space-4); cursor: pointer; }
-  .settings-section .model-box-option.active {
-    background: color-mix(in srgb, var(--accent) 14%, transparent); }
-  .settings-section .model-box-name { color: var(--text); font-size: 0.84375rem;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .settings-section .model-box-route, .settings-section .model-box-context {
-    color: var(--muted); font-size: 0.71875rem; justify-self: end;
-    white-space: nowrap; }
-  .settings-section .model-box-id { color: var(--muted); min-width: 0;
-    font: 0.71875rem var(--font-mono);
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .settings-section .model-box-note { padding: var(--space-3) var(--space-4); font-size: 0.78125rem;
-    color: var(--muted); }
-  @media (max-width: 700px) {
-    .settings-section .row.effort { flex-direction: column;
-      align-items: stretch; gap: var(--space-2); }
-    .settings-section .row.effort > span { padding-top: 0; }
-    .settings-section .model-box { flex: none; }
-    /* About five rows: the list stays inline, above the phone keyboard. */
-    .settings-section .model-box-list { max-height: 300px; }
-    .settings-section .model-box-option { min-height: 44px;
-      align-content: center; } }
-  .settings-section .row.extra .hint { flex: 1; min-width: 0; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
-  /* Shape and tones come from the shared button rules in app.css. */
-  .settings-section button.ghost:hover { border-color: var(--danger);
-    color: var(--danger); }
-  .settings-section .msg { font-size: 0.78125rem; min-height: 1.1em; margin: var(--space-3) 0 0; }
-  .settings-section .msg.ok { color: var(--running); }
-  .settings-section .mcp-settings .hint { color: var(--text); }
-  .remotes-settings { color: var(--text); font-size: 0.8125rem; }
-  .remotes-description { margin: 0 0 var(--space-3); }
-  .remote-incoming { margin-top: var(--space-5); }
-  .remote-incoming h4 { margin: 0 0 var(--space-3); font-size: inherit; }
-  .settings-section .remotes-settings button:is(.primary, .ghost, .secondary),
-  .settings-section .remotes-settings input { min-height: 44px; min-width: 44px; }
-  .remote-entry { padding: var(--space-3) 0; margin-bottom: var(--space-3);
-    border-bottom: 1px solid var(--border); }
-  .remote-entry .row { margin-top: 0; flex-wrap: nowrap; align-items: flex-start; }
-  .remote-info { min-width: 0; overflow-wrap: anywhere; }
-  .remote-info > div { margin-top: var(--space-2); }
-  .remote-entry .row > button { flex: none; }
-  .remote-sign-in { display: flex; align-items: flex-end; gap: var(--space-3);
-    margin-top: var(--space-3); }
-  .remote-sign-in .field { flex: 1; min-width: 0; margin: 0; }
-  .remote-sign-in input { width: 100%; min-width: 0; }
-  .remote-sign-in button { flex: none; }
-  .remote-add { margin-top: var(--space-4); }
-  .remote-add .row { justify-content: flex-end; }
-  .remotes-settings label, .remotes-settings input::placeholder { color: var(--text); opacity: 1; }
-  .remote-entry > div:last-child:not(.row) { margin-top: var(--space-3); }
-  .mcp-status { color: var(--text); font-size: 0.8125rem; }
-  .mcp-server { display: flex; align-items: center; justify-content: space-between;
-    gap: var(--space-3); padding: var(--space-3) 0; border-bottom: 1px solid var(--border); }
-  .mcp-server > div { min-width: 0; overflow-wrap: anywhere; }
-  .mcp-server button { flex: none; }
- .mcp-paste .hint { flex-basis: 100%; margin: 0; overflow-wrap: anywhere; }
- .mcp-paste input { flex: 1; min-width: 0; }
-  .mcp-state { display: inline-flex; align-items: center; gap: var(--space-2);
-    margin-left: var(--space-3); }
-  .mcp-state::before { content: ""; width: 0.5em; height: 0.5em;
-    border-radius: 50%; background: currentColor; }
-  .mcp-state[data-state="connected"]::before { background: var(--running); }
-  .mcp-state[data-state="failed"]::before { background: var(--danger); }
-  .mcp-detail { margin-top: var(--space-2); }
-  .settings-section .msg.err { color: var(--danger); }
-  .settings-section a.link { color: var(--accent); font-size: 0.78125rem;
-    text-decoration: none; }
-  .settings-section a.link:hover { text-decoration: underline; }
-  .settings-section .authbtns { display: flex; gap: var(--space-3); flex-wrap: wrap;
-    justify-content: flex-end; }
-  .settings-section .authbtns button { white-space: nowrap; }
-  .settings-section textarea { width: 100%; resize: vertical;
-    font: 0.78125rem/1.5 var(--font-mono); }
-  .settings-section pre.cmd, .settings-section pre.cmdpy { background: var(--code-bg);
-    border: 1px solid var(--border); border-radius: 10px; padding: var(--space-4);
-    color: var(--text); font: 0.78125rem/1.5 var(--font-mono);
-    white-space: pre-wrap; overflow-wrap: anywhere; margin: 0 0 var(--space-3);
-    user-select: all; }
-  .settings-section [hidden] { display: none; }
-
   /* ---------- message inspector ("no hidden prompts") ----------
      Reveals delivered user input or an assistant response with its tool activity.
      Reuses the settings-modal overlay pattern; wider, since prompts are long. */
@@ -557,7 +363,7 @@
     background: color-mix(in srgb, var(--scrim) 62%, transparent); align-items: flex-start; justify-content: center; }
   #prompt-overlay.on { display: flex; }
   #prompt-modal { width: 680px; max-width: calc(100vw - 32px);
-    max-height: 84vh; overflow-y: auto; margin-top: 8vh;
+    max-height: min(84vh, calc(100dvh - env(safe-area-inset-top) - 8vh)); overflow-y: auto; margin-top: max(8vh, env(safe-area-inset-top));
     padding: var(--space-5) var(--space-6) var(--space-6);
     /* Every human-readable inspector field supports drag selection and mobile
        long-press. Individual controls opt out through their native behavior. */
@@ -762,7 +568,6 @@
     position: absolute; right: 0; bottom: calc(1lh - var(--turn-button-size)); font-size: inherit; line-height: inherit; }
   .activity-body:has(> .activity-group:nth-last-child(2) .turn-tail):not(:has(> .turn-foot .turn-outcome)) > .turn-foot {
     position: absolute; right: 0; bottom: calc(1lh - var(--turn-button-size)); font-size: 0.78125rem; line-height: inherit; }
-  .activity-boundary:has(> .msg > .working) > .activity-body:has(.turn-foot) { margin-bottom: var(--space-5); }
   .turn-foot-actions { flex: none; margin-left: auto; display: inline-flex;
     align-items: center; gap: var(--turn-button-gap); }
   .turn-expand, .turn-tokens { flex: none; display: inline-flex;
@@ -786,7 +591,7 @@
   .turn-tool-dot { flex: none; align-self: center; width: 6px; height: 6px;
     border-radius: 50%; background: var(--accent); }
   .turn-tool-caret { flex: none; font-size: 0.65625rem; opacity: .75; }
-  .turn-tool-name { flex: none; color: var(--accent); font-weight: 600; }
+  .turn-tool-name { min-width: 0; color: var(--accent); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* the parentheses are decoration, so the row's text stays the exact command
      for selection, copy, and screen readers. It clips to one line rather than
      wrapping: hover and aria-label still carry all of it. */
@@ -904,7 +709,6 @@
   #messages img { -webkit-user-select: none; user-select: none; }
   #scroll:has(#messages > .activity-boundary:last-child .turn-foot) { padding-bottom: var(--space-5); }
   #scroll:has(#messages > .activity-boundary:last-child > .activity-body > .turn-foot) { padding-bottom: var(--space-6); }
-  #scroll:has(#messages > .activity-boundary:last-child > .msg .working) { padding-bottom: 0; }
   /* Spec: keep 12px message padding plus scroll-end room for hanging footer
      targets; spacing between turns is unchanged. Edge fades reserve no room. */
   #messages { width: 100%; max-width: 780px; min-width: 0; margin: 0 auto;
@@ -1028,13 +832,14 @@
   .agent-attachments.images-two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-attachments.images-many { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .agent-attachment-item { width: 100%; min-width: 0; }
-  .agent-attachment-item.image { position: relative; overflow: hidden; aspect-ratio: 4 / 3;
-    max-height: 390px; border: 1px solid var(--border); border-radius: 10px;
+  .agent-attachment-item.image { position: relative; overflow: hidden; width: fit-content;
+    min-width: min(100%, 120px); max-width: 100%; border: 1px solid var(--border); border-radius: 10px;
     background: var(--panel-2); }
-  .agent-attachment-preview { display: block; width: 100%; height: 100%; padding: 0;
-    border: 0; background: transparent; cursor: zoom-in; }
-  .agent-attachment-preview img { display: block; width: 100%; height: 100%;
-    object-fit: contain; }
+  .agent-attachment-item.image:not(.loaded) { width: 100%; aspect-ratio: 4 / 3; }
+  .agent-attachment-preview { display: block; width: 100%; max-width: 100%; padding: 0;
+    border: 0; background: transparent; cursor: zoom-in; text-align: start; font: inherit; }
+  .agent-attachment-preview img { display: block; width: auto; height: auto;
+    max-width: 100%; max-height: 390px; }
   .agent-attachment-preview:focus-visible { outline: 2px solid var(--accent);
     outline-offset: -3px; }
   .agent-attachment-download-icon { position: absolute; z-index: var(--z-raised); top: 8px; right: 8px;
@@ -1117,12 +922,6 @@
     border-color: var(--border); background: var(--panel-2); }
   .working { width: 100%; min-width: 0; max-width: 100%; color: var(--muted);
     font-size: 0.78125rem; }
-  .working-live { display: flex; align-items: center; gap: var(--space-3); width: 100%;
-    min-width: 0; max-width: 100%; white-space: nowrap; }
-  /* CSS clips by rendered space rather than slicing JS strings, preserving
-     Unicode; title/aria-label retain the full bounded backend-redacted text. */
-  .working-live .work-label { flex: 1 1 auto; min-width: 0; overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap; }
   /* Live activity panel: a fixed-size box for the running turn — a pulsing
      dot plus the tool name in bright text with its arguments muted, or the
      Thinking / Starting states while no tool runs. One height for every
@@ -1370,13 +1169,13 @@
   /* An open phone pane covers the thread: the title bar meets its bar at a
      hard line, never the thread's fade. */
   #topbar.pane-overlay::after { display: none; }
-  /* A selection started in the thread must not extend into the title bar or
-     composer chrome when a touch handle is dragged past the thread's edge. */
-  #topbar, #composer-wrap { -webkit-user-select: none; user-select: none; }
+  /* Reading selections must not include title, composer, or comment controls,
+     including when a comment bar appears after a paragraph is selected. */
+  #topbar, #composer-wrap, .report-sendbar { -webkit-user-select: none; user-select: none; }
   :is(#topbar, #composer-wrap) :is(input, textarea) { -webkit-user-select: text; user-select: text; }
 
   /* scroll-to-latest: floats over the messages pane, centered just above the
-     composer, shown only when scrolled far from the bottom (see updateScrollBtn). */
+     composer, shown whenever the reader is away from the bottom (see updateScrollBtn). */
   #scroll-btn { position: absolute; bottom: 100%; left: 50%; margin-bottom: var(--space-3);
     transform: translateX(-50%) translateY(6px); width: 36px; height: 36px;
     border-radius: 50%; border: 1px solid var(--border); background: var(--panel-2);
@@ -1388,6 +1187,12 @@
     transform: translateX(-50%) translateY(0); }
   #scroll-btn:hover { color: var(--text); border-color: var(--accent-dim); }
   #composer-shell { max-width: 780px; margin: 0 auto; position: relative; }
+  /* The running turn's live panel stays above the composer, outside the
+     thread, so it is visible at any scroll position and covers nothing. */
+  #live-bar { max-width: 780px; margin: 0 auto var(--space-2); }
+  #live-bar[hidden], #live-bar.stale { display: none; }
+  #live-bar :is(.live-thinking-summary, .live-tool-body) { max-height: 30vh;
+    overflow-y: auto; -webkit-user-select: text; user-select: text; }
   #composer, .composer-box { width: 100%; margin: 0; background: var(--panel-2);
     border: 1px solid var(--border); border-radius: 14px;
     padding: var(--space-2);
@@ -1679,15 +1484,13 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
   .drawing-editor .excalidraw .default-sidebar-trigger { display: none; }
 
   /* ---------- mobile ---------- */
-  #backdrop { display: none; }
+  #agent-list-actions { display: none; }
   @media (max-width: 700px) {
-    #sidebar { position: fixed; inset: 0 auto 0 0; z-index: calc(var(--z-drawer) + 3); width: 85vw;
-      max-width: 360px; padding-top: var(--mobile-shell-height);
-      padding-bottom: env(safe-area-inset-bottom);
-      transform: translateX(-102%); transition: transform var(--motion-move); }
+    #sidebar { position: fixed; inset: 0; z-index: calc(var(--z-drawer) + 3); width: auto;
+      max-width: none; padding-top: 0; border-right: 0;
+      padding-left: env(safe-area-inset-left); padding-bottom: env(safe-area-inset-bottom);
+      transform: translateX(-102%); }
     #sidebar.open { transform: none; }
-    #backdrop.on { display: block; position: fixed; inset: 0; z-index: calc(var(--z-drawer) + 2);
-      background: color-mix(in srgb, var(--shadow) 50%, transparent); }
     #menu-btn { display: inline-flex; }
     #sidebar-foot { display: block;
       padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
@@ -1759,6 +1562,17 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
     .shell-surface { width: 100%; max-width: none;
       max-height: calc(100dvh - var(--mobile-shell-height) - 112px);
       padding: var(--space-5); border-radius: 14px; }
+    /* Phones have a full-screen agent list below one conversation entry. */
+    #sidebar #brand { min-height: calc(48px + env(safe-area-inset-top));
+      box-sizing: border-box; padding: env(safe-area-inset-top) var(--space-3) 0; }
+    #brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #agent-list-actions { display: flex; flex: none; margin-left: auto; }
+    #agent-list .agent, .tree-section-toggle { min-height: 44px; }
+    .tree-section-toggle { align-items: center; }
+    #brand #settings-btn { width: 44px; height: 44px; padding: 0; border: 0;
+      justify-content: center; color: var(--text); }
+    #brand #settings-btn span, #sidebar-foot, #conv-titlebar #chip-kids { display: none; }
+    .phone-list #main { visibility: hidden; }
   }
   @media (pointer: coarse) {
     /* Panel chips keep their 18 px badge height in the panel. Their
@@ -1799,7 +1613,12 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
 <body data-version="__VERSION__">
 
 <aside id="sidebar" tabindex="-1">
-  <div id="brand"><img src="/static/brand/mark.svg" width="24" height="24" alt="">__APP__</div>
+  <div id="brand"><img src="/static/brand/mark.svg" width="24" height="24" alt=""><span id="brand-name">__APP__</span>
+    <div id="agent-list-actions">
+      <button id="new-list" class="icon-btn lg" title="New top-level agent" aria-label="New top-level agent"></button>
+    </div>
+  </div>
+  <div id="sidebar-script-notice" hidden></div>
   <nav id="agent-list" aria-label="Agent tree" role="tree"></nav>
   <div id="sidebar-foot">
     <details id="shortcut-pane">
@@ -1812,21 +1631,20 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
     <span>Settings</span>
   </button>
 </aside>
-<div id="backdrop"></div>
 
 <div id="settings-overlay">
   <div id="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
-    <header class="settings-head">
-      <h2 id="settings-title">Settings</h2>
-      <select id="settings-backend" class="text-field sm" aria-label="Recurse these settings change" hidden></select>
-      <span id="settings-release" title="Recurse release and commit" hidden></span>
-      <button class="icon-btn lg" id="settings-close" title="Close"
-        aria-label="Close settings"><svg data-icon="CLOSE_ICON"></svg></button>
-    </header>
-    <div class="settings-cols">
+    <button class="icon-btn lg" id="settings-close" title="Close"
+      aria-label="Close settings"><svg data-icon="CLOSE_ICON"></svg></button>
+    <aside class="settings-side">
+      <header class="settings-head">
+        <h2 id="settings-title">Settings</h2>
+        <select id="settings-backend" class="text-field sm" aria-label="Recurse these settings change" hidden></select>
+      </header>
       <nav id="settings-nav" aria-label="Settings categories"></nav>
-      <div id="settings-sections"></div>
-    </div>
+      <span id="settings-release" title="Recurse release and commit" hidden></span>
+    </aside>
+    <div id="settings-sections"></div>
   </div>
 </div>
 
@@ -1896,8 +1714,7 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
         <span class="lbl">New</span>
       </button>
       <button id="pane-fab" title="More actions" aria-label="More actions" aria-haspopup="menu"
-        aria-controls="pane-menu" aria-expanded="false">
-      </button>
+        aria-controls="pane-menu" aria-expanded="false"></button>
     </div>
   </div>
   <div id="shared-tree-status" class="menu-note" role="status" hidden></div>
@@ -1909,6 +1726,7 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
   <div id="thread-loading" role="status" aria-live="polite"></div>
   <div id="scroll"><div id="messages"></div></div>
   <div id="composer-wrap">
+    <div id="live-bar" hidden></div>
     <button id="scroll-btn" aria-label="Scroll to latest">
       <svg data-icon="SCROLL_DOWN_ICON"></svg>
     </button>
@@ -1980,15 +1798,15 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
 <div id="panes"></div>
 <div id="pane-rail"><div id="pane-rail-panels"></div></div>
 <div id="pane-menu" class="menu" role="menu" aria-label="Conversation actions and panels">
-  <button id="share-link-btn" class="menu-item pane-menu-item" role="menuitem" hidden>Share link</button>
   <button id="trash-btn" class="menu-item pane-menu-item" role="menuitem">
     <span class="action-label">Delete</span>
   </button>
   <button id="takeover-btn" class="menu-item pane-menu-item" role="menuitem" title="Take over" aria-label="Take over" aria-pressed="false">
     <span>Take control</span>
   </button>
+  <div id="pane-menu-divider" role="separator"></div>
+  <button id="share-link-btn" class="menu-item pane-menu-item" role="menuitem" title="Share link" aria-label="Share link" hidden><span>Share link</span></button>
   <div id="pane-menu-panels" role="none"></div>
-  <button id="up-btn" class="menu-item pane-menu-item" role="menuitem" title="Up to parent agent">Up to parent agent</button>
 </div>
 <div id="pane-backdrop"></div>
 <div id="pane-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>

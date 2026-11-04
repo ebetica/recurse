@@ -52,7 +52,10 @@ test(
     expect(value.contextFiles.map((file) => file.content)).toContain(
       "Repo rules.\n",
     );
-    expect(value.skills.map((skill) => skill.name)).toEqual(["notes"]);
+    expect(value.skills.map((skill) => skill.name)).toEqual([
+      "notes",
+      "recurse-settings",
+    ]);
     expect(fallbacks).toEqual([]);
   },
   THREAD_TEST_MS,

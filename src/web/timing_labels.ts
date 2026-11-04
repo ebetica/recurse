@@ -1,6 +1,6 @@
 // Shared log-label vocabulary: shell ids and element kinds, never user content.
 export const TIMING_TARGETS =
-  "settings-btn settings-close menu-btn new-top pane-fab up-top input send attach file-input scroll-btn safety-btn context-indicator model-trigger effort-range agent-finder-query trash-btn takeover-btn up-btn prompt-close context-close button textarea select a summary div span document".split(
+  "settings-btn settings-close menu-btn new-top pane-fab up-top input send attach file-input scroll-btn safety-btn context-indicator model-trigger effort-range agent-finder-query trash-btn takeover-btn prompt-close context-close button textarea select a summary div span document".split(
     " ",
   );
 export const STALL_MARKERS = [

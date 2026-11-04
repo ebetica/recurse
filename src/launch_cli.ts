@@ -2,8 +2,8 @@
 // Build ROOT publishes a current stamp only after RTK/frontend succeed.
 // Image builds reuse that generation with src/local.ts --prebuilt.
 import { resolve } from "node:path";
-import { matches } from "./build_stamp";
-import { buildCurrentGeneration } from "./launcher/build";
+import { matches } from "./build_stamp.cli";
+import { buildCurrentGeneration } from "./launcher/build.cli";
 import {
   preparePiAgentDir,
   resolveRoots,

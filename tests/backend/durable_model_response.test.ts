@@ -1,10 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { DurableHost } from "../../src/agents/durable/host";
+import {
+  replayProvider,
+  type Recording,
+} from "./fixtures/provider_replay/server";
 import {
   fauxHost,
   held,
@@ -79,6 +83,74 @@ test("generated responses retain requested effort and provider token counts", as
     ).toEqual(["high", "off"]);
   } finally {
     await host.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+// Regression: #2902 Settings catalog updates reach a running Durable host without network refresh.
+test("a stored Pi catalog update runs through the built-in provider", async () => {
+  const root = await mkdtemp(join(tmpdir(), "model-catalog-"));
+  const stored = await Bun.file(
+    new URL("./fixtures/model_response/models-store.json", import.meta.url)
+      .pathname,
+  ).json();
+  const catalogModel = stored["openai-codex"].models[0];
+  const recording = (await Bun.file(
+    new URL(
+      "./fixtures/provider_replay/openai-codex-auto.json",
+      import.meta.url,
+    ).pathname,
+  ).json()) as Recording;
+  recording.exchanges[0]!.request.model = catalogModel.id;
+  const replay = replayProvider(recording, { timeScale: 0 });
+  const record = { id: "c1", backend: "durable", workdir: root };
+  const host = new DurableHost({
+    ...testDeps(
+      root,
+      () => record,
+      () => ["c1"],
+    ),
+    settings: () => [`openai-codex/${catalogModel.id}`, "low"],
+  });
+  try {
+    const models = await host.models();
+    expect(models.getModel("openai-codex", catalogModel.id)?.baseUrl).not.toBe(
+      replay.baseUrl + "/backend-api",
+    );
+    await writeFile(
+      join(root, "auth.json"),
+      JSON.stringify({
+        "openai-codex": {
+          type: "oauth",
+          access: `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "recorded-test" } })).toString("base64url")}.test`,
+          refresh: "recorded-test-refresh",
+          expires: Date.now() + 3600_000,
+          accountId: "recorded-test",
+        },
+      }),
+    );
+    catalogModel.baseUrl = replay.baseUrl + "/backend-api";
+    stored["openai-codex"].lastModified = Date.now();
+    await writeFile(join(root, "models-store.json"), JSON.stringify(stored));
+    await host.send("c1", "Reply without tools", "catalog-update");
+    await until(idle(host));
+    replay.assertComplete();
+    expect(await host.models()).toBe(models);
+    expect(models.getModel("openai-codex", catalogModel.id)).toMatchObject({
+      api: catalogModel.api,
+      baseUrl: catalogModel.baseUrl,
+      contextWindow: catalogModel.contextWindow,
+    });
+    expect(replay.requests[0]!.model).toBe(catalogModel.id);
+    const view = await host.view("c1", {});
+    expect(
+      (view.blocks as Record<string, any>[]).findLast(
+        (row) => row.role === "assistant",
+      )?.text,
+    ).toContain("RECORDED_PROVIDER_OK");
+  } finally {
+    await host.close();
+    replay.server.stop(true);
     await rm(root, { recursive: true, force: true });
   }
 });

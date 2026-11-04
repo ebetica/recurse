@@ -15,6 +15,9 @@ export const PROMOTE_ICON = outline(
 export const DELETE_ICON = outline(
   '<path d="M3 6h18M8 6V4h8v2m2 0v14H6V6M10 10v7m4-7v7"/>',
 );
+export const SHARE_ICON = outline(
+  '<path d="M10 13a5 5 0 0 0 7.1 0l2.8-2.8a5 5 0 0 0-7.1-7.1L11.2 4.7M14 11a5 5 0 0 0-7.1 0l-2.8 2.8a5 5 0 0 0 7.1 7.1l1.6-1.6"/>',
+);
 export const TAKE_CONTROL_ICON = outline(
   '<circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/>',
 );
@@ -51,6 +54,25 @@ export const ARTIFACTS_ICON = outline(
 export const TERMINAL_ICON = outline(
   '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
 );
+// Settings categories and the phone list's chevron.
+export const SETTINGS_CATEGORY_ICONS = {
+  account: outline(
+    '<circle cx="12" cy="8" r="4"/><path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"/>',
+  ),
+  appearance: outline(
+    '<circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor" stroke="none"/>',
+  ),
+  auth: outline(
+    '<circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.3-9.3M16 7l3 3M13.5 9.5l2 2"/>',
+  ),
+  models: outline(
+    '<path d="M12 3.5 13.9 9l5.6 1.9-5.6 1.9L12 18.5l-1.9-5.7-5.6-1.9L10.1 9z"/><path d="m19 15.5.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/>',
+  ),
+  agents: outline(
+    '<path d="M9 3v5M15 3v5M6.5 8h11v3.5a5.5 5.5 0 0 1-11 0zM12 17v4"/>',
+  ),
+};
+export const CHEVRON_RIGHT_ICON = outline('<path d="m9 6 6 6-6 6"/>');
 export const PERSON_ICON =
   '<svg class="pico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 12a5 5 0 1 0 0-10 5 5 0 0 0 0 10zm0 2c-5 0-9 2.7-9 6v2h18v-2c0-3.3-4-6-9-6z"/></svg>';
 
@@ -110,3 +132,17 @@ export const ARTIFACT_DELETE_ICON = `<svg viewBox="0 0 24 24" fill="none" stroke
 
 // New-agent draft greeting.
 export const NEW_AGENT_ICON = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
+
+// Sidebar action icons, keyed by the action names sidebar scripts use.
+const ICON_PATHS: Record<string, string> = {
+  archive:
+    '<rect x="3" y="4" width="18" height="5" rx="1"/><path d="M5 9v10h14V9M10 13h4"/>',
+  snooze:
+    '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l2 2M5 3 2 6M22 6l-3-3"/>',
+  pin: '<path d="M12 17v5M9 3h6l-1 7 4 4H6l4-4z"/>',
+  unpin: '<path d="M12 17v5M9 3h6l-1 7 4 4H6l4-4zM3 3l18 18"/>',
+  restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
+  tag: '<path d="M3 12V3h9l9 9-9 9zM7.5 7.5h.01"/>',
+};
+export const actionIcon = (name: string): string =>
+  outline(ICON_PATHS[name] ?? ICON_PATHS.tag);

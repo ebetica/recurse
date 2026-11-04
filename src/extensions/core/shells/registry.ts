@@ -3,7 +3,9 @@
 // wedging turns.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { closeSync, mkdirSync, openSync, unlinkSync } from "node:fs";
+import { slowSpan } from "../../../observability/slow_span";
+import fs from "node:fs";
+import fsPromises, { type FileHandle } from "node:fs/promises";
 import {
   HAS_PROCESS_TABLE,
   procEntryExists,
@@ -24,6 +26,7 @@ import { fileSize, readLastLine, readRange, trimFile } from "./fileio.ts";
 import { capLines, splitCompleteLines } from "./lines.ts";
 import {
   getBootId,
+  prepareBootId,
   procStartTime,
   type RecordStatus,
   type RegistryStore,
@@ -178,6 +181,7 @@ export interface Shell {
   completed: boolean;
   /** Whether the current ownership record reached the atomic on-disk store. */
   recordPersisted: boolean;
+  persistenceVersion?: number;
   /** Epoch ms of the latest successful live ownership write. */
   lastOwnershipPersistAt: number;
   /** Pending until the corresponding custom-message batch is acknowledged. */
@@ -421,6 +425,14 @@ export class ShellRegistry {
   private readonly shells = new Map<string, Shell>();
   /** Bounded live index; terminal history may outlive this process view. */
   private readonly liveShells = new Map<string, Shell>();
+  private readonly monitorFlushes = new WeakMap<Shell, Promise<void>>();
+  private readonly outputReaders = new WeakMap<Shell, number>();
+  private readonly initialized: Promise<void>;
+  private readonly launches = new WeakMap<Shell, Promise<void>>();
+  private readonly descriptors = new WeakMap<
+    Shell,
+    { handle: FileHandle; close?: Promise<void> }
+  >();
   private readonly recentCommands: string[] = [];
   /** Every run() call, used to throttle the hygiene teaching note. */
   private totalRuns = 0;
@@ -431,6 +443,7 @@ export class ShellRegistry {
   private store: RegistryStore | undefined;
   // Freeze live records at teardown so resume sees interrupted shells.
   private frozen = false;
+  private readonly pendingPersists = new Map<string, Promise<boolean>>();
   private shutdownPromise: Promise<void> | undefined;
   private completionSequence = 0;
   private groupPollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -452,9 +465,12 @@ export class ShellRegistry {
       this.cfg.agentTempDir,
     );
     this.store = store;
-    try {
-      mkdirSync(this.cfg.logDir, { recursive: true });
-    } catch {}
+    this.initialized = fsPromises
+      .mkdir(this.cfg.logDir, { recursive: true })
+      .then(
+        () => {},
+        () => {},
+      );
   }
 
   // Completion state shares the shell-liveness session directory.
@@ -463,8 +479,8 @@ export class ShellRegistry {
     if (!store) return undefined;
     return {
       loadPending: () => store.loadPendingCompletions(),
-      acknowledge: (completionIds) => {
-        const ok = store.acknowledgeCompletions(completionIds);
+      acknowledge: async (completionIds) => {
+        const ok = await store.acknowledgeCompletions(completionIds);
         if (ok) {
           const ids = new Set(completionIds);
           for (const shell of this.shells.values()) {
@@ -479,24 +495,44 @@ export class ShellRegistry {
   }
 
   // Persist current shell state unless the store is absent or frozen.
-  private persist(shell: Shell): boolean {
+  private async persist(shell: Shell): Promise<boolean> {
     if (!this.store || this.frozen) return false;
+    const version = (shell.persistenceVersion ?? 0) + 1;
+    shell.persistenceVersion = version;
+    const requestedAt = Date.now();
+    let pending: Promise<boolean> | undefined;
     try {
-      shell.recordPersisted = this.store.write(
-        toRecord(shell, this.inputs.ownerId),
-      );
-      if (shell.recordPersisted) shell.lastOwnershipPersistAt = Date.now();
-      return shell.recordPersisted;
+      pending = this.store.write(toRecord(shell, this.inputs.ownerId));
+      this.pendingPersists.set(shell.id, pending);
+      const ok = await pending;
+      if (shell.persistenceVersion === version) {
+        shell.recordPersisted = ok;
+        if (ok) shell.lastOwnershipPersistAt = requestedAt;
+      }
+      return ok;
     } catch (err) {
-      shell.recordPersisted = false;
+      if (shell.persistenceVersion === version) shell.recordPersisted = false;
       this.reportError(err);
       return false;
+    } finally {
+      if (pending && this.pendingPersists.get(shell.id) === pending)
+        this.pendingPersists.delete(shell.id);
     }
+  }
+
+  /** Settle accepted snapshots before handoff or a foreground result. */
+  async flushPersistence(shell: Shell): Promise<void> {
+    await this.store?.flush(shell.id);
   }
 
   // Retry missing records or transient /proc identity failures.
   private refreshOwnershipRecord(shell: Shell): void {
-    if (shell.completed || shell.status !== "running") return;
+    if (
+      shell.completed ||
+      shell.status !== "running" ||
+      this.pendingPersists.has(shell.id)
+    )
+      return;
     let identityChanged = false;
     if (shell.identity === undefined && shell.pid !== undefined) {
       try {
@@ -517,26 +553,33 @@ export class ShellRegistry {
   // Prove exact pid/start identity is durably readable before detached launch
   // handoff. A successful write is insufficient: directory replacement may
   // erase it before return.
-  hasDurableOwnership(shell: Shell): boolean {
+  async hasDurableOwnership(shell: Shell): Promise<boolean> {
     if (!this.store?.sessionScoped || this.frozen) return false;
     if (shell.pid === undefined || shell.pid <= 1 || shell.pgid !== shell.pid)
       return false;
     if (!shell.identity) this.refreshOwnershipRecord(shell);
+    await this.flushPersistence(shell);
+    if (this.frozen) return false;
     if (!shell.identity || procStartTime(shell.pid) !== shell.identity)
       return false;
-    const matches = () => {
-      const record = this.store?.readRecord(shell.id);
+    const matches = async () => {
+      const record = await this.store?.readRecord(shell.id);
       return Boolean(
+        !this.frozen &&
+        !shell.completed &&
         record &&
         record.id === shell.id &&
         record.pid === shell.pid &&
         record.pgid === shell.pgid &&
         record.identity === shell.identity &&
-        record.ownerId === this.inputs.ownerId,
+        record.ownerId === this.inputs.ownerId &&
+        shell.pid !== undefined &&
+        procStartTime(shell.pid) === shell.identity,
       );
     };
-    if (shell.recordPersisted && matches()) return true;
-    return this.persist(shell) && matches();
+    if (shell.recordPersisted && (await matches())) return true;
+    if (this.frozen || shell.completed) return false;
+    return (await this.persist(shell)) && (await matches());
   }
 
   // Stop launches without durable ownership rather than let them escape
@@ -562,7 +605,7 @@ export class ShellRegistry {
     if (processGroupExists(shell)) {
       // Invariant: Retain ownership for exit retries; never claim cleanup while
       // an uninterruptible member survives.
-      this.closeFd(shell);
+      await this.closeFd(shell);
       return false;
     }
     // Invariant: Mark terminal before removal so late exit callbacks cannot
@@ -572,26 +615,26 @@ export class ShellRegistry {
     shell.endedAt ??= Date.now();
     shell.pendingExit = undefined;
     this.clearTimers(shell);
-    this.closeFd(shell);
-    this.removePersist(shell.id);
+    await this.closeFd(shell);
+    await this.removePersist(shell.id);
     this.liveShells.delete(shell.id);
     this.shells.delete(shell.id);
-    this.pruneStore();
+    await this.pruneStore();
     return true;
   }
 
   /** Drop a shell's on-disk record (no-op without a store / when frozen). */
-  private removePersist(id: string): void {
+  private async removePersist(id: string): Promise<void> {
     if (!this.store || this.frozen) return;
     try {
-      this.store.remove(id);
+      await this.store.remove(id);
     } catch {}
   }
 
   // Guard callbacks so thrown errors cannot escape to the host.
-  private safe(fn: () => void): void {
+  private safe(fn: () => void | Promise<void>): void {
     try {
-      fn();
+      void Promise.resolve(fn()).catch((err) => this.reportError(err));
     } catch (err) {
       this.reportError(err);
     }
@@ -619,7 +662,10 @@ export class ShellRegistry {
   }
 
   /** Persist a terminal notice before exposing it to the in-memory pi queue. */
-  private queueCompletion(shell: Shell, message: string): CompletionRecord {
+  private async queueCompletion(
+    shell: Shell,
+    message: string,
+  ): Promise<CompletionRecord> {
     const completion: CompletionRecord = {
       id: shell.id,
       message,
@@ -627,7 +673,7 @@ export class ShellRegistry {
       sequence: ++this.completionSequence,
     };
     shell.completion = completion;
-    this.persist(shell);
+    await this.persist(shell);
     return completion;
   }
 
@@ -743,17 +789,40 @@ export class ShellRegistry {
     return snapshot === undefined ? undefined : wrapSystemReminder(snapshot);
   }
 
-  // Trim the log to the shell's line limit or override, at most 2000.
-  trimmedOutput(shell: Shell, limit?: number): string {
-    return trimFile(shell.logPath, {
-      byteBudget: this.cfg.byteBudget,
-      maxLines: clampLineLimit(limit ?? shell.lineLimit ?? this.cfg.lineLimit),
-      maxLineLen: this.cfg.maxLineLen,
-      logPath: shell.logPath,
-    }).text;
+  /** Keep a log until its output consumer finishes, including nested reads. */
+  retainOutput(shell: Shell): Disposable {
+    this.outputReaders.set(shell, (this.outputReaders.get(shell) ?? 0) + 1);
+    let released = false;
+    return {
+      [Symbol.dispose]: () => {
+        if (released) return;
+        released = true;
+        const remaining = this.outputReaders.get(shell)! - 1;
+        if (remaining > 0) this.outputReaders.set(shell, remaining);
+        else {
+          this.outputReaders.delete(shell);
+          if (shell.completed) this.evict();
+        }
+      },
+    };
   }
 
-  // Spawn and track a shell immediately; the caller handles foreground waits.
+  // Trim the log to the shell's line limit or override, at most 2000.
+  async trimmedOutput(shell: Shell, limit?: number): Promise<string> {
+    using _output = this.retainOutput(shell);
+    return (
+      await trimFile(shell.logPath, {
+        byteBudget: this.cfg.byteBudget,
+        maxLines: clampLineLimit(
+          limit ?? shell.lineLimit ?? this.cfg.lineLimit,
+        ),
+        maxLineLen: this.cfg.maxLineLen,
+        logPath: shell.logPath,
+      })
+    ).text;
+  }
+
+  // Track a shell immediately; waitForLaunch includes asynchronous log setup.
   // toolCallId keys publish ownership.
   run(
     command: string,
@@ -821,21 +890,10 @@ export class ShellRegistry {
       return shell;
     }
 
-    let fd: number;
+    let env: NodeJS.ProcessEnv;
+    let args: string[];
     try {
-      fd = openSync(logPath, "a");
-    } catch (err) {
-      shell.status = "error";
-      shell.endedAt = Date.now();
-      this.liveShells.delete(id);
-      this.reportError(err);
-      return shell;
-    }
-    shell.fd = fd;
-
-    let child: ChildProcess;
-    try {
-      const env = { ...this.inputs.environment?.() };
+      env = { ...this.inputs.environment?.() };
       // Invariant: Strip runner-owned descriptor names; undeclared fds would be
       // stale capabilities in tools and descendant processes.
       for (const name of Object.keys(env)) {
@@ -864,22 +922,68 @@ export class ShellRegistry {
           : []),
         command,
       ].join("\n");
-      child = spawn(this.cfg.shell, this.cfg.shellArgs(scrubbedCommand), {
-        cwd,
-        detached: true,
-        stdio: ["ignore", fd, fd],
-        env,
-      });
-    } catch (err) {
-      shell.status = "error";
-      shell.launchError = "spawn";
-      shell.launchErrorMessage =
-        err instanceof Error ? err.message : String(err);
-      shell.endedAt = Date.now();
-      this.closeFd(shell);
-      this.liveShells.delete(id);
-      this.reportError(err);
+      // Invariant: Capture call-scoped arguments before asynchronous log setup.
+      args = this.cfg.shellArgs(scrubbedCommand);
+    } catch (error) {
+      this.failLaunch(shell, error);
       return shell;
+    }
+    const launch = this.launch(shell, cwd, args, env);
+    this.launches.set(shell, launch);
+    void launch.catch((error) => this.reportError(error));
+    return shell;
+  }
+
+  private failLaunch(shell: Shell, error: unknown): void {
+    shell.status = "error";
+    shell.launchError = "spawn";
+    shell.launchErrorMessage =
+      error instanceof Error ? error.message : String(error);
+    shell.completed = true;
+    shell.endedAt = Date.now();
+    this.liveShells.delete(shell.id);
+    this.reportError(error);
+  }
+
+  private async launch(
+    shell: Shell,
+    cwd: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+  ): Promise<void> {
+    await this.initialized;
+    await prepareBootId();
+    if (this.frozen || this.disposed || shell.completed) {
+      this.abortShell(shell);
+      return;
+    }
+    try {
+      const handle = await fsPromises.open(shell.logPath, "a");
+      this.descriptors.set(shell, { handle });
+      shell.fd = handle.fd;
+    } catch (error) {
+      this.failLaunch(shell, error);
+      return;
+    }
+    if (this.frozen || this.disposed || shell.completed) {
+      this.abortShell(shell);
+      await this.closeFd(shell);
+      return;
+    }
+    let child: ChildProcess;
+    try {
+      child = slowSpan("shell_spawn", undefined, () =>
+        spawn(this.cfg.shell, args, {
+          cwd,
+          detached: true,
+          stdio: ["ignore", shell.fd!, shell.fd!],
+          env,
+        }),
+      );
+    } catch (error) {
+      await this.closeFd(shell);
+      this.failLaunch(shell, error);
+      return;
     }
     shell.child = child;
     shell.pid = child.pid;
@@ -900,32 +1004,32 @@ export class ShellRegistry {
       this.safe(() => this.onExit(shell, code, signal)),
     );
 
-    if (mode === "monitor") {
+    if (shell.mode === "monitor") {
       this.startOwnershipHeartbeat(shell);
       this.startMonitor(shell);
-    } else if (mode === "background") {
+    } else if (shell.mode === "background") {
       this.startOwnershipHeartbeat(shell);
     }
-    return shell;
   }
 
-  private onSpawnError(shell: Shell, err: unknown): void {
+  private async onSpawnError(shell: Shell, err: unknown): Promise<void> {
     if (shell.completed) return;
     shell.status = "error";
+    await this.closeFd(shell);
+    if (shell.completed) return;
     shell.launchError = "spawn";
     shell.launchErrorMessage = err instanceof Error ? err.message : String(err);
     shell.completed = true;
     shell.endedAt = Date.now();
     this.clearTimers(shell);
-    this.closeFd(shell);
     this.liveShells.delete(shell.id);
     this.reportError(err);
     if (shell.notifyOnComplete) {
       const message = `Shell \`${shell.id}\` failed to start: ${shell.launchErrorMessage}`;
-      const completion = this.queueCompletion(shell, message);
+      const completion = await this.queueCompletion(shell, message);
       this.notify(message, true, completion);
     } else {
-      this.persist(shell);
+      await this.persist(shell);
     }
     this.evict();
   }
@@ -942,7 +1046,7 @@ export class ShellRegistry {
     this.closeFd(shell);
     // Invariant: No-descendant exit is O(1); surviving groups use a shared
     // async identity scan, never per-shell /proc traversal.
-    if (!processGroupExists(shell)) this.finishExit(shell);
+    if (!processGroupExists(shell)) this.safe(() => this.finishExit(shell));
     else this.startGroupPoll();
   }
 
@@ -956,7 +1060,7 @@ export class ShellRegistry {
           if (epoch !== this.groupPollEpoch) return;
           for (const shell of this.shells.values()) {
             if (shell.pendingExit && !ownedGroupHasMembers(shell, groups))
-              this.finishExit(shell);
+              this.safe(() => this.finishExit(shell));
           }
           if ([...this.shells.values()].some((shell) => shell.pendingExit))
             this.startGroupPoll();
@@ -967,7 +1071,9 @@ export class ShellRegistry {
     this.groupPollTimer = timer;
   }
 
-  private finishExit(shell: Shell): void {
+  private async finishExit(shell: Shell): Promise<void> {
+    if (shell.completed) return;
+    await this.closeFd(shell);
     if (shell.completed) return;
     const { code, signal } = shell.pendingExit ?? {
       code: shell.exitCode,
@@ -979,24 +1085,26 @@ export class ShellRegistry {
     shell.signal = signal;
     if (shell.status === "running") shell.status = signal ? "killed" : "exited";
     this.clearTimers(shell);
-    this.closeFd(shell);
     shell.pendingExit = undefined;
     this.liveShells.delete(shell.id);
 
-    if (shell.mode === "monitor") this.flushMonitor(shell);
+    using _output = this.retainOutput(shell);
+    if (shell.mode === "monitor") {
+      await this.monitorFlushes.get(shell);
+      await this.flushMonitor(shell);
+    }
 
     if (shell.notifyOnComplete) {
       const how = signal ? `killed by ${signal}` : `exited ${code}`;
-      const out = this.trimmedOutput(shell);
+      const out = await this.trimmedOutput(shell);
       const message = `Shell \`${shell.id}\` (${middleElide(shell.command, COMMAND_CHARS_IN_MESSAGES)}) ${how} after ${fmtElapsed(
         (shell.endedAt ?? shell.startedAt) - shell.startedAt,
       )} (was pid ${shell.pid ?? "?"}, pgid ${pgidStr(shell)}).\nLog: ${shell.logPath}\n${out}`;
-      const completion = this.queueCompletion(shell, message);
+      const completion = await this.queueCompletion(shell, message);
       this.notify(message, true, completion);
     } else {
-      this.persist(shell);
+      await this.persist(shell);
     }
-    this.evict();
   }
 
   // Evict oldest completed shells/logs over the cap, never running shells.
@@ -1005,7 +1113,12 @@ export class ShellRegistry {
     const cap = Math.max(1, this.cfg.maxTrackedShells);
     if (this.shells.size > cap) {
       const completed = [...this.shells.values()]
-        .filter((s) => s.completed && (!this.store || !s.completion))
+        .filter(
+          (s) =>
+            s.completed &&
+            !this.outputReaders.has(s) &&
+            (!this.store || !s.completion),
+        )
         .sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0));
       let over = this.shells.size - cap;
       for (const s of completed) {
@@ -1013,7 +1126,8 @@ export class ShellRegistry {
         this.shells.delete(s.id);
         this.removePersist(s.id);
         try {
-          unlinkSync(s.logPath);
+          // oxlint-disable-next-line no-restricted-properties -- known: main-thread shell log lifecycle filesystem operation
+          fs.unlinkSync(s.logPath);
         } catch {}
         over--;
       }
@@ -1023,34 +1137,46 @@ export class ShellRegistry {
   }
 
   /** Best-effort on-disk prune; never throws and respects the frozen state. */
-  private pruneStore(): void {
+  private async pruneStore(): Promise<void> {
     if (this.store && !this.frozen) {
       try {
-        this.store.prune();
+        await this.store.prune();
       } catch {}
     }
   }
 
-  // Wait for Node to confirm spawn or failure when no pid is synchronous.
-  async waitForLaunch(shell: Shell): Promise<void> {
-    const child = shell.child;
-    if (shell.status !== "running" || shell.pid !== undefined || !child) return;
-    await new Promise<void>((resolve) => {
-      const settled = () => {
-        child.off("spawn", settled);
-        child.off("error", settled);
-        resolve();
-      };
-      child.once("spawn", settled);
-      child.once("error", settled);
-    });
+  // Wait for log preparation and Node's spawn or failure confirmation.
+  async waitForLaunch(shell: Shell, signal?: AbortSignal): Promise<void> {
+    const abort = () => this.abortShell(shell);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    try {
+      await this.launches.get(shell);
+      const child = shell.child;
+      if (shell.status !== "running" || shell.pid !== undefined || !child)
+        return;
+      await new Promise<void>((resolve) => {
+        const settled = () => {
+          child.off("spawn", settled);
+          child.off("error", settled);
+          resolve();
+        };
+        child.once("spawn", settled);
+        child.once("error", settled);
+      });
+    } finally {
+      if (shell.status === "error") await this.closeFd(shell);
+      if (signal?.aborted) abort();
+      signal?.removeEventListener("abort", abort);
+    }
   }
 
   /**
    * Await foreground completion for up to `ms`, resolving "exited" if the
    * process finished or "timeout" if it is still running.
    */
-  waitForExit(shell: Shell, ms: number): Promise<"exited" | "timeout"> {
+  async waitForExit(shell: Shell, ms: number): Promise<"exited" | "timeout"> {
+    await this.waitForLaunch(shell);
     if (shell.completed || shell.status !== "running" || !shell.child) {
       return Promise.resolve("exited");
     }
@@ -1094,10 +1220,11 @@ export class ShellRegistry {
   }
 
   // Still-running block shared with wait timeout answers.
-  stillRunningText(shell: Shell): string {
+  async stillRunningText(shell: Shell): Promise<string> {
+    using _output = this.retainOutput(shell);
     let last = "";
     try {
-      last = readLastLine(shell.logPath, this.cfg.tailWindowBytes);
+      last = await readLastLine(shell.logPath, this.cfg.tailWindowBytes);
     } catch {}
     return formatStillRunningShell({
       id: shell.id,
@@ -1113,12 +1240,12 @@ export class ShellRegistry {
   }
 
   // Live detached-shell blocks for wait timeout answers.
-  stillRunningLines(): string[] {
+  async stillRunningLines(): Promise<string[]> {
     const lines: string[] = [];
     for (const shell of this.shells.values()) {
       if (shell.completed || shell.status !== "running") continue;
       if (shell.mode !== "background" && shell.mode !== "monitor") continue;
-      lines.push(this.stillRunningText(shell));
+      lines.push(await this.stillRunningText(shell));
     }
     return lines;
   }
@@ -1134,18 +1261,28 @@ export class ShellRegistry {
   }
 
   private startMonitor(shell: Shell): void {
-    const timer = setInterval(
-      () => this.safe(() => this.flushMonitor(shell)),
-      this.cfg.monitorFlushMs,
-    );
+    const timer = setInterval(() => {
+      if (!this.monitorFlushes.has(shell))
+        this.safe(() => this.flushMonitor(shell));
+    }, this.cfg.monitorFlushMs);
     timer.unref?.();
     shell.monitorTimer = timer;
   }
 
+  private flushMonitor(shell: Shell): Promise<void> {
+    const pending = this.monitorFlushes.get(shell);
+    if (pending) return pending;
+    const reading = this.readMonitor(shell)
+      .catch((error) => this.reportError(error))
+      .finally(() => this.monitorFlushes.delete(shell));
+    this.monitorFlushes.set(shell, reading);
+    return reading;
+  }
+
   /** Read newly-appended complete lines and deliver a bounded batch. */
-  private flushMonitor(shell: Shell): void {
+  private async readMonitor(shell: Shell): Promise<void> {
     this.refreshOwnershipRecord(shell);
-    const size = fileSize(shell.logPath);
+    const size = await fileSize(shell.logPath);
     if (size > shell.monitorPos) {
       let skippedBytes = 0;
       // Invariant: Skip huge backlogs to the newest window, dropping the
@@ -1161,7 +1298,7 @@ export class ShellRegistry {
         size - shell.monitorPos,
         this.cfg.monitorMaxChunkBytes,
       );
-      let chunk = readRange(shell.logPath, shell.monitorPos, want);
+      let chunk = await readRange(shell.logPath, shell.monitorPos, want);
       // Invariant: Advance by requested bytes, not decoded length; multibyte
       // boundary cuts otherwise cause drift.
       shell.monitorPos += want;
@@ -1226,13 +1363,11 @@ export class ShellRegistry {
     this.groupPollTimer = undefined;
   }
 
-  private closeFd(shell: Shell): void {
-    if (shell.fd !== undefined) {
-      try {
-        closeSync(shell.fd);
-      } catch {}
-      shell.fd = undefined;
-    }
+  private closeFd(shell: Shell): Promise<void> {
+    const descriptor = this.descriptors.get(shell);
+    if (!descriptor) return Promise.resolve();
+    shell.fd = undefined;
+    return (descriptor.close ??= descriptor.handle.close().catch(() => {}));
   }
 
   // Note: there is no per-shell kill API. The agent stops a shell itself with
@@ -1258,8 +1393,17 @@ export class ShellRegistry {
     }
   }
 
-  /** Abort only the foreground command whose tool call received Pi's signal. */
+  /** Cancel pending launches; abort only foreground processes. */
   abortShell(shell: Shell): void {
+    if (!shell.child) {
+      shell.status = "error";
+      shell.launchError = "spawn";
+      shell.launchErrorMessage = "Command was canceled before launch.";
+      shell.completed = true;
+      shell.endedAt ??= Date.now();
+      this.liveShells.delete(shell.id);
+      return;
+    }
     if (shell.mode !== "foreground") return;
     shell.notifyOnComplete = false;
     this.clearTimers(shell);
@@ -1293,11 +1437,20 @@ export class ShellRegistry {
       await new Promise((r) => setTimeout(r, Math.min(50, remaining)));
     }
     for (const s of live) this.signalGroup(s, "SIGKILL");
-    for (const s of this.shells.values()) {
-      this.clearTimers(s);
-      this.closeFd(s);
-    }
+    const closes = [...this.shells.values()].map((shell) =>
+      this.closeFd(shell),
+    );
+    for (const shell of this.shells.values()) this.clearTimers(shell);
     this.stopGroupPoll();
+    await Promise.allSettled([
+      this.initialized,
+      ...[...this.shells.values()].map((shell) => this.launches.get(shell)),
+    ]);
+    await Promise.all([
+      ...closes,
+      ...[...this.shells.values()].map((shell) => this.closeFd(shell)),
+    ]);
+    await this.store?.flush();
     this.disposed = true;
   }
 }

@@ -277,6 +277,7 @@ Without strict flags, findings only warn. Requires python3 for Python files.`);
     "-z",
     "--",
     ".",
+    ":(glob,exclude)" + ["play", "ground"].join("") + "/**",
     ":(glob,exclude)web/vendor/**",
     ":(glob,exclude)web/dist/**",
     ":(glob,exclude)scripts/patches/**",

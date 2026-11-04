@@ -7,8 +7,17 @@ import {
   stat,
   rm,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { buildInstance } from "../../src/agents/instance";
+import {
+  createModels,
+  fauxProvider,
+  fauxAssistantMessage,
+  fauxToolCall,
+} from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import type { DurableHostDeps } from "../../src/agents/durable/host";
+import { setSafetyReviewOff } from "../../src/extensions/core/safety/durable";
 import { Config } from "../../src/config";
 import { BackendKeys } from "../../src/auth/backend_keys";
 import { publishLoopbackToken } from "../../src/web/request_auth";
@@ -17,10 +26,12 @@ import { ConnectedBackends } from "../../src/backends/connected";
 import { registerBackendRoutes } from "../../src/web/backends";
 import { registerBackendProxy } from "../../src/web/backend_proxy";
 import { jsonResponse } from "../../src/web/router";
+import { conditionalJson } from "../../src/web/caching";
+import { API_MAJOR, API_REVISION } from "../../src/web/api_v1/schema";
 import { buildAuthApp, PASSWORD } from "./http_auth_app";
 import { until } from "./fixtures/durable_host/host";
 
-// Regression: #2758 Sign-in timeouts remain actionable while credentials, operator gates and revocation remain protected.
+// Regression: #2758 Sign-in timeouts remain actionable while credentials, operator gates and revocation remain protected. (also #3029 Unknown compatibility still probes readiness.)
 test("home connects to password and open backends without exposing credentials", async () => {
   const directory = await mkdtemp(join(tmpdir(), "connected-backends-"));
   const piDir = join(directory, "home", "pi");
@@ -69,7 +80,6 @@ test("home connects to password and open backends without exposing credentials",
         detail: `connected backends file is unreadable: fix or remove ${file}`,
       });
     }
-    await broken.run(new AbortController().signal);
     expect(await readFile(file, "utf8")).toBe(corrupt);
     expect(warnings).toEqual([
       { path: file, reason: "invalid JSON or connection records" },
@@ -82,10 +92,63 @@ test("home connects to password and open backends without exposing credentials",
   }
   await rm(file);
   const store = await ConnectedBackends.load(piDir, "Home laptop!", warn);
-  const status = (router: Parameters<typeof registerBackendRoutes>[0]) =>
-    router.get("/api/status", async () =>
-      jsonResponse({ ready: true, active_agents: 0 }),
+  let version: {
+    api: number;
+    api_revision?: number;
+    release: { version: string; commit: null };
+  } | null = {
+    api: API_MAJOR,
+    api_revision: API_REVISION,
+    release: { version: "test", commit: null },
+  };
+  let versionUnavailable: "json" | "text" | null = null;
+  let holdStatus: number | null = null;
+  let holdBefore = false;
+  let statusHits = 0;
+  let abortedVersions = 0;
+  let versionReplies = 0;
+  let releaseVersion: (() => void) | undefined;
+  const conditionalRequests: (string | null)[] = [];
+  const status = (router: Parameters<typeof registerBackendRoutes>[0]) => {
+    router.get("/api/status", async () => {
+      statusHits++;
+      return jsonResponse({ ready: true, active_agents: 0 });
+    });
+    router.get("/api/v1/version", async () => jsonResponse({ api: 1 }));
+    router.get("/api/v1/agents/{id}/idle", async () =>
+      jsonResponse({ idle: true }),
     );
+    router.get("/api/v1/agents/{id}/messages", async () =>
+      jsonResponse({ messages: [] }),
+    );
+    router.get("/api/version", async (ex) => {
+      conditionalRequests.push(ex.request.headers.get("if-none-match"));
+      if (versionUnavailable === "json")
+        return jsonResponse({ detail: "not ready" }, 503);
+      if (versionUnavailable === "text")
+        return new Response("not ready", { status: 503 });
+      if (holdBefore) {
+        holdBefore = false;
+        ex.request.signal.addEventListener("abort", () => abortedVersions++, {
+          once: true,
+        });
+        await new Promise<void>((resolve) => {
+          releaseVersion = resolve;
+        });
+      }
+      const response = version
+        ? conditionalJson(ex.request, version)
+        : new Response("not JSON");
+      if (response.status === holdStatus) {
+        holdStatus = null;
+        await new Promise<void>((resolve) => {
+          releaseVersion = resolve;
+        });
+      }
+      versionReplies++;
+      return response;
+    });
+  };
   const target = join(directory, "target");
   await mkdir(target);
   const instance = await buildInstance({
@@ -101,6 +164,13 @@ test("home connects to password and open backends without exposing credentials",
     }),
     sink: { write() {} },
   });
+  const faux = fauxProvider({ tokensPerSecond: 20_000 });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  const deps = (instance.durable as unknown as { deps: DurableHostDeps }).deps;
+  deps.models = models;
+  deps.settings = () => ["faux/faux-1", "off"];
+  instance.durable.remoteSettings = store;
   await instance.start();
   while (!instance.lifecycle.readinessSnapshot().ready) await Bun.sleep(20);
   const cid = String(
@@ -122,6 +192,7 @@ test("home connects to password and open backends without exposing credentials",
           }),
       });
       status(router);
+      registerBackendProxy(router, store);
     },
   });
   delete home.env.CHAT_AUTH_HASH;
@@ -130,8 +201,6 @@ test("home connects to password and open backends without exposing credentials",
     backendKeys: true,
     extraRoutes: status,
   });
-  const controller = new AbortController();
-  const health = store.run(controller.signal);
   const homeUrl = `http://127.0.0.1:${home.running.port}`;
   const remoteUrl = `http://127.0.0.1:${remote.running.port}`;
   const remoteHeaders = {
@@ -181,26 +250,34 @@ test("home connects to password and open backends without exposing credentials",
         ).toBe(403);
     }
     await publishLoopbackToken(join(directory, "home"), home.running.port);
-    const cli = async (...args: string[]) => {
-      const proc = Bun.spawn(
-        [
-          "bun",
-          resolve(import.meta.dir, "../../tools/subagent.ts"),
-          "backends",
-          ...args,
-        ],
-        {
-          env: {
-            ...process.env,
-            CHAT_DATA_DIR: join(directory, "home"),
-            RECURSE_AGENT_ID: cid,
-          },
-          stderr: "pipe",
+    const opened = await instance.durable.open(cid);
+    await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+    let turn = 0;
+    const settings = async (args: Record<string, string>) => {
+      let out = "";
+      faux.setResponses([
+        fauxAssistantMessage(
+          fauxToolCall("codemode", {
+            code: `text(await tools.recurse_settings(${JSON.stringify(args)}));`,
+          }),
+          { stopReason: "toolUse" },
+        ),
+        (request) => {
+          out = JSON.stringify(
+            request.messages.findLast(
+              (message) => message.role === "toolResult",
+            ),
+          );
+          return fauxAssistantMessage("Done.");
         },
-      );
-      const out = await new Response(proc.stdout).text();
-      const err = await new Response(proc.stderr).text();
-      expect([await proc.exited, err]).toEqual([0, ""]);
+      ]);
+      await instance.delivery.deliver(cid, "Manage the requested remote", {
+        origin: "operator",
+        messageId: `remote-settings-${++turn}`,
+      });
+      await opened.conversation.waitForIdle(BACKGROUND_CONTEXT);
+      expect(out).not.toContain(token);
+      expect(out).not.toContain(homeKey.key);
       return out;
     };
     let hits = 0;
@@ -212,15 +289,26 @@ test("home connects to password and open backends without exposing credentials",
         return new Response("not a backend");
       },
     });
-    const agentHeaders = { "x-loopback-token": token, "x-recurse-agent": cid };
+    const agentHeaders = {
+      "x-loopback-token": token,
+      "x-recurse-agent": cid,
+      "x-recurse-bundled-tool": "subagent",
+    };
     try {
       const url = `http://127.0.0.1:${listener.port}`;
-      expect(await cli("add", "dismiss", url)).toBe(
-        `Backend dismiss (${url}) needs sign-in: ask the operator to enter its password in Settings → Remotes.\n`,
+      expect(
+        await settings({ action: "add_remote", label: "dismiss", url }),
+      ).toContain(
+        `Backend dismiss (${url}) needs sign-in: ask the operator to enter its password in Settings → Remotes.`,
       );
-      expect(await cli("list")).toContain(
-        `dismiss ${url} pending · Needs sign-in · Last contact never`,
-      );
+      const listed = await settings({ action: "list_remotes" });
+      expect(listed).toContain("pending");
+      expect(listed).toContain("Needs sign-in");
+      expect(listed).toContain("Backend requester");
+      expect(listed).toContain(url);
+      expect(
+        await settings({ action: "add_remote", label: "invalid label", url }),
+      ).toContain("invalid backend label");
       const pendingDisk = JSON.parse(await readFile(file, "utf8"));
       expect(pendingDisk[0]).toMatchObject({
         key: null,
@@ -228,10 +316,7 @@ test("home connects to password and open backends without exposing credentials",
         pending: true,
       });
       const loaded = await ConnectedBackends.load(piDir, "home", warn);
-      const stop = new AbortController();
-      const task = loaded.run(stop.signal);
-      stop.abort();
-      await task;
+      await loaded.refreshStale();
       expect(hits).toBe(0);
       for (const [path, method, body] of [
         ["/api/backends/dismiss/sign-in", "POST", { password: PASSWORD }],
@@ -247,7 +332,11 @@ test("home connects to password and open backends without exposing credentials",
         expect((await call(path, method, body, agentHeaders)).status).toBe(403);
       expect((await call("/api/backends/dismiss", "DELETE")).status).toBe(200);
       expect(hits).toBe(0);
-      await cli("add", "requested", remoteUrl);
+      await settings({
+        action: "add_remote",
+        label: "requested",
+        url: remoteUrl,
+      });
       expect(
         (
           await call("/api/backends/requested/sign-in", "POST", {
@@ -255,7 +344,9 @@ test("home connects to password and open backends without exposing credentials",
           })
         ).status,
       ).toBe(422);
-      expect(await cli("list")).toContain("pending · wrong password");
+      expect(await settings({ action: "list_remotes" })).toContain(
+        "wrong password",
+      );
       expect(
         (
           await call("/api/backends/requested/sign-in", "POST", {
@@ -339,6 +430,7 @@ test("home connects to password and open backends without exposing credentials",
             headers: {
               "x-loopback-token": token,
               "x-recurse-agent": cid,
+              "x-recurse-bundled-tool": "subagent",
               "content-type": "application/json",
             },
             body: JSON.stringify({ label, url: remoteUrl }),
@@ -379,6 +471,177 @@ test("home connects to password and open backends without exposing credentials",
       reason: null,
     });
     expect(listing[0]!.last_contact).toBeNumber();
+    expect(listing[0]).toMatchObject({
+      compatibility: "compatible",
+      remote_api: API_MAJOR,
+      remote_revision: API_REVISION,
+      remote_release: "test",
+    });
+    await store.checkRelay("work", new AbortController().signal);
+    expect(conditionalRequests.some(Boolean)).toBe(true);
+    expect((await call("/api/backends/work/v1/version")).status).toBe(200);
+    expect(
+      (await call(`/api/backends/work/v1/agents/${cid}/messages`)).status,
+    ).toBe(200);
+    versionUnavailable = "json";
+    expect((await connect("unknown", remoteUrl)).status).toBe(200);
+    const unknown = await call("/api/backends/unknown/v1/version");
+    expect(unknown.status).toBe(409);
+    expect(await unknown.text()).toContain("revision 3");
+    expect((await call("/api/backends/unknown/status")).status).toBe(200);
+    const unknownStatusBefore = statusHits;
+    const unknownVersionsBefore = conditionalRequests.length;
+    await store.checkRelay("unknown", new AbortController().signal, false);
+    expect(statusHits).toBe(unknownStatusBefore + 1);
+    expect(conditionalRequests).toHaveLength(unknownVersionsBefore + 1);
+    expect((await call("/api/backends/unknown", "DELETE")).status).toBe(200);
+    versionUnavailable = null;
+    version = { api: API_MAJOR, release: { version: "old", commit: null } };
+    await store.checkRelay("work", new AbortController().signal);
+    expect(store.list().find((row) => row.label === "work")).toMatchObject({
+      compatibility: "older",
+      remote_revision: 0,
+      remote_release: "old",
+    });
+    expect(await settings({ action: "list_remotes" })).toContain("older");
+    const old = await call("/api/backends/work/v1/version");
+    expect(old.status).toBe(409);
+    expect(await old.text()).toContain("revision 3");
+    expect((await call("/api/backends/work/status")).status).toBe(200);
+    for (const revision of [1, 2]) {
+      version = {
+        api: API_MAJOR,
+        api_revision: revision,
+        release: { version: "old", commit: null },
+      };
+      await store.checkRelay("work", new AbortController().signal);
+      for (const path of [
+        "v1/version",
+        `v1/agents/${cid}/idle`,
+        `v1/agents/${cid}/messages`,
+      ]) {
+        const denied = await call(`/api/backends/work/${path}`);
+        expect(denied.status).toBe(409);
+        expect(await denied.text()).toContain("revision 3");
+      }
+      expect(
+        (
+          await call(`/api/backends/work/v1/agents/${cid}/messages`, "POST", {
+            text: "hello",
+          })
+        ).status,
+      ).toBe(409);
+      expect((await call("/api/backends/work/status")).status).toBe(200);
+    }
+    version = { api: API_MAJOR, release: { version: "old", commit: null } };
+    await store.checkRelay("work", new AbortController().signal);
+    holdBefore = true;
+    const finalWaiter = new AbortController();
+    const abandoned = store.checkRelay("work", finalWaiter.signal).then(
+      () => "resolved",
+      (error: Error) => error.message,
+    );
+    await until(() => !!releaseVersion);
+    finalWaiter.abort();
+    expect(await abandoned).toContain("aborted");
+    await until(() => abortedVersions > 0);
+    version = {
+      api: API_MAJOR + 1,
+      api_revision: 0,
+      release: { version: "future", commit: null },
+    };
+    await expect(
+      store.checkRelay("work", new AbortController().signal),
+    ).rejects.toThrow(`speaks API v${API_MAJOR + 1}`);
+    const repliesBefore = versionReplies;
+    version = { api: API_MAJOR, release: { version: "old", commit: null } };
+    releaseVersion!();
+    releaseVersion = undefined;
+    await until(() => versionReplies > repliesBefore);
+    expect(
+      store.list().find((row) => row.label === "work")?.compatibility,
+    ).toBe("incompatible");
+    await store.checkRelay("work", new AbortController().signal);
+    for (const beforeResponse of [false, true]) {
+      if (beforeResponse) holdBefore = true;
+      else holdStatus = 304;
+      const cancel = new AbortController();
+      const first = store.checkRelay("work", cancel.signal).then(
+        () => "resolved",
+        (error: Error) => error.message,
+      );
+      await until(() => !!releaseVersion);
+      const statusBefore = statusHits;
+      const versionsBefore = conditionalRequests.length;
+      const second = store
+        .checkRelay("work", new AbortController().signal)
+        .then(
+          () => "resolved",
+          (error: Error) => error.message,
+        );
+      await until(() => statusHits > statusBefore);
+      const state = store as unknown as {
+        rows: { label: string }[];
+        versionChecks: WeakMap<object, { waiters: number }>;
+      };
+      await until(
+        () =>
+          (state.versionChecks.get(
+            state.rows.find((row) => row.label === "work")!,
+          )?.waiters ?? 0) === 2,
+      );
+      expect(conditionalRequests).toHaveLength(versionsBefore);
+      cancel.abort();
+      expect(await first).toContain("aborted");
+      version = {
+        api: API_MAJOR + 1,
+        api_revision: 0,
+        release: { version: "future", commit: null },
+      };
+      releaseVersion!();
+      releaseVersion = undefined;
+      if (beforeResponse)
+        expect(await second).toContain(`speaks API v${API_MAJOR + 1}`);
+      else {
+        expect(await second).toBe("resolved");
+        await expect(
+          store.checkRelay("work", new AbortController().signal),
+        ).rejects.toThrow(`speaks API v${API_MAJOR + 1}`);
+        version = { api: API_MAJOR, release: { version: "old", commit: null } };
+        await store.checkRelay("work", new AbortController().signal);
+      }
+    }
+    expect(store.list().find((row) => row.label === "work")).toMatchObject({
+      compatibility: "incompatible",
+      remote_api: API_MAJOR + 1,
+    });
+    expect(() => store.relayReady("work")).toThrow("speaks API");
+    expect(() => store.transcript("work", cid, new URLSearchParams())).toThrow(
+      "speaks API",
+    );
+    await expect(
+      store.proxy("work", "/api/tree", new Request(homeUrl), false),
+    ).rejects.toThrow("speaks API");
+    for (const failure of ["json", "text"] as const) {
+      versionUnavailable = failure;
+      await expect(
+        store.checkRelay("work", new AbortController().signal),
+      ).rejects.toThrow(`speaks API v${API_MAJOR + 1}`);
+    }
+    versionUnavailable = null;
+    version = null;
+    await expect(
+      store.checkRelay("work", new AbortController().signal),
+    ).rejects.toThrow("invalid API version");
+    version = {
+      api: API_MAJOR,
+      api_revision: API_REVISION,
+      release: { version: "test", commit: null },
+    };
+    await store.checkRelay("work", new AbortController().signal);
+    expect(
+      store.list().find((row) => row.label === "work")?.compatibility,
+    ).toBe("compatible");
     expect(listing[0]).not.toHaveProperty("key");
     expect((await connect("work", remoteUrl)).status).toBe(409);
     expect((await connect("open", homeUrl, "ignored password")).status).toBe(
@@ -433,8 +696,7 @@ test("home connects to password and open backends without exposing credentials",
       stalled.stop(true);
     }
   } finally {
-    controller.abort();
-    await health;
+    releaseVersion?.();
     await instance.shutdown();
     await home.running.close();
     await remote.running.close();

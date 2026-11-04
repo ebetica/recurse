@@ -5,13 +5,16 @@ async function ps(args: string[]): Promise<string> {
     stdout: "pipe",
     stderr: "ignore",
   });
+  const output = new Response(child.stdout).text();
   try {
     return await Promise.race([
-      new Response(child.stdout).text(),
+      output,
       Bun.sleep(1000).then(() => "ps diagnostic timed out"),
     ]);
   } finally {
     if (child.exitCode === null) child.kill("SIGKILL");
+    await child.exited;
+    await output;
   }
 }
 
@@ -59,9 +62,18 @@ export async function captureFixture(
     stdout: "pipe",
     stderr: "pipe",
   });
+  const readers = [child.stdout.getReader(), child.stderr.getReader()];
+  const capture = async (reader: (typeof readers)[number]) => {
+    const chunks: Uint8Array[] = [];
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return Buffer.concat(chunks);
+      chunks.push(value);
+    }
+  };
   const completed = Promise.all([
-    new Response(child.stdout).arrayBuffer(),
-    new Response(child.stderr).arrayBuffer(),
+    capture(readers[0]!),
+    capture(readers[1]!),
     child.exited,
   ]);
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -76,7 +88,7 @@ export async function captureFixture(
   }
   if (result !== null) {
     const [out, err, exitCode] = result;
-    return { exitCode, stdout: Buffer.from(out), stderr: Buffer.from(err) };
+    return { exitCode, stdout: out, stderr: err };
   }
   let diagnostic = await Promise.race([
     describe(child.pid),
@@ -90,7 +102,11 @@ export async function captureFixture(
     if ((error as NodeJS.ErrnoException).code !== "ESRCH")
       diagnostic += `\ngroup kill failed: ${String(error)}`;
   }
-  await Promise.race([child.exited, Bun.sleep(1000)]);
+  await Promise.allSettled([
+    ...readers.map((reader) => reader.cancel()),
+    completed,
+  ]);
+  await child.exited;
   throw new Error(
     `fixture command timed out: ${JSON.stringify(argv)} group=${child.pid} elapsed=${Math.round(performance.now() - started)}ms\n${diagnostic}`,
   );

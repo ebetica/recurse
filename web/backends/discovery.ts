@@ -35,6 +35,17 @@ function removeNodes(label: string): void {
 // Cap remote reads to preserve this origin's scarce HTTP/1.1 connections.
 const REMOTE_TREE_READS = 2;
 let rotation = 0;
+const changedTrees = new Set<string>();
+const watchedReads = new WeakSet<Promise<boolean>>();
+
+/** Queue pushed tag changes through the same bounded remote-read scheduler. */
+export function refreshChangedRemoteTrees(
+  labels: string[],
+  apply: (label: string, read: TreeRead | null) => boolean,
+): void {
+  for (const label of labels) changedTrees.add(label);
+  refreshRemoteTrees(apply);
+}
 
 /** Starts remote tree reads, at most two at once, independent of the home. */
 export function refreshRemoteTrees(
@@ -43,15 +54,37 @@ export function refreshRemoteTrees(
 ): void {
   if (embeddedFrameHidden()) return;
   if (!discovered) queueDiscovery();
-  const trees = remotes().map(
-    (backend) => [backend.label, treeOf(backend)] as const,
+  const remote = remotes();
+  const trees = remote.map((_, i) => {
+    const backend = remote[(rotation + i) % remote.length]!;
+    return [
+      backend.label,
+      treeOf(backend),
+      backend.apiVersion === null,
+    ] as const;
+  });
+  for (const label of changedTrees)
+    if (!remote.some((backend) => backend.label === label))
+      changedTrees.delete(label);
+  trees.sort(
+    ([a], [b]) => Number(changedTrees.has(b)) - Number(changedTrees.has(a)),
   );
   let reading = trees.filter(([, tree]) => tree.reading).length;
-  for (let i = 0; i < trees.length; i++) {
-    const [label, tree] = trees[(rotation + i) % trees.length]!;
+  for (const [label, tree, versionPending] of trees) {
     if (!tree.reading && reading >= REMOTE_TREE_READS) continue;
     const wasReading = tree.reading;
-    void tree.refresh((read) => apply(label, read), force);
+    const commit = (read: TreeRead | null) => apply(label, read);
+    const changed =
+      !(tree.reading && versionPending) && changedTrees.delete(label);
+    const done = changed
+      ? tree.refreshChanged(commit)
+      : tree.refresh(commit, force);
+    if (tree.reading && !watchedReads.has(done)) {
+      watchedReads.add(done);
+      void done.finally(() => {
+        if (changedTrees.size) refreshRemoteTrees(apply);
+      });
+    }
     if (!wasReading && tree.reading) reading++;
   }
   rotation = (rotation + 1) % (trees.length || 1);
@@ -68,6 +101,8 @@ async function discover(signal: AbortSignal): Promise<void> {
       label: string;
       url: string;
       state: string;
+      reason: string | null;
+      compatibility?: string;
       last_contact: number | null;
     }>;
     const approved = rows.filter((row) => row.state !== "pending");
@@ -79,13 +114,27 @@ async function discover(signal: AbortSignal): Promise<void> {
     }
     for (const row of approved) {
       const existing = findBackend(row.label);
-      if (existing?.directUrl === row.url) continue;
+      const compatibility =
+        row.compatibility === "incompatible" &&
+        (row.state === "connected" || row.reason === "Health check pending")
+          ? "incompatible"
+          : "unknown";
+      if (existing?.directUrl === row.url) {
+        if (existing.compatibility !== compatibility) {
+          existing.compatibility = compatibility;
+          treeOf(existing).invalidate();
+        }
+        if (row.compatibility === "compatible" || row.compatibility === "older")
+          treeOf(existing).confirmCompatible();
+        continue;
+      }
       if (existing) {
         treeOf(existing).invalidate();
         removeNodes(row.label);
       }
       const backend = new Backend(row.label);
       backend.directUrl = row.url;
+      backend.compatibility = compatibility;
       registerBackend(backend);
       treeOf(backend, row.last_contact);
     }
@@ -138,9 +187,9 @@ export function remoteSectionHeader(backend: Backend): TemplateResult {
         ? html`<button
             class="backend-settings"
             @click=${() =>
-              document
-                .querySelector<HTMLButtonElement>("#settings-btn")
-                ?.click()}
+              window.dispatchEvent(
+                new CustomEvent("recurse:open-settings", { detail: "account" }),
+              )}
           >
             ${message} — Remotes
           </button>`

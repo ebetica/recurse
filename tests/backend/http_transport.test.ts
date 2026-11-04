@@ -39,7 +39,7 @@ beforeAll(() => {
         records.push(record);
     },
   });
-  running = startServer({ logger: log, handler });
+  running = startServer({ port: 0, logger: log, handler });
 });
 afterAll(() => running.close());
 
@@ -171,6 +171,109 @@ describe("pieces one loopback client cannot record", () => {
     const reserved = good.slice();
     reserved[3] = 0x20;
     await expect(gunzipBounded(reserved, 1 << 20)).rejects.toThrow("invalid");
+  });
+
+  // Regression: #2951 closing live gzip streams releases compression capacity.
+  test("a gzip event stream delivers each event before the next is written", async () => {
+    const router = new Router();
+    const next = Promise.withResolvers<void>();
+    router.get("/live", async () => {
+      let sent = 0;
+      const body = new ReadableStream<Uint8Array>({
+        async pull(controller) {
+          if (sent === 1) await next.promise;
+          if (sent === 2) return controller.close();
+          sent += 1;
+          controller.enqueue(
+            new TextEncoder().encode(`data: event ${sent}\n\n`),
+          );
+        },
+      });
+      return new Response(body, {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    router.get("/repeating", async () => {
+      let timer: ReturnType<typeof setInterval>;
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(new TextEncoder().encode("data: initial\n\n"));
+            timer = setInterval(
+              () =>
+                controller.enqueue(
+                  new TextEncoder().encode("data: update\n\n"),
+                ),
+              1,
+            );
+          },
+          cancel() {
+            clearInterval(timer);
+          },
+        }),
+        { headers: { "content-type": "text/event-stream" } },
+      );
+    });
+    router.get(
+      "/after",
+      async () =>
+        new Response("x".repeat(10_000), {
+          headers: { "content-type": "text/plain" },
+        }),
+    );
+    const log = logger("http", { write: () => {} });
+    const server = startServer({
+      port: 0,
+      logger: log,
+      handler: composeApp({ router, logger: log, summaryInterval: 0 }),
+    });
+    try {
+      const response = await fetch(`${server.url}/live`, {
+        headers: { "accept-encoding": "gzip" },
+        decompress: false,
+      } as RequestInit);
+      expect(response.headers.get("content-encoding")).toBe("gzip");
+      const gunzip = zlib.createGunzip();
+      let text = "";
+      gunzip.on("data", (chunk: Buffer) => (text += chunk.toString("utf8")));
+      const reader = response.body!.getReader();
+      const readUntil = async (wanted: string) => {
+        while (!text.includes(wanted)) {
+          const read = await reader.read();
+          if (read.done) break;
+          await new Promise<void>((done) =>
+            gunzip.write(read.value, () => done()),
+          );
+          await new Promise<void>((done) => setImmediate(done));
+        }
+      };
+      await readUntil("data: event 1\n\n");
+      expect(text).toBe("data: event 1\n\n");
+      next.resolve();
+      await readUntil("data: event 2\n\n");
+      expect(text).toBe("data: event 1\n\ndata: event 2\n\n");
+      await readUntil("never written");
+      expect(text).toBe("data: event 1\n\ndata: event 2\n\n");
+      for (let i = 0; i < 10; i++) {
+        const abort = new AbortController();
+        const response = await fetch(`${server.url}/repeating`, {
+          headers: { "accept-encoding": "gzip" },
+          signal: abort.signal,
+        });
+        const reader = response.body!.getReader();
+        expect((await reader.read()).done).toBe(false);
+        abort.abort();
+        void reader.cancel().catch(() => {});
+      }
+      const after = await fetch(`${server.url}/after`, {
+        headers: { "accept-encoding": "gzip" },
+        signal: AbortSignal.timeout(30_000),
+      });
+      expect(await after.text()).toHaveLength(10_000);
+    } finally {
+      next.resolve();
+      await server.close();
+    }
   });
 
   test("close waits for in-flight requests, then runs shutdown once", async () => {

@@ -1,7 +1,7 @@
 // Thin operator Settings/provider-auth routes; agent markers never qualify.
 // Auth bumps revision/refreshes snapshot, then rewrites catalog best-effort.
 // Provider credentials and instance storage retain separate ownership.
-// Home sync uses only settings_sync's four-route inventory.
+// Home sync uses only settings_sync's route inventory.
 
 import { THINKING_LEVELS, type Config } from "../config";
 import {
@@ -38,6 +38,10 @@ import type { CodexAuth } from "../auth/codex";
 import type { MuseAuth } from "../auth/muse";
 import type { OpenRouterAuth } from "../auth/openrouter";
 import type { ProviderSnapshot } from "../auth/provider_snapshot";
+import type {
+  UsageLimits,
+  UsageProvider,
+} from "../extensions/extra/usage-limits/usage-limits.ts";
 import { pyStrip } from "../auth/provider_store";
 import {
   McpConfigError,
@@ -119,6 +123,7 @@ export function logicalProviderAuthed(
 
 export interface SettingsRoutesDeps {
   readonly config: Config;
+  promptCacheWarmingChanged?(): void;
   readonly modelUpdates: Pick<PiModelUpdater, "start" | "status">;
   readonly recurseUpdates: Pick<RecurseUpdates, "apply" | "status">;
   readonly mcpChecks?: Pick<McpChecks, "start" | "statuses" | "resolve">;
@@ -132,6 +137,8 @@ export interface SettingsRoutesDeps {
     removeCredentials(providers: string[]): Promise<void>;
   };
   readonly providers: Pick<ProviderSnapshot, "refresh">;
+  /** The subscription usage limits model responses last reported. */
+  readonly usageLimits: Pick<UsageLimits, "read" | "changeLogin">;
   /** The prepared Pi agent dir that holds mcp.json. */
   piAgentDir(): Promise<string>;
   /** mutation_guard.mutate_external_storage: run under the lifecycle lease. */
@@ -427,7 +434,7 @@ export function registerSettingsRoutes(
     // Invariant: A login change re-checks reachability; never fatal to the
     // login.
     try {
-      config.writeAvailableModels();
+      await config.writeAvailableModels();
     } catch {}
     return value;
   }
@@ -503,6 +510,18 @@ export function registerSettingsRoutes(
         config.setDeletedAgentHistoryDays(field(body, "days")),
       ),
     });
+  });
+
+  router.get("/api/settings/prompt-cache-warming", async () =>
+    json({ enabled: config.keepPromptCacheWarm() }),
+  );
+  router.post("/api/settings/prompt-cache-warming", async (ex) => {
+    const body = await jsonDictBody(ex);
+    const enabled = await mutate(() =>
+      config.setKeepPromptCacheWarm(field(body, "enabled")),
+    );
+    deps.promptCacheWarmingChanged?.();
+    return json({ enabled });
   });
 
   router.get("/api/settings/maximum-context-window", async () =>
@@ -585,11 +604,18 @@ export function registerSettingsRoutes(
     title: string,
     auth: AnthropicAuth | CodexAuth,
     importAmbient: () => Promise<boolean>,
+    subscription: UsageProvider,
   ) {
+    // Invariant: Usage limits belong to one login.
+    const changeLogin = <T>(change: () => Promise<T>): Promise<T> =>
+      deps.usageLimits.changeLogin(subscription, change);
     router.get(prefix, async () => {
+      // Invariant: Import runs only with no stored login, so no usage exists.
       const imported = await importAmbient();
-      const status = await auth.authStatus();
-      return json(imported ? await providerAuthUpdated(status) : status);
+      let status = await auth.authStatus();
+      if (imported) status = await providerAuthUpdated(status);
+      const usage = await deps.usageLimits.read(subscription);
+      return json({ ...status, ...(usage && { usage_limits: usage }) });
     });
 
     router.post(`${prefix}/login-url`, async () =>
@@ -606,7 +632,9 @@ export function registerSettingsRoutes(
         const code = field(body, "code", "") as string;
         try {
           return json(
-            await providerAuthUpdated(await auth.completeLogin(code)),
+            await providerAuthUpdated(
+              await changeLogin(() => auth.completeLogin(code)),
+            ),
           );
         } catch (error) {
           if (isValueError(error))
@@ -638,8 +666,8 @@ export function registerSettingsRoutes(
         try {
           return json(
             await providerAuthUpdated(
-              await auth.completeLoginWithToken(
-                field(body, "token", "") as string,
+              await changeLogin(() =>
+                auth.completeLoginWithToken(field(body, "token", "") as string),
               ),
             ),
           );
@@ -657,7 +685,9 @@ export function registerSettingsRoutes(
       async (ex) => {
         const body = await jsonDictBody(ex);
         try {
-          await auth.setApiKey(field(body, "key", "") as string);
+          await changeLogin(() =>
+            auth.setApiKey(field(body, "key", "") as string),
+          );
         } catch (error) {
           if (isValueError(error))
             throw new HttpError(422, (error as Error).message);
@@ -671,18 +701,26 @@ export function registerSettingsRoutes(
     router.post(
       `${prefix}/logout`,
       async () => {
-        await auth.logout();
+        await changeLogin(() => auth.logout());
         return json(await providerAuthUpdated(await auth.authStatus()));
       },
       long,
     );
   }
 
-  oauthRoutes("/api/pi/auth", "Claude", deps.anthropic, () =>
-    deps.anthropic.importClaudeCodeLogin(),
+  oauthRoutes(
+    "/api/pi/auth",
+    "Claude",
+    deps.anthropic,
+    () => deps.anthropic.importClaudeCodeLogin(),
+    "anthropic",
   );
-  oauthRoutes("/api/pi/codex-auth", "Codex", deps.codex, () =>
-    deps.codex.importCodexCliLogin(),
+  oauthRoutes(
+    "/api/pi/codex-auth",
+    "Codex",
+    deps.codex,
+    () => deps.codex.importCodexCliLogin(),
+    "openai-codex",
   );
 
   router.get("/api/pi/muse-auth", async () =>

@@ -1,11 +1,15 @@
 // Durable compaction shares Pi's window/Models; failure defers to Durable.
-// Memos survive restart; continuation notes precede input. Summary requests
-// never replace captured turn input. Historical Context/length guards bound
-// summaries; fill reminders reset on compaction/clear.
+// Memos survive restart; notes precede input; capture keeps the turn request.
+// Historical Context/length guards bound summaries; reminders reset on compact.
+// Server items replace summaries; unusable items summarize retained history.
 
-import type { Context } from "@earendil-works/chord";
 import {
-  Type,
+  serverCompactionSource,
+  serverCompactionSummary,
+} from "./server-compaction";
+import type { Context } from "@earendil-works/chord";
+import { Type } from "typebox";
+import {
   type Message,
   type Model,
   type Models,
@@ -29,15 +33,16 @@ import {
   defineDoc,
   defineExtension,
   defineTool,
-  type EntryRecord,
   type Extension,
   hook,
+  type HookApi,
   InboxDoc,
   type InboxItem,
   type JsonObject,
   LiveDoc,
   ToolTask,
   type ToolExecutionResult,
+  type Tx,
 } from "@earendil-works/pi-durable";
 export const RECURSE_COMPACTION_ADDITIONS = [
   "Start `## Goal` with the unfinished task being worked on and the corrections accepted for it; a later question or status request does not replace it. List finished or answered requests only under Done.",
@@ -357,6 +362,7 @@ export const RecurseUsageDoc = defineDoc<{
   history: "latest",
   fork: "initial",
   initial: () => ({ models: {} }),
+  checkpointWhen: () => false,
 });
 
 /** The fill reminder steps fired since the head marker `head`. */
@@ -370,6 +376,7 @@ export const FillReminderDoc = defineDoc<{
   history: "latest",
   fork: "initial",
   initial: () => ({ head: null, fired: [] }),
+  checkpointWhen: () => false,
 });
 
 /** The continuation note entry. */
@@ -435,11 +442,9 @@ function addUsage(total: unknown, usage: unknown): JsonObject {
   return sum as JsonObject;
 }
 
-/** The summary of a pi.compaction entry, without Durable's wrapper. */
-function headSummary(entry: EntryRecord | undefined): string | undefined {
-  if (!CompactionEntry.is(entry)) return undefined;
-  const content = (entry.model?.[0] as { content?: unknown } | undefined)
-    ?.content;
+/** A compaction message's summary, without Durable's wrapper. */
+function messageSummary(message: Message | undefined): string | undefined {
+  const content = (message as { content?: unknown } | undefined)?.content;
   const text = Array.isArray(content)
     ? content
         .map((part: { type?: string; text?: string }) =>
@@ -465,85 +470,194 @@ export interface DurableCompactionHost {
   /** Start a manual compaction; the compact tool's result text. */
   compact(context: Context, id: Conversation["id"]): Promise<string>;
   report(event: string, error: unknown): void;
+  /** The provider's own compaction, replacing readable summary generation. */
+  providerCompaction?(
+    messages: readonly Message[],
+    agent: Agent,
+    api: HookApi,
+    context: Context,
+  ): Promise<ProviderCompaction | undefined>;
+}
+
+export interface ProviderCompaction {
+  usage: Usage;
+  model: Model<never>;
+  save(
+    tx: Tx,
+    conversationId: Conversation["id"],
+    summary: string,
+  ): Promise<void>;
+}
+
+async function summarizeCompaction(
+  models: Models,
+  compaction: {
+    messages: readonly Message[];
+    instructions?: string;
+  },
+  agent: Pick<Agent, "model"> & Partial<Pick<Agent, "thinkingLevel">>,
+  context: Context,
+): Promise<{ text: string; usage: Usage; model: Model<never> }> {
+  const ref = agent.model;
+  const model = ref && models.getModel(ref.provider, ref.modelId);
+  if (!model)
+    throw new Error(
+      `no model for the summary: ${ref?.provider}/${ref?.modelId}`,
+    );
+  const previous = messageSummary(compaction.messages[0]);
+  // Invariant: The head marker's message is passed as the previous summary.
+  const messages = (previous === undefined
+    ? compaction.messages
+    : compaction.messages.slice(1)) as unknown as AgentMessage[];
+  const { customInstructions, priorContext } = buildCompactionInstructions(
+    compaction.instructions,
+    previous,
+    {
+      reserveTokens: RESERVE_TOKENS,
+      modelMaxTokens: model.maxTokens,
+    },
+  );
+  const fallback = buildCompactionInstructions(
+    compaction.instructions,
+    undefined,
+    {
+      reserveTokens: RESERVE_TOKENS,
+      modelMaxTokens: model.maxTokens,
+      budgetFraction: RETRY_SUMMARY_BUDGET_FRACTION,
+    },
+  ).customInstructions;
+  // Invariant: Models owns credentials; empty summarizer auth fields are
+  // dropped.
+  const stream = ((
+    m: Model<never>,
+    ctx: never,
+    options: Record<string, unknown> = {},
+  ) =>
+    models.streamSimple(
+      m,
+      ctx,
+      Object.fromEntries(
+        Object.entries(options).filter(([, value]) => value !== undefined),
+      ),
+    )) as never;
+  const result = await summarizeWithLengthFallback(
+    messages,
+    model as never,
+    RESERVE_TOKENS,
+    undefined,
+    undefined,
+    context.abortSignal,
+    customInstructions,
+    previous,
+    agent.thinkingLevel as never,
+    stream,
+    undefined,
+    fallback,
+  );
+  return {
+    text: ensureHistoricalContext(result.text, priorContext, messages),
+    usage: result.usage,
+    model: model as Model<never>,
+  };
+}
+
+/** Lazy readable summaries, bounded to the newest two history boundaries. */
+const ReadableCompactionDoc = defineDoc<{
+  saved: { source: string; summary: string }[];
+}>({
+  kind: "recurse.readable-compaction",
+  version: 1,
+  scope: "conversation",
+  history: "latest",
+  fork: "current",
+  initial: () => ({ saved: [] }),
+  checkpointWhen: () => false,
+});
+
+/** Resolve a server-only head from retained history when no item applies. */
+export async function readableCompactionMessages(
+  models: Models,
+  conversation: Conversation,
+  messages: readonly Message[],
+  agent: Pick<Agent, "model"> & Partial<Pick<Agent, "thinkingLevel">>,
+  context: Context,
+): Promise<Message[]> {
+  const at = messages.findIndex((message) => message.role === "user");
+  const head = messages[at];
+  const previous = messageSummary(head);
+  const source =
+    previous === undefined ? undefined : serverCompactionSource(previous);
+  if (source === undefined) return [...messages];
+  const sourceKey = previous!;
+  const cached = await conversation.commit(
+    async (tx) =>
+      (await tx.doc(ReadableCompactionDoc, conversation.id)).saved.find(
+        (entry) => entry.source === sourceKey,
+      )?.summary,
+    context,
+  );
+  let summary = cached;
+  if (summary === undefined) {
+    const view = await conversation.context(context, { at: source.at });
+    const through = view.entries.findIndex(
+      (entry) => entry.id === source.through,
+    );
+    if (
+      through < 0 ||
+      (serverCompactionSource(messageSummary(view.head?.model?.[0]) ?? "")
+        ?.at ?? -1) >= source.at
+    )
+      throw new Error("Server compaction history boundary is unavailable");
+    const selected = new Set(view.contributions.slice(0, through + 1).flat());
+    const history = await readableCompactionMessages(
+      models,
+      conversation,
+      view.messages.filter(
+        (message) => message.role !== "system" && selected.has(message),
+      ),
+      agent,
+      context,
+    );
+    const result = await summarizeCompaction(
+      models,
+      { messages: history },
+      agent,
+      context,
+    );
+    summary = result.text;
+    await conversation.commit(async (tx) => {
+      const doc = await tx.doc(ReadableCompactionDoc, conversation.id);
+      doc.saved = [
+        ...doc.saved.filter((entry) => entry.source !== sourceKey),
+        { source: sourceKey, summary: result.text },
+      ].slice(-2);
+      const usage = await tx.doc(RecurseUsageDoc, conversation.id);
+      const key = `${result.model.provider}/${result.model.id}`;
+      usage.models[key] = addUsage(usage.models[key], result.usage);
+    }, context);
+  }
+  const content = (
+    head as { content: string | { type: string; text?: string }[] }
+  ).content;
+  const replace = (text: string) => text.replace(previous!, () => summary!);
+  const next = [...messages];
+  next[at] = {
+    ...head,
+    content:
+      typeof content === "string"
+        ? replace(content)
+        : content.map((part) =>
+            part.type === "text"
+              ? { ...part, text: replace(part.text ?? "") }
+              : part,
+          ),
+  } as Message;
+  return next;
 }
 
 export function createDurableCompaction(
   host: DurableCompactionHost,
 ): Extension {
-  const summarize = async (
-    compaction: {
-      entries: readonly EntryRecord[];
-      messages: readonly Message[];
-      instructions?: string;
-    },
-    agent: Agent,
-    context: Context,
-  ): Promise<{ text: string; usage: Usage; model: Model<never> }> => {
-    const ref = agent.model;
-    const model = ref && host.models.getModel(ref.provider, ref.modelId);
-    if (!model)
-      throw new Error(
-        `no model for the summary: ${ref?.provider}/${ref?.modelId}`,
-      );
-    const previous = headSummary(compaction.entries[0]);
-    // Invariant: The head marker's message is passed as the previous summary.
-    const messages = (previous === undefined
-      ? compaction.messages
-      : compaction.messages.slice(
-          compaction.entries[0]?.model?.length ?? 0,
-        )) as unknown as AgentMessage[];
-    const { customInstructions, priorContext } = buildCompactionInstructions(
-      compaction.instructions,
-      previous,
-      {
-        reserveTokens: RESERVE_TOKENS,
-        modelMaxTokens: model.maxTokens,
-      },
-    );
-    const fallback = buildCompactionInstructions(
-      compaction.instructions,
-      undefined,
-      {
-        reserveTokens: RESERVE_TOKENS,
-        modelMaxTokens: model.maxTokens,
-        budgetFraction: RETRY_SUMMARY_BUDGET_FRACTION,
-      },
-    ).customInstructions;
-    // Invariant: Models owns credentials; empty summarizer auth fields are
-    // dropped.
-    const stream = ((
-      m: Model<never>,
-      ctx: never,
-      options: Record<string, unknown> = {},
-    ) =>
-      host.models.streamSimple(
-        m,
-        ctx,
-        Object.fromEntries(
-          Object.entries(options).filter(([, value]) => value !== undefined),
-        ),
-      )) as never;
-    const result = await summarizeWithLengthFallback(
-      messages,
-      model as never,
-      RESERVE_TOKENS,
-      undefined,
-      undefined,
-      context.abortSignal,
-      customInstructions,
-      previous,
-      agent.thinkingLevel as never,
-      stream,
-      undefined,
-      fallback,
-    );
-    return {
-      text: ensureHistoricalContext(result.text, priorContext, messages),
-      usage: result.usage,
-      model: model as Model<never>,
-    };
-  };
-
   const fillReminder = async (
     result: ToolExecutionResult,
     context: Context,
@@ -640,15 +754,45 @@ export function createDurableCompaction(
               context,
               api.conversationId,
             );
-            const summary = await summarize(
-              compaction,
-              await conversation.agent(context),
-              context,
-            );
+            const agent = await conversation.agent(context);
+            const checkpoint = await host
+              .providerCompaction?.(compaction.messages, agent, api, context)
+              .catch((error: unknown) => {
+                host.report("durable_provider_compaction_fallback", error);
+                return undefined;
+              });
+            const summary = checkpoint
+              ? {
+                  ...checkpoint,
+                  text: serverCompactionSummary(
+                    compaction.entries.at(-1)!.id,
+                    compaction.entries.reduce(
+                      (latest, entry) =>
+                        Math.max(latest, entry.id) as typeof latest,
+                      compaction.entries[0]!.id,
+                    ),
+                  ),
+                }
+              : await summarizeCompaction(
+                  host.models,
+                  {
+                    ...compaction,
+                    messages: await readableCompactionMessages(
+                      host.models,
+                      conversation,
+                      compaction.messages,
+                      agent,
+                      context,
+                    ),
+                  },
+                  agent,
+                  context,
+                );
             await conversation.commit(async (tx) => {
               const doc = await tx.doc(RecurseUsageDoc, conversation.id);
               const key = `${summary.model.provider}/${summary.model.id}`;
               doc.models[key] = addUsage(doc.models[key], summary.usage);
+              await checkpoint?.save(tx, conversation.id, summary.text);
             }, context);
             return {
               summary: await api.memo(SUMMARY_MEMO, summary.text, context),

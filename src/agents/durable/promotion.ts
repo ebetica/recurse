@@ -10,7 +10,7 @@ import {
   BACKGROUND_CONTEXT as context,
   withAbortSignal,
 } from "@earendil-works/chord/context";
-import * as trash from "../../utils/trash";
+import { retirePath } from "../../utils/trash_sweep";
 import type { Opened } from "./host/open.ts";
 
 const runtime = () => import("./host/runtime.ts");
@@ -72,7 +72,7 @@ export class Promotions {
         const failed = error instanceof Error ? error.message : String(error);
         this.deps.log("durable_promotion_failed", { cid, error: failed });
         await this.deps.promotion?.(cid, { failed });
-        this.retireLeftovers(cid);
+        await this.retireLeftovers(cid);
       })
       .catch((error: unknown) =>
         this.deps.log("durable_promotion_failed", {
@@ -107,11 +107,11 @@ export class Promotions {
   }
 
   /** Retire the staged or unused storage a promotion of side `cid` left. */
-  private retireLeftovers(cid: string): void {
+  private async retireLeftovers(cid: string): Promise<void> {
     if (typeof this.deps.load(cid, ["side_of"])?.side_of !== "string") return;
     const dir = join(this.deps.dataDir, "conversations", cid);
     for (const name of ["durable", "durable.promoting"])
-      trash.retire(join(dir, name), this.deps.trashDir);
+      await retirePath(join(dir, name), this.deps.trashDir);
   }
 
   private async run(cid: string, signal: AbortSignal): Promise<void> {
@@ -125,7 +125,7 @@ export class Promotions {
     if (refused) throw new Error(refused);
     const fork = (await rt.sideForks(host.harness, host.conversation))[cid];
     if (fork === undefined) throw new Error("the side conversation is gone");
-    this.retireLeftovers(cid);
+    await this.retireLeftovers(cid);
     const dir = join(this.deps.dataDir, "conversations", cid);
     const staged = join(dir, "durable.promoting");
     await mkdir(staged, { recursive: true, mode: 0o700 });

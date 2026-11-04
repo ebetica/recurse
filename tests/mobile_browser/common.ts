@@ -180,6 +180,15 @@ export async function startServer(
   });
   const target = join(data, "target-repo");
   await mkdir(target, { recursive: true });
+  const probe = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(),
+  });
+  const requestedPort = probe.port;
+  await probe.stop(true);
+  if (!requestedPort || requestedPort === 8000)
+    throw new Error("browser tests require an explicit free non-default port");
   const env: Record<string, string> = {
     HOME: join(data, "home"),
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin",
@@ -194,7 +203,7 @@ export async function startServer(
     RECURSE_BROWSER_VERSION: "browser-e2e-current",
     RECURSE_FRONTEND_LIVE: "0",
     RECURSE_ISOLATED_ROOT: data,
-    PORT: "0",
+    PORT: String(requestedPort),
   };
   if (options.auth) {
     const salt = "00112233445566778899aabbccddeeff";
@@ -210,7 +219,7 @@ export async function startServer(
   const recording = options.sourceRoot
     ? undefined
     : process.env.RECURSE_BROWSER_COVERAGE;
-  if (recording) env.RECURSE_SERVER_COVERAGE_PORT = "0";
+  if (recording) env.RECURSE_SERVER_COVERAGE_PORT = String(requestedPort);
   let announce!: (port: number) => void;
   const listening = new Promise<number>((resolve) => (announce = resolve));
   const deadline = Date.now() + 30_000;
@@ -230,7 +239,7 @@ export async function startServer(
             options.sourceRoot ?? ROOT,
             "tests/mobile_browser/browser_test_app.ts",
           ),
-          "0",
+          String(requestedPort),
         ],
     {
       cwd: ROOT,
@@ -419,10 +428,44 @@ export async function closeWithRoutes(
   }
 }
 
+export async function showAgentList(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const browser = globalThis as any;
+    return (
+      !browser.matchMedia("(max-width: 700px)").matches ||
+      browser.document.documentElement.classList.contains("phone-list") ||
+      browser.document.querySelector("#sidebar")?.inert
+    );
+  });
+  if (await page.locator("#sidebar").evaluate((el) => (el as any).inert))
+    await page.locator("#menu-btn").click();
+  await page.locator("#sidebar:not([inert])").waitFor();
+}
+export async function openSettingsPanel(page: Page): Promise<void> {
+  await showAgentList(page);
+  await page.locator("#settings-btn").click();
+}
+export async function startNewAgent(page: Page): Promise<void> {
+  if (await page.locator("#new-top").isVisible())
+    return page.locator("#new-top").click();
+  await page.locator("#new-list").click();
+}
 export async function gotoRoot(page: Page, base: string): Promise<void> {
   await page.goto(`${base}#agent=${rootAgentId()}`, {
     waitUntil: "domcontentloaded",
   });
+}
+
+export async function reloadConversation(page: Page): Promise<void> {
+  await page.waitForFunction(() => {
+    const browser = globalThis as any;
+    return (
+      !browser.matchMedia("(max-width: 700px)").matches ||
+      (browser.history.state?.phoneScreen === "conversation" &&
+        !!browser.history.state?.recurseView)
+    );
+  });
+  await page.reload();
 }
 
 export function captureErrors(page: Page): string[] {
@@ -627,7 +670,7 @@ export async function mockConversation(
   await page.route(`${base}api/conversations/${id}/view?*`, view);
   let lastEvents = "";
   let eventsRevision = 0;
-  await page.route(`${base}api/conversations/${id}/events`, (route) => {
+  await page.route(`${base}api/conversations/${id}/events?*`, (route) => {
     const conv = read();
     const rows = fixtureRows(conv);
     const encoded = JSON.stringify(rows);

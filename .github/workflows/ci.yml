@@ -33,9 +33,6 @@ jobs:
       - name: Frontend tests, type-check and build
         run: tests/check.sh web
 
-      - name: Install the pinned deployment SDK for lifecycle integration tests
-        run: python3 -m pip install modal==1.5.1
-
       - name: Backend TypeScript tests and type-check
         run: tests/check.sh ts
 

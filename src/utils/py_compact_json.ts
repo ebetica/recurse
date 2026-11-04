@@ -2,6 +2,7 @@
 // JS normalizes integral floats and small exponents; integer-like keys reorder.
 // Byte-stable callers must avoid numeric keys or carry their order in arrays.
 import { randomUUID } from "node:crypto";
+import { slowSpan } from "../observability/slow_span";
 
 export interface PyCompactJsonOptions {
   separators?: "compact" | "default";
@@ -87,11 +88,17 @@ export function pyCompactJson(
     return result;
   }
 
-  return encode(value, 0);
+  return slowSpan("record_json_encode", undefined, () => encode(value, 0));
 }
 
 // Parse json.load values, including Python's bare NaN and Infinity constants.
 export function parsePythonJson(text: string): unknown {
+  return slowSpan("record_json_decode", undefined, () =>
+    parsePythonValue(text),
+  );
+}
+
+function parsePythonValue(text: string): unknown {
   try {
     return JSON.parse(text);
   } catch (error) {

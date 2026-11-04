@@ -71,6 +71,7 @@ export function createSseParser(initialId: string | null = null): SseParser {
 export interface SseConnectionHandlers {
   /** `at`: performance.now() when the frame's request was sent. */
   onEvent: (kind: string, id: string | null, data: string, at?: number) => void;
+  onActivity?: () => void;
   onFailure: (status: number | null) => void;
 }
 
@@ -105,6 +106,7 @@ export function openSseConnection(
   const parser = createSseParser(options.lastEventId ?? null);
   let closed = false;
   let failures = 0;
+  let requestedAt = 0;
 
   const fail = async (status: number | null): Promise<void> => {
     if (closed) return;
@@ -114,7 +116,6 @@ export function openSseConnection(
     if (!closed) void connect();
   };
 
-  let requestedAt = 0;
   const pump = async (body: ReadableStream<Uint8Array>): Promise<boolean> => {
     const reader = body.getReader();
     const decoder = new TextDecoder();
@@ -127,6 +128,7 @@ export function openSseConnection(
           finished = true;
           continue;
         }
+        handlers.onActivity?.();
         for (const frame of parser.push(
           decoder.decode(next.value, { stream: true }),
         )) {
@@ -178,6 +180,7 @@ export function openSseConnection(
     // frame, a restart). Reconnect at the base retry unless nothing arrived at
     // all, which backs off like a failure.
     if (sawEvent) {
+      if (!response.headers.has("content-length")) handlers.onFailure(null);
       await sleep(parser.retryMs);
       if (!closed) void connect();
     } else await fail(null);

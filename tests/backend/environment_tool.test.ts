@@ -8,27 +8,13 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import * as auth from "../../src/web/request_auth";
-import { Router } from "../../src/web/router";
-import { registerTreeRoutes, type TreeRoutesDeps } from "../../src/web/tree";
 import * as durable from "./fixtures/durable_host/host";
-import { serveOpen } from "./http_open_app";
 
 const root = await mkdtemp(join(tmpdir(), "env-tool-"));
 const data = join(root, "data");
 const world = durable.fauxHost(data);
-const router = new Router();
-const served = await serveOpen(router, data);
-registerTreeRoutes(router, {
-  loopbackAuthenticated: (ex) =>
-    auth.loopbackAuthenticated(ex, served.loopbackToken),
-  changeEnvironment: async (cid, change) =>
-    cid === "c1" ? world.host.changeEnvironment(cid, change) : null,
-} as Partial<TreeRoutesDeps> as TreeRoutesDeps);
-await auth.publishLoopbackToken(data, served.running.port);
 
 afterAll(async () => {
-  await served.running.close();
   await world.host.close();
   await rm(root, { recursive: true, force: true });
 });
@@ -119,13 +105,4 @@ test("of two concurrent loads that together exceed the limit, one is refused", a
     names: string[];
   };
   expect(names.filter((name) => name.startsWith("BIG_"))).toHaveLength(4);
-});
-
-test("the route needs the loopback token and a Durable calling agent", async () => {
-  const url = `http://127.0.0.1:${served.running.port}/api/agent-environment`;
-  const agent = { "x-recurse-agent": "c1" };
-  expect((await fetch(url, { headers: agent })).status).toBe(403);
-  const token = { "x-loopback-token": served.loopbackToken };
-  const other = { ...token, "x-recurse-agent": "c2" };
-  expect((await fetch(url, { headers: other })).status).toBe(404);
 });

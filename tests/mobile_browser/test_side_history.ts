@@ -95,8 +95,31 @@ export const tests: BrowserTest[] = [
             new URL(request.url()).pathname === "/api/tree",
         );
     };
-    await page.goto(`${base}#agent=${agent}`);
+    let releaseBootTree!: () => void;
+    const bootTreeHeld = new Promise<void>((resolve) => {
+      releaseBootTree = resolve;
+    });
+    let firstBootTree = true;
+    await page.route(`${base}api/tree`, async (route) => {
+      if (route.request().frame() === page.mainFrame() && firstBootTree) {
+        firstBootTree = false;
+        await bootTreeHeld;
+      }
+      await route.continue();
+    });
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      await page.evaluate("dispatchEvent(new PageTransitionEvent('pageshow'))");
+      await page
+        .getByText("Side history answer 69", { exact: true })
+        .waitFor({ state: "attached" });
+    } finally {
+      releaseBootTree();
+    }
     const rail = page.locator('.rail-btn[data-pane="side"]');
+    await page
+      .locator("#side-frame-parking iframe.side-frame")
+      .waitFor({ state: "attached" });
     const side = page.frameLocator("iframe.side-frame");
     await side
       .getByText("Side history answer 69", { exact: true })
@@ -131,6 +154,12 @@ export const tests: BrowserTest[] = [
       await parentTicks(4);
       expect(reads).toEqual([]);
       holdCatchup = true;
+      const reconnect = page.waitForRequest(
+        (request) =>
+          request.frame() !== page.mainFrame() &&
+          request.method() === "GET" &&
+          new URL(request.url()).pathname === `/api/conversations/${id}/events`,
+      );
       await rail.click();
       expect(await side.locator("#scroll").getAttribute("data-cached")).toBe(
         "retained",
@@ -142,6 +171,7 @@ export const tests: BrowserTest[] = [
       ).toBe(true);
       holdCatchup = false;
       await Promise.all(held.splice(0).map((route) => route.continue()));
+      await reconnect;
       if (cycle === 0) {
         const older = page.waitForRequest((request) => {
           const url = new URL(request.url());

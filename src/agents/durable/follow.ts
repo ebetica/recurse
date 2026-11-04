@@ -1,14 +1,21 @@
-// Follow one conversation of an open Harness from its commits: run, shells,
-// queue, model and safety state for its live row. Promote queued input at
-// idle; write lost-task rows; kick its run reporter.
+// Follow an open Harness conversation's live watches and commits: run, shells,
+// queue, model, committed usage and safety state. Promote queued input at idle;
+// write lost-task rows; kick its run reporter.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
+  AgentDoc,
   InboxDoc,
   LiveDoc,
+  ToolTask,
+  type CommitPublication,
   type Conversation,
+  type EntryId,
   type Harness,
   type LiveState,
+  type ToolTaskInput,
 } from "@earendil-works/pi-durable";
+import { assistantContextUsage } from "../runtime/context_usage.ts";
+import { createdPrUrls } from "../conversation_prs.ts";
 import { pendingRows } from "./durable_rows.ts";
 import { lostTasks, taskFailures } from "./failure_log.ts";
 import type { Reporter } from "./report.ts";
@@ -37,6 +44,7 @@ export interface ShellInput {
 }
 
 export interface LiveRow {
+  contextUsage?: Rec | null;
   runId?: string;
   /** InboxDoc items, set synchronously from commits. */
   queued?: number;
@@ -63,10 +71,58 @@ export interface FollowInput {
   syncAgent(): Promise<void>;
   clearPending?(): void;
   onIdle?(): void;
+  activityChanged?(): void;
+  committed?(publication: CommitPublication): void;
+  contextChanged?(): void;
   model(): { provider: string; model: string };
   log(event: string, fields: Rec, level?: number): void;
   rowChanged(): void;
+  viewChanged?(): void;
   safetyChanged(): void;
+  /** PRs a tool call that started at `since` (epoch seconds) created. */
+  prsCreated?(urls: string[], since: number): void;
+}
+
+// Successful model bash calls this commit settled whose output names a pull
+// request: [assistant entry, call id, output text, start in epoch seconds].
+function prOutputs(
+  publication: CommitPublication,
+): [EntryId, string, string, number][] {
+  const calls = new Map<string, EntryId>();
+  for (const change of publication.changes)
+    if (
+      change.type === "task" &&
+      change.value.kind === ToolTask.definition.name &&
+      (change.value.input as Rec)?.kind === "model"
+    ) {
+      const input = change.value.input as unknown as ToolTaskInput & {
+        kind: "model";
+      };
+      calls.set(input.callId, input.assistant);
+    }
+  return publication.changes.flatMap((change) => {
+    if (change.type !== "entry" || change.value.kind !== "pi.tool-result")
+      return [];
+    const message = change.value.model?.[0] as Rec | undefined;
+    const text = (Array.isArray(message?.content) ? message.content : [])
+      .map((part: Rec) => (part.type === "text" ? String(part.text) : ""))
+      .join("\n");
+    const assistant = calls.get(String(message?.toolCallId));
+    return assistant !== undefined &&
+      message?.toolName === "bash" &&
+      message.isError !== true &&
+      text.includes("/pull/")
+      ? [
+          [
+            assistant,
+            String(message!.toolCallId),
+            text,
+            (Number(message!.timestamp) - Number(message!.durationMs ?? 0)) /
+              1000,
+          ],
+        ]
+      : [];
+  });
 }
 
 export async function followConversation(input: FollowInput): Promise<{
@@ -127,7 +183,7 @@ export async function followConversation(input: FollowInput): Promise<{
     // queued, its oldest row showing the error: it never runs on the previous
     // model.
     let synced = true;
-    if (run !== undefined) row.modelError = undefined;
+    if (run !== undefined) row.modelError = syncError = undefined;
     if (input.ready() && run === undefined && !input.state().closing)
       await input.syncAgent().then(
         () => {
@@ -196,11 +252,28 @@ export async function followConversation(input: FollowInput): Promise<{
   row.queued = (
     await harness.snapshot(InboxDoc, conversation.id, context)
   )?.items.length;
-  const stop = harness.subscribeCommits((all) => {
+  const live = await conversation.watch(context);
+  live.start(async (call) => {
+    if (call.kind === "value" && input.current()) input.viewChanged?.();
+  });
+  const committed = (all: CommitPublication) => {
+    input.committed?.(all);
     const publication = forConversation(all, conversation.id, input.root);
+    if (publication.changes.length)
+      queueMicrotask(() => {
+        if (input.current()) input.viewChanged?.();
+      });
     // Invariant: Settings are read on the Session line: use the adopted live
     // revision, not the asynchronous metadata snapshot, at the very next
     // boundary.
+    for (const change of publication.changes) {
+      if (change.type !== "entry") continue;
+      if (change.value.kind === "pi.compaction") row.contextUsage = null;
+      else if (change.value.kind === "pi.assistant")
+        row.contextUsage = assistantContextUsage(
+          change.value.model?.[0] as Rec | undefined,
+        );
+    }
     let moved = false;
     for (const change of publication.changes)
       if (
@@ -208,7 +281,10 @@ export async function followConversation(input: FollowInput): Promise<{
         change.record.kind === LiveDoc.definition.kind &&
         change.conversationId === conversation.id
       ) {
-        const run = (change.value as LiveState | undefined)?.run;
+        const run =
+          change.kind === "change"
+            ? (change.value as LiveState).run
+            : undefined;
         const before = row.runId;
         row.runId = run && String(run.taskId);
         moved ||= row.runId !== before;
@@ -218,7 +294,9 @@ export async function followConversation(input: FollowInput): Promise<{
         change.conversationId === conversation.id
       )
         row.queued = (
-          change.value as { items?: unknown[] } | undefined
+          change.kind === "change"
+            ? (change.value as { items?: unknown[] })
+            : undefined
         )?.items?.length;
       else if (
         change.type === "task" &&
@@ -232,6 +310,16 @@ export async function followConversation(input: FollowInput): Promise<{
         else row.shells.set(id, input as unknown as ShellInput);
         moved ||= row.shells.size !== before;
       }
+    if (
+      publication.changes.some(
+        (change) =>
+          (change.type === "document" &&
+            change.record.kind === AgentDoc.definition.kind) ||
+          (change.type === "entry" && change.value.kind === "pi.compaction"),
+      )
+    )
+      input.contextChanged?.();
+    input.activityChanged?.();
     if (moved)
       queueMicrotask(() => {
         if (input.current()) input.rowChanged();
@@ -271,9 +359,39 @@ export async function followConversation(input: FollowInput): Promise<{
       )
     )
       noteDue = true;
+    for (const [assistant, callId, text, since] of prOutputs(publication))
+      void conversation
+        .entries(
+          { minEntryId: assistant, maxEntryId: assistant },
+          1,
+          undefined,
+          context,
+        )
+        .then(({ items }) => {
+          const message = items[0]?.model?.[0] as Rec | undefined;
+          const call = (
+            Array.isArray(message?.content) ? message.content : []
+          ).find((part: Rec) => part.type === "toolCall" && part.id === callId);
+          const command = (call?.arguments as Rec | undefined)?.command;
+          const urls =
+            typeof command === "string" ? createdPrUrls(command, text) : [];
+          if (urls.length) input.prsCreated?.(urls, since);
+        })
+        .catch(report("created_pr_read_failed"));
     if (reporter?.noteCommit(publication))
       queueMicrotask(() => void reporter.kick());
     queueMicrotask(() => void retrack());
+  };
+  const observation = harness.observeCommits({
+    advance: committed,
+    end: () => {},
   });
-  return { track, retrack, stop };
+  return {
+    track,
+    retrack,
+    stop() {
+      observation.detach();
+      void live.stop();
+    },
+  };
 }

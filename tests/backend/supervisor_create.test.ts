@@ -172,7 +172,7 @@ test("new conversations and children use Durable", async () => {
 
 test("new conversations and spawns on a Settings custom provider use Durable", async () => {
   const t = setup();
-  t.world.config.upsertCustomProvider("local-llm", {
+  await t.world.config.upsertCustomProvider("local-llm", {
     base_url: "http://127.0.0.1:9/v1",
     env_key: "LOCAL_LLM_KEY",
     wire_api: "completions",
@@ -198,8 +198,8 @@ test("new conversations and spawns on a Settings custom provider use Durable", a
   ]);
 });
 
-// Feature: #2461 Take over must notify both recipients without waking idle agents.
-test("Take over stores inspectable notes once, without waking idle recipients", async () => {
+// Regression: #2993 Returning control must notify both recipients once without waking idle agents.
+test("Take over and release store inspectable notes once, without waking idle recipients", async () => {
   const w = await switchoverWorld();
   try {
     const { create, durable, delivery, conversations } = w.instance;
@@ -215,12 +215,13 @@ test("Take over stores inspectable notes once, without waking idle recipients", 
       model: "recurse-test/scripted",
     });
     await conversations.withSafetyGuard("boss", async () => {
-      await create.setPinned("held", true);
-      await create.setPinned("held", true);
+      await create.setTakenOver("held", true);
+      await create.setTakenOver("held", true);
       expect(durable.metadata("boss").status).toBe("idle");
     });
+    await w.instance.createTasks.drain();
     const note =
-      "User has taken control of the agent, do not message Held agent (held).";
+      "User has taken control of Held agent (held); do not message it.";
     for (const cid of ["held", "boss"]) {
       await until(async () =>
         JSON.stringify(await durable.view(cid)).includes(note),
@@ -237,8 +238,30 @@ test("Take over stores inspectable notes once, without waking idle recipients", 
         "[recurse-origin: platform]",
       );
     }
-    await create.setPinned("held", false);
+    await create.setTakenOver("held", false);
+    await create.setTakenOver("held", false);
+    await w.instance.createTasks.drain();
     expect(conversations.load("held")!.muted).toBe(false);
+    const releaseNote =
+      "User has returned control of Held agent (held); you can message it again.";
+    for (const cid of ["held", "boss"]) {
+      const view = await durable.view(cid);
+      expect(
+        (view.blocks as Json[]).filter((b) =>
+          String(b.text).includes(releaseNote),
+        ),
+      ).toHaveLength(1);
+      expect(durable.metadata(cid).status).toBe("idle");
+    }
+    for (const cid of ["held", "boss"]) {
+      await delivery.deliver(cid, "Continue after release", {
+        origin: "operator",
+      });
+      await until(() => durable.metadata(cid).status === "idle");
+      const prompt = JSON.stringify(await durable.prompt(cid));
+      expect(prompt).toContain(releaseNote);
+      expect(prompt.indexOf(note)).toBeLessThan(prompt.indexOf(releaseNote));
+    }
     const active = w.holdNextRequest({
       name: "read",
       args: { path: join(w.root, "data/config/model-providers.json") },
@@ -247,7 +270,7 @@ test("Take over stores inspectable notes once, without waking idle recipients", 
       await delivery.deliver("held", "Keep working", { origin: "operator" });
       await active.started;
       expect(durable.metadata("held").status).toBe("running");
-      await create.setPinned("held", true);
+      await create.setTakenOver("held", true);
       await until(
         async () =>
           ((await durable.view("boss")).blocks as Json[]).filter((b) =>
@@ -269,9 +292,9 @@ test("Take over stores inspectable notes once, without waking idle recipients", 
     expect(
       JSON.stringify(activeRequest.context.messages).split(note).length - 1,
     ).toBe(2);
-    await create.setPinned("boss", true);
+    await create.setTakenOver("boss", true);
     const parentNote =
-      "User has taken control of the agent, do not message Boss (boss).";
+      "User has taken control of Boss (boss); do not message it.";
     await until(async () =>
       JSON.stringify(await durable.view("boss")).includes(parentNote),
     );
@@ -290,7 +313,7 @@ test("Take over stores inspectable notes once, without waking idle recipients", 
   }
 });
 
-test("pin HTTP route returns a retryable refusal while the lifecycle is held", async () => {
+test("take-over HTTP route returns a retryable refusal while the lifecycle is held", async () => {
   const t = setup();
   await t.world.conversations.save({ ...BASE, id: "g" });
   const lifecycle = new TreeLifecycle({
@@ -302,23 +325,23 @@ test("pin HTTP route returns a retryable refusal while the lifecycle is held", a
   lifecycle.reserve(lifecycle.newToken(), "test_hold", null);
   const app = await buildConversationsApp(join(t.root, "http"), {
     patch: (deps) => {
-      deps.create.setPinned = t.create.setPinned.bind(t.create);
+      deps.create.setTakenOver = t.create.setTakenOver.bind(t.create);
     },
   });
   try {
     const response = await fetch(
-      `http://127.0.0.1:${app.running.port}/api/conversations/g/pin`,
+      `http://127.0.0.1:${app.running.port}/api/conversations/g/take-over`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pinned: true }),
+        body: JSON.stringify({ taken_over: true }),
       },
     );
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({
       detail: "Take-over change is busy. Try again shortly.",
     });
-    expect(t.world.conversations.load("g")!.pinned).toBeFalsy();
+    expect(t.world.conversations.load("g")!.taken_over).toBeFalsy();
   } finally {
     lifecycle.release();
     await app.running.close();

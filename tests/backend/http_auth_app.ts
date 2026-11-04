@@ -54,6 +54,9 @@ export async function buildAuthApp(
     backendKeys?: boolean;
     extraRoutes?: (router: Router) => void;
     port?: number;
+    tailscaleSocket?: string;
+    tailscaleLogin?: string;
+    forwardedAllowIps?: readonly string[];
   } = {},
 ): Promise<AuthApp> {
   await mkdir(dataDir, { recursive: true });
@@ -117,6 +120,7 @@ export async function buildAuthApp(
     logger: logger("http", sink),
     summaryInterval: 0,
     auth: requestAuth({
+      tailscaleLogin: options.tailscaleLogin,
       backendKeys,
       operator,
       service: new ServiceAuth({
@@ -129,6 +133,12 @@ export async function buildAuthApp(
       logger: web,
     }),
   });
-  const running = startServer({ handler, logger: web, port: options.port });
+  const running = startServer({
+    handler,
+    logger: web,
+    port: options.port,
+    tailscaleSocket: options.tailscaleSocket,
+    forwardedAllowIps: options.forwardedAllowIps,
+  });
   return { running, router, operator, throttle, env, envCreds, records, calls };
 }

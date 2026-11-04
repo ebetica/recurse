@@ -1,7 +1,9 @@
 import { expect } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { captureErrors, type BrowserTest } from "./common";
+import { test_last_thinking_survives_wait_and_reload } from "./last_thinking";
 export const tests: BrowserTest[] = [
+  test_last_thinking_survives_wait_and_reload,
   // Regression: #2854 folded summaries omitted nested script writes and commands, including calls past the display cap. (also Regression #2341 script labels and expanded read diagnostics exposed internal wording.)
   async function test_script_labels_and_plain_read_diagnostics(browser, base) {
     const page = await browser.newPage();
@@ -48,7 +50,7 @@ export const tests: BrowserTest[] = [
       });
       await scripts.first().waitFor();
       expect(await scripts.allTextContents()).toEqual([
-        "Ran a script · 104 tools",
+        "Ran a script · 101 probe/echo, 2 bash, +1 more",
         "Ran a script",
       ]);
     } finally {

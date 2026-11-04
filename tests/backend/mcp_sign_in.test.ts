@@ -84,13 +84,17 @@ test("Settings signs an HTTP MCP server in through the Recurse callback, across 
     signal: shutdown.signal,
     providerToken: (provider) => providerToken(durableModels(root), provider),
   });
+  let mutations = 0;
   const start = (port?: number) =>
     buildAuthApp(join(root, "http"), {
       port,
       extraRoutes: (router) =>
         registerMcpServerRoutes(router, {
           piAgentDir: async () => root,
-          mutateExternalStorage: (work) => work(),
+          mutateExternalStorage: (work) => {
+            mutations++;
+            return work();
+          },
           mcpChecks: checks,
         }),
     });
@@ -301,18 +305,37 @@ test("Settings signs an HTTP MCP server in through the Recurse callback, across 
     expect(viaLogin.signedIn).toBeUndefined();
 
     fixture.expireAccessTokens();
+    expect(await callWhoami()).toBe(`client ${clientId}`);
+    fixture.expireAccessTokens();
     const release = fixture.holdRefreshes();
-    const refreshed = callWhoami();
+    expect(
+      (await post("/api/settings/mcp-servers/check", { name: "tracker" }))
+        .status,
+    ).toBe(202);
     await until(() => fixture.heldRefreshes() === 1);
+    const releaseRevocation = fixture.holdRevocations();
+    const previousMutations = mutations;
     const signedOut = post("/api/settings/mcp-servers/sign-out", {
       name: "tracker",
     });
-    await Promise.race([signedOut, Bun.sleep(200)]);
-    release();
-    expect(await refreshed).toBe(`client ${clientId}`);
-    expect((await signedOut).status).toBe(200);
-    expect(fixture.grants).toEqual(["authorization_code", "refresh_token"]);
+    try {
+      await until(() => mutations > previousMutations);
+      release();
+      await until(() => fixture.heldRevocations() === 1);
+      await checked();
+      releaseRevocation();
+      expect((await signedOut).status).toBe(200);
+    } finally {
+      release();
+      releaseRevocation();
+    }
+    expect(fixture.grants).toEqual([
+      "authorization_code",
+      "refresh_token",
+      "refresh_token",
+    ]);
     expect(fixture.revoked).toHaveLength(1);
+    expect(fixture.revoked[0]).toBe(fixture.issuedRefreshTokens[2]);
     expect(fixture.revoked[0]).not.toBe(first.refresh_token);
     expect(await trackerState()).toBeUndefined();
     expect(await tracker()).toMatchObject({
@@ -372,6 +395,7 @@ test("Settings signs an HTTP MCP server in through the Recurse callback, across 
     });
     expect(fixture.grants).toEqual([
       "authorization_code",
+      "refresh_token",
       "refresh_token",
       "authorization_code",
     ]);

@@ -98,7 +98,7 @@ export async function buildEnv(
   );
   env.RECURSE_INTERRUPT_SOCKET = paths.INTERRUPT_SOCKET;
   env.PI_OFFLINE = "1";
-  env.PI_FFF_MULTIGREP = "1";
+  delete env.PI_FFF_MULTIGREP;
   delete env.RTK_DISABLED;
   delete env.PI_AUTH_JSON;
   delete env.OPENROUTER_API_KEY;

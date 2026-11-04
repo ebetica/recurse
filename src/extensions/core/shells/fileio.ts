@@ -1,7 +1,7 @@
-// Bounded head/tail log reads, never whole command logs in memory. I/O failures
-// return empty/degraded results rather than throw.
+// Bounded asynchronous log reads, never whole command logs in memory. I/O
+// failures return empty/degraded results rather than throw.
 
-import { closeSync, openSync, readSync, statSync } from "node:fs";
+import { open, stat, type FileHandle } from "node:fs/promises";
 import {
   byteTruncationMarker,
   clampLineLimit,
@@ -13,73 +13,54 @@ import {
 } from "./trim.ts";
 
 /** Read up to `maxBytes` from the end of a file as UTF-8 text. */
-export function readTail(path: string, maxBytes: number): string {
-  let fd: number | undefined;
-  try {
-    const size = statSync(path).size;
-    if (size === 0) return "";
-    const want = Math.min(maxBytes, size);
-    const start = size - want;
-    fd = openSync(path, "r");
-    const buf = Buffer.allocUnsafe(want);
-    const read = readSync(fd, buf as unknown as Uint8Array, 0, want, start);
-    return buf.subarray(0, read).toString("utf8");
-  } catch {
-    return "";
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
-  }
+export async function readTail(
+  path: string,
+  maxBytes: number,
+): Promise<string> {
+  const size = await fileSize(path);
+  const want = Math.min(maxBytes, size);
+  return readRange(path, size - want, want);
 }
 
 /** Read up to `maxBytes` from the start of a file as UTF-8 text. */
-export function readHead(path: string, maxBytes: number): string {
-  let fd: number | undefined;
-  try {
-    const size = statSync(path).size;
-    if (size === 0) return "";
-    const want = Math.min(maxBytes, size);
-    fd = openSync(path, "r");
-    const buf = Buffer.allocUnsafe(want);
-    const read = readSync(fd, buf as unknown as Uint8Array, 0, want, 0);
-    return buf.subarray(0, read).toString("utf8");
-  } catch {
-    return "";
-  } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
-  }
+export async function readHead(
+  path: string,
+  maxBytes: number,
+): Promise<string> {
+  return readRange(path, 0, Math.min(maxBytes, await fileSize(path)));
 }
 
 // Read len bytes at start; return empty text on I/O failure.
-export function readRange(path: string, start: number, len: number): string {
+export async function readRange(
+  path: string,
+  start: number,
+  len: number,
+): Promise<string> {
   if (len <= 0) return "";
-  let fd: number | undefined;
+  let file: FileHandle | undefined;
   try {
-    fd = openSync(path, "r");
+    file = await open(path, "r");
     const buf = Buffer.allocUnsafe(len);
-    const read = readSync(fd, buf as unknown as Uint8Array, 0, len, start);
-    return buf.subarray(0, read).toString("utf8");
+    const { bytesRead } = await file.read(
+      buf as unknown as Uint8Array,
+      0,
+      len,
+      start,
+    );
+    return buf.subarray(0, bytesRead).toString("utf8");
   } catch {
     return "";
   } finally {
-    if (fd !== undefined) {
-      try {
-        closeSync(fd);
-      } catch {}
-    }
+    if (file) await file.close().catch(() => {});
   }
 }
 
 /** The last non-empty line of a file, read from a bounded tail window. */
-export function readLastLine(path: string, windowBytes = 8192): string {
-  const tail = readTail(path, windowBytes);
+export async function readLastLine(
+  path: string,
+  windowBytes = 8192,
+): Promise<string> {
+  const tail = await readTail(path, windowBytes);
   const lines = tail.split("\n");
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i].replace(/\r$/, "");
@@ -89,9 +70,9 @@ export function readLastLine(path: string, windowBytes = 8192): string {
 }
 
 /** Current byte size of a file, or 0 if it can't be stat'd. */
-export function fileSize(path: string): number {
+export async function fileSize(path: string): Promise<number> {
   try {
-    return statSync(path).size;
+    return (await stat(path)).size;
   } catch {
     return 0;
   }
@@ -99,11 +80,14 @@ export function fileSize(path: string): number {
 
 // Trim logs using bounded reads. Small logs get exact omitted-line counts;
 // large logs use head/tail windows and a byte-based omission marker.
-export function trimFile(path: string, options: TrimOptions = {}): TrimResult {
+export async function trimFile(
+  path: string,
+  options: TrimOptions = {},
+): Promise<TrimResult> {
   const READ_CAP = 256 * 1024;
-  const size = fileSize(path);
+  const size = await fileSize(path);
   if (size <= READ_CAP) {
-    return trimOutput(readHead(path, READ_CAP), options);
+    return trimOutput(await readHead(path, READ_CAP), options);
   }
 
   const byteBudget = options.byteBudget ?? DEFAULT_BYTE_BUDGET;
@@ -112,11 +96,11 @@ export function trimFile(path: string, options: TrimOptions = {}): TrimResult {
   const tailTarget = maxLines - headTarget;
   const half = Math.floor(byteBudget / 2);
   // Invariant: Byte cuts leave partial edge lines; retain only whole lines.
-  const headWindow = readHead(path, half);
+  const headWindow = await readHead(path, half);
   const headLines = headWindow.split("\n");
   headLines.pop();
   const head = headLines.slice(0, headTarget);
-  const tailWindow = readTail(path, byteBudget - half);
+  const tailWindow = await readTail(path, byteBudget - half);
   const tailLines = tailWindow.split("\n");
   tailLines.shift();
   const tail = tailLines.slice(Math.max(0, tailLines.length - tailTarget));

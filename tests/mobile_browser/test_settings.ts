@@ -10,8 +10,10 @@ import {
   visibleAndUncovered,
   LOGIN,
   type BrowserTest,
+  openSettingsPanel,
 } from "./common";
 import type { Locator, Page } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readRelease, releaseLabel } from "../../src/release";
@@ -48,6 +50,9 @@ const LIST_FRESH = {
 const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 type LadderEntry = { model: string; reasoning: string };
+
+const fontSize = (el: unknown) =>
+  (globalThis as any).getComputedStyle(el).fontSize;
 
 async function routeLadder(
   page: Page,
@@ -117,58 +122,201 @@ async function listCapacity(listbox: Locator): Promise<number> {
 async function openLadder(page: Page, base: string): Promise<void> {
   await gotoRoot(page, base);
   await page.locator(".agent").first().waitFor();
-  await page.locator("#settings-btn").click();
+  await openSettingsPanel(page);
   await page.locator('#settings-nav button[data-cat="models"]').click();
+  await openDetail(page, /^Effort ladder /);
 }
 
 const LEVEL_ONE_HELP =
-  "(Used for safety review and conversation names; choose an inexpensive model such as Luna or Haiku.)";
+  "Used for safety review and conversation names; choose an inexpensive model such as Luna or Haiku.";
 
-const computedColour = (el: unknown) =>
-  (globalThis as any).getComputedStyle(el).color;
+async function openDetail(page: Page, name: RegExp): Promise<void> {
+  if (page.viewportSize()!.width <= 700)
+    await page.getByRole("button", { name }).click();
+}
+
+async function closeDetails(page: Page): Promise<void> {
+  const sheets = page.locator("dialog.settings-sheet[open]");
+  while (await sheets.count())
+    await sheets
+      .last()
+      .getByRole("button", { name: /^Close / })
+      .click();
+}
+
+async function closeLevel(page: Page): Promise<void> {
+  const current = page.locator(
+    'dialog.settings-sheet[open][aria-label^="Level "]',
+  );
+  if (await current.count())
+    await current.getByRole("button", { name: /^Close / }).click();
+}
+
+async function openLevel(page: Page, level: number): Promise<void> {
+  await closeLevel(page);
+  await openDetail(page, new RegExp(`^Level ${level} `));
+  if (page.viewportSize()!.width > 700)
+    await page
+      .getByRole("combobox", { name: `Model for level ${level}`, exact: true })
+      .focus();
+}
 
 async function expectLevelOneHelp(page: Page): Promise<void> {
-  const name = page.locator(".row.effort > span").first();
-  expect(await name.evaluate((el) => el.firstChild!.textContent)).toBe(
-    "Level 1",
-  );
-  const note = name.locator(".effort-note");
-  expect(await note.innerText()).toBe(LEVEL_ONE_HELP);
-  const labelBottom = await name.evaluate((el) => {
-    const doc = (globalThis as any).document;
-    const range = doc.createRange();
-    range.selectNodeContents(el.firstChild);
-    return range.getBoundingClientRect().bottom;
-  });
-  const noteBox = await note.boundingBox();
-  expect(noteBox!.y).toBeGreaterThanOrEqual(labelBottom - 1);
-  expect(await note.evaluate(computedColour)).toBe(
-    await name.evaluate(computedColour),
-  );
-  expect(
-    await note.evaluate(
-      (el) => (globalThis as any).getComputedStyle(el).fontWeight,
-    ),
-  ).toBe("400");
+  await openLevel(page, 1);
+  const sheet = page.getByRole("region", { name: "Level 1", exact: true });
+  await browserExpect(
+    sheet.getByText(LEVEL_ONE_HELP, { exact: true }),
+  ).toBeVisible();
+  await closeLevel(page);
+}
+
+async function showCategory(page: Page, cat: string): Promise<void> {
+  await closeDetails(page);
+  const back = page.locator(".settings-cat:not([hidden]) .settings-back");
+  if (await back.isVisible()) await back.click();
+  await page.locator(`#settings-nav button[data-cat="${cat}"]`).click();
 }
 
 async function saveLadder(page: Page, tap = false): Promise<void> {
+  await closeLevel(page);
   const save = page
-    .getByRole("combobox", { name: "Model for level 1" })
-    .locator(
-      "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' settings-section ')]",
-    )
-    .getByRole("button", { name: "Save" });
+    .getByRole("region", { name: "Effort ladder", exact: true })
+    .getByRole("button", { name: "Save", exact: true });
   if (tap) await save.tap();
   else await save.click();
   await page.getByText("Saved. Applies to new turns.").waitFor();
 }
 
 export const tests: BrowserTest[] = [
-  async function test_phone_settings_tabs_fade_where_more_tabs_scroll(
+  // Regression: #2904 skipped updates do not offer an update button.
+  async function test_skipped_updates_hide_button(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await context.newPage();
+    try {
+      const status = await (
+        await page.request.get(base + "api/settings/update")
+      ).json();
+      expect(status.skipped).toBeTruthy();
+      await gotoRoot(page, base);
+      await page.locator(".agent").first().waitFor();
+      await page.locator("#settings-btn").click();
+      await openDetail(page, /^Software update/);
+      await page
+        .locator(".update-status")
+        .getByText(status.skipped, { exact: true })
+        .waitFor();
+      expect(await page.locator(".update-now").isVisible()).toBeFalse();
+    } finally {
+      await context.close();
+    }
+  },
+  async function test_settings_category_list_back_and_deep_links(
     browser,
     base,
   ) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 915 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    await gotoRoot(page, base);
+    await page.locator(".agent").first().waitFor();
+    await openSettingsPanel(page);
+    await page.locator("#settings-overlay.on").waitFor();
+    const nav = page.locator("#settings-nav button");
+    await browserExpect(nav).toHaveText([
+      "Account",
+      "Appearance",
+      "Authentication",
+      "Models",
+      "MCPs",
+    ]);
+    for (const button of await nav.all())
+      expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await browserExpect(page.locator("#settings-sections")).toBeHidden();
+    await page.locator("#settings-release").waitFor();
+    await visibleAndUncovered(page, "#settings-release");
+    await nav.getByText("Authentication", { exact: true }).tap();
+    const title = page.getByRole("heading", {
+      name: "Authentication",
+      exact: true,
+    });
+    await browserExpect(title).toBeVisible();
+    await browserExpect(page.locator("#settings-nav")).toBeHidden();
+    await browserExpect(
+      page.locator(
+        '.provider[data-provider="claude"] > .settings-detail > button.settings-row',
+      ),
+    ).toBeVisible();
+    const back = page.getByRole("button", { name: "Back to all settings" });
+    await browserExpect(back).toBeFocused();
+    expect((await back.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    await back.tap();
+    await browserExpect(title).toBeHidden();
+    await browserExpect(
+      nav.getByText("Authentication", { exact: true }),
+    ).toBeVisible();
+    await browserExpect(
+      page.locator('#settings-nav [data-cat="auth"]'),
+    ).toBeFocused();
+    const url = page.url();
+    await nav.getByText("Models", { exact: true }).tap();
+    await browserExpect(back).toBeFocused();
+    await page.goBack();
+    await browserExpect(nav.first()).toBeVisible();
+    await page.goBack();
+    await page.locator("#settings-overlay.on").waitFor({ state: "detached" });
+    expect(page.url()).toBe(url);
+    await openSettingsPanel(page);
+    await page.locator("#settings-close").tap();
+    await page.waitForFunction("!history.state?.settings");
+    expect(page.url()).toBe(url);
+    await openSettingsPanel(page);
+    await nav.getByText("Models", { exact: true }).tap();
+    await page.waitForFunction("history.state?.settings === 2");
+    await page.reload();
+    await page.waitForFunction("!history.state?.settings");
+    expect(page.url()).toBe(url);
+    await page.locator(".agent").first().waitFor({ state: "attached" });
+    await page.evaluate(() =>
+      (globalThis as any).dispatchEvent(
+        new CustomEvent("recurse:open-settings", { detail: "account" }),
+      ),
+    );
+    await browserExpect(
+      page.getByRole("button", { name: "Change password", exact: true }),
+    ).toBeVisible();
+    await browserExpect(page.locator("#settings-nav")).toBeHidden();
+    await browserExpect(
+      page.getByRole("button", { name: "Back to all settings" }),
+    ).toBeFocused();
+    await page.locator("#settings-close").tap();
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.evaluate(() =>
+      (globalThis as any).dispatchEvent(
+        new CustomEvent("recurse:open-settings", { detail: "models" }),
+      ),
+    );
+    const models = page.locator('#settings-nav button[data-cat="models"]');
+    await browserExpect(models).toBeFocused();
+    await browserExpect(
+      page.getByRole("heading", { name: "Models", exact: true }),
+    ).toBeVisible();
+    await showCategory(page, "account");
+    await openDetail(page, /^Add a remote$/);
+    await browserExpect(
+      page.locator(".remote-add input").first(),
+    ).toBeVisible();
+    for (const input of await page.locator(".remote-add input:visible").all())
+      expect((await input.boundingBox())!.height).toBeLessThanOrEqual(44);
+    expect(errors).toEqual([]);
+    await context.close();
+  },
+  async function test_phone_settings_branding_name_and_icon(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 412, height: 915 },
       isMobile: true,
@@ -189,36 +337,12 @@ export const tests: BrowserTest[] = [
     expect(
       await mark.evaluate((image) => image.getBoundingClientRect().width),
     ).toBe(24);
-    await page.locator("#settings-btn").tap();
-    await page.locator("#settings-overlay.on").waitFor();
-    const nav = page.locator("#settings-nav");
-    const edges = () =>
-      nav.evaluate((el) => ({
-        clipped:
-          el.lastElementChild!.getBoundingClientRect().right >
-          el.getBoundingClientRect().right,
-        start: el.classList.contains("more-start"),
-        end: el.classList.contains("more-end"),
-        mask: (globalThis as any).getComputedStyle(el).maskImage as string,
-      }));
-    const atRest = await edges();
-    expect(atRest.clipped).toBe(true);
-    expect([atRest.start, atRest.end]).toEqual([false, true]);
-    expect(atRest.mask).toContain("linear-gradient");
-    await nav.evaluate((el) => {
-      el.scrollLeft = el.scrollWidth;
-    });
-    await page.waitForFunction(
-      "document.querySelector('#settings-nav').classList.contains('more-start')",
-    );
-    const atEnd = await edges();
-    expect([atEnd.start, atEnd.end]).toEqual([true, false]);
-    await page.locator("#settings-close").tap();
+    await page.locator("#sidebar .agent").first().tap();
     const customName = "My __APP__ __VERSION__ __THEME__ __ERROR__ __VALUE__";
     const open = async () => {
-      await page.locator("#menu-btn").tap();
-      await page.locator("#settings-btn").tap();
+      await openSettingsPanel(page);
       await page.locator('#settings-nav button[data-cat="appearance"]').tap();
+      await page.getByRole("button", { name: /^Name and icon / }).tap();
     };
     try {
       await gotoRoot(page, base);
@@ -256,7 +380,7 @@ export const tests: BrowserTest[] = [
       await page.reload();
       await page.locator("#settings-btn").waitFor({ state: "attached" });
       expect(await page.title()).toBe(customName);
-      expect(await page.locator("#brand").textContent()).toBe(customName);
+      expect(await page.locator("#brand-name").textContent()).toBe(customName);
       const favicon = await page
         .locator('link[rel="icon"]')
         .last()
@@ -280,24 +404,15 @@ export const tests: BrowserTest[] = [
       ).toBe(false);
       await direct.close();
       await open();
-      for (const control of await section.locator("input,button").all()) {
+      const editor = page.getByRole("region", {
+        name: "Name and icon",
+        exact: true,
+      });
+      for (const control of await editor.locator("input,button").all()) {
         await control.scrollIntoViewIfNeeded();
-        expect(
-          await control.evaluate((element) => {
-            const rect = element.getBoundingClientRect();
-            const x = rect.left + rect.width / 2;
-            const y = rect.top + rect.height / 2;
-            return [-21, 21].every((dx) =>
-              [-21, 21].every((dy) => {
-                const hit = element.ownerDocument.elementFromPoint(
-                  x + dx,
-                  y + dy,
-                );
-                return hit !== null && element.contains(hit);
-              }),
-            );
-          }),
-        ).toBe(true);
+        const box = await control.boundingBox();
+        expect(box!.height).toBeGreaterThanOrEqual(44);
+        expect(box!.width).toBeGreaterThanOrEqual(44);
       }
       await section.locator('[name="reset-name"]').tap();
       await section.getByRole("status").filter({ hasText: "Saved." }).waitFor();
@@ -305,7 +420,9 @@ export const tests: BrowserTest[] = [
       await section.getByRole("status").filter({ hasText: "Saved." }).waitFor();
       await page.reload();
       expect(await page.title()).toBe(originalTitle);
-      expect(await page.locator("#brand").textContent()).toBe(originalTitle);
+      expect(await page.locator("#brand-name").textContent()).toBe(
+        originalTitle,
+      );
       expect(
         await page.locator('link[rel="icon"]').last().getAttribute("href"),
       ).toBe(originalIcon);
@@ -320,7 +437,7 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
-  async function test_mobile_settings_open_from_drawer(browser, base) {
+  async function test_mobile_settings_open_from_list(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
       isMobile: true,
@@ -359,8 +476,6 @@ export const tests: BrowserTest[] = [
     await routeArtifacts(page, base);
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
-    await page.locator("#menu-btn").tap();
-    await page.locator("#sidebar.open").waitFor();
     await page.route(`${base}api/settings/update`, (route) =>
       route.fulfill({
         json: {
@@ -376,46 +491,49 @@ export const tests: BrowserTest[] = [
         },
       }),
     );
-    await page.locator("#settings-btn").tap();
+    await openSettingsPanel(page);
     await page.locator("#settings-overlay.on").waitFor();
     await page.locator("#settings-release").waitFor();
     expect(await page.locator("#settings-release").innerText()).toBe(
       `Recurse ${releaseLabel(await readRelease())}`,
     );
     await visibleAndUncovered(page, "#settings-release");
+    await page.locator('#settings-nav button[data-cat="account"]').tap();
+    await page.getByRole("button", { name: /^Software update/ }).tap();
     const updateNow = page.getByRole("button", { name: "Update now" });
     await updateNow.scrollIntoViewIfNeeded();
     expect(await page.locator(".update-status").innerText()).toBe(
       "Recurse v0.2.0 is available (installed: v0.1.0, newest release).",
     );
     await visibleAndUncovered(page, ".update-now");
+    await closeDetails(page);
     expect(await page.locator("#settings-nav button").count()).toBe(5);
     expect(await page.locator("#settings-modal .signout").count()).toBe(3);
     expect(
       await page
         .getByRole("heading", {
-          name: "Muse subscription",
+          name: "Muse",
           exact: true,
           includeHidden: true,
         })
         .count(),
     ).toBe(0);
-    const [headBox, sectionBox] = await Promise.all([
-      page.locator(".settings-head").boundingBox(),
-      page.locator(".settings-section:visible").first().boundingBox(),
+    const [titleBox, groupBox] = await Promise.all([
+      page.getByRole("heading", { name: "Account", exact: true }).boundingBox(),
+      page.locator(".settings-section .group:visible").first().boundingBox(),
     ]);
-    expect(Math.round(sectionBox!.x)).toBe(Math.round(headBox!.x));
-    expect(Math.round(sectionBox!.width)).toBe(Math.round(headBox!.width));
+    expect(Math.round(groupBox!.x)).toBe(Math.round(titleBox!.x));
+    expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(390);
+    await page
+      .getByRole("button", { name: "Change password", exact: true })
+      .tap();
     const password = page.locator(
       '.settings-section input[type="password"]:visible',
     );
-    const fontSize = (el: unknown) =>
-      (globalThis as any).getComputedStyle(el).fontSize;
-    expect(await password.first().evaluate(fontSize)).toBe(
-      await page.locator(".settings-section h3").first().evaluate(fontSize),
-    );
-    expect((await password.first().boundingBox())!.height).toBeLessThan(44);
-    const notify = page.getByRole("checkbox", {
+    expect(await password.first().evaluate(fontSize)).toBe("16px");
+    expect((await password.first().boundingBox())!.height).toBe(44);
+    await closeDetails(page);
+    const notify = page.getByRole("switch", {
       name: "Notify me when a top-level agent finishes",
     });
     const notifyRow = page.locator(".settings-section label.check:visible");
@@ -486,6 +604,7 @@ export const tests: BrowserTest[] = [
         ) === cid,
       other,
     );
+    await page.getByRole("button", { name: "Back to all settings" }).tap();
     await page.locator('#settings-nav button[data-cat="models"]').tap();
     expect(
       await page
@@ -497,12 +616,27 @@ export const tests: BrowserTest[] = [
     ).toBeFalse();
     expect(
       await page
-        .getByRole("heading", { name: "Maximum context window" })
+        .getByRole("button", { name: /^Maximum context window / })
         .isVisible(),
     ).toBeTrue();
     await page.locator("#settings-close").tap();
     await page.waitForFunction(
       "!document.querySelector('#settings-overlay')?.classList.contains('on')",
+    );
+    expect(page.url()).toContain(other);
+    await page.goBack();
+    await page.waitForFunction(
+      (cid) =>
+        !(globalThis as any).location.hash.includes(cid) &&
+        !(globalThis as any).history.state?.settings,
+      other,
+    );
+    await page.goForward();
+    await page.waitForFunction(
+      (cid) =>
+        (globalThis as any).location.hash.includes(cid) &&
+        !(globalThis as any).history.state?.settings,
+      other,
     );
     expect(errors).toEqual([
       expect.stringContaining(
@@ -523,12 +657,24 @@ export const tests: BrowserTest[] = [
       const errors = captureErrors(page);
       const open = async () => {
         await page.locator(".agent").first().waitFor();
-        if (width === 412) await page.locator("#menu-btn").click();
-        await page.locator("#settings-btn").click();
+        await openSettingsPanel(page);
         await page.locator('#settings-nav button[data-cat="models"]').click();
       };
       await gotoRoot(page, base);
       await open();
+      const warming = page.getByRole("switch", {
+        name: "Keep prompt cache warm while agents work",
+      });
+      await browserExpect(warming).toBeEnabled();
+      await browserExpect(warming).toBeChecked();
+      await warming.uncheck();
+      await browserExpect(warming).toBeEnabled();
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await open();
+      await browserExpect(warming).not.toBeChecked();
+      await warming.check();
+      await browserExpect(warming).toBeEnabled();
+      await openDetail(page, /^Maximum context window /);
       const maximum = page.getByRole("spinbutton", {
         name: "Maximum context window (tokens)",
       });
@@ -541,15 +687,11 @@ export const tests: BrowserTest[] = [
       );
       const original = await maximum.inputValue();
       expect(await slider.inputValue()).toBe(original);
-      const [sliderBox, numberBox] = await Promise.all([
-        slider.boundingBox(),
-        maximum.boundingBox(),
-      ]);
-      expect(sliderBox!.height).toBe(numberBox!.height);
-      expect(numberBox!.height).toBeLessThan(44);
-      expect(sliderBox!.y).toBe(numberBox!.y);
-      expect(sliderBox!.x + sliderBox!.width).toBeLessThan(numberBox!.x);
-      expect(numberBox!.x + numberBox!.width).toBeLessThanOrEqual(width);
+      for (const control of [slider, maximum]) {
+        const bounds = (await control.boundingBox())!;
+        expect(bounds.height).toBeGreaterThanOrEqual(width === 412 ? 44 : 36);
+        expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
+      }
       await slider.fill("500000");
       expect(await maximum.inputValue()).toBe("500000");
       await maximum.fill("500123");
@@ -564,9 +706,7 @@ export const tests: BrowserTest[] = [
             (el as unknown as { validity: { valid: boolean } }).validity.valid,
         ),
       ).toBeTrue();
-      const card = maximum.locator(
-        "xpath=ancestor::*[contains(@class, 'settings-section')]",
-      );
+      const card = maximum.locator("xpath=ancestor::form");
       await maximum.fill("63999");
       await card.getByRole("button", { name: "Save", exact: true }).click();
       expect(
@@ -584,6 +724,7 @@ export const tests: BrowserTest[] = [
         .waitFor();
       await page.reload({ waitUntil: "domcontentloaded" });
       await open();
+      await openDetail(page, /^Maximum context window /);
       await page.waitForFunction(
         "document.querySelector('#maximum-context-window').value === '500123'",
       );
@@ -593,7 +734,8 @@ export const tests: BrowserTest[] = [
       await page
         .getByText("Saved. Applies when an agent process next starts.")
         .waitFor();
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await showCategory(page, "account");
+      await openDetail(page, /^Deleted agents' history /);
       const retention = page.getByRole("spinbutton", {
         name: "Keep deleted agents' history (days)",
       });
@@ -615,7 +757,8 @@ export const tests: BrowserTest[] = [
       ).toEqual({ days: 120 });
       await page.reload({ waitUntil: "domcontentloaded" });
       await open();
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await showCategory(page, "account");
+      await openDetail(page, /^Deleted agents' history /);
       await page.waitForFunction(
         "document.querySelector('#deleted-agent-history')?.value === '120'",
       );
@@ -666,6 +809,7 @@ export const tests: BrowserTest[] = [
     const line = page.locator(".model-list-status");
     await page.getByText("449 models in Pi's list.").waitFor();
     const readsBefore = routes.ladderReads();
+    await openLevel(page, 2);
     const box = page.getByRole("combobox", { name: "Model for level 2" });
     await box.click();
     await box.fill("fresh");
@@ -676,7 +820,8 @@ export const tests: BrowserTest[] = [
     const refreshedList = page.waitForResponse(
       `${base}api/settings/model-list`,
     );
-    await page.getByRole("button", { name: "Update model list" }).click();
+    await closeLevel(page);
+    await page.getByRole("button", { name: /^Update model list/ }).click();
     await page
       .getByText(
         "Could not update: openrouter: Unable to connect. Is the computer able to access the url? Using Pi's current list.",
@@ -695,14 +840,12 @@ export const tests: BrowserTest[] = [
     );
     expect(routes.listReads()).toBe(2);
     expect(routes.ladderReads()).toBeGreaterThan(readsBefore);
-    expect(
-      await page
-        .getByRole("combobox", { name: "Model for level 2" })
-        .inputValue(),
-    ).toBe("Fresh");
-    expect(
-      await page.getByRole("button", { name: "Update model list" }).isEnabled(),
-    ).toBeTrue();
+    await browserExpect(
+      page.locator('input[aria-label="Model for level 2"]'),
+    ).toHaveValue("Fresh");
+    await browserExpect(
+      page.getByRole("button", { name: /^Update model list/ }),
+    ).toBeEnabled();
     await saveLadder(page);
     expect(routes.saved).toHaveLength(1);
     const levels = routes.saved[0]!.levels;
@@ -741,14 +884,18 @@ export const tests: BrowserTest[] = [
     expect(listRequests).toEqual([]);
     await page.locator("#settings-btn").click();
     await page.locator('#settings-nav button[data-cat="models"]').click();
+    await openDetail(page, /^Effort ladder /);
     const box = (level: number) =>
-      page.getByRole("combobox", { name: `Model for level ${level}` });
+      page.locator(`input[aria-label="Model for level ${level}"]`);
     const reasoning = (level: number) =>
       page.getByLabel(`Reasoning for level ${level}`);
-    await box(1).waitFor();
     await expectLevelOneHelp(page);
+    await openLevel(page, 1);
     expect(routes.listReads()).toBe(1);
-    expect(await box(1).inputValue()).toBe("anthropic/claude-gone");
+    expect(await box(1).getAttribute("placeholder")).toBe(
+      "anthropic/claude-gone",
+    );
+    await browserExpect(box(1)).toHaveAttribute("aria-expanded", "true");
     await page
       .getByText(
         "level 1 model anthropic/claude-gone is not in Pi's model list",
@@ -767,6 +914,7 @@ export const tests: BrowserTest[] = [
       "off (not offered for this model)",
     ]);
     expect(await reasoning(2).inputValue()).toBe("off");
+    await openLevel(page, 3);
     await box(3).click();
     expect(await box(3).getAttribute("aria-expanded")).toBe("true");
     const listbox = page.getByRole("listbox", { name: "Model for level 3" });
@@ -802,6 +950,7 @@ export const tests: BrowserTest[] = [
     expect(await box(3).inputValue()).toBe("Fresh");
     expect(await levelTexts(3)).toEqual(["off"]);
     expect(await reasoning(3).inputValue()).toBe("off");
+    await openLevel(page, 4);
     await box(4).click();
     await box(4).fill("claude");
     await box(4).press("ArrowDown");
@@ -809,6 +958,7 @@ export const tests: BrowserTest[] = [
     expect(await box(4).inputValue()).toBe("Claude Sonnet 5");
     expect(await levelTexts(4)).toHaveLength(7);
     expect(await reasoning(4).inputValue()).toBe("high");
+    await openLevel(page, 5);
     await box(5).click();
     await box(5).fill("gpt");
     await box(5).press("Enter");
@@ -826,9 +976,13 @@ export const tests: BrowserTest[] = [
         },
       },
     ]);
+    await openLevel(page, 1);
     await box(1).click();
     await box(1).press("Escape");
     expect(await page.locator("#settings-overlay.on").count()).toBe(1);
+    await browserExpect(
+      page.getByRole("region", { name: "Level 1", exact: true }),
+    ).toBeVisible();
     await page.keyboard.press("Escape");
     await page.waitForFunction(
       "!document.querySelector('#settings-overlay')?.classList.contains('on')",
@@ -855,28 +1009,22 @@ export const tests: BrowserTest[] = [
     await routeArtifacts(page, base);
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
-    await page.locator("#menu-btn").tap();
-    await page.locator("#sidebar.open").waitFor();
-    await page.locator("#settings-btn").tap();
+    await openSettingsPanel(page);
     await page.locator("#settings-overlay.on").waitFor();
     await page.locator('#settings-nav button[data-cat="models"]').tap();
-    const box = page.getByRole("combobox", { name: "Model for level 2" });
-    await box.waitFor();
+    await page.getByRole("button", { name: /^Effort ladder / }).tap();
     await expectLevelOneHelp(page);
-    const label = page.locator(".row.effort > span").nth(1);
+    await openLevel(page, 2);
+    const sheet = page.getByRole("region", { name: "Level 2", exact: true });
+    const box = sheet.getByRole("combobox", { name: "Model for level 2" });
+    await box.waitFor();
     const select = page.getByLabel("Reasoning for level 2");
-    const [labelBox, inputBox, selectBox] = await Promise.all([
-      label.boundingBox(),
-      box.boundingBox(),
-      select.boundingBox(),
-    ]);
-    expect(inputBox!.y).toBeGreaterThan(labelBox!.y + labelBox!.height - 1);
-    expect(selectBox!.y).toBeGreaterThan(inputBox!.y + inputBox!.height - 1);
-    expect(inputBox!.height).toBeLessThan(44);
-    expect(inputBox!.x + inputBox!.width).toBeLessThanOrEqual(390);
-    const fontSize = (el: unknown) =>
-      (globalThis as any).getComputedStyle(el).fontSize;
-    expect(await box.evaluate(fontSize)).toBe(await label.evaluate(fontSize));
+    for (const control of [box, select]) {
+      const bounds = (await control.boundingBox())!;
+      expect(bounds.height).toBeGreaterThanOrEqual(44);
+      expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+    }
+    expect(await box.evaluate(fontSize)).toBe("16px");
     expect(await box.getAttribute("autocapitalize")).toBe("off");
     expect(await box.getAttribute("autocorrect")).toBe("off");
     await box.tap();
@@ -893,12 +1041,15 @@ export const tests: BrowserTest[] = [
         (el) => (globalThis as any).getComputedStyle(el).position,
       ),
     ).toBe("static");
-    expect(listBox!.y).toBeGreaterThanOrEqual(inputBox!.y + inputBox!.height);
+    const scrolledInputBox = await box.boundingBox();
+    expect(listBox!.y).toBeGreaterThanOrEqual(
+      scrolledInputBox!.y + scrolledInputBox!.height,
+    );
     expect(optionBox!.height).toBeGreaterThanOrEqual(44);
     expect(await listCapacity(listbox)).toBeGreaterThanOrEqual(4);
     await visibleAndUncovered(
       page,
-      '.model-box-option[data-id="openrouter/vendor/fresh"]',
+      '.model-box-option[data-id="openrouter/vendor/fresh"]:visible',
     );
     await option.tap();
     expect(await box.inputValue()).toBe("Fresh");
@@ -1065,35 +1216,381 @@ export const tests: BrowserTest[] = [
       await page.waitForFunction(
         "!document.querySelector('#messages')?.classList.contains('stale')",
       );
-      await page.locator("#messages").waitFor();
+      await page.locator("#sidebar.open .agent.selected").click();
       await page.locator("#input").waitFor();
       await visibleAndUncovered(page, "#messages");
       await visibleAndUncovered(page, "#input");
       expect(await page.locator("#messages").isVisible()).toBeTrue();
       expect(await page.locator("#input").isVisible()).toBeTrue();
-      await page.locator("#menu-btn").tap();
-      await page.locator("#settings-btn").tap();
+      await openSettingsPanel(page);
+      await showCategory(page, "account");
       const homes = page.locator(".remotes-settings .remote-incoming");
       await homes.getByText("No homes have access.", { exact: true }).waitFor();
-      const minted = await context.request.post(
-        `${server.base}api/backend-keys`,
-        {
-          data: { password: LOGIN, name: "browser-home" },
-        },
-      );
-      expect(minted.status()).toBe(200);
+      const ids: string[] = [];
+      for (let i = 0; i < 2; i++) {
+        const minted = await context.request.post(
+          `${server.base}api/backend-keys`,
+          {
+            data: { password: LOGIN, name: "browser-home" },
+          },
+        );
+        expect(minted.status()).toBe(200);
+        ids.push(((await minted.json()) as { id: string }).id);
+      }
       await page.locator("#settings-close").tap();
-      await page.locator("#menu-btn").tap();
-      await page.locator("#settings-btn").tap();
-      await homes.getByText("browser-home", { exact: true }).waitFor();
-      await homes
-        .getByRole("button", { name: "Revoke access", exact: true })
-        .tap();
+      await openSettingsPanel(page);
+      await showCategory(page, "account");
+      for (const id of ids) {
+        const address = `@browser-home\\.${id.slice(0, 6)}`;
+        await homes
+          .getByRole("button", {
+            name: new RegExp(`^browser-home ${address} · last seen never`),
+          })
+          .tap();
+        const details = page.getByRole("region", {
+          name: "browser-home",
+          exact: true,
+        });
+        await browserExpect(
+          details.getByText(
+            new RegExp(
+              `^Created .+ · last seen never · agents here reach it as ${address}$`,
+            ),
+          ),
+        ).toBeVisible();
+        await details
+          .getByRole("button", { name: "Revoke access", exact: true })
+          .tap();
+        await browserExpect(details).toHaveCount(0);
+      }
       await homes.getByText("No homes have access.", { exact: true }).waitFor();
       expect(errors).toEqual([]);
     } finally {
       await context.close();
       await stopServer(server);
+    }
+  },
+  // Feature: #2963 subscription sign-in opens the provider and takes the pasted address.
+  async function test_subscription_sign_in_pastes_the_redirect_address(
+    browser,
+    base,
+  ) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 915 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    for (const [authorize, callback, code] of [
+      [
+        "https://claude.ai/oauth/authorize",
+        "http://localhost:53692/callback",
+        "claude-code",
+      ],
+      [
+        "https://auth.openai.com/oauth/authorize",
+        "http://localhost:1455/auth/callback",
+        "chatgpt-code",
+      ],
+    ]) {
+      await context.route(`${authorize}**`, (route) => {
+        const state = new URL(route.request().url()).searchParams.get("state");
+        const target = `${callback}?code=${code}&state=${state}`;
+        return route.fulfill({
+          contentType: "text/html",
+          body: `<script>location.replace(${JSON.stringify(target)})</script>`,
+        });
+      });
+      await context.route(`${callback}**`, (route) =>
+        route.fulfill({ status: 404, body: "unreachable" }),
+      );
+    }
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    const requests: Record<string, string>[] = [];
+    const replies: [number, string][] = [
+      [
+        200,
+        JSON.stringify({
+          access_token: "sk-test-acc",
+          refresh_token: "sk-test-ref",
+          expires_in: 3600,
+        }),
+      ],
+      [429, "slow"],
+    ];
+    const tokens = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (call) => {
+        requests.push({
+          path: new URL(call.url).pathname,
+          ...Object.fromEntries(new URLSearchParams(await call.text())),
+        });
+        const [status, body] = replies.shift() ?? [500, "no reply"];
+        return new Response(body, { status });
+      },
+    });
+    const account = Buffer.from(
+      JSON.stringify({
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct" },
+      }),
+    ).toString("base64url");
+    const chatgptToken = JSON.stringify({
+      access_token: `h.${account}.s`,
+      refresh_token: "sk-test-cref",
+      expires_in: 7200,
+    });
+    try {
+      await gotoRoot(page, base);
+      await page.locator(".agent").first().waitFor();
+      await page.request.post(`${base}__browser-test/subscription-token-urls`, {
+        data: {
+          claude: `${tokens.url}claude/token`,
+          chatgpt: `${tokens.url}codex/token`,
+        },
+      });
+      await openSettingsPanel(page);
+      await page.locator('#settings-nav button[data-cat="auth"]').tap();
+      const signIn = async (title: string, name: string) => {
+        await closeDetails(page);
+        await page
+          .locator(
+            `.provider[data-provider="${title.toLowerCase()}"] > .settings-detail > button.settings-row`,
+          )
+          .tap();
+        const section = page.getByRole("region", { name: title, exact: true });
+        const subscription = section.getByRole("button", {
+          name: "Subscription",
+        });
+        await section.getByRole("button", { name: "API key" }).tap();
+        await browserExpect(section.locator("button.primary")).toHaveText(
+          "Save key",
+        );
+        await subscription.tap();
+        await browserExpect(section.locator(".keypanel")).toBeHidden();
+        const open = section.getByRole("link", {
+          name: `Open ${name} sign-in`,
+        });
+        const answer = section.getByRole("textbox", {
+          name: `Address after signing in to ${name}`,
+        });
+        const finish = section.getByRole("button", { name: "Finish sign-in" });
+        for (const control of [open, answer, finish]) {
+          await control.waitFor();
+          expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(
+            44,
+          );
+        }
+        await browserExpect(open).toBeFocused();
+        const [provider] = await Promise.all([
+          context.waitForEvent("page"),
+          open.tap(),
+        ]);
+        await provider.waitForURL(/^http:\/\/localhost:\d+\/.*\?code=/);
+        const state = new URL(provider.url()).searchParams.get("state");
+        await answer.fill(provider.url());
+        await provider.close();
+        await finish.tap();
+        return { section, state };
+      };
+
+      const claude = await signIn("Claude", "Claude");
+      await browserExpect(
+        claude.section.getByText("Logged in with your Claude subscription."),
+      ).toBeVisible();
+      await browserExpect(
+        page.locator(
+          '.provider[data-provider="claude"] > .settings-detail > button.settings-row .settings-row-value',
+        ),
+      ).toHaveText("Subscription · signed in");
+      await browserExpect(claude.section.locator(".paste-sign-in")).toHaveCount(
+        0,
+      );
+
+      const chatgpt = await signIn("OpenAI", "ChatGPT");
+      const command = chatgpt.section.locator(".localfb pre");
+      await browserExpect(command).toContainText("code=chatgpt-code");
+      await browserExpect(
+        chatgpt.section.locator(".paste-sign-in"),
+      ).toHaveCount(0);
+      await chatgpt.section
+        .getByRole("textbox", { name: "Command output" })
+        .fill(chatgptToken);
+      await chatgpt.section
+        .locator(".localfb")
+        .getByRole("button", { name: "Finish sign-in" })
+        .tap();
+      await browserExpect(
+        chatgpt.section.getByText("Logged in with your ChatGPT subscription."),
+      ).toBeVisible();
+      await browserExpect(chatgpt.section.locator(".localfb")).toBeHidden();
+
+      expect(requests.map((request) => [request.path, request.code])).toEqual([
+        ["/claude/token", "claude-code"],
+        ["/codex/token", "chatgpt-code"],
+      ]);
+      expect(requests[0]!.code_verifier).toBe(claude.state!);
+      expect(errors).toEqual([]);
+    } finally {
+      for (const path of ["auth", "codex-auth"])
+        await page.request.post(`${base}api/pi/${path}/logout`);
+      await context.close();
+      await tokens.stop(true);
+    }
+  },
+  // Feature: #2932 response-header usage limits show under each login.
+  async function test_usage_limits_from_response_headers(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    const at = (hours: number) =>
+      String(Math.floor(Date.now() / 1000) + hours * 3600);
+    try {
+      for (const path of ["auth", "codex-auth"])
+        expect(
+          (
+            await page.request.post(`${base}api/pi/${path}/api-key`, {
+              data: { key: "browser-test-inline-key" },
+            })
+          ).ok(),
+        ).toBeTrue();
+      for (const [name, headers] of [
+        [
+          "anthropic-sse",
+          {
+            "anthropic-ratelimit-unified-status": "allowed",
+            "anthropic-ratelimit-unified-5h-status": "allowed",
+            "anthropic-ratelimit-unified-5h-utilization": "0.62",
+            "anthropic-ratelimit-unified-5h-reset": at(2),
+            "anthropic-ratelimit-unified-7d-status": "allowed",
+            "anthropic-ratelimit-unified-7d-utilization": "0.18",
+            "anthropic-ratelimit-unified-7d-reset": at(72),
+            "anthropic-ratelimit-unified-representative-claim": "five_hour",
+            "anthropic-ratelimit-unified-reset": at(2),
+          },
+        ],
+        [
+          "openai-codex-sse",
+          {
+            "x-codex-primary-used-percent": "41",
+            "x-codex-primary-window-minutes": "300",
+            "x-codex-primary-reset-at": at(1),
+            "x-codex-secondary-used-percent": "7",
+            "x-codex-secondary-window-minutes": "10080",
+            "x-codex-secondary-reset-at": at(120),
+          },
+        ],
+      ] as const) {
+        const chat = await context.newPage();
+        const chatErrors = captureErrors(chat);
+        const seeded = await chat.request.post(
+          `${base}__browser-test/seed-provider-replay`,
+          { data: { name, headers } },
+        );
+        const { agent } = await seeded.json();
+        await chat.goto(`${base}#agent=${agent}`);
+        await chat.locator("#input").fill("Public usage message.");
+        await chat.locator("#send").click();
+        await chat.getByText("RECORDED_PROVIDER_OK", { exact: true }).waitFor();
+        await browserExpect(chat.locator("#send.stop")).toHaveCount(0);
+        const status = await chat.request.post(
+          `${base}__browser-test/provider-replay-status`,
+          { data: { agent, close: true } },
+        );
+        expect(await status.json()).toEqual({ requests: 1, failures: [] });
+        expect(chatErrors).toEqual([]);
+        await chat.close();
+      }
+      await gotoRoot(page, base);
+      await page.locator(".agent").first().waitFor();
+      await page.locator("#settings-btn").click();
+      await page.locator('#settings-nav button[data-cat="auth"]').click();
+      const time = String.raw`(?:\w{3} )?\d\d:\d\d`;
+      for (const title of ["Claude", "OpenAI", "OpenRouter"]) {
+        const section = page.getByRole("region", { name: title, exact: true });
+        await browserExpect(section).toBeVisible();
+        await browserExpect(
+          section.getByRole("button", { name: "API key", exact: true }),
+        ).toBeVisible();
+        if (title !== "OpenRouter") {
+          await browserExpect(
+            section.getByRole("button", { name: /^Subscription/ }),
+          ).toBeVisible();
+          await browserExpect(
+            section.getByRole("button", { name: "Log out", exact: true }),
+          ).toBeVisible();
+        }
+      }
+      await browserExpect(page.locator("dialog[open]")).toHaveCount(0);
+      for (const width of [1280, 412]) {
+        await page.setViewportSize({ width, height: 915 });
+        for (const [title, left] of [
+          ["Claude", ["38", "82"]],
+          ["OpenAI", ["59", "93"]],
+        ] as const) {
+          await closeDetails(page);
+          const provider = page.locator(
+            `.provider[data-provider="${title.toLowerCase()}"]`,
+          );
+          const section = page.getByRole("region", {
+            name: title,
+            exact: true,
+          });
+          if (width === 412) {
+            await browserExpect(section).toBeHidden();
+            await provider
+              .locator(":scope > .settings-detail > button.settings-row")
+              .click();
+            await browserExpect(
+              page.getByRole("dialog", { name: title, exact: true }),
+            ).toBeVisible();
+          }
+          await browserExpect(section.locator(".usage-name")).toHaveText([
+            "5-hour",
+            "Weekly",
+          ]);
+          await browserExpect(section.locator(".usage-text")).toHaveText(
+            left.map(
+              (percent) => new RegExp(`^${percent}% left, resets ${time}$`),
+            ),
+          );
+          expect(
+            await section
+              .getByRole("progressbar")
+              .evaluateAll((bars) =>
+                bars.map((bar) => bar.getAttribute("aria-valuenow")),
+              ),
+          ).toEqual([...left]);
+          await browserExpect(
+            section.locator(".usage-limits .hint"),
+          ).toHaveText(new RegExp(`^As of ${time}$`));
+        }
+      }
+      await page
+        .getByRole("button", { name: "Close OpenAI", exact: true })
+        .click();
+      await page
+        .locator(
+          '.provider[data-provider="claude"] > .settings-detail > button.settings-row',
+        )
+        .click();
+      const claude = page.getByRole("region", { name: "Claude", exact: true });
+      await claude
+        .getByRole("button", { name: "API key", exact: true })
+        .click();
+      const key = claude.getByLabel("Anthropic API key");
+      await key.fill("unsaved-test-key");
+      await page.setViewportSize({ width: 1280, height: 915 });
+      await browserExpect(page.locator("dialog[open]")).toHaveCount(0);
+      await browserExpect(key).toBeVisible();
+      await browserExpect(key).toHaveValue("unsaved-test-key");
+      expect(errors).toEqual([]);
+    } finally {
+      for (const path of ["auth", "codex-auth"])
+        await page.request.post(`${base}api/pi/${path}/logout`);
+      await context.close();
     }
   },
 ];

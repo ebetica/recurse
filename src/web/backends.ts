@@ -1,5 +1,7 @@
 // Agents request/list connections, never supply credentials or contact URLs.
-// Only operator sessions sign in, dismiss or disconnect.
+// Only operator sessions sign in, dismiss or disconnect. Listing probes stale
+// connections in the background; remotes reach /api/remote-events only with
+// a callback token.
 import type { ConnectedBackends } from "../backends/connected";
 import { jsonDictBody } from "./login";
 import { HttpError, jsonResponse, type Router, type Exchange } from "./router";
@@ -47,14 +49,7 @@ export function registerBackendRoutes(
   const requireOperator = requireBackendOperator;
   router.get("/api/backends", async (ex) => {
     if (!requester(ex)) requireOperator(ex);
-    return jsonResponse(
-      store.list().map((row) => ({
-        ...row,
-        requested_by_title: row.requested_by
-          ? (agents.title(row.requested_by) ?? null)
-          : null,
-      })),
-    );
+    return jsonResponse(store.listForAgents(agents.title));
   });
   router.post("/api/backends", async (ex) => {
     const cid = requester(ex);
@@ -91,6 +86,16 @@ export function registerBackendRoutes(
       if (cid && agents.title(cid) !== undefined)
         await agents.deliverPlatformNote(cid, text).catch(() => {});
     }
+    return jsonResponse({ ok: true });
+  });
+  router.post("/api/remote-events", async (ex) => {
+    const label = ex.state.remote_event_label;
+    if (ex.state.auth_method !== "remote-callback" || typeof label !== "string")
+      throw new HttpError(403, "remote callback token required");
+    const { type } = await jsonDictBody(ex);
+    if (type !== "relay" && type !== "test")
+      throw new HttpError(422, "unknown remote event");
+    store.remoteEvent(label, type);
     return jsonResponse({ ok: true });
   });
   router.delete("/api/backends/{label}", async (ex) => {

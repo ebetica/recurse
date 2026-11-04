@@ -4,6 +4,7 @@
 // through the pane root.
 import { ArtifactContentCache } from "./content-cache.js";
 import type { ArtifactInfo, ArtifactVersion } from "./model.js";
+import type { PreparedCrop } from "./comment-crops.js";
 
 export interface ListCache {
   list: ArtifactInfo[];
@@ -35,6 +36,7 @@ export interface Comment {
   quote: string;
   text: string;
   box?: CommentBox;
+  crop?: PreparedCrop;
 }
 export interface ArtifactState {
   agentId: string | null;
@@ -47,6 +49,8 @@ export interface ArtifactState {
   loadingKey: string | null;
   failedKey: string | null;
   requestSeq: number;
+  revalidationSeq: number;
+  revalidating: boolean;
   versionsSeq: number;
   versionsId: string | null;
   versions: ArtifactVersion[];

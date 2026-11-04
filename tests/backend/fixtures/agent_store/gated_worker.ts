@@ -1,6 +1,6 @@
 // Test-only gate around the production handler, leaving all four Worker slots
 // occupied while the main thread checks admitted-but-uncompleted bounds.
-import "../../../../src/agents/agent_store_worker";
+import "../../../../src/agents/agent_store.worker";
 import { existsSync } from "node:fs";
 import type { WorkerRequest } from "../../../../src/agents/agent_store";
 declare const self: { onmessage: (event: MessageEvent<WorkerRequest>) => void };

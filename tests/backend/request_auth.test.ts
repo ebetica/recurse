@@ -38,6 +38,8 @@ beforeAll(async () => {
   app = await buildAuthApp(dir, {
     now: () => clock,
     sleep: async (seconds) => void slept.push(seconds),
+    extraRoutes: (router) =>
+      router.get("/api/status", (ex) => stubResponse(ex, "/api/status")),
   });
 });
 afterAll(async () => {
@@ -215,8 +217,11 @@ test("backend key lifecycle preserves operator and service boundaries", async ()
     expect(Object.keys(listed[0]).sort()).toEqual([
       "created",
       "id",
+      "label",
+      "last_client",
       "last_used",
       "name",
+      "url",
     ]);
     const stored = await readFile(join(keyDir, "backend-keys.json"), "utf8");
     expect(stored).not.toContain(home.key);
@@ -615,7 +620,7 @@ describe("invariant 7: loopback tool token", () => {
       await readFile(join(dir, "server.json"), "utf8"),
     ).token;
     const T: [string, string] = ["X-Loopback-Token", token];
-    expect(json(await send("GET", "/api/tree", [T])).auth_method).toBe(
+    expect(json(await send("GET", "/api/status", [T])).auth_method).toBe(
       "loopback",
     );
     expect(

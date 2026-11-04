@@ -5,6 +5,10 @@ import {
   retireIntoChild,
   sweep,
 } from "../../src/utils/trash";
+import {
+  retireAll as retireAllWorker,
+  sweepTrash,
+} from "../../src/utils/trash_sweep";
 import fs from "node:fs";
 import {
   closeSync,
@@ -45,8 +49,9 @@ function makeVictim(parent: string, missing = false): string {
   return victim;
 }
 
-test("retirement renames the original tree and a bounded sweep deletes it later", () => {
-  withRoot((root) => {
+test("retirement renames the original tree and a bounded sweep deletes it later", async () => {
+  const root = mkdtempSync(join(tmpdir(), "recurse-trash-"));
+  try {
     const parent = join(root, "source");
     const trash = join(root, "trash");
     mkdirSync(parent);
@@ -64,9 +69,11 @@ test("retirement renames the original tree and a bounded sweep deletes it later"
     expect(readFileSync(join(parked, "nested/payload.txt"), "utf8")).toBe(
       "payload",
     );
-    expect(sweep(trash, 1)).toBe(1);
+    expect(await sweepTrash([trash], 1)).toEqual([1]);
     expect(readdirSync(trash)).toEqual([]);
-  });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("sweep is bounded, ignores foreign names, and never follows a retired symlink", () => {
@@ -214,7 +221,8 @@ test("same-filesystem rename rejects a cross-device trash root", () => {
   }
 });
 
-test("retireAll reports one filesystem error and still retires later entries", () => {
+// Regression: #3110 Worker batches preserve isolated filesystem errors and later retirements.
+test("retireAll reports one filesystem error and still retires later entries", async () => {
   const sharedMemory = "/dev/shm";
   if (!existsSync(sharedMemory)) return;
   let external: string;
@@ -223,18 +231,19 @@ test("retireAll reports one filesystem error and still retires later entries", (
   } catch {
     return;
   }
+  const root = mkdtempSync(join(tmpdir(), "recurse-trash-batch-"));
   try {
-    withRoot((root) => {
-      const parent = join(root, "source");
-      const trash = join(root, "trash");
-      mkdirSync(parent);
+    const parent = join(root, "source");
+    const trash = join(root, "trash");
+    mkdirSync(parent);
+    const externalVictim = join(external, "payload");
+    writeFileSync(externalVictim, "keep");
+    if (statSync(external).dev === statSync(root).dev) return;
+    for (const batch of [retireAll, retireAllWorker]) {
       const localVictim = makeVictim(parent);
-      const externalVictim = join(external, "payload");
-      writeFileSync(externalVictim, "keep");
-      if (statSync(external).dev === statSync(root).dev) return;
       const failures: { code?: string; path: string }[] = [];
-      const count = retireAll(
-        [externalVictim, localVictim],
+      const count = await batch(
+        [externalVictim, join(parent, "missing"), localVictim],
         trash,
         (error, path) =>
           failures.push({ code: (error as { code?: string }).code, path }),
@@ -243,8 +252,9 @@ test("retireAll reports one filesystem error and still retires later entries", (
       expect(failures).toEqual([{ code: "EXDEV", path: externalVictim }]);
       expect(existsSync(externalVictim)).toBe(true);
       expect(existsSync(localVictim)).toBe(false);
-    });
+    }
   } finally {
+    rmSync(root, { recursive: true, force: true });
     rmSync(external, { recursive: true, force: true });
   }
 });

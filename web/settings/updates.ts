@@ -4,6 +4,7 @@
 // reloads into the new version (web/connection.ts).
 import { api, jpost } from "../api.js";
 import { settingsClient, settingsLabel } from "./target.js";
+import { settingsDetail } from "./layout.js";
 
 export interface UpdateStatus {
   release: { version: string; commit: string | null };
@@ -84,16 +85,29 @@ export function updateStatusText(status: UpdateStatus): [string, boolean] {
 
 export function buildUpdatesSection(body: HTMLElement): void {
   body.innerHTML = `
-    <p class="hint update-status" role="status"></p>
-    <div class="row"><button type="button" class="primary update-now" hidden>Update now</button></div>`;
+    <div class="group"><div class="item">
+      <p class="hint update-status" role="status"></p>
+      <button type="button" class="primary update-now" hidden>Update now</button></div></div>`;
   const text = body.querySelector<HTMLElement>(".update-status")!;
   const button = body.querySelector<HTMLButtonElement>(".update-now")!;
   let polling = false;
+  let summary = "Checking…";
+  const detail = settingsDetail(body, "Software update", () => summary);
   const show = (status: UpdateStatus) => {
     const [message, error] = updateStatusText(status);
     text.textContent = message;
     text.classList.toggle("err", error);
     const state = status.update?.state ?? "";
+    summary = error
+      ? "Needs attention"
+      : IN_PROGRESS.includes(state)
+        ? "Updating…"
+        : status.available && status.available !== status.installed
+          ? "Update available"
+          : status.installed
+            ? "Up to date"
+            : "Unavailable";
+    detail.refresh();
     button.textContent = state === "failed" ? "Try again" : "Update now";
     button.hidden =
       Boolean(status.skipped) ||

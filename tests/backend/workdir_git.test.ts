@@ -221,13 +221,11 @@ test("worktree summary computes one real diff and owns PR refresh separately", a
     root,
     { ...env, ...BUILD_ENV },
   );
-  const tasks: (() => Promise<void>)[] = [];
   const wg = new WorkdirGit({
     repoUrl: "unused",
     repoDir: root,
     dataDir: root,
     env,
-    backgroundTask: (_name, work) => tasks.push(work),
   });
   await measure(
     "summary",
@@ -252,54 +250,70 @@ test("worktree summary computes one real diff and owns PR refresh separately", a
       ]);
       expect(measurement.counters.get("git_diff_subprocesses")).toBe(1);
       expect(result.currentPr).toBeNull();
-      expect(tasks.length).toBe(1);
     },
     { write() {} },
   );
-  await tasks[0]!();
 });
 
-test("a gh lookup past its timeout is killed and reads as no PR", async () => {
+test("a gh lookup past its timeout is killed, reads as no PR and backs off", async () => {
   const pidFile = join(temp, "gh.pid");
   const [root, env] = setupRoot(
-    `#!/bin/sh\necho $$ > ${pidFile}\nexec /bin/sleep 30\n`,
+    `#!/bin/sh\necho $$ >> ${pidFile}\nexec /bin/sleep 30\n`,
   );
   await build(
     [
       ["mkdir", "r"],
       ["git", "r", "init", "-q", "-b", "main"],
-      ["write", "r/a", "a\n"],
-      ["git", "r", "add", "-A"],
-      ["git", "r", "commit", "-q", "-m", "a"],
-      ["write", "r/a", "b\n"],
+      ["git", "r", "commit", "-q", "--allow-empty", "-m", "a"],
+      ["git", "r", "remote", "add", "origin", "https://github.com/o/r"],
+      ["git", "r", "update-ref", "refs/remotes/origin/main", "HEAD"],
+      ["git", "r", "branch", "-q", "--set-upstream-to", "origin/main"],
     ],
     root,
     { ...env, ...BUILD_ENV },
   );
-  const tasks: (() => Promise<void>)[] = [];
+  const logged: unknown[] = [];
   const wg = new WorkdirGit({
     repoUrl: "x",
     repoDir: root,
     dataDir: root,
     env,
-    backgroundTask: (_name, work) => tasks.push(work),
+    log: (event, fields) => logged.push({ event, reason: fields.reason }),
   });
   const started = performance.now();
-  const out = await wg.worktreeDiff(join(root, "r"));
+  expect(await wg.branchPr(join(root, "r"), "test")).toBeNull();
   console.log("gh lookup elapsed ms", performance.now() - started);
-  expect(out.available).toBe(true);
-  expect(out.currentPr).toBeNull();
-  expect(await Bun.file(pidFile).exists()).toBe(false);
-  expect(tasks.length).toBe(1);
-  await tasks[0]!();
   const pid = (await Bun.file(pidFile).text()).trim();
   expect(await Bun.file(`/proc/${pid}/stat`).exists()).toBe(false);
+  expect(await wg.pullRequestDiff(prDiff.pr.url)).toMatchObject({
+    available: false,
+  });
+  expect((await Bun.file(pidFile).text()).trim()).toBe(pid);
+  expect(logged).toEqual([
+    { event: "gh_call", reason: "test" },
+    { event: "gh_call_skipped", reason: "pull_request_diff" },
+    { event: "gh_call_skipped", reason: "pull_request_description" },
+  ]);
 }, 20_000);
 
-test("cached open PR base wins over upstream, but explicit bases still win", async () => {
+test("branch PR lookups are rate-limited, skip final and default-branch closed PRs, and set the open PR base", async () => {
   const [root, env] = setupRoot(
-    '#!/bin/sh\nprintf \'%s\\n\' \'{"number":1801,"title":"Re-record the managed Pi wrapper on every root preparation","url":"https://github.com/ebetica/recurse/pull/1801","state":"OPEN","baseRefName":"main"}\'\n',
+    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$GH_CALLS"\n[ "$1" = api ] && exec /bin/cat "$GH_LIMITS"\nexec /bin/cat "$GH_PR"\n',
   );
+  const pr = {
+    number: 1801,
+    title: "Re-record the managed Pi wrapper on every root preparation",
+    url: "https://github.com/ebetica/recurse/pull/1801",
+    state: "OPEN",
+    baseRefName: "main",
+    headRepository: { name: "r" },
+    headRepositoryOwner: { login: "o" },
+  };
+  const [calls, payload] = [join(root, "calls"), join(root, "pr.json")];
+  const limits = join(root, "limits.json");
+  const fork = { ...pr, number: 9, headRepositoryOwner: { login: "fork" } };
+  write(payload, JSON.stringify([fork, pr]));
+  let clock = 0;
   await build(
     [
       ["mkdir", "r"],
@@ -312,48 +326,111 @@ test("cached open PR base wins over upstream, but explicit bases still win", asy
       ["write", "r/a", "branch\n"],
       ["git", "r", "commit", "-qam", "branch"],
       ["git", "r", "update-ref", "refs/remotes/origin/feature", "HEAD"],
-      ["git", "r", "remote", "add", "origin", "."],
+      ["git", "r", "remote", "add", "origin", "https://github.com/o/r"],
       ["git", "r", "config", "branch.feature.remote", "origin"],
       ["git", "r", "config", "branch.feature.merge", "refs/heads/feature"],
+      [
+        "git",
+        "r",
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+      ],
     ],
     root,
     { ...env, ...BUILD_ENV },
   );
-  const tasks: (() => Promise<void>)[] = [];
   const git = new WorkdirGit({
     repoUrl: "unused",
     repoDir: root,
     dataDir: root,
-    env,
-    backgroundTask: (_name, work) => tasks.push(work),
+    env: { ...env, GH_CALLS: calls, GH_PR: payload, GH_LIMITS: limits },
+    now: () => clock,
   });
   const wt = join(root, "r");
+  const lookup = async () => (await git.branchPr(wt, "test"))?.state ?? null;
+  const called = async () =>
+    (await Bun.file(calls).text()).split("\n").filter(Boolean);
+  const checkout = (...args: string[]) =>
+    build([["git", "r", "checkout", "-q", ...args]], root, {
+      ...env,
+      ...BUILD_ENV,
+    });
   expect((await git.worktreeDiff(wt)).reason).toBe("clean");
-  await tasks.shift()!();
+  expect(await lookup()).toBe("OPEN");
   const automatic = await git.worktreeDiff(wt);
   expect(automatic.base).toBe("origin/main");
+  expect(automatic.currentPr?.number).toBe(1801);
   expect(automatic.files.map((file) => file.path)).toEqual(["a"]);
   expect((await git.diffFile(wt, "a")).patch).toContain("+branch");
   expect((await git.worktreeDiff(wt, "HEAD")).baseSource).toBe("override:HEAD");
-  while (tasks.length) await tasks.shift()!();
-  await build([["git", "r", "checkout", "--detach", "HEAD"]], root, {
-    ...env,
-    ...BUILD_ENV,
-  });
-  const detached = await git.worktreeDiff(wt, "HEAD");
-  expect(detached.currentPr).toBeNull();
-  expect(detached.reason).toBe("clean");
-  expect(tasks.length).toBe(1);
-  await tasks.shift()!();
-  await build([["git", "r", "checkout", "feature"]], root, {
-    ...env,
-    ...BUILD_ENV,
-  });
+  expect(await lookup()).toBe("OPEN");
+  expect(await called()).toEqual([
+    "pr list --repo o/r --head feature --state all --limit 5 --json number,title,url,state,baseRefName,statusCheckRollup,headRepository,headRepositoryOwner",
+  ]);
+  await checkout("--detach", "HEAD");
+  expect(await lookup()).toBeNull();
   expect((await git.worktreeDiff(wt, "HEAD")).currentPr).toBeNull();
-  expect(tasks.length).toBe(1);
-  await tasks.shift()!();
-  expect((await git.worktreeDiff(wt, "HEAD")).currentPr?.number).toBe(1801);
-});
+  await checkout("feature");
+  expect(await lookup()).toBe("OPEN");
+  write(payload, JSON.stringify([{ ...pr, state: "MERGED" }]));
+  for (const _ of [0, 1]) {
+    clock += 61;
+    expect(await lookup()).toBe("MERGED");
+  }
+  expect(await called()).toHaveLength(2);
+  await build(
+    [
+      ["git", "r", "checkout", "-q", "main"],
+      ["git", "r", "branch", "-q", "--set-upstream-to", "origin/main"],
+    ],
+    root,
+    { ...env, ...BUILD_ENV },
+  );
+  write(payload, JSON.stringify([pr]));
+  expect(await lookup()).toBe("OPEN");
+  expect(await called()).toHaveLength(3);
+  const track = (branch: string) =>
+    Bun.spawn(["git", "config", "branch.main.merge", `refs/heads/${branch}`], {
+      cwd: wt,
+      env: { ...env, ...BUILD_ENV },
+    }).exited;
+  for (let i = 0; i <= 200; i++) {
+    await track(`b${i}`);
+    expect(await lookup()).toBe("OPEN");
+  }
+  await track("main");
+  expect(await lookup()).toBe("OPEN");
+  expect(await called()).toHaveLength(204);
+  write(payload, "[");
+  const reset = Math.round(Date.now() / 1000) + 3600;
+  write(
+    limits,
+    JSON.stringify({ resources: { core: { remaining: 0, reset } } }),
+  );
+  clock += 61;
+  expect(await lookup()).toBe("OPEN");
+  expect((await called()).slice(204)).toEqual([
+    "pr list --repo o/r --head main --state all --limit 5 --json number,title,url,state,baseRefName,statusCheckRollup,headRepository,headRepositoryOwner",
+    "api rate_limit",
+  ]);
+  write(payload, JSON.stringify([{ ...pr, state: "MERGED" }]));
+  await track("b200");
+  for (const _ of [0, 1]) {
+    clock += 900;
+    expect(await lookup()).toBe("OPEN");
+  }
+  expect(await called()).toHaveLength(206);
+  await track("main");
+  for (const _ of [0, 1]) {
+    clock += 3600;
+    expect(await lookup()).toBeNull();
+  }
+  expect(await called()).toHaveLength(207);
+  await checkout("feature");
+  expect(await lookup()).toBe("MERGED");
+  expect(await called()).toHaveLength(207);
+}, 60_000);
 
 // Regression: #2142 Git 2.55 ambiguous ref names must remain selectable
 test("diff candidates keep ambiguous short names and <remote>/HEAD on every Git", async () => {
@@ -423,41 +500,20 @@ test("PR patches decode Git-quoted paths", () => {
   );
 });
 
-test("PR list metadata includes the description after its background read", async () => {
-  const [root, env] = setupRoot('#!/bin/sh\nexec /bin/cat "$PR_METADATA"\n');
-  const payload = join(root, "metadata.json");
-  write(payload, JSON.stringify(prDiff.pr));
-  const tasks: (() => Promise<void>)[] = [];
-  const git = new WorkdirGit({
-    repoUrl: "unused",
-    repoDir: root,
-    dataDir: root,
-    env: { ...env, PR_METADATA: payload },
-    backgroundTask: (_name, work) => tasks.push(work),
-  });
-  expect(git.pullRequests(null, [prDiff.pr.url]).prs[0]?.metadata).toBe(
-    "pending",
-  );
-  await tasks.shift()!();
-  const row = git.pullRequests(null, [prDiff.pr.url]).prs[0]!;
-  expect(row.metadata).toBe("ready");
-  expect(row.title).toBe(prDiff.pr.title);
-  expect(row.body).toBe(prDiff.pr.body);
-  expect(tasks).toHaveLength(0);
-});
-
-test("PR summary and lazy patch share a bounded fetch without a checkout", async () => {
+test("PR summary, description and lazy patch share bounded fetches without a checkout", async () => {
   const [root, env] = setupRoot(
-    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PR_CALLS"\nexec /bin/cat "$PR_PATCH"\n',
+    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PR_CALLS"\n[ "$2" = view ] && exec /bin/cat "$PR_METADATA"\nexec /bin/cat "$PR_PATCH"\n',
   );
   const patch = join(root, "patch");
   const calls = join(root, "calls");
+  const metadata = join(root, "metadata.json");
   write(patch, prDiff.file.patch);
+  write(metadata, JSON.stringify({ body: prDiff.pr.body }));
   const git = new WorkdirGit({
     repoUrl: "unused",
     repoDir: join(root, "reaped"),
     dataDir: root,
-    env: { ...env, PR_PATCH: patch, PR_CALLS: calls },
+    env: { ...env, PR_PATCH: patch, PR_CALLS: calls, PR_METADATA: metadata },
   });
   const [summary, file] = await Promise.all([
     git.pullRequestDiff(prDiff.pr.url),
@@ -465,6 +521,8 @@ test("PR summary and lazy patch share a bounded fetch without a checkout", async
   ]);
   expect(summary.files).toEqual(prDiff.summary.files);
   expect(summary.target).toEqual(prDiff.summary.target);
+  expect(summary.body).toBe(prDiff.pr.body);
+  expect((await Bun.file(calls).text()).split("\n")).toHaveLength(3);
   expect(file).toEqual(prDiff.file);
   expect((await git.pullRequestDiff(prDiff.pr.url, "missing")).available).toBe(
     false,

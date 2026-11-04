@@ -10,12 +10,24 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { logText, lostTasks } from "../../src/agents/durable/failure_log.ts";
+import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
+import { LiveDoc } from "@earendil-works/pi-durable";
+import { commitWrites } from "@earendil-works/pi-durable/testing";
+import {
+  openWorkerSqliteStorage,
+  SqliteWorker,
+} from "../../src/agents/durable/sqlite_worker";
 import { DurableHost } from "../../src/agents/durable/host.ts";
 import {
   recordMessage,
   WARNING,
 } from "../../src/observability/runtime_logging";
-import { testDeps, until } from "./fixtures/durable_host/host.ts";
+import {
+  fauxHost,
+  idle,
+  testDeps,
+  until,
+} from "./fixtures/durable_host/host.ts";
 
 setDefaultTimeout(30_000);
 type Rec = Record<string, unknown>;
@@ -221,6 +233,72 @@ test("a reply the scheduler could not save shows one error row, which never reac
     expect(requests[0]).not.toContain("non-JSON");
   } finally {
     await host.close();
+  }
+});
+
+// Regression: #3013 restart-limited tasks end upstream instead of parking for Recurse to abort.
+test("a restart-limited reply ends with a visible error and a later input can run", async () => {
+  const dataDir = mkdtempSync(join(root, "restarted-"));
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      join(import.meta.dir, "fixtures/durable_host/restart_child.ts"),
+      dataDir,
+    ],
+    {
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  const worker = new SqliteWorker();
+  const { host, faux } = fauxHost(dataDir);
+  try {
+    const reader = child.stdout.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain("request started");
+    reader.releaseLock();
+    child.kill("SIGKILL");
+    await child.exited;
+    const storage = await openWorkerSqliteStorage(
+      worker,
+      join(dataDir, "conversations/c1/durable/session.sqlite"),
+    );
+    try {
+      const tasks = await storage.scanTasks({}, 100, undefined, context);
+      const generation = tasks.items.find(
+        (task) => task.kind === "pi.generation",
+      )!;
+      expect(generation.state.status).toBe("running");
+      await commitWrites(
+        storage,
+        [{ type: "task", value: { ...generation, restarts: 5 } }],
+        context,
+      );
+    } finally {
+      await storage.close(context);
+    }
+    const { harness, conversation } = await host.open("c1");
+    await until(idle(host));
+    await until(async () =>
+      (await rows(host)).some((row) =>
+        String(row.error).includes("repeated server restarts"),
+      ),
+    );
+    expect(
+      (await harness.snapshot(LiveDoc, conversation.id, context))?.runFailure
+        ?.reason,
+    ).toBe("restart_limit");
+    expect((await harness.inspect(context)).tasks).toHaveLength(0);
+    faux.setResponses([fauxAssistantMessage("recovered answer")]);
+    await host.send("c1", "Try again", "again");
+    await until(async () =>
+      (await rows(host)).some((row) => row.text === "recovered answer"),
+    );
+  } finally {
+    child.kill("SIGKILL");
+    await child.exited;
+    await host.close();
+    await worker.close();
   }
 });
 

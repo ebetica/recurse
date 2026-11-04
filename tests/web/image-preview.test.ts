@@ -15,7 +15,7 @@ describe("previewTargetFor", () => {
         filename: "cat.png",
       }),
     ).toEqual({
-      url: "/api/conversations/agent-a/attachments/0123456789abcdef0123456789abcdef.png/preview",
+      url: "/api/conversations/agent-a/attachments/0123456789abcdef0123456789abcdef.png/thumbnail",
       alt: "cat.png",
     });
   });

@@ -1,0 +1,86 @@
+[
+  {
+    "name": "env",
+    "description": "Environment overrides affect later tools and persist across turns/restarts. Results hide values. Unset removes overrides, not ambient defaults. Protected: RECURSE_*, PI_*, CHAT_DATA_DIR. Limits: 16,384 chars/value, 64 KiB total; multiline allowed.",
+    "parameters": {
+      "type": "object",
+      "required": ["action"],
+      "properties": {
+        "action": {
+          "anyOf": [
+            {
+              "type": "string",
+              "const": "set"
+            },
+            {
+              "type": "string",
+              "const": "unset"
+            },
+            {
+              "type": "string",
+              "const": "list"
+            },
+            {
+              "type": "string",
+              "const": "load"
+            }
+          ]
+        },
+        "name": {
+          "type": "string",
+          "description": "For set."
+        },
+        "value": {
+          "type": "string",
+          "description": "For set."
+        },
+        "names": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "description": "For unset."
+        },
+        "path": {
+          "type": "string",
+          "description": "Dotenv file for load; relative to cwd."
+        }
+      }
+    }
+  },
+  {
+    "name": "chdir",
+    "description": "Change cwd for subsequent tools and turns.",
+    "parameters": {
+      "type": "object",
+      "required": ["directory"],
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Relative paths use the current cwd."
+        }
+      }
+    }
+  },
+  {
+    "name": "publish",
+    "description": "Publish files in the operator's reply and Files pane; images display inline. Other agents need file paths, not publication. Same filename adds a version. Limits: 100 MB/file, 120 files/minute. Text paths/links don't publish files.",
+    "parameters": {
+      "type": "object",
+      "required": ["paths"],
+      "properties": {
+        "paths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "name": {
+          "type": "string"
+        }
+      }
+    }
+  }
+]

@@ -18,15 +18,15 @@ describe("pi-safety config", () => {
     expect(result.error).toContain("rules must be an array");
   });
 
-  test("appends the Recurse-global Markdown prompt after JSON rules", () => {
+  test("appends the Recurse-global Markdown prompt after JSON rules", async () => {
     const dir = mkdtempSync(join(tmpdir(), "pi-safety-prompt-"));
     writeFileSync(
       join(dir, "pi-safety.json"),
       JSON.stringify({ rules: ["Deny X."] }),
     );
-    expect(loadSafetyConfig(dir).additionalRules).toEqual(["Deny X."]);
+    expect((await loadSafetyConfig(dir)).additionalRules).toEqual(["Deny X."]);
     writeFileSync(join(dir, "pi-safety.md"), "\n# Notes\nSlurm jobs are OK.\n");
-    expect(loadSafetyConfig(dir).additionalRules).toEqual([
+    expect((await loadSafetyConfig(dir)).additionalRules).toEqual([
       "Deny X.",
       "# Notes\nSlurm jobs are OK.",
     ]);

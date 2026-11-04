@@ -13,6 +13,7 @@ import {
 import type { ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { OwnedProcess } from "../../../process_lifecycle.ts";
+import { slowSpan } from "../../../observability/slow_span";
 import {
   McpOAuthCredentialStore,
   McpServerConnection,
@@ -103,7 +104,7 @@ class OwnedStdio extends StdioTransport {
   override async start() {
     await this.previous?.close();
     this.signal.throwIfAborted();
-    await super.start();
+    await slowSpan("mcp_stdio_spawn", undefined, () => super.start());
     const child = (this as unknown as { child: ChildProcess }).child;
     const exited = new Promise<number>((done) =>
       child.exitCode !== null || child.signalCode !== null
@@ -205,16 +206,18 @@ export class McpServers {
     for (const [key, raw] of Object.entries(record ?? {})) {
       let value: string | undefined;
       if (isCommandConfigValue(raw)) {
-        const proc = Bun.spawn(
-          ["/bin/sh", "-c", GATED, "sh", "/bin/sh", "-c", raw.slice(1)],
-          {
-            cwd,
-            env,
-            stdin: "pipe",
-            stdout: "pipe",
-            stderr: "ignore",
-            detached: true,
-          },
+        const proc = slowSpan("mcp_command_spawn", undefined, () =>
+          Bun.spawn(
+            ["/bin/sh", "-c", GATED, "sh", "/bin/sh", "-c", raw.slice(1)],
+            {
+              cwd,
+              env,
+              stdin: "pipe",
+              stdout: "pipe",
+              stderr: "ignore",
+              detached: true,
+            },
+          ),
         );
         procs.add(proc);
         try {

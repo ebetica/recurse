@@ -10,6 +10,7 @@ export {
   defineExtension,
   hook,
   ToolTask,
+  wrapSection,
   wrapTool,
 } from "@earendil-works/pi-durable";
 export { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
@@ -47,8 +48,18 @@ export { createPublish } from "../../../extensions/core/environment/publish.ts";
 export { createArtifact } from "../../../extensions/core/environment/artifact.ts";
 export { createSettings } from "../../../extensions/core/settings/settings.ts";
 export { createConfig } from "../../../config.ts";
+export { createCacheWarm } from "../../../extensions/extra/cache-warm/cache-warm.ts";
 export { createModelClock } from "../../../extensions/extra/model-clock/model-clock.ts";
-export { createCodex } from "../../../extensions/extra/codex/codex.ts";
+export { systemBeforeUser } from "../system_order.ts";
+export {
+  codexReplay,
+  createCodex,
+} from "../../../extensions/extra/codex/codex.ts";
+export {
+  createCodexCheckpoints,
+  requestCodexCompaction,
+} from "../../../extensions/extra/codex/compaction.ts";
+export { observeUsageLimits } from "../../../extensions/extra/usage-limits/usage-limits.ts";
 export { createRtk } from "../../../extensions/extra/rtk/rtk.ts";
 export { McpServers } from "../../../extensions/extra/mcp/mcp.ts";
 export {

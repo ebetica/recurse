@@ -6,7 +6,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { isAbsolute, join, resolve } from "node:path";
-import { ARTIFACT_PATHS } from "./build_stamp";
+import { ARTIFACT_PATHS } from "./build_stamp.cli";
 import {
   RootError,
   preparePiAgentDir,
@@ -16,7 +16,7 @@ import {
   validateLaunchEnvironment,
   type Roots,
 } from "./local_roots";
-import { buildCurrentGeneration } from "./launcher/build";
+import { buildCurrentGeneration } from "./launcher/build.cli";
 import {
   HERE,
   exists,
@@ -24,8 +24,8 @@ import {
   prepareCodeSource,
   repoUrl,
 } from "./launcher/git";
-import { acquireSupervisorLock, LOCK_FD_ENV } from "./launcher/lock";
-import { Supervisor } from "./launcher/supervisor";
+import { acquireSupervisorLock, LOCK_FD_ENV } from "./launcher/lock.cli";
+import { Supervisor } from "./launcher/supervisor.cli";
 import { execReplacing, logError, say } from "./launcher/system";
 import { versionLine } from "./release";
 import { pyResolve } from "./workdir_git";
@@ -41,7 +41,7 @@ export const PREBUILT_ARTIFACTS = [
   "web/dist/katex.css",
   "src/extensions/core/safety/index.ts",
   "src/extensions/core/environment/managed_tools.ts",
-  "src/extensions/extra/fff/fff_worker_thread.ts",
+  "src/extensions/extra/fff/fff_thread.worker.ts",
   "src/extensions/extra/mcp/mcp.ts",
   "src/extensions/extra/rtk/rtk.ts",
 

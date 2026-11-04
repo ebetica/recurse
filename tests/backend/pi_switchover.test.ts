@@ -14,6 +14,8 @@ import {
   openWorkerSqliteStorage,
 } from "../../src/agents/durable/sqlite_worker";
 import { switchoverWorld, until } from "./fixtures/durable_host/host";
+import { registerConversationRoutes } from "../../src/web/conversations";
+import { Router, type Exchange } from "../../src/web/router";
 const worlds: Awaited<ReturnType<typeof switchoverWorld>>[] = [];
 afterEach(async () => {
   for (const w of worlds.splice(0)) await w.close();
@@ -25,6 +27,7 @@ async function world() {
 }
 const signal = () => new AbortController().signal;
 
+// Regression: #3028 Legacy prompts remain inspectable before native migration.
 test("maintenance imports children before roots, including Settings custom providers; next turns are native", async () => {
   const w = await world();
   const root = "aaaaaaaaaaaa",
@@ -33,7 +36,34 @@ test("maintenance imports children before roots, including Settings custom provi
   const file = await w.row(root);
   const original = await readFile(file);
   await w.row(child, root);
-  await w.row(custom, root, "recurse-test/scripted");
+  const customFile = await w.row(custom, root, "recurse-test/scripted");
+  const session = await readFile(customFile, "utf8");
+  const offset = session.indexOf("\n") + 1;
+  const message = JSON.parse(session.slice(offset)).message;
+  const router = new Router();
+  registerConversationRoutes(router, { reads: w.instance.reads } as never);
+  const inspect = (position: number) => {
+    const url = new URL(
+      `http://localhost/api/conversations/${custom}/turn-prompt?offset=${position}`,
+    );
+    return router.handle({
+      request: new Request(url),
+      url,
+      path: url.pathname,
+      scheme: "http",
+      params: {},
+      query: {},
+      state: {},
+      disableTimeout() {},
+    } as Exchange);
+  };
+  const legacy = await inspect(offset);
+  expect(legacy.status).toBe(200);
+  expect(legacy.headers.get("cache-control")).toBe("no-store");
+  expect(await legacy.json()).toMatchObject({
+    role: "user",
+    driving: message.content,
+  });
   w.instance.lifecycle.launchMaintenanceJob("pi_switchover", (s) =>
     w.move.run(s),
   );
@@ -469,7 +499,7 @@ for (const workdir of [null, ""])
       );
     } finally {
       await harness.close(context);
-      worker.close();
+      await worker.close();
     }
   });
 
@@ -493,7 +523,7 @@ test("committed marker restores Durable after a metadata failure, without lettin
   ).toBe("durable");
 });
 
-test("an import does not queue behind a live conversation's SQLite statements", async () => {
+test("an import and a live conversation exclude foreign SQLite writes", async () => {
   const w = await world();
   const live = "555555555555";
   await w.instance.conversations.save({
@@ -518,44 +548,21 @@ test("an import does not queue behind a live conversation's SQLite statements", 
   const imported = "666666666666";
   await w.row(imported);
   const foreign = new Database(w.host.storagePath(live));
-  const order: string[] = [];
-  const posted = Promise.withResolvers<void>();
-  const request = SqliteWorker.prototype.request;
-  // test-check-allow: T3 Real SQLite request and foreign lock prove isolation.
-  const spy = spyOn(SqliteWorker.prototype, "request").mockImplementation(
-    function (this: SqliteWorker, ...args: Parameters<typeof request>) {
-      if (args[1].op === "exec" && args[1].sql === "BEGIN IMMEDIATE") {
-        foreign.exec("BEGIN IMMEDIATE");
-        const reply = request.apply(this, args);
-        posted.resolve();
-        return reply;
-      }
-      return request.apply(this, args);
-    },
-  );
-  const blocked = w.host
-    .send(live, "second", "op:operator::busy-2")
-    .then(
-      () => "accepted",
-      (error: unknown) => String(error),
-    )
-    .then((outcome) => order.push(`live send ${outcome}`));
   try {
-    await posted.promise;
-    spy.mockRestore();
-    const result = await w.host.importPi(
-      w.load(imported)!,
-      { state: () => ({ running: false, queued: 0 }) },
-      signal(),
-    );
-    order.push(`import ${result.status}`);
+    expect(() => foreign.exec("BEGIN IMMEDIATE")).toThrow("database is locked");
+    const [sent, result] = await Promise.all([
+      w.host.send(live, "second", "op:operator::busy-2"),
+      w.host.importPi(
+        w.load(imported)!,
+        { state: () => ({ running: false, queued: 0 }) },
+        signal(),
+      ),
+    ]);
+    expect(sent).toBe("op:operator::busy-2");
+    expect(result.status).toBe("imported");
   } finally {
-    spy.mockRestore();
-    foreign.exec("ROLLBACK");
     foreign.close();
   }
-  await blocked;
-  expect(order).toEqual(["import imported", "live send accepted"]);
   await until(
     () =>
       w.host.runningCount() === 0 && w.host.metadata(live).pending.length === 0,

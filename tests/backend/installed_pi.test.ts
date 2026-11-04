@@ -28,7 +28,7 @@ test("installed Pi lists every model Recurse's defaults and routes use", async (
   const root = mkdtempSync(join(tmpdir(), "pi-list-"));
   try {
     const run = await captureFixture(
-      [process.execPath, join(CHECKOUT_ROOT, "src/pi_auth_worker.mjs")],
+      [process.execPath, join(CHECKOUT_ROOT, "src/pi_auth.worker.mjs")],
       {
         input: `${JSON.stringify({ action: "list_models", providers: PI_MODEL_ROUTES.map(([p]) => p) })}\n`,
         env: {
@@ -47,7 +47,7 @@ test("installed Pi lists every model Recurse's defaults and routes use", async (
       env: { CHAT_DATA_DIR: join(root, "data"), HOME: join(root, "home") },
       authenticatedProviders: () => ["anthropic", "openai-codex"],
     });
-    config.setPiModelList(reply.models);
+    await config.setPiModelList(reply.models);
     expect(reply.reasoning_levels_unavailable).toBeUndefined();
     expect(
       reply.models.filter(
@@ -117,7 +117,7 @@ async function listFromPackageCopy(
       writeFileSync(join(fake, "index.js"), piAi.source);
     }
     const run = await captureFixture(
-      [process.execPath, join(CHECKOUT_ROOT, "src/pi_auth_worker.mjs")],
+      [process.execPath, join(CHECKOUT_ROOT, "src/pi_auth.worker.mjs")],
       {
         input: `${JSON.stringify({ action: "list_models", providers: ["anthropic"] })}\n`,
         env: {
@@ -139,7 +139,7 @@ async function listFromPackageCopy(
 }
 
 test("Pi's model list still lists when its reasoning levels cannot be read", async () => {
-  const levels = (source: string) => ({ version: "1.3.0", source });
+  const levels = (source: string) => ({ version: "1.5.0", source });
   for (const [piAi, reason] of [
     [null, "pi_ai_unresolved"],
     [{ version: "0.98.0", source: "export const x = 1;" }, "pi_ai_unresolved"],

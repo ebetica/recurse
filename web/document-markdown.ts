@@ -73,7 +73,17 @@ export async function revealArtifactImage(
   signal: AbortSignal,
 ): Promise<boolean> {
   try {
-    const dimensions = await loadDecodedArtifactImage(image, source, signal);
+    // Invariant: A failed thumbnail (a connected backend without the route)
+    // retries once as the original preview.
+    const dimensions = await loadDecodedArtifactImage(
+      image,
+      source,
+      signal,
+    ).catch((error) => {
+      if (signal.aborted || !source.endsWith("/thumbnail")) throw error;
+      const original = source.replace(/\/thumbnail$/, "/preview");
+      return loadDecodedArtifactImage(image, original, signal);
+    });
     if (signal.aborted || !frame.parentNode) return false;
     const width = Number(image.getAttribute("width"));
     const height = Number(image.getAttribute("height"));
