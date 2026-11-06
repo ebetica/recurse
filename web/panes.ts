@@ -527,6 +527,16 @@ function closePane(
     });
   return true;
 }
+/** Close pane `id` as the operator, leaving focus to the caller. */
+export function closeOpenPane(id: string): boolean {
+  return closePane(id, true, false);
+}
+
+/** Whether pane `id` is offered for the open agent. */
+export function paneAvailable(id: string): boolean {
+  return availableFor(buildCtx()).some((p) => p.id === id);
+}
+
 function togglePane(id: string): void {
   open.has(id)
     ? closePane(id, true, true)
@@ -910,6 +920,15 @@ function paneBadge(pane: PaneDef, ctx: PaneContext): string {
   }
 }
 
+function paneAttention(pane: PaneDef): boolean {
+  if (pane.id === ARTIFACTS_PANE_ID) return artifactsAttention;
+  try {
+    return !!pane.attention?.();
+  } catch {
+    return false;
+  }
+}
+
 function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   const mobile = isMobile();
   // Invariant: Reparent shared controls, retaining their owners and handlers.
@@ -931,12 +950,13 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     }
   }
   const badges = new Map(avail.map((p) => [p.id, paneBadge(p, ctx)]));
+  const attentive = avail.filter(paneAttention);
   const hash =
     avail.map((p) => `${p.id}:${badges.get(p.id) || ""}`).join(",") +
     "|" +
     [...open].join(",") +
     "|" +
-    (artifactsAttention ? "a" : "") +
+    attentive.map((p) => p.id).join(",") +
     "|" +
     (mobile ? "m" : "d") +
     "|" +
@@ -949,12 +969,13 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     !mobile && (any || (!!state.selectedId && state.selectedId !== DRAFT)),
   );
   fabEl.classList.toggle("on", mobile);
-  const mobileAttention =
-    artifactsAttention && avail.some((p) => p.id === ARTIFACTS_PANE_ID);
-  fabEl.classList.toggle("attention", mobileAttention);
+  fabEl.classList.toggle("attention", attentive.length > 0);
   // Spec: Pane counts appear in the menu, not on More.
   const fabLabel =
-    "More actions" + (mobileAttention ? " — Artifacts available" : "");
+    "More actions" +
+    (attentive.length
+      ? ` — ${attentive.map((p) => p.title || p.id).join(", ")} available`
+      : "");
   fabEl.title = fabLabel;
   fabEl.setAttribute("aria-label", fabLabel);
 
@@ -962,7 +983,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   railPanels.innerHTML = "";
   for (const p of avail) {
     const b = document.createElement("button");
-    const attention = artifactsAttention && p.id === ARTIFACTS_PANE_ID;
+    const attention = attentive.includes(p);
     b.className =
       "rail-btn" +
       (open.has(p.id) ? " active" : "") +
@@ -991,7 +1012,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   panelItems.innerHTML = "";
   for (const p of avail) {
     const b = document.createElement("button");
-    const attention = artifactsAttention && p.id === ARTIFACTS_PANE_ID;
+    const attention = attentive.includes(p);
     b.className =
       "menu-item pane-menu-item" +
       (open.has(p.id) ? " active" : "") +

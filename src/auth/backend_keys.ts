@@ -201,6 +201,7 @@ function backendV1Allowed(method: string, path: string): boolean {
 
 /** Narrow operator keys to agent routes when provenance is present. */
 export function backendAgentAllowed(method: string, path: string): boolean {
+  if (/^\/api\/conversations\/[^/]+\/path-image\/?$/.test(path)) return false;
   if (
     method === "POST" &&
     /^\/api\/conversations\/[^/]+\/(safety|pin|promote)\/?$/.test(path)

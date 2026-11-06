@@ -4,6 +4,7 @@
 // DurableHost owns Harness admission; cancellation bypasses failure cleanup.
 
 import type { Config } from "../../config";
+import type { Tags } from "../conversation_tags";
 import {
   WARNING,
   logEvent,
@@ -137,6 +138,8 @@ export interface CreateOptions {
   workdir?: string | null;
   attachmentDraft?: string | null;
   muted?: boolean;
+  /** Validated operator tags, saved before the conversation is published. */
+  tags?: Tags;
   takenOver?: boolean;
   spawnRequestId?: string | null;
   externalKey?: string | null;
@@ -507,6 +510,7 @@ export class SupervisorCreate {
       updated: this.deps.now(),
       created: this.deps.now(),
     };
+    if (o.tags) conv.tags = o.tags;
     if (conv.taken_over)
       conv.taken_over_order = (
         this.deps.freshTakenOverOrder ?? freshTakenOverOrder

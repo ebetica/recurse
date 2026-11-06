@@ -459,7 +459,9 @@ function addFiles(files: FileList | File[] | null): boolean {
 
 // Returns this owner's send-safe snapshot, then clears without release: these
 // stable URLs are about to become message content and are no longer unsent.
-export function takeAttachmentsForSend(): ReadyAttachment[] | null {
+export function takeAttachmentsForSend(
+  consume = true,
+): ReadyAttachment[] | null {
   const ownerState = attachmentStates.get(activeOwnerId);
   const entries = ownerState?.entries || [];
   if (entries.some((entry) => entry.status !== "ready" || !entry.url))
@@ -469,6 +471,7 @@ export function takeAttachmentsForSend(): ReadyAttachment[] | null {
     isImage: entry.isImage,
     filename: entry.filename,
   }));
+  if (!consume) return ready;
   // Invariant: A text-only draft may already hold an empty upload lease after
   // its last chip was removed. Sending consumes that lease too; an empty send
   // does not.

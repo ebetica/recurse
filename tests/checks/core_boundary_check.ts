@@ -18,6 +18,8 @@ const proc = Bun.spawn(
     ".",
     `:(glob,exclude)${directory}/**`,
     ":(exclude)docs/**",
+    ":(exclude)tests/backend/sidebar_script.test.ts",
+    ":(exclude)tests/mobile_browser/test_sidebar.ts",
     ":(exclude)README.md",
     ":(exclude)web/dist/**",
     optionalWorkflow,

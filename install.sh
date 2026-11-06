@@ -181,7 +181,7 @@ if [ "$MODE" != install ]; then
       "$CHANNEL" "${installed:-${head:0:7}}" "$available"
     exit 0
   fi
-  log "updating recurse checkout to $INSTALL_REF…"
+  log "updating recurse checkout to ${INSTALL_REF}…"
   if ! update_checkout "$dir"; then
     log "update failed. Fix the Git error and rerun recurse update."
     exit 1
@@ -263,7 +263,7 @@ elif [ -e "$INSTALL_DIR" ] || [ -e "$UPDATE_STAGE" ]; then
   exit 1
 else
   choose_ref . "$RECURSE_REPO"
-  log "cloning recurse $INSTALL_REF…"
+  log "cloning recurse ${INSTALL_REF}…"
   git -c advice.detachedHead=false clone --branch "$INSTALL_REF" "$RECURSE_REPO" "$INSTALL_DIR"
 fi
 
@@ -274,7 +274,7 @@ if [ -d "$UPDATE_STAGE/.git" ]; then
     log "switching the update channel from $previous to $CHANNEL"
   fi
   if choose_ref "$UPDATE_STAGE" origin; then
-    log "updating recurse checkout to $INSTALL_REF…"
+    log "updating recurse checkout to ${INSTALL_REF}…"
     update_checkout "$UPDATE_STAGE" && updated=1
   fi
   if [ "$updated" != 1 ]; then

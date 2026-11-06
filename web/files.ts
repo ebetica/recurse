@@ -64,6 +64,7 @@ import {
   type SessionFile,
 } from "./files/model.js";
 import type { PaneContext, Turn } from "./types.js";
+import { installReferenceImageViewer } from "./image-preview/references.js";
 
 const PANE_ID = "files";
 const FILES_PAGE_SIZE = 100;
@@ -286,21 +287,23 @@ function renderImage(): void {
           () => drawOn(detailImage(), closeImage),
           "files-draw",
         )}
-        ${iconButton("Open in Files", unsafeHTML(FILES_ICON), () => {
-          const open = () => {
-            selections.set(cid, { key: file.key });
-            if (paneEl) paneEl._filesHash = undefined;
-            repaint();
-            openPane(PANE_ID);
-          };
-          if (history.state?.imagePopout) {
-            window.addEventListener("popstate", open, { once: true });
-            closeImage();
-          } else {
-            closeImage();
-            open();
-          }
-        })}
+        ${file.image_url
+          ? nothing
+          : iconButton("Open in Files", unsafeHTML(FILES_ICON), () => {
+              const open = () => {
+                selections.set(cid, { key: file.key });
+                if (paneEl) paneEl._filesHash = undefined;
+                repaint();
+                openPane(PANE_ID);
+              };
+              if (history.state?.imagePopout) {
+                window.addEventListener("popstate", open, { once: true });
+                closeImage();
+              } else {
+                closeImage();
+                open();
+              }
+            })}
         ${iconButton("Close image", unsafeHTML(CLOSE_ICON), closeImage)}
       </header>
       <article
@@ -551,17 +554,7 @@ function installSwipe(
   );
 }
 
-document.querySelector("#messages")?.addEventListener("click", (event) => {
-  const image = (event.target as Element).closest?.("img");
-  const match =
-    image &&
-    !image.closest("button, a") &&
-    /^\/api\/conversations\/([\w-]+)\/attachments\/([\w.-]+)\/(?:preview|thumbnail)$/.exec(
-      image.getAttribute("src") ?? "",
-    );
-  if (match && match[1] === state.selectedId)
-    showFileInPane(match[1], match[2]!);
-});
+installReferenceImageViewer(() => state.selectedId, openImage, showFileInPane);
 
 function abandon(value: CacheEntry): void {
   value.request++;
@@ -792,6 +785,7 @@ function badge(ctx: PaneContext): string | number | null {
 }
 
 function downloadHref(cid: string, file: SessionFile): string | null {
+  if (file.image_url) return `${file.image_url}&download=1`;
   if (!file.id || file.unavailable) return null;
   return backendFor(cid).url(
     `/api/conversations/${encodeURIComponent(cid)}/attachments/${encodeURIComponent(file.id)}`,
@@ -809,8 +803,9 @@ async function downloadImage(cid: string, file: SessionFile): Promise<void> {
     try {
       const response = await fetch(href);
       if (!response.ok) throw new Error("Image download failed");
-      const original = new File([await response.blob()], file.name, {
-        type: file.media_type,
+      const blob = await response.blob();
+      const original = new File([blob], file.name, {
+        type: file.image_url ? blob.type : file.media_type,
       });
       const files = [original];
       if (navigator.canShare({ files })) {
@@ -831,6 +826,7 @@ async function downloadImage(cid: string, file: SessionFile): Promise<void> {
 }
 
 function imageHref(cid: string, file: SessionFile): string | null {
+  if (file.image_url) return file.image_url;
   const base = downloadHref(cid, file);
   if (!base || file.preview !== "image") return null;
   // Invariant: The bytes route forces octet-stream + nosniff (never renders);
@@ -1104,6 +1100,8 @@ function markdownPreview(
   renderDocumentMarkdown(body, text, {
     title: file.name,
     signal: controller.signal,
+    agentId: cid,
+    documentPath: file.source_path,
     resolveRelative: (path, image) => {
       let name: string;
       try {

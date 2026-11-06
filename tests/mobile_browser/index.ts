@@ -20,6 +20,7 @@ import { tests as hold } from "./test_hold_confirm";
 import { tests as recovery } from "./test_recovery";
 import { tests as wake } from "./test_wake";
 import { tests as settings } from "./test_settings";
+import { tests as notifications } from "./test_notification_clicks";
 import { tests as remotes } from "./test_remotes";
 import { tests as settingsSync } from "./test_settings_sync";
 import { tests as mcpSettings } from "./test_mcp_settings";
@@ -74,6 +75,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["recovery", recovery],
   ["wake", wake],
   ["settings", settings],
+  ["notifications", notifications],
   ["remotes", remotes],
   ["settings-sync", settingsSync],
   ["mcp-settings", mcpSettings],

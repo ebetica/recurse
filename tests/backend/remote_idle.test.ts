@@ -24,7 +24,12 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
     fetch(request) {
       const auth = request.headers.get("authorization") ?? "";
       checkins.push(`${new URL(request.url).pathname} ${auth.slice(0, 20)}`);
-      const answer = auth === laptopAuth ? checkAnswer : "sleep";
+      const name = auth === laptopAuth ? "laptop" : "home";
+      const answer = !paused[name]
+        ? "wake"
+        : name === "laptop"
+          ? checkAnswer
+          : "sleep";
       if (answer === "error") return new Response("down", { status: 500 });
       if (answer === "sleep" && auth === laptopAuth) laptopPaused++;
       return Response.json({
@@ -81,8 +86,9 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       async fetch(request) {
         const url = new URL(request.url);
         seen[name]!.push(url.pathname + url.search);
-        if (name === "laptop" && url.pathname === "/api/relay/requests")
-          laptopAuth = request.headers.get("authorization") ?? "";
+        if (url.pathname !== "/api/relay/requests") paused[name] = false;
+        if (name === "laptop" && request.headers.has("authorization"))
+          laptopAuth = request.headers.get("authorization")!;
         open[name]!++;
         try {
           const headers = new Headers(request.headers);

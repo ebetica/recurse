@@ -86,6 +86,7 @@ export interface ConversationDraftSpec {
   model?: string | null;
   effort?: string | null;
   level?: number | null;
+  tags?: string[];
   attachmentDraft?: string | null;
   muted?: boolean;
 }
@@ -94,6 +95,7 @@ export function conversationCreationBody(
   spec: ConversationDraftSpec,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { parent: spec.parent };
+  if (spec.tags?.length) body.tags = spec.tags;
   if (spec.model) body.model = spec.model;
   if (spec.effort) body.effort = spec.effort;
   if (typeof spec.level === "number") body.level = spec.level;

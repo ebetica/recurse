@@ -1,6 +1,6 @@
-// The built-in sidebar script. Pinned: pinned conversations, shown only when
-// there are any. Inbox: idle conversations. Active: working ones. Archive:
-// archived or snoozed; an archived one returns when it replies.
+// Built-in Pinned, Inbox, Active and Archive sections hide when empty.
+// Archived or snoozed rows return when they reply or their snooze expires.
+// Custom tag controls and sections are opt-in through a custom sidebar script.
 
 const ARCHIVE = {
   label: "Archive",
@@ -28,7 +28,7 @@ const archived = (r) =>
 const byRank = (a, b) => a.rank - b.rank;
 const DAY = 86400;
 
-export default function sidebar(rows, now) {
+export default function sidebar(rows) {
   rows = rows.filter((r) => r.depth === 0 && !r.side_of);
   const pinned = rows.filter((r) => r.tags.pinned && !archived(r));
   rows = rows.filter((r) => !pinned.includes(r));
@@ -43,22 +43,28 @@ export default function sidebar(rows, now) {
     rows: stale,
   };
   return [
-    ...(pinned.length
-      ? [{ title: "Pinned", rows: pinned.sort(byRank), rowActions: [UNPIN] }]
-      : []),
+    {
+      title: "Pinned",
+      hideWhenEmpty: true,
+      rows: pinned.sort(byRank),
+      rowActions: [UNPIN],
+    },
     {
       title: "Inbox",
+      hideWhenEmpty: true,
       rows: inbox.sort(byRank),
       rowActions: [ARCHIVE, SNOOZE, PIN],
       actions: stale.length ? [archiveStale] : [],
     },
     {
       title: "Active",
+      hideWhenEmpty: true,
       rows: active.sort(byRank),
       rowActions: [PIN],
     },
     {
       title: "Archive",
+      hideWhenEmpty: true,
       collapsed: true,
       rows: archive.sort((a, b) => b.updated - a.updated),
       rowActions: [RESTORE],

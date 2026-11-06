@@ -1,13 +1,15 @@
 // Sidebar actions change tags through API v1 on the owning backend, in batches.
-// Each change shows at once, over the tree's tags, until a tree read started
-// after its answer arrives or its request fails. Snooze asks for a time from a
-// few presets; a section action confirms its count first.
+// Changes overlay tree tags until a read started after the answer arrives.
+// Snooze asks for a time; custom tags use typed names or existing suggestions.
+// Section actions confirm their count before applying changes.
 import { html, nothing, render, type TemplateResult } from "lit";
 import { backendFor, parseConversationId } from "../backends/backend.js";
 import { treeOf } from "../backends/tree.js";
 import { poll } from "../conversation/poll.js";
 import { requestUiStatus } from "../ui-events.js";
 import { state } from "../state.js";
+import { OPERATOR_TAGS } from "../../src/agents/conversation_tags.js";
+import { normalizeSearchText, textRank, titleTokens } from "../fuzzy-match.js";
 import { liveTags, type Action, type Tags } from "./arrangement.js";
 
 export const SIDEBAR_CHANGE = "recurse:sidebar-change";
@@ -60,6 +62,15 @@ export async function runAction(
   anchor: DOMRect,
   confirm = false,
 ): Promise<void> {
+  if (action.ask === "tag") {
+    const name = await askTag(anchor, ids, action.clearAsked === true);
+    if (!name) return;
+    action = {
+      ...action,
+      set: action.clearAsked ? action.set : [...action.set, name],
+      clear: action.clearAsked ? [...action.clear, name] : action.clear,
+    };
+  }
   let until = action.until;
   if (until === "ask") until = await askSnooze(anchor);
   if (until === undefined && action.until === "ask") return;
@@ -154,7 +165,10 @@ let closeOpen: (() => void) | null = null;
 function popover<T>(
   anchor: DOMRect,
   label: string,
-  body: (done: (value: T | undefined) => void) => TemplateResult,
+  body: (
+    done: (value: T | undefined) => void,
+    refresh: () => void,
+  ) => TemplateResult,
 ): Promise<T | undefined> {
   closeOpen?.();
   host ??= document.body.appendChild(document.createElement("div"));
@@ -165,6 +179,8 @@ function popover<T>(
       closeOpen = null;
       document.removeEventListener("pointerdown", outside, true);
       document.removeEventListener("keydown", escape, true);
+      window.visualViewport?.removeEventListener("resize", position);
+      window.visualViewport?.removeEventListener("scroll", position);
       render(nothing, host!);
       host!.hidden = true;
       returnFocus?.focus?.({ preventScroll: true });
@@ -179,19 +195,166 @@ function popover<T>(
       done(undefined);
     };
     closeOpen = () => done(undefined);
-    render(
-      html`<div role="dialog" aria-label=${label}>${body(done)}</div>`,
-      host!,
-    );
+    const position = () => {
+      const viewport = window.visualViewport;
+      const top = (viewport?.offsetTop ?? 0) + 8;
+      const bottom = top + (viewport?.height ?? innerHeight) - 16;
+      host!.style.maxHeight = `${bottom - top}px`;
+      const box = host!.getBoundingClientRect();
+      const left = Math.min(
+        Math.max(8, anchor.left),
+        innerWidth - box.width - 8,
+      );
+      const y =
+        anchor.bottom + 4 + box.height < bottom
+          ? anchor.bottom + 4
+          : anchor.top - box.height - 4;
+      host!.style.left = `${left}px`;
+      host!.style.top = `${Math.max(top, Math.min(y, bottom - box.height))}px`;
+    };
+    const refresh = () => {
+      render(
+        html`<div role="dialog" aria-label=${label}>
+          ${body(done, refresh)}
+        </div>`,
+        host!,
+      );
+      position();
+    };
     host!.hidden = false;
-    const box = host!.getBoundingClientRect();
-    const left = Math.min(Math.max(8, anchor.left), innerWidth - box.width - 8);
-    const below = anchor.bottom + 4 + box.height < innerHeight;
-    host!.style.left = `${left}px`;
-    host!.style.top = `${below ? anchor.bottom + 4 : Math.max(8, anchor.top - box.height - 4)}px`;
-    host!.querySelector<HTMLElement>("[data-focus]")?.focus();
+    refresh();
+    host!
+      .querySelector<HTMLElement>("[data-focus]")
+      ?.focus({ preventScroll: true });
+    window.visualViewport?.addEventListener("resize", position);
+    window.visualViewport?.addEventListener("scroll", position);
     document.addEventListener("pointerdown", outside, true);
     document.addEventListener("keydown", escape, true);
+  });
+}
+
+/** Pick a custom tag from live rows, or type a normalized new name. */
+export function askTag(
+  anchor: DOMRect,
+  ids: string[],
+  removing: boolean,
+  optional = false,
+): Promise<string | undefined> {
+  const now = Date.now() / 1000;
+  const names = [
+    ...new Set(
+      (removing ? ids : Object.keys(state.nodes)).flatMap((id) =>
+        Object.keys(shownTags(id, now)),
+      ),
+    ),
+  ]
+    .filter((name) => !OPERATOR_TAGS.has(name))
+    .sort();
+  let value = "";
+  let picked = -1;
+  const label = removing ? "Remove tag" : "Tag name";
+  return popover<string>(anchor, label, (done, refresh) => {
+    const suggestions = names
+      .flatMap((name) => {
+        const rank = textRank(
+          {
+            normalizedTitle: name,
+            normalizedId: "",
+            tokens: titleTokens(name),
+          },
+          value,
+        );
+        return rank ? [{ name, ...rank }] : [];
+      })
+      .sort(
+        (a, b) =>
+          a.tier - b.tier || a.score - b.score || a.name.localeCompare(b.name),
+      );
+    const error = OPERATOR_TAGS.has(value)
+      ? "This tag is reserved. Choose another name."
+      : removing && value && !names.includes(value)
+        ? "Choose a tag on these conversations."
+        : "";
+    const submit = () => {
+      const name = suggestions[picked]?.name ?? value;
+      if (optional && !name) done("");
+      else if (
+        name &&
+        !OPERATOR_TAGS.has(name) &&
+        (!removing || names.includes(name))
+      )
+        done(name);
+    };
+    return html`<label class="popover-title" for="sidebar-tag-name"
+        >${label}</label
+      >
+      <input
+        id="sidebar-tag-name"
+        data-focus
+        type="text"
+        autocomplete="off"
+        autocapitalize="none"
+        spellcheck="false"
+        enterkeyhint="done"
+        .value=${value}
+        aria-invalid=${error ? "true" : "false"}
+        aria-describedby="sidebar-tag-error"
+        @input=${(event: Event) => {
+          const input = event.target as HTMLInputElement;
+          value = normalizeSearchText(input.value.replace(/\s/g, "-"))
+            .replace(/[^a-z0-9-]+/g, "-")
+            .slice(0, 24);
+          input.value = value;
+          picked = -1;
+          refresh();
+        }}
+        @keydown=${(event: KeyboardEvent) => {
+          if (event.isComposing) return;
+          if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            picked =
+              event.key === "ArrowDown"
+                ? Math.min(picked + 1, suggestions.length - 1)
+                : Math.max(-1, picked - 1);
+            refresh();
+            host!
+              .querySelector("[aria-pressed=true]")
+              ?.scrollIntoView({ block: "nearest" });
+          } else if (event.key === "Enter") {
+            event.preventDefault();
+            submit();
+          }
+        }}
+      />
+      <span id="sidebar-tag-error" role="status" ?hidden=${!error}
+        >${error}</span
+      >
+      <div class="tag-suggestions" aria-label="Existing tags">
+        ${suggestions.map(
+          ({ name }, index) =>
+            html`<button
+              type="button"
+              class="btn"
+              aria-pressed=${picked === index ? "true" : "false"}
+              @click=${() => done(name)}
+            >
+              ${name}
+            </button>`,
+        )}
+      </div>
+      <button
+        type="button"
+        class="btn primary"
+        ?disabled=${!value || !!error}
+        @click=${submit}
+      >
+        ${removing ? "Remove tag" : "Set tag"}
+      </button>
+      ${optional
+        ? html`<button type="button" class="btn" @click=${() => done("")}>
+            No tag
+          </button>`
+        : nothing}`;
   });
 }
 

@@ -1332,7 +1332,7 @@ describe("DurableHost", () => {
 const PIXEL_PNG =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-test("a server killed mid-generation resumes and finishes the turn on restart", async () => {
+test("startup leaves idle sessions closed while a killed mid-generation turn resumes", async () => {
   const dataDir = mkdtempSync(join(root, "kill-"));
   const child = Bun.spawn(
     [
@@ -1355,10 +1355,21 @@ test("a server killed mid-generation resumes and finishes the turn on restart", 
   } finally {
     child.kill("SIGKILL");
   }
-  const { faux, host } = fauxHost(dataDir);
+  const { faux, host, records, work } = fauxHost(dataDir);
+  for (const cid of ["idle1", "idle2", "idle3", "unused"])
+    records[cid] = { id: cid, backend: "durable", workdir: work };
+  const opened: string[] = [];
+  host.deps.log = (event, fields) => {
+    if (event === "durable_open") opened.push(String(fields.cid));
+  };
   faux.setResponses([fauxAssistantMessage("resumed answer")]);
   try {
     await host.openLive();
+    console.log(
+      `startup recovery opened ${opened.length} sessions: ${opened.join(", ")}`,
+    );
+    expect(opened).toEqual(["c1"]);
+    expect([...host.opened.keys()]).toEqual(["c1"]);
     await until(async () => {
       const view = await host.view("c1", { limit: 50 });
       return view.turn_status === "idle" && (view.blocks as Rec[]).length >= 2;
@@ -1368,6 +1379,23 @@ test("a server killed mid-generation resumes and finishes the turn on restart", 
       ["assistant", "resumed answer"],
     ]);
     expect(faux.state.callCount).toBe(1);
+    const activity = join(host.storagePath("c1"), "..", "activity");
+    await until(() => !existsSync(activity));
+    const next = held(fauxAssistantMessage("lazy answer"));
+    faux.setResponses([next.step]);
+    await host.send("idle1", "wake lazily", "op:operator::lazy");
+    await next.started;
+    const idleActivity = join(host.storagePath("idle1"), "..", "activity");
+    await until(() => existsSync(idleActivity));
+    next.release();
+    await until(() => host.runningCount() === 0 && !existsSync(idleActivity));
+    expect(await rows(host, "idle1")).toEqual([
+      ["user", "hello idle1"],
+      ["assistant", "settled idle1"],
+      ["user", "wake lazily"],
+      ["assistant", "lazy answer"],
+    ]);
+    expect(opened).toEqual(["c1", "idle1"]);
   } finally {
     await host.close();
   }

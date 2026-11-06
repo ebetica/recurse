@@ -502,7 +502,8 @@ async function cmdSend(parsed: Parsed, stdout: string): Promise<string> {
   const [cid, message] = parsed.positional;
   if (cid!.includes("@")) {
     const [agent, label] = cid!.split("@");
-    const unconfirmed = `Not confirmed: the connection to ${label} dropped during delivery; the message may have arrived. Check \`subagent read ${agent}@${label}\` before resending.\n`;
+    const unconfirmed = (reason = "delivery could not be confirmed") =>
+      `Not confirmed: ${reason.replace(/\.$/, "")}; the message may have arrived. Check \`subagent read ${agent}@${label}\` before resending.\n`;
     let result: JsonObject;
     try {
       result = await api(
@@ -516,7 +517,7 @@ async function cmdSend(parsed: Parsed, stdout: string): Promise<string> {
         Array.from({ length: 200 }, (_, i) => 400 + i),
       );
     } catch {
-      return unconfirmed;
+      return unconfirmed();
     }
     if (typeof result.id !== "string")
       return `Failed: ${String(result.detail ?? "delivery refused").replace(/\.$/, "")}.\n`;
@@ -534,14 +535,17 @@ async function cmdSend(parsed: Parsed, stdout: string): Promise<string> {
           ),
         );
       } catch {
-        return unconfirmed;
+        return unconfirmed();
       }
       if (outcome.state === "delivered") return `Delivered to ${cid}.\n`;
       if (outcome.state === "failed" || outcome.state === "queued")
         return `${outcome.state === "failed" ? "Failed" : "Queued"}: ${String(outcome.reason).replace(/\.$/, "")}.\n`;
-      if (outcome.state === "unconfirmed") return unconfirmed;
+      if (outcome.state === "unconfirmed")
+        return unconfirmed(
+          String(outcome.reason ?? "delivery could not be confirmed"),
+        );
     }
-    return unconfirmed;
+    return unconfirmed();
   }
   try {
     await loadConv(cid!);

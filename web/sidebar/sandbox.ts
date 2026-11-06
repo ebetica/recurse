@@ -9,7 +9,7 @@ const MEMORY = 16 * 1024 * 1024;
 const MAX_ERROR = 300;
 
 export type ScriptResult =
-  | { sections: unknown }
+  | { sections: unknown; newAgent?: unknown }
   | { error: string; line: number | null };
 
 /** Run `script`'s default export on `rows`; the error names its line. */
@@ -32,9 +32,11 @@ export async function runSidebarScript(
     const loaded = await vm.resolvePromise(loading);
     loading.dispose();
     if ("error" in loaded) throw loaded.error.consume((e) => vm.dump(e));
-    const sidebar = loaded.value.consume((exports) =>
-      exports.getProp("default"),
-    );
+    const exports = loaded.value;
+    const newAgent = exports
+      .getProp("newAgent")
+      .consume((value) => vm.dump(value));
+    const sidebar = exports.consume((value) => value.getProp("default"));
     if (vm.typeof(sidebar) !== "function")
       return { error: "The script must export a default function", line: null };
     deadline = performance.now() + RUN_MS;
@@ -45,7 +47,7 @@ export async function runSidebarScript(
       input,
       vm.newNumber(now),
     );
-    return { sections: output.consume((value) => vm.dump(value)) };
+    return { sections: output.consume((value) => vm.dump(value)), newAgent };
   } catch (error) {
     const { name, message, stack } = (error ?? {}) as Error;
     const line = /sidebar\.js:(\d+)/.exec(String(stack))?.[1];

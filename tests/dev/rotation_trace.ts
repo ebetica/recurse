@@ -119,7 +119,6 @@ async function check(
       "1",
       "-fp",
       "0",
-      "-noGenerateSpecTE",
       "-metadir",
       join(model, "states"),
       "Recorded.tla",

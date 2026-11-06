@@ -609,6 +609,7 @@ export interface StaticRoutesDeps {
   readonly themesFile: string;
   /** supervisor.readiness_snapshot: the one readiness authority. */
   readinessSnapshot(): unknown;
+  sleepCheckUrl?: string;
 }
 
 export function registerStaticRoutes(
@@ -682,6 +683,7 @@ export function registerStaticRoutes(
         deps.displayName,
       release: deps.release,
       theme: (await readTheme(deps.themesFile)).version,
+      ...(deps.sleepCheckUrl ? { check_url: deps.sleepCheckUrl } : {}),
     });
   });
 

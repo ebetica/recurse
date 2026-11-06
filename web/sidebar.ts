@@ -2,7 +2,7 @@
 // Keyed forest rows preserve DOM/scroll; tree_projection owns reveal policy.
 // Rename/swipe gestures freeze repaint until completion.
 // Rows keep title, badges and time on one line; models stay in the composer.
-import { startDraft } from "./composer.js";
+import { startNewAgent } from "./composer.js";
 import { sharedTrees, reloadChangedTreeLink } from "./shared-trees.js";
 import { copyText } from "./tool_details.js";
 import { remoteSectionHeader } from "./backends/discovery.js";
@@ -105,7 +105,9 @@ import {
   rowButtons,
   rowHoldItems,
   sectionHeader,
+  sectionKey,
   sectionHoldItems,
+  sectionForBackend,
 } from "./sidebar/sections.js";
 
 interface TreeEntry {
@@ -116,6 +118,7 @@ interface TreeEntry {
   /** A top-level row's actions. */
   actions?: Action[];
   depth: number;
+  sectionDepth?: number;
   relationship?: TreeRelationship;
   hasChildren?: boolean;
   collapsed?: boolean;
@@ -211,6 +214,7 @@ function visibleTree(): TreeEntry[] {
     out.splice(current >= 0 ? current + 1 : 0, 0, {
       draftRow: true,
       depth: current >= 0 ? out[current].depth + 1 : 0,
+      sectionDepth: current >= 0 ? out[current].sectionDepth : 0,
     });
   }
   return out;
@@ -251,35 +255,38 @@ function sectioned(): TreeEntry[] {
   sectionsByTitle.clear();
   actionsById.clear();
   const out: TreeEntry[] = [];
+  const append = (section: Section, parentFolded = false) => {
+    if (!parentFolded) {
+      sectionsByTitle.set(sectionKey(section), section);
+      out.push({ header: section, depth: section.path.length - 1 });
+    }
+    const folded = parentFolded || isFolded(section);
+    if (section.sections) {
+      for (const child of section.sections) append(child, folded);
+      return;
+    }
+    for (const id of section.ids) {
+      const rows = blocks.get(id);
+      if (!rows?.length) continue;
+      const writable = !section.backend || !!state.nodes[id]?.agent?.tags;
+      rows[0]!.actions = writable ? rowActions(section, id) : [];
+      actionsById.set(id, rows[0]!.actions);
+      if (!folded || rows.some((e) => e.n!.id === state.selectedId))
+        out.push(
+          ...rows.map((row) => ({
+            ...row,
+            sectionDepth: section.path.length - 1,
+          })),
+        );
+    }
+  };
   for (const { label } of backends()) {
     const owns = (id: string) => parseConversationId(id).label === label;
     if (label && !nodes.some((node) => owns(node.id))) continue;
     const writable = (id: string) => !label || !!state.nodes[id]?.agent?.tags;
     for (const original of sections) {
-      const section = {
-        ...original,
-        backend: label,
-        ids: original.ids.filter(owns),
-        actions: original.actions
-          .map((a) => ({
-            ...a,
-            ids: a.ids.filter((id) => owns(id) && writable(id)),
-          }))
-          .filter((a) => a.ids.length),
-      };
-      sectionsByTitle.set(`${label}/${section.title}`, section);
-      out.push({ header: section, depth: 0 });
-      for (const id of section.ids) {
-        const rows = blocks.get(id);
-        if (!rows?.length) continue;
-        rows[0]!.actions = writable(id) ? rowActions(section, id) : [];
-        actionsById.set(id, rows[0]!.actions);
-        if (
-          !isFolded(section) ||
-          rows.some((e) => e.n!.id === state.selectedId)
-        )
-          out.push(...rows);
-      }
+      const section = sectionForBackend(original, label, writable);
+      if (section) append(section);
     }
   }
   return out;
@@ -345,7 +352,11 @@ function announceMove(text: string): void {
 
 // Agent ids key real rows; one fixed sentinel keys the draft row.
 const rowKey = (e: TreeEntry): string =>
-  e.header ? `section:${e.header.title}` : e.draftRow ? "__draft__" : e.n!.id;
+  e.header
+    ? `section:${sectionKey(e.header)}`
+    : e.draftRow
+      ? "__draft__"
+      : e.n!.id;
 
 // One row: the not-yet-created draft placeholder, or a real agent node.
 function rowT(
@@ -356,7 +367,11 @@ function rowT(
   const visualDepth = Math.min(e.depth, MAX_VISUAL_DEPTH);
   const indentPx = 8 + visualDepth * INDENT;
   const pad = styleMap(
-    e.depth ? { paddingInlineStart: `min(${indentPx}px, 18vw)` } : {},
+    visualDepth || e.sectionDepth
+      ? {
+          paddingInlineStart: `min(calc(${indentPx}px + ${e.sectionDepth ? "var(--space-3)" : "0px"}), 18vw)`,
+        }
+      : {},
   );
   if (e.draftRow) {
     return html`<div
@@ -571,7 +586,7 @@ export function renderSidebar(): void {
                 : `${label} is offline`}
               ?disabled=${!connected}
               ?hidden=${sharedTrees !== null}
-              @click=${() => startDraft({ parent: null, backendLabel: label })}
+              @click=${(e: Event) => startNewAgent(e, label)}
             >
               ${unsafeHTML(NEW_ICON)}
             </button>
@@ -589,7 +604,7 @@ export function renderSidebar(): void {
   let section: string | null = null;
   let title = "";
   for (const entry of entries) {
-    if (entry.header) title = entry.header.title;
+    if (entry.header) title = sectionKey(entry.header);
     else if (entry.n?.id === state.selectedId) section = title;
   }
   if (section !== null) {
@@ -795,6 +810,8 @@ function openHistoryEntry(traversed: boolean, listed = false): void {
   const fallback = visibleRows()[0]?.id;
   if (!fallback) return;
   const entry = readHistoryView(history.state, location.hash);
+  const current = currentHistoryView();
+  if (entry.draft && current.draft && entry.agent === current.agent) return;
   if (!readAgentLink(location.hash).present)
     entry.agent = state.selectedId || fallback;
   const known = visibleAgent(entry.agent);
@@ -804,7 +821,6 @@ function openHistoryEntry(traversed: boolean, listed = false): void {
   // Invariant: Deduplicate navigation by full input and unchanged outgoing
   // view. Popstate/hashchange describe one traversal; later same-URL navigation
   // still counts, while refusals and unavailable notices happen only once.
-  const current = currentHistoryView();
   const handled = [
     location.href,
     entry.agent,

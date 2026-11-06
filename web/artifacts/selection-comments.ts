@@ -1,7 +1,7 @@
-// Selection-anchored review comments: store, quote re-anchoring, pointer/touch
-// offers, popover, staging, and displayed-snapshot binding. Cmd/Ctrl+Enter
-// stages the draft and returns focus to the viewer; the next press sends
-// staged comments without opening the comment list.
+// Selection comments: quotes, pointer/touch offers, and snapshot binding.
+// Cmd/Ctrl+Enter stages a draft and focuses the viewer; the next press sends
+// staged comments without opening the list. Scroll events queued before a
+// selection gesture do not cancel that gesture's comment offer.
 import { selectionCommentRange } from "../comments/selection-text.js";
 import { resizeTextarea } from "../composer/textarea.js";
 import { displayedInfo, renderBar, renderComments } from "./comment-bar.js";
@@ -169,6 +169,7 @@ interface SelectionSource {
   generation: number;
   active: boolean;
   pointerIds: Set<number>;
+  interactionStarted: number;
   touch: boolean;
   changed: boolean;
   blocked: boolean;
@@ -370,6 +371,7 @@ function createSelectionSource(
     generation: ++selectionGeneration,
     active: true,
     pointerIds: new Set(),
+    interactionStarted: 0,
     touch: false,
     changed: false,
     blocked: false,
@@ -520,6 +522,7 @@ function onSelectionPointerDown(
       break;
     }
   if (!selectionInteractionActive(source)) source.changed = false;
+  source.interactionStarted = event.timeStamp;
   source.blocked = false;
   source.blockedRange = null;
   source.pointerIds.add(event.pointerId);
@@ -551,8 +554,9 @@ function onSelectionPointerCancel(
   source.pointerIds.delete(event.pointerId);
   invalidateSelectionSequence(source);
 }
-function onSelectionTouchStart(source: SelectionSource): void {
+function onSelectionTouchStart(source: SelectionSource, event: Event): void {
   if (!selectionInteractionActive(source)) source.changed = false;
+  source.interactionStarted = event.timeStamp;
   source.blocked = false;
   source.blockedRange = null;
   source.touch = true;
@@ -569,7 +573,8 @@ function onSelectionTouchCancel(source: SelectionSource): void {
   source.touch = false;
   invalidateSelectionSequence(source);
 }
-function onSelectionScroll(source: SelectionSource): void {
+function onSelectionScroll(source: SelectionSource, event: Event): void {
+  if (event.timeStamp < source.interactionStarted) return;
   invalidateSelectionSequence(source);
   positionPopover();
 }
@@ -599,10 +604,10 @@ function installSelectionInteractions(source: SelectionSource): void {
     onSelectionPointerUp(source, event as PointerEvent);
   const onPointerCancel = (event: Event) =>
     onSelectionPointerCancel(source, event as PointerEvent);
-  const onTouchStart = () => onSelectionTouchStart(source);
+  const onTouchStart = (event: Event) => onSelectionTouchStart(source, event);
   const onTouchEnd = () => onSelectionTouchEnd(source);
   const onTouchCancel = () => onSelectionTouchCancel(source);
-  const onScroll = () => onSelectionScroll(source);
+  const onScroll = (event: Event) => onSelectionScroll(source, event);
   doc.addEventListener("selectionchange", onChange);
   doc.addEventListener("pointerdown", onPointerDown, true);
   doc.addEventListener("pointerup", onPointerUp, true);
@@ -620,15 +625,9 @@ const mainSelectionSource = createSelectionSource(
   null,
 );
 installSelectionInteractions(mainSelectionSource);
-function invalidateAllSelectionSequences(): void {
-  invalidateSelectionSequence(mainSelectionSource);
-}
 addEventListener(
   "scroll",
-  () => {
-    invalidateAllSelectionSequences();
-    positionPopover();
-  },
+  (event) => onSelectionScroll(mainSelectionSource, event),
   true,
 );
 addEventListener("resize", () => positionPopover());

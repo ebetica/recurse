@@ -44,6 +44,7 @@ function world() {
   const router = new Router();
   registerConversationRoutes(router, {
     store: { load: () => record },
+    requireActionReady: () => undefined,
     durable: host,
     delivery: {
       deliver: (cid: string, text: string) =>

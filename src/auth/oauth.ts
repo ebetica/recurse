@@ -6,6 +6,7 @@ import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { PI_PACKAGE_ROOT } from "../build_dir";
+import { slowSpan } from "../observability/slow_span";
 import type { ProcessHandle, ProcessLifecycle } from "../process_lifecycle";
 import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
 import type { ProviderCredentialStore } from "./provider_store";
@@ -244,7 +245,9 @@ export class OAuthStore implements ProviderCredentialStore {
         throw new Error("Pi authentication worker protocol failed");
       let result: unknown;
       try {
-        result = parsePythonJson(DECODE.decode(stdout));
+        result = slowSpan("pi_reply_decode", undefined, () =>
+          parsePythonJson(DECODE.decode(stdout)),
+        );
       } catch {
         throw new Error("Pi authentication worker protocol failed");
       }

@@ -1,26 +1,7 @@
-// Conservative shell hygiene removes timeout, atomic trailing head/tail and
-// stream merges. Unknown/unbalanced/compound syntax stays untouched and silent;
-// teaching fires only for actual removals. Quoted spans, substitutions and
-// trailing comments stay intact.
-
-export const SYSTEM_REMINDER_OPEN = "<system_reminder>";
-export const SYSTEM_REMINDER_CLOSE = "</system_reminder>";
-
-/** Wrap guidance so it renders distinctly from command output or content. */
-export function wrapSystemReminder(note: string): string {
-  const text = note.replace(/^\n+|\n+$/g, "");
-  if (
-    /^<system[_-]reminder>/.test(text.trim()) &&
-    /<\/system[_-]reminder>$/.test(text.trim())
-  )
-    return text;
-  return `${SYSTEM_REMINDER_OPEN}\n${text}\n${SYSTEM_REMINDER_CLOSE}`;
-}
-
-/** Short teaching injected after a rewrite. */
-export const HYGIENE_TEACHING =
-  "Prefer backgrounded shells and parsing logs over timeouts, head/tail pipes, and output redirects: " +
-  "the runner already backgrounds long commands and merges stdout/stderr into the log.";
+// Conservative shell hygiene edits exact source ranges for timeout, trailing
+// head/tail and stream merges, preserving quoted spans and all other bytes.
+// Heredocs, here-strings, substitutions, escaped newlines and unbalanced syntax
+// stay untouched; teaching fires only for actual removals.
 
 export interface RewriteResult {
   command: string;
@@ -36,85 +17,25 @@ type Token =
 const DURATION_RE = /^[0-9]+(\.[0-9]+)?(s|m|h|d)?$/;
 const COUNT_RE = /^[0-9]+$/;
 
-/** Skip a balanced `open…close` span honoring quotes, escapes, and nesting. */
-function skipBalanced(
-  source: string,
-  start: number,
-  open: string,
-  close: string,
-): number {
-  let depth = 0;
-  let index = start;
+/** Skip shell quotes, including ANSI-C escapes. */
+function skipQuoted(source: string, start: number): number {
+  const ansi = source[start] === "$";
+  const quote = source[start + (ansi ? 1 : 0)]!;
+  let index = start + (ansi ? 2 : 1);
   while (index < source.length) {
     const char = source[index]!;
-    if (char === "\\") {
+    if (char === "\\" && (ansi || quote === '"')) {
       index += 2;
       continue;
     }
-    if (char === "'") {
-      const end = source.indexOf("'", index + 1);
-      if (end < 0) return -1;
-      index = end + 1;
-      continue;
-    }
-    if (char === '"') {
-      index += 1;
-      let closed = false;
-      while (index < source.length) {
-        const quoted = source[index]!;
-        if (quoted === "\\") {
-          index += 2;
-          continue;
-        }
-        if (quoted === '"') {
-          closed = true;
-          index += 1;
-          break;
-        }
-        index += 1;
-      }
-      if (!closed) return -1;
-      continue;
-    }
-    if (char === "`") {
-      const end = skipBacktick(source, index);
-      if (end < 0) return -1;
-      index = end;
-      continue;
-    }
-    if (char === open) depth += 1;
-    else if (char === close) {
-      depth -= 1;
-      if (depth === 0) return index + 1;
-    }
+    if (char === quote) return index + 1;
     index += 1;
   }
   return -1;
 }
 
-/** Skip a backtick span, honoring escapes and nested `$(…)` substitutions. */
-function skipBacktick(source: string, start: number): number {
-  let index = start + 1;
-  while (index < source.length) {
-    const char = source[index]!;
-    if (char === "\\") {
-      index += 2;
-      continue;
-    }
-    if (char === "`") return index + 1;
-    if (char === "$" && source[index + 1] === "(") {
-      const end = skipBalanced(source, index + 1, "(", ")");
-      if (end < 0) return -1;
-      index = end;
-      continue;
-    }
-    index += 1;
-  }
-  return -1;
-}
-
-// Tokenize exact offsets, preserving trailing comments. Unbalanced
-// quotes/substitutions return undefined so the command stays unchanged.
+// Tokenize exact offsets, preserving trailing comments. Unbalanced quotes
+// return undefined so the command stays unchanged.
 function tokenize(
   source: string,
 ): { tokens: Token[]; commentStart: number } | undefined {
@@ -143,15 +64,6 @@ function tokenize(
       // Spec: Between tokens # begins a verbatim trailing comment; foo#bar
       // stays a word.
       return { tokens, commentStart: index };
-    }
-    if ((char === "<" || char === ">") && source[index + 1] === "(") {
-      // Invariant: Process substitutions are opaque; never rewrite operators
-      // inside them.
-      const end = skipBalanced(source, index + 1, "(", ")");
-      if (end < 0) return undefined;
-      push("word", source.slice(index, end), index, end);
-      index = end;
-      continue;
     }
     const two = source.slice(index, index + 2);
     const three = source.slice(index, index + 3);
@@ -234,53 +146,12 @@ function tokenize(
         index += 2;
         continue;
       }
-      if (current === "'") {
-        const end = source.indexOf("'", index + 1);
-        if (end < 0) return undefined;
-        value += source.slice(index, end + 1);
-        index = end + 1;
-        continue;
-      }
-      if (current === '"') {
-        let end = index + 1;
-        let closed = false;
-        while (end < source.length) {
-          const quoted = source[end]!;
-          if (quoted === "\\") {
-            end += 2;
-            continue;
-          }
-          if (quoted === '"') {
-            closed = true;
-            break;
-          }
-          end += 1;
-        }
-        if (!closed) return undefined;
-        value += source.slice(index, end + 1);
-        index = end + 1;
-        continue;
-      }
-      if (current === "`") {
-        const end = skipBacktick(source, index);
-        if (end < 0) return undefined;
-        value += source.slice(index, end);
-        index = end;
-        continue;
-      }
       if (
-        current === "$" &&
-        (source[index + 1] === "(" || source[index + 1] === "{")
+        current === "'" ||
+        current === '"' ||
+        (current === "$" && source[index + 1] === "'")
       ) {
-        const closer = source[index + 1] === "(" ? ")" : "}";
-        const end = skipBalanced(source, index + 1, source[index + 1]!, closer);
-        if (end < 0) return undefined;
-        value += source.slice(index, end);
-        index = end;
-        continue;
-      }
-      if ((current === "<" || current === ">") && source[index + 1] === "(") {
-        const end = skipBalanced(source, index + 1, "(", ")");
+        const end = skipQuoted(source, index);
         if (end < 0) return undefined;
         value += source.slice(index, end);
         index = end;
@@ -405,6 +276,8 @@ export function rewriteCommand(source: string): RewriteResult {
 }
 
 function rewriteInner(source: string): RewriteResult {
+  if (/<<|\\\n|\$[({]|[<>]\(|`/.test(source))
+    return { command: source, rewritten: false, dropped: false };
   const parsed = tokenize(source);
   if (!parsed) return { command: source, rewritten: false, dropped: false };
   const { tokens, commentStart } = parsed;
@@ -454,10 +327,7 @@ function rewriteInner(source: string): RewriteResult {
   }
 
   if (tail) {
-    let end = tail.end;
-    while (end < commentStart && (source[end] === " " || source[end] === "\t"))
-      end += 1;
-    edits.push({ start: tail.start, end, text: "" });
+    edits.push({ start: tail.start, end: tail.end, text: "" });
   }
   if (timeout) {
     edits.push({ start: timeout.start, end: timeout.end, text: "" });
@@ -474,16 +344,10 @@ function rewriteInner(source: string): RewriteResult {
     command =
       command.slice(0, edit.start) + edit.text + command.slice(edit.end);
   }
-  // Invariant: Keep a separator before preserved comments so removal cannot
-  // fuse cmd# text.
-  const comment = source.slice(commentStart);
-  const body = command
-    .slice(0, command.length - comment.length)
-    .replace(/[ \t]{2,}/g, " ")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/^[ \t]+/, "")
-    .trimEnd();
-  command = body + (comment ? (body ? " " : "") + comment : "");
+  const body = command.slice(
+    0,
+    command.length - (source.length - commentStart),
+  );
   // Invariant: A comment alone is not runnable.
   if (!body.trim())
     return { command: source, rewritten: false, dropped: false };

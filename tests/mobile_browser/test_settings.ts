@@ -576,34 +576,14 @@ export const tests: BrowserTest[] = [
     expect(
       await page.locator(".settings-section .msg.err:visible").textContent(),
     ).toBe("Registration failed - permission denied");
-    const other = String(
-      (
-        await page.evaluate(
-          async () =>
-            (
-              await fetch("/api/conversations", {
-                method: "POST",
-                headers: { "content-type": "application/json" },
-                body: "{}",
-              })
-            ).json() as Promise<any>,
-        )
-      ).id,
-    );
-    const worker = context
-      .serviceWorkers()
-      .find((each) => each.url().endsWith("/push-worker.js"))!;
-    await worker.evaluate(
-      (cid) => (globalThis as any).openAgent(cid).catch(() => undefined),
-      other,
-    );
-    await page.waitForFunction(
-      (cid) =>
-        new URLSearchParams((globalThis as any).location.hash.slice(1)).get(
-          "agent",
-        ) === cid,
-      other,
-    );
+    const created = await context.request.post(`${base}api/conversations`, {
+      data: {},
+    });
+    const other = String((await created.json()).id);
+    await page.evaluate((cid) => {
+      (globalThis as any).location.hash = `agent=${cid}`;
+    }, other);
+    await page.waitForURL(`**/#agent=${other}`);
     await page.getByRole("button", { name: "Back to all settings" }).tap();
     await page.locator('#settings-nav button[data-cat="models"]').tap();
     expect(

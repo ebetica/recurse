@@ -175,6 +175,63 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(len(wrappers), 3)
         self.assertTrue(wrappers[0].endswith(f"modal_app.py pin={sha} name=Demo"), wrappers[0])
 
+    def test_only_unfinished_durable_work_keeps_an_open_session_warm(self):
+        tree = ast.parse((HERE / "modal_app.py").read_text())
+        names = {"_durable_work", "_running_shell", "_WARM_TURN_MAX_AGE_SECONDS",
+                 "_SCAN_CAP", "_MAX_SHELL_RECORDS", "_MAX_RECORD_BYTES"}
+        nodes = [node for node in tree.body if getattr(node, "name", "") in names or
+                 isinstance(node, ast.Assign) and any(getattr(target, "id", "") in names for target in node.targets)]
+        from itertools import islice
+        namespace = dict(Path=Path, time=time, json=json, islice=islice)
+        exec(compile(ast.Module(body=nodes, type_ignores=[]), "modal_app.py", "exec"), namespace)
+        root = Path(tempfile.mkdtemp(prefix="modal-durable-"))
+        self.addCleanup(shutil.rmtree, root)
+        script = """
+import { fauxHost, held, until } from './tests/backend/fixtures/durable_host/host.ts';
+import { fauxAssistantMessage } from '@earendil-works/pi-ai';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+const { host, faux } = fauxHost(process.argv[1]);
+const activity = join(dirname(host.storagePath('c1')), 'activity');
+const input = Bun.stdin.stream().getReader();
+await host.open('c1');
+console.log('idle');
+await input.read();
+const answer = held(fauxAssistantMessage('finished'));
+faux.setResponses([answer.step]);
+await host.send('c1', 'hello', 'op:operator::keepalive');
+await answer.started;
+await until(() => existsSync(activity));
+console.log('active');
+await input.read();
+answer.release();
+await until(() => host.runningCount() === 0 && !existsSync(activity));
+console.log('settled');
+await input.read();
+await host.close();
+process.exit(0);
+"""
+        child = subprocess.Popen(["bun", "-e", script, str(root)], cwd=HERE.parents[1],
+                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, start_new_session=True)
+        try:
+            for phase in ("idle", "active", "settled"):
+                self.assertEqual(child.stdout.readline().strip(), phase)
+                self.assertTrue((root / "conversations/c1/durable/session.sqlite-wal").exists())
+                reason = namespace["_durable_work"](root / "conversations")
+                if phase == "active":
+                    self.assertIn("durable work active:", reason)
+                else:
+                    self.assertIsNone(reason)
+                child.stdin.write("\n")
+                child.stdin.flush()
+            self.assertEqual(child.wait(timeout=30), 0)
+        finally:
+            if child.poll() is None:
+                os.killpg(child.pid, signal.SIGKILL)
+                child.wait()
+            child.stdin.close()
+            child.stdout.close()
+
     def test_forced_web_cleanup_never_commits_the_volume(self):
         tree = ast.parse((HERE / "modal_app.py").read_text())
         stop_web = next(node for node in tree.body if getattr(node, "name", "") == "_stop_web")
@@ -277,7 +334,9 @@ class DeployTest(unittest.TestCase):
             self.assertEqual(call(refused)[0], 401, refused)
         self.assertEqual(call(key(home), "/api/tree")[0], 404)
         wrapper.sleep_dict.put("awake", "newer container")
-        self.assertEqual(call(key(home)), wake)
+        self.assertEqual(call(key(home))[0], 503)
+        self.assertEqual(call(key("3" * 16, home))[0], 503)
+        self.assertEqual(call(None)[0], 401)
 
         async def unavailable(*args):
             raise ConnectionError("dict down")

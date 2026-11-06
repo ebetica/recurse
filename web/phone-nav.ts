@@ -121,7 +121,12 @@ export function installPhonePaneHistory(close: () => void): void {
     if (open) paneUrl = location.href;
     if (open && !history.state?.phonePane)
       history.pushState({ ...history.state, phonePane: true }, "");
-    else if (!open && history.state?.phonePane && !history.state?.settings)
+    else if (
+      !open &&
+      !pendingSelection &&
+      history.state?.phonePane &&
+      !history.state?.settings
+    )
       history.back();
   };
   syncPaneSelection = () => {

@@ -1,5 +1,6 @@
 // Pure bounded shell-liveness reminders and lifecycle formatting; no I/O or
 // state. Equal timestamps retain live launch order or legacy snapshot order.
+import { escapeReminderMarkers } from "../../../reminder_text.ts";
 
 export type BackgroundReminderStatus = "running" | "stopping";
 
@@ -41,12 +42,7 @@ function escapeCommand(command: string, maxLength: number): string {
   // Invariant: Escape reminder markers in commands so hidden context cannot
   // forge blocks.
   const visible = [
-    ...command
-      .replace(ANSI_ESCAPE_RE, "")
-      .replaceAll("<system_reminder>", "<system_reminder-quoted>")
-      .replaceAll("</system_reminder>", "</system_reminder-quoted>")
-      .replaceAll("<system-reminder>", "<system-reminder-quoted>")
-      .replaceAll("</system-reminder>", "</system-reminder-quoted>"),
+    ...escapeReminderMarkers(command.replace(ANSI_ESCAPE_RE, "")),
   ]
     .map((char) => {
       const code = char.codePointAt(0) ?? 0;

@@ -24,7 +24,9 @@ an agent fences new writes first, so a late write cannot bring its directory bac
 
 Each file gets an opaque storage ID, with its display name kept separately. A
 publication copies and hashes the open source in bounded chunks; a file is
-published atomically, and only after its bytes and metadata validate. Listings come in
+published atomically, and only after its bytes and metadata validate. New
+publications retain their absolute `source_path` in metadata and Files rows so
+Markdown image references resolve beside the original document. Listings come in
 bounded pages, and deleting a file needs no proof that no message refers to it.
 A publication lookup is complete only when its collection and every manifest
 can be read. Valid results stay visible while incomplete lookups retry.
@@ -65,7 +67,9 @@ matching file exists, and cancellation may still delete them.
   into staging with a completion marker before atomic publication; the old copy
   retires only afterward. Migration errors keep the instance unready. Conflicting
   old and new collections without a completion marker are preserved for repair.
-- The browser never sends paths. Reads take a conversation ID and an opaque file
-  ID, resolved through checked directory handles that do not follow symlinks.
+- Stored-file reads take a conversation ID and an opaque file ID, resolved
+  through checked directory handles that do not follow symlinks. The separate
+  operator-only local-image route accepts paths but returns only bounded,
+  content-checked image snapshots, never arbitrary file downloads.
 - Draft uploads stay private until a new conversation adopts them; a failed
   adoption keeps the bytes and never deletes the only copy.

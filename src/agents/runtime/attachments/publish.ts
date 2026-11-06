@@ -6,7 +6,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
-import { basename, isAbsolute, join, extname } from "node:path";
+import { basename, isAbsolute, join, extname, resolve } from "node:path";
 import { lstatAt, openAt, renameAt, unlinkAt } from "../../../utils/dir_fd";
 import {
   AttachmentError,
@@ -631,6 +631,7 @@ export async function registerFile(
             SOURCE_PUBLICATION,
             created,
           ),
+          source_path: resolve(workdir, source),
           intent_sha256: sourceIntent,
           run_id: runId,
           tool_call_id: toolCallId,

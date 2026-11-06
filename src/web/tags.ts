@@ -4,12 +4,48 @@
 // operator's tags (archived, snoozed, pinned).
 import {
   parseTagChange,
+  applyTagChange,
   TagRefused,
+  type Tags,
   type TagChange,
 } from "../agents/conversation_tags";
 import { requireLocalAgent } from "./backends";
 import { jsonDictBody } from "./login";
-import { HttpError, jsonResponse, type Handler, type Router } from "./router";
+import { agentMarked } from "./request_auth";
+import {
+  HttpError,
+  jsonResponse,
+  type Exchange,
+  type Handler,
+  type Router,
+} from "./router";
+
+/** Validate custom tags supplied by the operator on initial creation. */
+export function creationTags(ex: Exchange, value: unknown): Tags | undefined {
+  if (value === undefined) return undefined;
+  if (agentMarked(ex))
+    throw new HttpError(403, "only the operator can choose initial tags");
+  if (!Array.isArray(value) || value.some((tag) => typeof tag !== "string"))
+    throw new HttpError(422, "tags must list custom tag names");
+  if (!value.length) return {};
+  const now = Date.now() / 1000;
+  try {
+    return applyTagChange(
+      {},
+      parseTagChange(
+        Object.fromEntries(value.map((tag) => [tag, null])),
+        [],
+        false,
+        now,
+      ),
+      "operator",
+      now,
+    );
+  } catch (error) {
+    if (error instanceof TagRefused) throw new HttpError(422, error.message);
+    throw error;
+  }
+}
 
 export const MAX_TAG_IDS = 500;
 

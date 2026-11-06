@@ -42,6 +42,7 @@ import {
   type RunningServer,
 } from "../server";
 import { LoopLag } from "../observability/loop_lag";
+import { slowSpan } from "../observability/slow_span";
 import * as startupMetrics from "../observability/startup_metrics";
 import { readRelease } from "../release";
 import { RecurseUpdates } from "../recurse_update";
@@ -283,6 +284,14 @@ export async function buildApp(options: AppOptions): Promise<App> {
   );
   const filesDeps: FilesRoutesDeps = {
     themesFile: config.paths.THEMES_FILE,
+    imageCwd: async (cid) => {
+      const conv = conversations.load(cid, { withPending: false });
+      if (!conv || nodes.existing(cid)?.reaping) return null;
+      return (
+        (durable.owns(conv) ? await durable.effectiveCwd(cid) : null) ??
+        conversations.effectiveWorkdir(conv)
+      );
+    },
     requireActionReady,
     drafts: instance.drafts,
     files: {
@@ -365,7 +374,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
     },
     (name, work) => {
       void instance.tasks
-        .spawn(name, work, instance.shutdownController.signal)
+        .spawn(
+          name,
+          (signal) =>
+            slowSpan("relay_poll_call", undefined, () => work(signal)),
+          instance.shutdownController.signal,
+        )
         .catch(() => {});
     },
     instance.delivery,
@@ -390,6 +404,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     displayName: config.displayName,
     release,
     readinessSnapshot: () => lifecycle.readinessSnapshot(),
+    sleepCheckUrl: options.env.RECURSE_SLEEP_CHECK_URL || undefined,
   });
   registerTreeRoutes(router, {
     ...stopDeps,
@@ -659,7 +674,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     try {
       await startupMetrics.measure(event, async (m) => {
         m.count("calls");
-        await work();
+        await slowSpan(`${event}_call`, undefined, work);
       });
     } catch (error) {
       logException(web, `${event}_failed`, error, { fields: { step: event } });
@@ -783,10 +798,16 @@ export async function buildApp(options: AppOptions): Promise<App> {
       work: (signal: AbortSignal) => Promise<void>,
     ) =>
       detached.push(
-        instance.tasks.spawn(name, work, signal).catch((error) => {
-          if (!signal.aborted)
-            logException(web, `${name}_failed`, error, { level: ERROR });
-        }),
+        instance.tasks
+          .spawn(
+            name,
+            (signal) => slowSpan(`${name}_call`, undefined, () => work(signal)),
+            signal,
+          )
+          .catch((error) => {
+            if (!signal.aborted)
+              logException(web, `${name}_failed`, error, { level: ERROR });
+          }),
       );
     track("git-identity", async () => {
       if (

@@ -30,7 +30,7 @@ import { messageMarkdownFragment } from "./util.js";
 import { renderMathPlaceholders } from "./math.js";
 import {
   INLINE_IMAGE_STYLE,
-  captionInlineImage,
+  renderReferenceImages,
   isAllowedAttachmentHref,
   isAllowedInlineImageSrc,
   scopedAttachmentPreviewHref,
@@ -170,9 +170,8 @@ const COPY_BTN = `<button class="btn sm copy-btn" type="button">Copy</button>`;
 const disclosureCaret = html`<span class="disclosure-caret" aria-hidden="true"
   >${unsafeHTML(DISCLOSURE_ICON)}</span
 >`;
-// Vets sanitized HTML in an inert template before any image can fetch. Only
-// same-origin attachment images survive; other sources get non-fetching blocked
-// markers, with responsive/lazy/alt handling for allowed images.
+// Classifies sanitized images in an inert template before any can fetch.
+// Local paths use authenticated previews; web images need an explicit click.
 function applyImagePolicy(
   fragment: DocumentFragment,
   base: string | null = null,
@@ -197,30 +196,16 @@ function applyImagePolicy(
       "style",
       "lowsrc",
       "dynsrc",
+      "data-external-image",
+      "data-image-alt",
+      "data-path-image",
+      "data-image-path",
     ]) {
       el.removeAttribute(attr);
     }
     if (el.tagName !== "IMG") el.removeAttribute("src");
   }
-  for (const img of tpl.content.querySelectorAll("img")) {
-    const src = img.getAttribute("src");
-    // Invariant: Upload bytes are inert downloads; only validated raster
-    // previews (magic allowlist, manifest match, sandboxed CSP) become inline
-    // images.
-    const raster = isAllowedInlineImageSrc(src)
-      ? src
-      : scopedAttachmentPreviewHref(src);
-    if (raster) {
-      img.setAttribute("src", resolveUrl(backend, raster));
-      captionInlineImage(img);
-    } else {
-      const blocked = document.createElement("span");
-      blocked.className = "blocked-image";
-      blocked.textContent = "Image blocked";
-      blocked.title = "Only images this instance hosts can render inline";
-      img.replaceWith(blocked);
-    }
-  }
+  renderReferenceImages(tpl.content, state.currentConv?.id ?? null, backend);
   if (backend.label) {
     for (const anchor of tpl.content.querySelectorAll("a[href]")) {
       const href = anchor.getAttribute("href")!;

@@ -83,6 +83,7 @@ stage_ts() {
   bun tests/checks/browser_import_check.ts
   bun tests/checks/operator_send_check.ts
   bun tests/checks/prompt_budget.ts
+  bun tests/checks/reminder_check.ts
   bun tests/checks/comment_check.ts --summary --strict
   bun tests/checks/test_check.ts --strict --summary
   bun run format:backend:check

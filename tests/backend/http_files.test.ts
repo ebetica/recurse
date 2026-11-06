@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { readdirSync, readlinkSync } from "node:fs";
 import {
   appendFile,
+  mkdir,
   mkdtemp,
   rm,
   symlink,
@@ -10,8 +11,8 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { join, relative } from "node:path";
 
 import * as artifacts from "../../src/artifacts";
 import { ARTIFACT_ACTIVE_CSP } from "../../src/artifacts";
@@ -122,6 +123,150 @@ describe("http_files corpus", () => {
 });
 
 describe("owner scoping", () => {
+  // Feature: #3142 local image paths expose only validated snapshots to the operator.
+  test("local images resolve document paths and refuse non-images and agent callers", async () => {
+    const png = new Uint8Array(Buffer.from(seed.png, "hex"));
+    const source = join(dir, "path-image.png");
+    const documents = join(dir, "documents");
+    await mkdir(documents);
+    await writeFile(source, png);
+    await writeFile(join(documents, "picture.png"), png);
+    await writeFile(join(dir, "not-image.png"), "private text");
+    await symlink(join(dir, "not-image.png"), join(dir, "linked.png"));
+    await writeFile(
+      join(dir, "chart.svg"),
+      '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+    );
+    await writeFile(join(dir, "fake.svg"), "<html>private text</html>");
+    await writeFile(
+      join(dir, "entity.svg"),
+      '<!DOCTYPE svg [<!ENTITY secret SYSTEM "file:///etc/passwd">]><svg>&secret;</svg>',
+    );
+    await writeFile(join(dir, "raster.svg"), png);
+    const base = `http://127.0.0.1:${app.running.port}`;
+    const url = (
+      path: string,
+      query: Record<string, string> = {},
+      cid = "owner-a",
+    ) =>
+      `${base}/api/conversations/${cid}/path-image?${new URLSearchParams({ path, ...query })}`;
+    for (const [path, query] of [
+      [source, {}],
+      ["path-image.png", {}],
+      [`~/${relative(homedir(), source)}`, {}],
+      ["picture.png", { document: "documents/report.md" }],
+      ["picture.png", { document: join(documents, "report.md") }],
+      ["raster.svg", {}],
+      ["path-image.png", { thumbnail: "1" }],
+    ] as [string, Record<string, string>][]) {
+      const response = await fetch(url(path, query));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("image/png");
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff");
+      expect(response.headers.get("content-security-policy")).toBe(
+        "default-src 'none'; sandbox",
+      );
+      expect(new Uint8Array(await response.arrayBuffer())).toEqual(png);
+    }
+    const head = await fetch(url(source), { method: "HEAD" });
+    expect(head.status).toBe(200);
+    expect(head.headers.get("content-type")).toBe("image/png");
+    expect(await head.text()).toBe("");
+    const download = await fetch(url(source, { download: "1" }));
+    expect(download.headers.get("content-disposition")).toStartWith(
+      "attachment;",
+    );
+    expect(new Uint8Array(await download.arrayBuffer())).toEqual(png);
+    const svg = await fetch(url("chart.svg"));
+    expect(svg.status).toBe(200);
+    expect(svg.headers.get("content-type")).toBe("image/svg+xml");
+    expect(svg.headers.get("content-security-policy")).toBe(
+      "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox",
+    );
+    for (const path of [
+      "not-image.png",
+      "documents/../not-image.png",
+      "fake.svg",
+      "entity.svg",
+    ]) {
+      for (const query of [{}, { download: "1" }] as Record<string, string>[]) {
+        const refused = await fetch(url(path, query));
+        expect(refused.status).toBe(415);
+        expect(await refused.text()).not.toContain("private text");
+      }
+    }
+    for (const path of ["missing.png", "linked.png", "documents", "/dev/null"])
+      expect((await fetch(url(path))).status).toBe(404);
+    const fifo = join(dir, "path-image.fifo");
+    expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);
+    expect((await fetch(url(fifo))).status).toBe(404);
+    const oversized = join(dir, "oversized.png");
+    await writeFile(oversized, png);
+    await truncate(oversized, 25 * 1024 * 1024 + 1);
+    expect((await fetch(url(oversized))).status).toBe(413);
+    expect((await fetch(url(source, {}, "missing-owner"))).status).toBe(404);
+    for (const headers of [
+      { "x-loopback-token": app.loopbackToken },
+      { "x-recurse-agent": "owner-a" },
+      { "x-recurse-agent-caller": "owner-a" },
+    ] as Record<string, string>[])
+      expect((await fetch(url(source), { headers })).status).toBe(403);
+    const key = await app.backendKeys.mint("image-test");
+    const authorization = `Bearer ${key.key}`;
+    const remote = await fetch(url(source), { headers: { authorization } });
+    expect(remote.status).toBe(200);
+    expect(new Uint8Array(await remote.arrayBuffer())).toEqual(png);
+    expect(
+      (
+        await fetch(url(source), {
+          headers: { authorization, "x-recurse-agent-caller": "owner-a" },
+        })
+      ).status,
+    ).toBe(403);
+    const artifact = await artifacts.create(app.artifacts, {
+      owner: "owner-a",
+      title: "Image document",
+    });
+    const repo = String(artifact.repo_path);
+    await mkdir(join(repo, "nested"));
+    await writeFile(join(repo, "nested", "picture.png"), png);
+    const query = {
+      artifact: String(artifact.id),
+      document: "nested/report.md",
+    };
+    const artifactImage = await fetch(url("picture.png", query));
+    expect(artifactImage.status).toBe(200);
+    expect(new Uint8Array(await artifactImage.arrayBuffer())).toEqual(png);
+    expect((await fetch(url("picture.png", query, "owner-b"))).status).toBe(
+      404,
+    );
+    expect(
+      (await fetch(url("picture.png", { ...query, document: "../report.md" })))
+        .status,
+    ).toBe(404);
+    const document = join(documents, "report.md");
+    await writeFile(document, "![Picture](picture.png)");
+    const saved = await registerFile(
+      await app.temp.ensureUploadsDir("20260925-owner-a"),
+      "owner-a",
+      "a".repeat(32),
+      "call-document",
+      document,
+      dir,
+    );
+    expect(saved.source_path).toBe(document);
+    const page = await listPage(
+      collectionSnapshot(app.records.get("owner-a")!, app.temp.config)!,
+      { config: app.temp.config },
+      null,
+      null,
+      50,
+    );
+    expect(page.files.find((file) => file.id === saved.id)?.source_path).toBe(
+      document,
+    );
+  }, 30_000);
   // Feature: #2937 crop retries and cancellation remain owner-scoped and ordered.
   test("crop uploads replay, conflict, cancel and expire under the owner lock", async () => {
     const base = `http://127.0.0.1:${app.running.port}`;
@@ -516,6 +661,12 @@ describe("owner scoping", () => {
       format: "webp",
     });
     expect(small.byteLength * 4).toBeLessThan(photo.byteLength);
+    const localThumb = await fetch(
+      `http://127.0.0.1:${app.running.port}/api/conversations/owner-b/path-image?${new URLSearchParams({ path: join(dir, "photo.jpg"), thumbnail: "1" })}`,
+    );
+    expect(localThumb.headers.get("content-type")).toBe("image/webp");
+    expect(localThumb.headers.get("cache-control")).toBe("private, no-store");
+    expect(new Uint8Array(await localThumb.arrayBuffer())).toEqual(small);
     const together = await Promise.all(
       Array.from({ length: 5 }, () => fetch(`${large}/thumbnail`)),
     );

@@ -1,9 +1,9 @@
-// Owner-scoped files: foreign owner is 404; draft tokens scope staged uploads.
-// Inert downloads; raster/media previews use a scriptless sandbox.
-// Active HTML/SVG Artifacts use sandbox CSP; relays never change stored bytes.
-// Bound upload bodies before multipart parsing; routes only delegate storage.
+// Owner-scoped files and draft uploads: foreign owners are 404; bound bodies.
+// Downloads are inert; image/media/Artifact previews retain sandbox CSP.
+// Operator-only path-image reads bounded, byte-sniffed, no-store snapshots;
+// paths use the conversation cwd or the optional document/Artifact location.
 
-import { basename, extname } from "node:path";
+import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { timingDetail, timingFailure } from "../observability/request_timing";
 
 import * as artifacts from "../artifacts";
@@ -30,6 +30,8 @@ import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse, type OpenedFile } from "./static";
 import { conditionalBytes, PRIVATE_REVALIDATE } from "./caching";
 import { resizable, thumbnail } from "./thumbnails";
+import { agentMarked } from "./request_auth";
+import { readPathImage } from "./path_image";
 
 /** Image extensions render inline; any other upload is a download. */
 export const ATTACH_TYPES: Readonly<Record<string, string>> = {
@@ -74,6 +76,8 @@ type Rec = Record<string, unknown>;
 
 export interface FilesRoutesDeps {
   readonly themesFile: string;
+  /** Effective Durable cwd, falling back to the conversation's workdir. */
+  imageCwd(cid: string): Promise<string | null>;
   /** 503 `service_storage_unavailable` + Retry-After until action-ready. */
   requireActionReady(): void;
   readonly drafts: {
@@ -469,6 +473,83 @@ export function registerFileRoutes(
   deps: FilesRoutesDeps,
 ): void {
   const ok = () => jsonResponse({ ok: true });
+
+  router.add(
+    ["GET", "HEAD"],
+    "/api/conversations/{cid}/path-image",
+    async (ex) => {
+      if (
+        agentMarked(ex) ||
+        !["cookie", "local", "tailscale", "backend-key"].includes(
+          String(ex.state.auth_method),
+        )
+      )
+        throw new HttpError(403, "only the operator can view local images");
+      const cid = ex.params.cid!;
+      const cwd = await deps.imageCwd(cid);
+      if (!cwd) throw new HttpError(404, "conversation not found");
+      let document = str(ex, "document");
+      const artifact = str(ex, "artifact");
+      if (artifact) {
+        try {
+          const meta = await artifacts.get(deps.artifacts, cid, artifact);
+          const repo = String(meta.repo_path);
+          const entry = document || artifacts.DOCUMENT_ENTRY;
+          const target = resolve(repo, entry);
+          const fromRepo = relative(repo, target);
+          if (
+            isAbsolute(entry) ||
+            fromRepo === ".." ||
+            fromRepo.startsWith("../") ||
+            isAbsolute(fromRepo)
+          )
+            throw new HttpError(404, "artifact document not found");
+          document = target;
+        } catch (error) {
+          if (error instanceof artifacts.ArtifactError) artifactFailure(error);
+          throw error;
+        }
+      }
+      let { data, media, name } = await readPathImage(
+        cwd,
+        String(ex.query.path),
+        document,
+        ATTACH_MAX_BYTES,
+        ex.request.signal,
+      );
+      const download = ex.query.download === true;
+      if (
+        !download &&
+        ex.query.thumbnail === true &&
+        resizable(media, data.length)
+      ) {
+        const small = await thumbnail(async () => data, ex.request.signal);
+        if (ex.request.signal.aborted)
+          throw new HttpError(499, "request cancelled");
+        if (small instanceof Uint8Array) {
+          data = small;
+          media = "image/webp";
+        }
+      }
+      return bytesResponse(data, media, {
+        ...ARTIFACT_SAFE_HEADERS,
+        "content-security-policy":
+          media === "image/svg+xml" ? SVG_PREVIEW_CSP : PREVIEW_CSP,
+        ...(download
+          ? { "content-disposition": contentDisposition(name) }
+          : {}),
+      });
+    },
+    {
+      query: {
+        path: { type: "str", required: true },
+        document: { type: "str" },
+        artifact: { type: "str" },
+        thumbnail: { type: "bool", default: false },
+        download: { type: "bool", default: false },
+      },
+    },
+  );
 
   router.post("/api/attachment-drafts", async () => {
     // Invariant: Staging for uploads made before the frontend draft has a

@@ -1,4 +1,5 @@
-// One content delivery path for the web composer and API v1.
+// One content delivery path for the composer, remote sends and API v1.
+// Startup rejects admission with a retryable response before resolving ids.
 import { pyStrip } from "../auth/provider_store";
 import { deliverRelayed, CLIENT_KEY_RE } from "../agents/supervisor/delivery";
 import { pyTruthy } from "../agents/runtime/turn_prep";
@@ -20,6 +21,7 @@ export function createMessageSender(
     sender: string | null,
     relayed: Relay = null,
   ): Promise<Rec> => {
+    deps.requireActionReady();
     const { store } = deps;
     const conv = store.load(cid);
     if (!pyTruthy(conv)) throw new HttpError(404);

@@ -43,7 +43,7 @@ Kill the group, not just its leader, to reach descendants. Completion is reporte
 only after the group has no non-zombie members; a leader exiting alone does not
 finish a shell whose descendants still run.
 
-The registry allows four live background/monitor groups by default. At the cap,
+The registry allows nine live background/monitor groups by default. At the cap,
 wait for a completion, inspect an existing log, or stop a group instead of
 starting another polling shell. Foreground commands remain available for recovery.
 
@@ -84,9 +84,17 @@ process exits or is killed.
 
 After safety approval, a conservative shell parser may remove redundant leading
 `timeout`, trailing `head`/`tail` pipes, and stderr merge redirects. The runner
-already backgrounds long commands, trims output, and merges streams. Quoting,
-substitutions, or unsupported syntax leave the command untouched. Occasional
-system reminders explain rewrites instead of repeating guidance on every call.
+already backgrounds long commands, trims output, and merges streams. Rewrites
+edit only the removed or replaced source ranges; quoted text, substitutions,
+comments, and all other whitespace remain byte-for-byte intact. Commands containing
+`<<` (including heredocs and here-strings), substitution markers (`$(`, `${`,
+backticks, `<(`, `>(`), or backslash-newline continuations stay untouched because
+the parser does not interpret those forms. This conservative check also skips
+those markers inside literals. Occasional system reminders explain rewrites
+instead of repeating guidance on every call.
+Shell reminders follow the rules in [`src/reminder_text.ts`](../../../reminder_text.ts):
+advice repeats only after 30,000 tokens of conversation growth, and the list of
+running background shells only when it names a shell its last copy did not.
 
 ## Durable ownership and cleanup
 

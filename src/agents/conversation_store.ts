@@ -1251,13 +1251,13 @@ export class ConversationStore {
             }
           }
         }
-        // Invariant: Only updatePrs, stampReply and changeTags own these
-        // fields; stale turn/settings snapshots must never erase values
-        // admitted while they were running.
+        // Invariant: Only updatePrs, stampReply and changeTags own existing
+        // fields; creation may supply initial tags. Stale snapshots never erase
+        // values admitted while they were running.
         for (const key of ["prs", "replied_at", "replied_run", "tags"])
           if (current && key in current)
             record[key] = structuredClone(current[key]);
-          else delete record[key];
+          else if (current || key !== "tags") delete record[key];
         if (typeof current?.operator_message_at === "number")
           record.operator_message_at = current.operator_message_at;
         if (clearPending) delete record.pending_model;

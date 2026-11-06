@@ -893,6 +893,9 @@ function publishedRecord(
     media_type: mediaType(name, info.media_type),
     preview,
     created_at: Number(info.created_at),
+    ...(typeof info.source_path === "string"
+      ? { source_path: info.source_path }
+      : {}),
   };
 }
 

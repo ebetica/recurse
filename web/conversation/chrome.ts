@@ -3,6 +3,7 @@
 // empty-list and draft renders. This module owns the freshness and chrome
 // state machine; refresh outcomes arrive via noteRefreshFailed/Applied.
 import { queuedDescription } from "../agent-status.js";
+import { savedSends, outboxBubbles } from "../composer/outbox.js";
 import {
   paintTakeoverControl,
   setTitleCopyable,
@@ -34,6 +35,7 @@ import { kidsBadge } from "../util.js";
 import { html, render } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { NEW_AGENT_ICON } from "../icons.js";
+import { showDraftTags } from "./draft-tags.js";
 
 // Cold-switch chrome is inert; cached threads remain interactive.
 const freshnessEl = $("#conv-freshness")!;
@@ -55,10 +57,13 @@ export function applyFreshness(): void {
   freshnessLabelEl.textContent = label;
   if (label) freshnessEl.title = label;
   else freshnessEl.removeAttribute("title");
-  threadLoadingEl.classList.toggle("on", phase === "loading");
-  threadLoadingEl.textContent = phase === "loading" ? "Loading…" : "";
-  msgsEl.classList.toggle("stale", phase === "loading");
-  msgsEl.toggleAttribute("inert", phase === "loading");
+  const loading =
+    phase === "loading" &&
+    !savedSends().some((send) => send.convId === state.selectedId);
+  threadLoadingEl.classList.toggle("on", loading);
+  threadLoadingEl.textContent = loading ? "Loading…" : "";
+  msgsEl.classList.toggle("stale", loading);
+  msgsEl.toggleAttribute("inert", loading);
   liveBarEl.classList.toggle("stale", phase === "loading");
   paintStopControl(state.currentConv);
 }
@@ -96,9 +101,22 @@ export function noteConversationSwitch(
   freshness = conversationSwitched(id, paintedFromCache);
   if (!paintedFromCache) clearConversationChrome(id);
   applyFreshness();
+  if (!paintedFromCache) renderColdOutbox(id);
   // Invariant: The newly opened agent owns the one SSE subscription; the
   // previously open one closes here so only the focused conversation streams.
   retargetFocusedEvents(id);
+}
+
+/** Keep saved sends visible before an offline conversation can be read. */
+export function renderColdOutbox(id: string): void {
+  if (!id) return;
+  if (!savedSends().some((send) => send.convId === id)) {
+    if (msgsEl.querySelector("[data-cold-outbox]")) render(html``, msgsEl);
+    return;
+  }
+  render(html`<div data-cold-outbox>${outboxBubbles(id)}</div>`, msgsEl);
+  inputEl.disabled = false;
+  applyFreshness();
 }
 
 // Completes tree-derived chrome when the conversation read wins.
@@ -251,13 +269,17 @@ export function renderDraft(): void {
           <div class="icon">${unsafeHTML(NEW_AGENT_ICON)}</div>
           <h2>New agent</h2>
           <div id="draft-model-host" class="draft-model-host"></div>
+          <div id="draft-tag-host"></div>
         </div>`,
     msgsEl,
   );
   // Invariant: The selector is intentionally omitted once creation is pending:
   // the send job already owns a synchronous snapshot and later UI changes
   // cannot retarget it.
-  if (!pending.length) showDraftModel(draft?.level);
+  if (!pending.length) {
+    showDraftModel(draft?.level);
+    if (draft) void showDraftTags(draft);
+  }
   updateScrollBtn();
   state.currentConv = null;
   // Invariant: A draft is a real navigation boundary even though it has no

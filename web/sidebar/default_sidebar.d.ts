@@ -1,9 +1,10 @@
 // Experimental sidebar API: documented, but may change without migration.
 // API v1 Agent fields retain their contract; other fields are experimental.
-// Pure, stateless sidebar(rows, now) receives detached backend snapshots.
-// Usage and side conversations are omitted. See README.md.
+// Pure sidebar(rows, now) omits usage and side conversations.
+// Tags are opt-in; newAgent = { ask: "tag" } adds the draft control.
 import type { Agent } from "../../src/web/api_v1/schema.js";
 import type { ScriptSection } from "./arrangement.js";
+export type { ScriptAction, ScriptSection, NewAgent } from "./arrangement.js";
 
 export interface SidebarRow extends Agent {
   /** API v1 Agent: conversation id. */
@@ -70,7 +71,10 @@ export interface SidebarRow extends Agent {
   tags: Record<string, { at: number; by: string; until?: number }>;
 }
 
-/** now is epoch seconds; the built-in script selects only depth-0 roots. */
+/**
+ * ask: "tag" picks a custom tag; clear: "ask" removes it instead.
+ * Use rows or sections (one child level); children keep actions and folds.
+ */
 export default function sidebar(
   rows: readonly SidebarRow[],
   now: number,

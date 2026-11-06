@@ -5,7 +5,11 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { ArrangementError, checkSections } from "../web/sidebar/arrangement.ts";
+import {
+  ArrangementError,
+  checkSections,
+  checkNewAgent,
+} from "../web/sidebar/arrangement.ts";
 import { sidebarRows, type RowSource } from "../web/sidebar/rows.ts";
 import { MAX_SCRIPT_BYTES, type ScriptResult } from "../web/sidebar/sandbox.ts";
 
@@ -144,6 +148,7 @@ export class SidebarScript {
             ? result.error
             : `${result.error} (line ${result.line})`,
         );
+      checkNewAgent(result.newAgent);
       return checkSections(result.sections, rows).map((section) => ({
         title: section.title,
         rows: section.ids.length,

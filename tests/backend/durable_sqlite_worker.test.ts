@@ -10,6 +10,7 @@ import {
   SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker.ts";
 import { openFauxHarness } from "./fixtures/durable_sqlite/harness.ts";
+import { drainWorkerReplies } from "../../src/observability/slow_span";
 
 const root = mkdtempSync(join(tmpdir(), "durable-sqlite-"));
 const worker = new SqliteWorker();
@@ -48,7 +49,15 @@ registerStorageConformance(
   },
   "Worker SQLite",
   async (use) => {
-    const storage = await openWorkerSqliteStorage(worker, freshPath());
+    const storage = await openWorkerSqliteStorage(
+      worker,
+      freshPath(),
+      undefined,
+      undefined,
+      false,
+      false,
+      "conformance",
+    );
     try {
       await use(storage);
     } finally {
@@ -137,6 +146,16 @@ test("a busy database open does not block another database before the lock is re
     await other.exec("CREATE TABLE t (x INTEGER)");
     await other.transaction((tx) => tx.run("INSERT INTO t VALUES (?)", 2));
     expect(await other.all("SELECT x FROM t")).toEqual([{ x: 2 }]);
+    drainWorkerReplies(-Infinity);
+    const payload = "large reply \u2603".repeat(100_000);
+    expect(await other.get("SELECT ? AS payload", payload)).toEqual({
+      payload,
+    });
+    expect(drainWorkerReplies(-Infinity)).toEqual([
+      expect.stringMatching(
+        new RegExp(`^sqlite_get:${Buffer.byteLength(payload)}B:\\d+ms$`),
+      ),
+    ]);
     expect(settled).toBe(false);
   } finally {
     foreign.exec("ROLLBACK");

@@ -1,5 +1,6 @@
 // Shared inert Markdown preview for Artifacts and Files, including embeds,
-// images, links, highlighting, Mermaid, and math. Callers resolve owned files.
+// images, links, highlighting, Mermaid, and math. Published siblings take
+// precedence over document-relative local paths; web images require a click.
 import {
   externalHttpHostname,
   htmlPreviewSrcdoc,
@@ -10,6 +11,13 @@ import { loadDecodedArtifactImage } from "./artifacts/image-loading.js";
 import { renderMathIn, renderMathPlaceholders } from "./math.js";
 import { isMermaidLang, renderMermaidIn } from "./mermaid.js";
 import { md } from "./util.js";
+import {
+  externalImageButton,
+  imageFailure,
+  imageHost,
+  originalPathImage,
+  referenceImageUrl,
+} from "./image-preview/references.js";
 
 const EMBED_RE = /```html-embed[^\n]*\n([\s\S]*?)```/g;
 const FORBIDDEN_DOCUMENT_TAGS =
@@ -30,7 +38,13 @@ function removeUrlSurfaces(root: ParentNode): void {
       if (
         URL_ATTRIBUTES.has(name) ||
         URL_ATTRIBUTES.has(localName) ||
-        name.endsWith(":href")
+        name.endsWith(":href") ||
+        [
+          "data-external-image",
+          "data-image-alt",
+          "data-path-image",
+          "data-image-path",
+        ].includes(name)
       ) {
         element.removeAttributeNode(attribute);
       }
@@ -110,6 +124,9 @@ export interface DocumentMarkdownOptions {
   resolveRelative: (path: string, image: boolean) => string | null;
   signal: AbortSignal;
   title: string;
+  agentId: string;
+  documentPath?: string;
+  artifactId?: string;
 }
 
 function markdownFragment(
@@ -137,33 +154,57 @@ function markdownFragment(
 
   for (const { image, source } of images) {
     if (!image.isConnected && !template.content.contains(image)) continue;
-    const resolved = isRelative(source)
-      ? options.resolveRelative(source!, true)
-      : null;
+    if (imageHost(source)) {
+      image.replaceWith(externalImageButton(source!, image.alt));
+      continue;
+    }
+    const fallback = referenceImageUrl(
+      source,
+      options.agentId,
+      options.documentPath,
+      options.artifactId,
+    );
+    const resolved =
+      (isRelative(source) ? options.resolveRelative(source!, true) : null) ||
+      fallback;
     if (resolved) {
       if (!(image.alt || "").trim()) image.alt = "Image without a description";
       image.classList.add("artifact-image");
       const frame = imagePlaceholder(image);
       image.replaceWith(frame);
       frame.appendChild(image);
-      void revealArtifactImage(frame, image, resolved, options.signal).then(
-        (loaded) => {
-          if (loaded || options.signal.aborted || !frame.parentNode) return;
-          const failed = document.createElement("span");
-          failed.className = "artifact-blocked-image artifact-failed-image";
-          failed.textContent = "Image preview unavailable";
-          frame.replaceWith(failed);
-        },
-      );
+      const reveal = async () => {
+        let loaded = await revealArtifactImage(
+          frame,
+          image,
+          resolved,
+          options.signal,
+        );
+        let used = resolved;
+        if (
+          !loaded &&
+          fallback &&
+          fallback !== resolved &&
+          !options.signal.aborted
+        ) {
+          loaded = await revealArtifactImage(
+            frame,
+            image,
+            fallback,
+            options.signal,
+          );
+          used = fallback;
+        }
+        if (loaded) {
+          const original = originalPathImage(used);
+          if (original) image.dataset.pathImage = original;
+        } else if (!options.signal.aborted && frame.parentNode)
+          frame.replaceWith(imageFailure(source || ""));
+      };
+      void reveal();
       continue;
     }
-    const host = externalHttpHostname(source);
-    const blocked = document.createElement("span");
-    blocked.className = "artifact-blocked-image";
-    blocked.textContent = host
-      ? `External image blocked (${host})`
-      : "Image blocked";
-    image.replaceWith(blocked);
+    image.replaceWith(imageFailure(source || ""));
   }
   for (const { link, href } of links) {
     if (!link.isConnected && !template.content.contains(link)) continue;

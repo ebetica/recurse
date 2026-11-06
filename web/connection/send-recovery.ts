@@ -29,11 +29,13 @@ export interface StoredSendJob {
   level?: number | null;
   attachmentDraft?: string | null;
   muted?: boolean;
+  tags?: string[];
   waitForIndex: number;
 }
 
 export interface StoredDraft {
   parent: string | null;
+  tags?: string[];
   backendLabel?: string;
   creatorIndex: number;
   model?: string | null;
@@ -55,6 +57,13 @@ export interface AuthRecovery {
   jobs: StoredSendJob[];
 }
 
+const optionalTags = (value: unknown): boolean =>
+  value === undefined ||
+  (Array.isArray(value) &&
+    value.length <= 16 &&
+    value.every(
+      (name) => typeof name === "string" && /^[a-z0-9-]{1,24}$/.test(name),
+    ));
 const optionalString = (value: unknown): boolean =>
   value === undefined || value === null || typeof value === "string";
 const optionalLevel = (value: unknown): boolean =>
@@ -101,6 +110,7 @@ function validStoredJob(value: unknown): value is StoredSendJob {
     optionalString(job.model) &&
     optionalString(job.effort) &&
     optionalLevel(job.level) &&
+    optionalTags(job.tags) &&
     optionalAttachmentDraft(job.attachmentDraft) &&
     (job.muted === undefined || typeof job.muted === "boolean") &&
     (job.clientId === undefined ||
@@ -148,6 +158,7 @@ function validDraft(value: unknown): value is StoredDraft | null {
     optionalString(draft.model) &&
     optionalString(draft.effort) &&
     optionalLevel(draft.level) &&
+    optionalTags(draft.tags) &&
     optionalAttachmentDraft(draft.attachmentDraft) &&
     (draft.muted === undefined || typeof draft.muted === "boolean")
   );

@@ -384,9 +384,11 @@ export function installHooks(
           rt.wrapSection("codemode", (inner) => ({
             ...inner,
             render: (input) => {
+              // Invariant: name model-callable deferred tools (Pi's
+              // agent.deferred); mcp_servers names on-demand MCP servers.
               const scripts = input.agent.callable.filter(
                 (tool) =>
-                  !tool.deferred &&
+                  (!tool.deferred || input.agent.deferred.includes(tool)) &&
                   !input.agent.tools.some(
                     (native) => native.name === tool.name,
                   ),

@@ -30,6 +30,16 @@ Discover the deferred tool with `searchTools("recurse_settings")`, inspect its s
 
 `share_link` uses local `conversations` ids and returns a sign-in-required link to their complete root trees. Children resolve to roots. It does not grant access or change authentication.
 
+## Tags
+
+Tags label agents, for example by project. Names use 1–24 lowercase letters, digits or hyphens; each conversation holds at most 16 tags. `archived`, `snoozed` and `pinned` are reserved.
+
+Tagging UI is turned on by a custom sidebar script; the built-in layout has no tag controls. Operators use its **Tag…** box to type or pick a tag, and **Untag** to remove its project tag. Agents use `bun $RECURSE_SRC/tools/subagent.ts tag <id> --add project-name` or `--remove project-name`; they cannot change reserved tags.
+
+Sidebar scripts read `r.tags[name]`, use actions with `ask: "tag"` to ask for a name (`clear: "ask"` removes one), and return tagged rows in sections with `hideWhenEmpty: true`. Export `newAgent = { ask: "tag" }` to show an optional tag control on the New agent draft. A section's `{ label: "New agent", start: true, set: "project" }` preselects its tag; the control can change or clear it. The example script does both. Optional `newAgent.defaults = { project: { effort: 3 } }` applies an editable effort level when that tag is chosen.
+
+Sections may group one level of child sections; the example's tag groups contain Active, Inbox and Archive.
+
 ## Sidebar
 
 The sidebar script API is experimental and may change without migration; Recurse updates may require editing the script.

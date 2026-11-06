@@ -1,4 +1,5 @@
 // Trace main-thread blocking calls and whole captured-request JSON encoding.
+// Caller identities skip wall-span wrappers; full stacks retain every frame.
 // Other JSON encoding (small metadata, provider bodies) is not this regression.
 import { isMainThread } from "node:worker_threads";
 import { writeFile } from "node:fs/promises";
@@ -37,6 +38,7 @@ if (isMainThread && process.env.RECURSE_BLOCKING_TRACE) {
         .filter(
           (line) =>
             !line.includes("blocking_trace_preload.ts") &&
+            !line.includes("/observability/slow_span.ts:") &&
             line.includes("/") &&
             !line.includes("node:") &&
             !line.includes("bun:"),

@@ -1,6 +1,7 @@
 // Startup catches up missing/stale projections, without reading current files.
 // Immutable archive files are projection done-markers, not a separate index.
 import { join } from "node:path";
+import { slowSpan } from "../observability/slow_span";
 import type { AgentArchive } from "../agents/durable/archive";
 import type { ProcessLifecycle } from "../process_lifecycle";
 import { BackfillProcess } from "./backfill_process";
@@ -41,10 +42,14 @@ export async function backfillMessageSearch(options: {
     while (phase !== "done" && !options.signal.aborted) {
       if (!(await yieldToFocus())) return;
       const started = performance.now();
-      const live = options.live().sort((a, b) => a.cid.localeCompare(b.cid));
+      const live = slowSpan("search_backfill_targets", undefined, () =>
+        options.live().sort((a, b) => a.cid.localeCompare(b.cid)),
+      );
       const targets: SearchTarget[] =
         phase === "live"
-          ? live.filter((target) => target.cid > after).slice(0, 16)
+          ? slowSpan("search_backfill_page", undefined, () =>
+              live.filter((target) => target.cid > after).slice(0, 16),
+            )
           : (await options.archive.page(after, 16)).map((row) => ({
               cid: row.cid,
               agent: row.archive_id,

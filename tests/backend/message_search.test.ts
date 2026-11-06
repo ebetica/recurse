@@ -49,10 +49,19 @@ test("message search follows commits and reads retained history without revival"
   const { root, env } = appWorld({ password: true });
   seedPiModelList(join(root, "data", "config"));
   const activity: number[] = [];
+  const stalls: string[] = [];
+  let blockNextSync = false;
   class SearchLog extends WebLogSink {
     override write(record: Parameters<WebLogSink["write"]>[0]): void {
       const active = /event=search_rg active=(\d+)/.exec(record.message);
       if (active) activity.push(Number(active[1]));
+      if (record.message.startsWith("event=event_loop_stall "))
+        stalls.push(record.message);
+      if (blockNextSync && record.message.startsWith("event=search_sync ")) {
+        blockNextSync = false;
+        const until = performance.now() + 400;
+        while (performance.now() < until) {}
+      }
       super.write(record);
     }
   }
@@ -445,7 +454,13 @@ test("message search follows commits and reads retained history without revival"
         progress.push(fields);
       },
     };
+    const previousStalls = stalls.length;
+    blockNextSync = true;
     await backfillMessageSearch(migration);
+    await until(() => stalls.length > previousStalls);
+    expect(stalls.slice(previousStalls).join("\n")).toContain(
+      "search_sync_result:",
+    );
     const migrated = JSON.parse(await readFile(checkpoint, "utf8"));
     expect(migrated).toMatchObject({ phase: "done", version: 1 });
     expect(await stat(legacySidecar).catch(() => null)).toBeNull();

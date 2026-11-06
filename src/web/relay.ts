@@ -3,6 +3,7 @@
 // Only named local agents read outcomes; bounded waits detach on disconnect.
 // Revoked connections stop polls; sleeping instances queue sends to homes.
 import type { ConnectedBackends } from "../backends/connected";
+import { slowSpan } from "../observability/slow_span";
 import type { HomeCallbacks } from "../backends/home_callbacks";
 import { requireLocalAgent } from "./backends";
 import {
@@ -81,29 +82,40 @@ export function registerRelayRoutes(
                     controller.signal,
                     wait,
                   );
-                  if (response.status !== 200) throw new Error("poll failed");
-                  const rows = (response.data as { requests?: unknown } | null)
-                    ?.requests;
-                  if (!Array.isArray(rows) || rows.length > 100)
-                    throw new Error("invalid poll");
+                  const rows = slowSpan(
+                    "relay_poll_response",
+                    undefined,
+                    () => {
+                      if (response.status !== 200)
+                        throw new Error("poll failed");
+                      const rows = (
+                        response.data as { requests?: unknown } | null
+                      )?.requests;
+                      if (!Array.isArray(rows) || rows.length > 100)
+                        throw new Error("invalid poll");
+                      return rows;
+                    },
+                  );
                   for (const raw of rows) {
                     const row = raw as RelayRequest;
-                    if (
-                      !row ||
-                      typeof row.id !== "string" ||
-                      typeof row.agent !== "string" ||
-                      typeof row.sender !== "string" ||
-                      !CLIENT_KEY_RE.test(row.id) ||
-                      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(row.agent) ||
-                      !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(row.sender) ||
-                      !advertised.includes(row.label) ||
-                      typeof row.content !== "string" ||
-                      Array.from(row.content).length >
-                        SERVICE_MESSAGE_MAX_CHARS ||
-                      (row.title !== null && typeof row.title !== "string") ||
-                      typeof row.interrupt !== "boolean"
-                    )
-                      throw new Error("invalid relay request");
+                    slowSpan("relay_poll_validate", undefined, () => {
+                      if (
+                        !row ||
+                        typeof row.id !== "string" ||
+                        typeof row.agent !== "string" ||
+                        typeof row.sender !== "string" ||
+                        !CLIENT_KEY_RE.test(row.id) ||
+                        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(row.agent) ||
+                        !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(row.sender) ||
+                        !advertised.includes(row.label) ||
+                        typeof row.content !== "string" ||
+                        Array.from(row.content).length >
+                          SERVICE_MESSAGE_MAX_CHARS ||
+                        (row.title !== null && typeof row.title !== "string") ||
+                        typeof row.interrupt !== "boolean"
+                      )
+                        throw new Error("invalid relay request");
+                    });
                     const outcome: Outcome = {
                       state: "pending",
                       reason: null,
@@ -394,7 +406,7 @@ export function registerRelayRoutes(
             response.status < 500
           ) {
             outcome.state = "unconfirmed";
-            outcome.reason = "connection dropped during delivery";
+            outcome.reason = `${label} refused the retry (${response.status})`;
             return;
           } else if (response.status === 401) {
             outcome.reason = `${label}'s key was revoked: reconnect in Settings`;

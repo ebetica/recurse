@@ -3,6 +3,7 @@
 // Repaints hold the reader through live-reply replacement and height clamps.
 // Phone thread drags blur the field; scrolling/composer gestures do not.
 import { commentOutbox } from "../artifacts/comment-outbox.js";
+import { outboxBubbles } from "../composer/outbox.js";
 import { showModelResponse } from "../model-response.js";
 import { activeDescendantCount } from "../active-agents.js";
 import {
@@ -672,7 +673,7 @@ function threadTemplate(
         latestCompaction.text === "Compacting…") ||
         latestCompaction === latestEntry),
   )}
-  ${commentOutbox(conv.id)}
+  ${commentOutbox(conv.id)} ${outboxBubbles(conv.id)}
   ${repeat(
     pending,
     (m, i) => m.id ?? i,

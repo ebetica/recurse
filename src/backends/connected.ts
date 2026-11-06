@@ -27,6 +27,7 @@ interface RecordRow {
   requested_by?: string;
   reason?: string;
   callback_sha256?: string;
+  check_url?: string;
 }
 interface Health {
   state: "connected" | "unreachable" | "key_revoked";
@@ -177,26 +178,48 @@ export class ConnectedBackends {
     const row = this.rows.find((r) => r.label === label && !r.pending);
     if (!row || row.key_revoked)
       throw new HttpError(409, "backend disconnected or needs sign-in");
-    const response = await this.call(row, "/api/relay/requests", {
-      home: { id: this.homeId, name: this.home },
-      query: new URLSearchParams({
-        labels: labels.join(","),
-        wait: String(wait),
-      }),
-      timeoutMs: 30_000,
-      signal,
-    });
+    let response =
+      row.check_url && wait !== 0
+        ? await this.call(
+            { ...row, url: row.check_url },
+            "/api/relay/requests",
+            {
+              timeoutMs: 10_000,
+              signal,
+            },
+          ).catch(() => null)
+        : null;
+    signal.throwIfAborted();
+    if (!response || (response.status !== 401 && !sleepUntil(response)))
+      response = await this.call(row, "/api/relay/requests", {
+        home: { id: this.homeId, name: this.home },
+        query: new URLSearchParams({
+          labels: labels.join(","),
+          wait: String(wait),
+        }),
+        timeoutMs: 30_000,
+        signal,
+      });
     if (response.status === 401) await this.revoke(row);
+    if (response.status === 200) await this.rememberCheck(row, response);
     const wasSleeping = this.asleep.has(label);
     const until = sleepUntil(response);
     if (until && this.rows.includes(row))
       this.asleep.set(label, {
         until,
-        check: checkUrl(row.url, response),
+        check: row.check_url ?? null,
         key: row.key,
       });
     else if (response.status === 200) this.asleep.delete(label);
-    if (response.status === 200) this.contact(row);
+    if (response.status === 200) {
+      if (until)
+        this.setHealth(row, {
+          state: "connected",
+          last_contact: Date.now() / 1000,
+          reason: null,
+        });
+      else this.contact(row);
+    }
     if (wasSleeping !== this.asleep.has(label)) this.changed();
     return response;
   }
@@ -280,6 +303,11 @@ export class ConnectedBackends {
                   /^recurse-link_[a-f0-9]{16}_[a-f0-9]{64}$/.test(r.key))
               ) ||
               !Number.isFinite(r.added) ||
+              !(
+                r.check_url === undefined ||
+                (backendUrl(r.check_url) === r.check_url &&
+                  new URL(r.check_url).protocol === new URL(r.url).protocol)
+              ) ||
               !(r.pending === undefined || typeof r.pending === "boolean") ||
               !(
                 r.key_revoked === undefined ||
@@ -354,6 +382,23 @@ export class ConnectedBackends {
         });
     }
     return response;
+  }
+  /** Persist an advertised check-in so the first poll after restart uses it. */
+  private async rememberCheck(
+    row: RecordRow,
+    response: { data: unknown },
+  ): Promise<void> {
+    const url = checkUrl(row.url, response);
+    if (!url || row.check_url === url) return;
+    if (!this.rows.includes(row)) {
+      row.check_url = url;
+      return;
+    }
+    await this.serialized(async () => {
+      if (!this.rows.includes(row) || row.check_url === url) return;
+      row.check_url = url;
+      await this.save(this.rows);
+    });
   }
   private requireAvailable(): void {
     if (this.unavailable)
@@ -902,6 +947,7 @@ export class ConnectedBackends {
       }
       if (response.status === 304 && previous?.etag) return "unchanged";
       if (response.status !== 200) return null;
+      await this.rememberCheck(row, response);
       const data = response.data as {
         api?: unknown;
         api_revision?: unknown;

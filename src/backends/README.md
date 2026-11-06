@@ -61,7 +61,12 @@ then polls once. Homes long-poll every remote back to back while connected. Each
 when the remote changes version, without another request. Sends to a connected
 remote with known compatibility go straight to delivery. A transient failure or
 unknown delivery route triggers one status/version wake probe and retries with
-the same message id; receiving admission remains deduplicated.
+the same message id; receiving admission remains deduplicated. Until the
+conversation index and startup scratch repair are ready, delivery returns 503
+with Retry-After instead of reporting the conversation missing. After the wake
+probe, sends retry 503 responses within the existing 30-second delivery budget.
+A rejected retry reports its HTTP status without claiming the connection dropped;
+if an earlier attempt could have arrived, its outcome remains unconfirmed.
 Local `GET /api/relay/messages/{id}` reads only the sender's outcome. Its optional
 `wait` is 0–25 integer seconds (default 0; invalid values return 422); completion
 wakes readers, and timeout or disconnect removes only that reader, not delivery.
@@ -90,12 +95,16 @@ contacting a revoked remote. Explicit relay checks and transcript reads may
 still try once; only a successful request resumes automatic polling. Callback
 notices cannot resume a revoked connection.
 
-`RECURSE_SLEEP_CHECK_URL` names a check-in service that answers a paused
-home's timed re-poll without starting the instance. The sleep answer carries
-it as `check_url`; when the pause ends, the home sends
-`GET <check_url>/api/relay/requests` with its backend key instead of polling.
+`RECURSE_SLEEP_CHECK_URL` names a check-in service that answers relay polls
+without starting the instance. Version and sleep answers advertise it as
+`check_url`; the home persists it with the connection, including at sign-in,
+so startup polls also check it before contacting the web URL. Timed polls send
+`GET <check_url>/api/relay/requests` with the backend key first. A callback's
+one-off poll goes straight to the web URL to claim the waiting messages.
 A 200 answer with `sleep_seconds` keeps it paused that long; any other answer
-or error makes it poll the instance as before. Homes ignore a check-in URL
+or error makes it poll the instance as before, except 401 still revokes the
+connection. A sleep answer never triggers a version read. Real sends and
+explicit reads keep using the web URL. Homes ignore a check-in URL
 that is not on the remote's own scheme (HTTPS, or HTTP on loopback). The
 service must authenticate the key and answer only for that home, for example
 from whether `relay-queue.json` holds messages for it; Recurse does not provide

@@ -21,22 +21,24 @@ mkdir -p "$tools"
 
 fetch() {
   local url=$1 path=$2 hash=$3
-  if [[ ! -f "$path" ]]; then
-    curl --fail --location --silent --show-error --retry 2 \
-      --connect-timeout 20 --max-time 180 "$url" -o "$path.part"
-    printf '%s  %s\n' "$hash" "$path.part" | sha256sum --check --status
-    mv -- "$path.part" "$path"
+  if printf '%s  %s\n' "$hash" "$path" | sha256sum --check --status 2>/dev/null; then return; fi
+  curl --fail --location --silent --show-error --retry 2 \
+    --connect-timeout 20 --max-time 180 "$url" -o "$path.part"
+  if ! printf '%s  %s\n' "$hash" "$path.part" | sha256sum --check --status; then
+    printf 'SHA-256 mismatch for %s\n' "$url" >&2
+    exit 1
   fi
-  printf '%s  %s\n' "$hash" "$path" | sha256sum --check --status
+  mv -- "$path.part" "$path"
 }
 
-fetch 'https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar' \
-  "$tools/tla2tools.jar" c57d4d7bbee3ed2c89c32cb9c60cac728f751e80e2570bc4b7368ae39291fc21
+fetch 'https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar' \
+  "$tools/tla2tools.jar" 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 fetch 'https://cdn.azul.com/zulu/bin/zulu21.40.17-ca-jre21.0.6-linux_x64.tar.gz' \
   "$tools/jre.tar.gz" 8524ef3c76ae1e00bb020044557c5ae1a59d985eee0394d71fc9b2414d083d33
 java="$tools/zulu21.40.17-ca-jre21.0.6-linux_x64/bin/java"
 if [[ ! -x "$java" ]]; then tar -xzf "$tools/jre.tar.gz" -C "$tools"; fi
 run=$(mktemp -d "$scratch/store-lifecycle.XXXXXX")
+cp -- "$source_dir/StoreLifecycle.tla" "$source_dir/ShellHandoff.tla" "$run/"
 printf 'Logs and generated configs: %s\n' "$run"
 "$java" -version
 
@@ -72,10 +74,10 @@ run_case() {
   done < "$source_dir/$model.cfg" > "$run/$name.cfg"
 
   local status=0 start=$SECONDS
-  timeout 110 "$java" -Djava.io.tmpdir="$run" -Xmx1g -XX:+UseParallelGC \
+  (cd "$run" && timeout 110 "$java" -Djava.io.tmpdir="$run" -Xmx1g -XX:+UseParallelGC \
     -cp "$tools/tla2tools.jar" tlc2.TLC -workers 1 -seed 1 -fp 0 \
-    -noGenerateSpecTE -metadir "$run/$name.states" \
-    -config "$run/$name.cfg" "$source_dir/$model.tla" \
+    -metadir "$run/$name.states" \
+    -config "$run/$name.cfg" "$model.tla") \
     > "$run/$name.log" 2>&1 || status=$?
   printf '\n%s: exit=%s elapsed=%ss\n' "$name" "$status" "$((SECONDS - start))"
   awk '/TLC2 Version|Error:|No error has been found|states generated,|depth of|Finished in/' "$run/$name.log"

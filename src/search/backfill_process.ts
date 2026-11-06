@@ -1,6 +1,7 @@
 // Startup catch-up uses one owned process without pre-reading transcript data.
 // Replies contain counters only; closing verifies the process group is gone.
 import { fileURLToPath } from "node:url";
+import { slowSpan } from "../observability/slow_span";
 import type { ProcessLifecycle } from "../process_lifecycle";
 import type { SearchTarget, SyncStats } from "./index";
 
@@ -37,13 +38,14 @@ export class BackfillProcess {
           stdin: "ignore",
           stdout: "ignore",
           stderr: "inherit",
-          ipc: (reply: BackfillReply) => {
-            const waiter = this.waiting.get(reply.id);
-            if (!waiter) return;
-            this.waiting.delete(reply.id);
-            if ("error" in reply) waiter.reject(new Error(reply.error));
-            else waiter.resolve(reply.value);
-          },
+          ipc: (reply: BackfillReply) =>
+            slowSpan("search_backfill_reply", undefined, () => {
+              const waiter = this.waiting.get(reply.id);
+              if (!waiter) return;
+              this.waiting.delete(reply.id);
+              if ("error" in reply) waiter.reject(new Error(reply.error));
+              else waiter.resolve(reply.value);
+            }),
         },
       },
     );
@@ -67,7 +69,9 @@ export class BackfillProcess {
     const waiter = Promise.withResolvers<SyncStats | undefined>();
     this.waiting.set(id, waiter);
     try {
-      child.send({ ...work, id });
+      slowSpan("search_backfill_send", undefined, () =>
+        child.send({ ...work, id }),
+      );
     } catch (error) {
       this.waiting.delete(id);
       throw error;

@@ -23,8 +23,8 @@ Tests mirror this layout in `tests/extensions/`, and `tests/check.sh ts` runs th
 
 The native [recurse_settings tool](core/settings/settings.ts) and
 [artifact tool](core/environment/artifact.ts) use Pi Durable's `deferred` flag.
-Their descriptions and schemas are absent from initial model requests and inline
-codemode declarations. Agents discover settings
+Their descriptions and schemas are absent from initial model requests; the
+codemode prompt section names them. Agents discover settings
 after reading the bundled [recurse-settings skill](../../skills/recurse-settings/SKILL.md),
 using `searchTools("recurse_settings")`, `describeTool("recurse_settings")`, and
 `tools.recurse_settings(...)`. The skill is available regardless of cwd; only its

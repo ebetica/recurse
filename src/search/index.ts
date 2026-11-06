@@ -1,7 +1,7 @@
 // Appends and startup catch-up publish derived files behind rotation fences.
 // Durable file/state markers restore readiness; queries never open SQLite.
 import { INFO, WARNING } from "../observability/runtime_logging";
-import { slowSpan } from "../observability/slow_span";
+import { awaitedSpan, slowSpan } from "../observability/slow_span";
 import { dirname, join } from "node:path";
 import type { CommitPublication } from "@earendil-works/pi-durable";
 import type { Work } from "./search.worker";
@@ -291,24 +291,25 @@ export class MessageSearch {
       );
       this.workers.set(shard, worker);
       const current = worker;
-      worker.onmessage = (event) => {
-        const { id, value, error, log } = event.data;
-        if (log) {
-          this.log(
-            log.event,
-            log.event === "search_rg"
-              ? { active: (ripgreps += Number(log.fields.delta)) }
-              : log.fields,
-            INFO,
-          );
-          return;
-        }
-        const pending = this.waiting.get(id);
-        if (!pending) return;
-        this.waiting.delete(id);
-        if (error) pending.waiter.reject(new Error(error));
-        else pending.waiter.resolve(value);
-      };
+      worker.onmessage = (event) =>
+        slowSpan("search_reply_handle", undefined, () => {
+          const { id, value, error, log } = event.data;
+          if (log) {
+            this.log(
+              log.event,
+              log.event === "search_rg"
+                ? { active: (ripgreps += Number(log.fields.delta)) }
+                : log.fields,
+              INFO,
+            );
+            return;
+          }
+          const pending = this.waiting.get(id);
+          if (!pending) return;
+          this.waiting.delete(id);
+          if (error) pending.waiter.reject(new Error(error));
+          else pending.waiter.resolve(value);
+        });
       worker.onerror = () => {
         for (const [id, pending] of this.waiting) {
           if (pending.worker !== current) continue;
@@ -323,7 +324,9 @@ export class MessageSearch {
     const waiter = Promise.withResolvers<unknown>();
     this.waiting.set(id, { worker, waiter });
     // Spec: @tla dispatch {request, scope:worker, id}
-    worker.postMessage({ ...request, id });
+    slowSpan("search_request_clone", undefined, () =>
+      worker.postMessage({ ...request, id }),
+    );
     const abort = () => worker.postMessage({ op: "cancel", id });
     signal?.addEventListener("abort", abort, { once: true });
     const work =
@@ -383,16 +386,16 @@ export class MessageSearch {
   }
 
   async sync(target: SearchTarget, project?: Projector): Promise<SyncStats> {
-    const stats = await this.request(
-      { op: "sync", target },
-      undefined,
-      project,
+    const stats = await awaitedSpan("search_sync", target.cid, () =>
+      this.request({ op: "sync", target }, undefined, project),
     );
-    if (this.backfillIncomplete && !target.archived)
-      this.indexedLive.add(target.path);
-    const { file: _file, ...timing } = stats;
-    this.log("search_sync", { cid: target.cid, ...timing }, INFO);
-    return stats;
+    return slowSpan("search_sync_result", target.cid, () => {
+      if (this.backfillIncomplete && !target.archived)
+        this.indexedLive.add(target.path);
+      const { file: _file, ...timing } = stats;
+      this.log("search_sync", { cid: target.cid, ...timing }, INFO);
+      return stats;
+    });
   }
 
   async search(

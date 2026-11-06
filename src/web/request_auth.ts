@@ -397,7 +397,7 @@ export function agentMarked(ex: Exchange): boolean {
 }
 
 function operatorConversationPath(path: string): boolean {
-  return /^\/api\/conversations\/[^/]+\/(safety|take-over|pin|promote)$/.test(
+  return /^\/api\/conversations\/[^/]+\/(safety|take-over|pin|promote|path-image)$/.test(
     path.replace(/\/+$/, ""),
   );
 }

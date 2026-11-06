@@ -499,7 +499,7 @@ def _running_shell(state: Path) -> str | None:
     return None
 
 def _durable_work(conversations: Path) -> str | None:
-    """Find recent Durable database writes or live shell records."""
+    """Find fresh Durable work markers or live shell records."""
     now = time.time()
     try:
         if conversations.is_symlink():
@@ -512,17 +512,16 @@ def _durable_work(conversations: Path) -> str | None:
             durable = conversation / "durable"
             if durable.is_symlink():
                 continue
-            for name in ("session.sqlite", "session.sqlite-wal"):
-                session = durable / name
-                try:
-                    if (
-                        not session.is_symlink()
-                        and session.is_file()
-                        and now - session.stat().st_mtime <= _WARM_TURN_MAX_AGE_SECONDS
-                    ):
-                        return f"durable session active: {session}"
-                except OSError:
-                    continue
+            activity = durable / "activity"
+            try:
+                if (
+                    not activity.is_symlink()
+                    and activity.is_file()
+                    and now - activity.stat().st_mtime <= _WARM_TURN_MAX_AGE_SECONDS
+                ):
+                    return f"durable work active: {activity}"
+            except OSError:
+                pass
             shells = durable / "shells"
             if not shells.is_symlink() and (reason := _running_shell(shells)):
                 return reason
@@ -627,13 +626,15 @@ def sleep_check_answer(authorization: str, awake, asleep) -> tuple[int, dict]:
     keep sleeping only if the web container stopped after the last start and
     nothing is queued for that key. Reveals nothing about other keys."""
     match = _KEY.fullmatch(authorization or "")
+    if match and (not isinstance(awake, str) or not isinstance(asleep, dict) or asleep.get("token") != awake):
+        return 503, {"detail": "web container may be awake"}
     keys = asleep.get("keys") if isinstance(asleep, dict) else None
     record = keys.get(match[1]) if match and isinstance(keys, dict) else None
     expected = record.get("sha256") if isinstance(record, dict) else None
     candidate = hashlib.sha256(match[2].encode()).hexdigest() if match else ""
     if not hmac.compare_digest(candidate, expected if isinstance(expected, str) else "0" * 64) or not expected:
         return 401, {"detail": "backend key required"}
-    if not isinstance(awake, str) or asleep.get("token") != awake or record.get("waiting") is not False:
+    if record.get("waiting") is not False:
         return 200, {"requests": []}
     return 200, {"requests": [], "sleep_seconds": SLEEP_CHECK_SECONDS}
 

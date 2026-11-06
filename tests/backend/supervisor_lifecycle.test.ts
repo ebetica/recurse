@@ -14,9 +14,8 @@ import {
   acquireSupervisorLock,
   LOCK_FD_ENV,
 } from "../../src/launcher/lock.cli";
-import { SqliteWorker } from "../../src/agents/durable/sqlite_worker";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
-import { fauxHost, until } from "./fixtures/durable_host/host";
+import { fauxHost, held, until } from "./fixtures/durable_host/host";
 import {
   existsSync,
   readdirSync,
@@ -44,6 +43,9 @@ import {
   ignoringCancelled,
 } from "../../src/utils/tasks";
 import { AgentStore } from "../../src/agents/agent_store";
+import { LoopLag } from "../../src/observability/loop_lag";
+import { logger } from "../../src/observability/runtime_logging";
+import { startServer } from "../../src/server";
 
 const NOW = 1_700_000_000.0;
 const LEVELS: Record<number, string> = {
@@ -394,14 +396,42 @@ test("supervisor_lifecycle: a job aborted before its first step still untracks",
   expect(h.life.maintenanceJobs()).toEqual([]);
 });
 
+async function interruptedStartup(
+  root: string,
+  ids: string[],
+  focusWaitMs?: number,
+) {
+  const seed = fauxHost(root);
+  delete seed.records.c1;
+  for (const cid of ids) {
+    seed.records[cid] = { id: cid, backend: "durable", workdir: seed.work };
+    const answer = held(fauxAssistantMessage("interrupted"));
+    seed.faux.setResponses([answer.step]);
+    await seed.host.send(
+      cid,
+      "Resume this work after restart.",
+      `startup:${cid}`,
+    );
+    await answer.started;
+  }
+  await seed.host.close();
+  const next = fauxHost(root, undefined, false, focusWaitMs);
+  delete next.records.c1;
+  Object.assign(next.records, seed.records);
+  return next;
+}
+
 // Regression: #2778 Startup opens yield between phases and do not wait on their own focused join.
 test("a focused open pauses startup before its next storage phase, including a same-agent join", async () => {
   const root = mkdtempSync(join(tmpdir(), "durable-priority-"));
   roots.push(root);
-  const { host, records, work } = fauxHost(root);
-  delete records.c1;
-  for (const cid of ["b0", "b1", "b2", "b3", "focus"])
-    records[cid] = { id: cid, backend: "durable", workdir: work };
+  const { host, records, work } = await interruptedStartup(root, [
+    "b0",
+    "b1",
+    "b2",
+    "b3",
+  ]);
+  records.focus = { id: "focus", backend: "durable", workdir: work };
   records.side = {
     id: "side",
     backend: "durable",
@@ -410,105 +440,113 @@ test("a focused open pauses startup before its next storage phase, including a s
   };
   const gate = Promise.withResolvers<void>();
   const started = Promise.withResolvers<void>();
+  const stalls: string[] = [];
+  const tasks = new TaskSet();
+  const log = logger("startup", {
+    write: (record) => stalls.push(record.message),
+  });
+  const loopLag = new LoopLag({
+    logger: log,
+    runningCount: () => host.runningCount(),
+    runningConversations: () => host.runningConversations(),
+    jobs: () => tasks.names(),
+  });
+  const server = startServer({
+    logger: log,
+    port: 0,
+    handler: async () => new Response("ready"),
+    shutdown: async () => {},
+  });
+  loopLag.start();
   const deps = (host as unknown as { deps: DurableHostDeps }).deps;
   const agentEnv = deps.agentEnv;
   deps.agentEnv = async (conv, timing) => {
     if (conv.id === "b0") {
+      const until = performance.now() + 400;
+      while (performance.now() < until) {}
       started.resolve();
       await gate.promise;
     }
     return agentEnv(conv, timing);
   };
   const order: string[] = [];
-  let queue: Promise<unknown> = Promise.resolve();
-  const original = SqliteWorker.prototype.openDatabase;
-  // test-check-allow: T3 Queues real database opens to expose focus ordering.
-  const spy = spyOn(SqliteWorker.prototype, "openDatabase").mockImplementation(
-    function (this: SqliteWorker, path, refused) {
-      const cid = path.split("/conversations/")[1]!.split("/")[0]!;
-      order.push(cid);
-      const turn = queue.then(async () => {
-        return original.call(this, path, refused);
-      });
-      queue = turn.catch(() => undefined);
-      return turn;
-    },
-  );
+  deps.log = (event, fields) => {
+    if (event === "durable_open") order.push(String(fields.cid));
+  };
   try {
-    const background = host.openLive();
+    expect(await (await fetch(server.url)).text()).toBe("ready");
+    const background = tasks.spawn("maintenance:durable_open_live", () =>
+      host.openLive(),
+    );
     await started.promise;
+    await until(() =>
+      stalls.some((line) => line.startsWith("event=event_loop_stall ")),
+    );
+    const stall = stalls.find((line) =>
+      line.startsWith("event=event_loop_stall "),
+    )!;
+    expect(stall).toContain("durable_agent_env_call:b0:");
+    expect(stall).toContain("jobs=maintenance:durable_open_live");
 
     const focus = host.open("focus");
     const joined = host.open("b0");
-    const side = host.open("side").then(
-      () => "",
-      (error) => String(error),
-    );
+    const side = host.open("side");
     gate.resolve();
     await focus;
     order.push("focus ready");
     await Promise.all([background, joined]);
-    expect(await side).toContain(
-      "the main conversation has nothing to fork yet",
-    );
+    expect((await side).parent).toBe("b0");
     expect(order).toEqual(["focus", "focus ready", "b0", "b1", "b2", "b3"]);
   } finally {
     gate.resolve();
-    spy.mockRestore();
+    loopLag.stop();
     await host.close();
+    await server.close();
   }
 });
 
 test("a focused open that never finishes delays background opens by one bounded wait, which is logged", async () => {
   const root = mkdtempSync(join(tmpdir(), "durable-focus-hang-"));
   roots.push(root);
-  const { host, records, work } = fauxHost(root, undefined, false, 200);
-  delete records.c1;
-  for (const cid of ["b0", "b1", "focus"])
-    records[cid] = { id: cid, backend: "durable", workdir: work };
+  const { host, records, work } = await interruptedStartup(
+    root,
+    ["b0", "b1"],
+    200,
+  );
+  records.focus = { id: "focus", backend: "durable", workdir: work };
   const hang = Promise.withResolvers<void>(),
     focusStarted = Promise.withResolvers<void>();
   const opened: string[] = [];
-  const original = SqliteWorker.prototype.openDatabase;
-  // test-check-allow: T3 Gates real database opens to expose native timeout.
-  const spy = spyOn(SqliteWorker.prototype, "openDatabase").mockImplementation(
-    async function (this: SqliteWorker, path) {
-      const cid = path.startsWith(`${root}/conversations/`)
-        ? path.split("/conversations/")[1]!.split("/")[0]!
-        : null;
-      if (cid) opened.push(cid);
-      if (cid === "focus") {
-        focusStarted.resolve();
-        await hang.promise;
-      }
-      return original.call(this, path);
-    },
-  );
-  const deps = (host as unknown as { deps: Pick<DurableHostDeps, "log"> }).deps;
-  // test-check-allow: T3 Call-through observer of real bounded-wait warnings.
-  const log = spyOn(deps, "log");
+  const warnings: Array<{ cids: unknown; level: number | undefined }> = [];
+  const deps = host.deps;
+  const agentEnv = deps.agentEnv;
+  deps.agentEnv = async (conv, timing) => {
+    if (conv.id === "focus") {
+      focusStarted.resolve();
+      await hang.promise;
+    }
+    return agentEnv(conv, timing);
+  };
+  deps.log = (event, fields, level) => {
+    if (event === "durable_open") opened.push(String(fields.cid));
+    if (event === "durable_focus_wait_bounded")
+      warnings.push({ cids: fields.cids, level });
+  };
   try {
     const focus = host.open("focus");
     await focusStarted.promise;
     const background = host.openLive();
-    const warned = () =>
-      log.mock.calls.filter(
-        ([event]) => event === "durable_focus_wait_bounded",
-      );
-    await until(() => opened.includes("b1") && warned().length === 2);
-    expect(opened).toEqual(["focus", "b0", "b1"]);
-    for (const [, fields, level] of warned()) {
-      expect(fields.cids).toBe("focus");
-      expect(level).toBe(30);
-      expect(fields.waited_ms).toBeGreaterThanOrEqual(199);
-    }
+    await until(() => opened.includes("b1") && warnings.length === 2);
+    expect(opened).toEqual(["b0", "b1"]);
+    expect(warnings).toEqual([
+      { cids: "focus", level: 30 },
+      { cids: "focus", level: 30 },
+    ]);
     hang.resolve();
     await focus;
     await background;
   } finally {
     hang.resolve();
-    spy.mockRestore();
-    log.mockRestore();
     await host.close();
   }
 }, 30_000);

@@ -1,6 +1,8 @@
 import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   gotoRoot,
   mockConversation,
@@ -22,7 +24,25 @@ export const tests: BrowserTest[] = [
       if (/example\.invalid|javascript:|data:image/.test(request.url()))
         attempted.push(request.url());
     });
-    await page.route("https://example.invalid/**", (route) => route.abort());
+    const png = Buffer.from(
+      await page.evaluate<string>(`(() => {
+      const canvas = document.createElement('canvas');
+      canvas.width = 320; canvas.height = 160;
+      const context = canvas.getContext('2d');
+      context.fillStyle = '#167d8d'; context.fillRect(0, 0, 320, 160);
+      context.fillStyle = '#fff'; context.font = '24px sans-serif';
+      context.fillText('Local image', 86, 88);
+      return canvas.toDataURL('image/png').split(',')[1];
+    })()`),
+      "base64",
+    );
+    const workdir = await mkdtemp(join(tmpdir(), "reply-images-"));
+    const absolute = join(workdir, "absolute.png");
+    await writeFile(absolute, new Uint8Array(png));
+    await writeFile(join(workdir, "relative.png"), new Uint8Array(png));
+    await page.route("https://example.invalid/**", (route) =>
+      route.fulfill({ contentType: "image/png", body: png }),
+    );
     page.on("dialog", async (dialog) => {
       executions.push(dialog.message());
       await dialog.dismiss();
@@ -35,6 +55,7 @@ export const tests: BrowserTest[] = [
     const reply =
       "~5 runs, ..., ~10 seconds; took ~5 min (~10 s each); (~5) and (~10); ~5-~10; ~5 runs.~10 s. ~~old~~ ~old~ **~~a~~** " +
       "[script link](javascript:alert(1)) ![script image](javascript:alert(2)) " +
+      `![Absolute path](${absolute}) ![Relative path](./relative.png) ` +
       "![blocked](https://example.invalid/image.png) " +
       "![data image](data:image/png;base64,AAAA) " +
       `![vetted](${safeImage} '&quot; onerror=alert(3)') ` +
@@ -44,7 +65,7 @@ export const tests: BrowserTest[] = [
     await page.request.post(
       `${base}__browser-test/seed-model-selection-error`,
       {
-        data: { agent: "tilde-reply", model: "fauxordinary/faux-1" },
+        data: { agent: "tilde-reply", model: "fauxordinary/faux-1", workdir },
       },
     );
     await page.goto(`${base}#agent=tilde-reply`);
@@ -79,12 +100,22 @@ export const tests: BrowserTest[] = [
     expect(await content.innerText()).toContain("took ~5 min (~10 s each)");
     expect(await content.locator("strong del").innerText()).toBe("a");
     await content.locator("p .turn-tail").waitFor();
-    expect(await content.locator(".blocked-image").allTextContents()).toEqual([
-      "Image blocked",
-      "Image blocked",
-      "Image blocked",
-    ]);
-    const vetted = content.locator("img");
+    await browserExpect(
+      content.getByRole("button", {
+        name: "Show image from example.invalid",
+        exact: true,
+      }),
+    ).toBeVisible();
+    await browserExpect(content.locator(".artifact-failed-image")).toHaveCount(
+      2,
+    );
+    for (const alt of ["Absolute path", "Relative path"]) {
+      const local = content.locator(`img[alt="${alt}"]`);
+      await local.scrollIntoViewIfNeeded();
+      await local.evaluate((image: any) => image.decode());
+      expect(await local.getAttribute("src")).toContain("/path-image?");
+    }
+    const vetted = content.locator('img[alt="vetted"]');
     expect(await vetted.count()).toBe(1);
     expect(await vetted.getAttribute("src")).toBe(`${safeImage}/thumbnail`);
     expect(await vetted.getAttribute("title")).toBe('" onerror=alert(3)');
@@ -114,13 +145,14 @@ export const tests: BrowserTest[] = [
         "(() => { const width = document.querySelector('#conv-controls').clientWidth; return document.querySelector('#context-indicator').classList.contains('mini-hidden') === (width < 620); })()",
       );
     }
-    await browserExpect(content.locator(".image-filename")).toHaveText(
-      "browser-image.png",
+    const filename = content.locator(
+      '.thread-image:has(img[alt="vetted"]) .image-filename',
     );
+    await browserExpect(filename).toHaveText("browser-image.png");
     expect(
-      await content
-        .locator(".image-filename")
-        .evaluate((caption: any) => caption.scrollWidth <= caption.clientWidth),
+      await filename.evaluate(
+        (caption: any) => caption.scrollWidth <= caption.clientWidth,
+      ),
     ).toBeTrue();
     const markup = await content.innerHTML();
     await page.request.post(
@@ -136,11 +168,57 @@ export const tests: BrowserTest[] = [
     await page.locator("#menu-btn").click();
     await page.locator('.agent[data-id="tilde-reply"]').click();
     await content.locator("p .turn-tail").waitFor();
-    await browserExpect(content.locator(".image-filename")).toHaveText(
-      "browser-image.png",
-    );
+    await browserExpect(filename).toHaveText("browser-image.png");
     expect(await content.innerHTML()).toBe(markup);
+    for (const width of [1280, 412]) {
+      await page.setViewportSize({ width, height: 844 });
+      await content
+        .locator('img[alt="Absolute path"]')
+        .scrollIntoViewIfNeeded();
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/path-images-${width}.png`,
+        });
+      await content.locator('img[alt="Absolute path"]').click();
+      const viewer = page.locator('dialog[aria-label="Image viewer"]');
+      await viewer.locator("img").evaluate((image: any) => image.decode());
+      await browserExpect(
+        viewer.getByRole("button", { name: "Download", exact: true }),
+      ).toBeVisible();
+      expect(await viewer.locator("img").getAttribute("src")).not.toContain(
+        "thumbnail=",
+      );
+      await viewer
+        .getByRole("button", { name: "Close image", exact: true })
+        .click();
+    }
+    const permission = content.getByRole("button", {
+      name: "Show image from example.invalid",
+      exact: true,
+    });
+    for (const width of [1280, 412]) {
+      await page.setViewportSize({ width, height: 844 });
+      await permission.scrollIntoViewIfNeeded();
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/external-before-${width}.png`,
+        });
+    }
+    expect(attempted).toEqual([]);
+    await permission.click();
+    const external = content.locator('img[alt="blocked"]');
+    await external.evaluate((image: any) => image.decode());
+    expect(attempted).toEqual(["https://example.invalid/image.png"]);
+    for (const width of [1280, 412]) {
+      await page.setViewportSize({ width, height: 844 });
+      await external.scrollIntoViewIfNeeded();
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/external-after-${width}.png`,
+        });
+    }
     await page.close();
+    await rm(workdir, { recursive: true, force: true });
   },
   // Regression: #2250 angle-bracket placeholders stay literal
   async function test_message_placeholders(browser, base) {

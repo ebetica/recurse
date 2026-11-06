@@ -57,7 +57,20 @@ export type ThreadReply = (
       ok: false;
       error: { name?: string; message: string; code?: string };
     }
-) & { timing?: RequestTiming };
+) & {
+  timing?: RequestTiming;
+  payload?: { string_bytes: number; sent: number };
+};
+
+/** SQL rows are flat; count their string bytes off-thread without encoding. */
+function stringBytes(value: unknown): number {
+  let bytes = 0;
+  for (const row of Array.isArray(value) ? value : [value])
+    if (row && typeof row === "object")
+      for (const field of Object.values(row))
+        if (typeof field === "string") bytes += Buffer.byteLength(field);
+  return bytes;
+}
 
 interface Store {
   path: string;
@@ -270,6 +283,11 @@ self.onmessage = (event: MessageEvent<ThreadRequest>) => {
     reply.timing = {
       received,
       finished: performance.timeOrigin + performance.now(),
+    };
+  if (reply.ok && (request.op === "get" || request.op === "all"))
+    reply.payload = {
+      string_bytes: stringBytes(reply.value),
+      sent: performance.timeOrigin + performance.now(),
     };
   // Spec: @tla reply request
   self.postMessage(reply);

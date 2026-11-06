@@ -49,10 +49,14 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
           while (performance.now() < until) {}
         });
       const finish = startSlowSpan("paired_route", "c1");
-      const until = performance.now() + 60;
+      const until = performance.now() + 100;
       while (performance.now() < until) {}
       finish();
       finish();
+    });
+    slowSpan("later_short_work", "c1", () => {
+      const until = performance.now() + 51;
+      while (performance.now() < until) {}
     });
     return jsonResponse({ ok: true });
   });
@@ -92,7 +96,7 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
   const spans = / spans=(\S+)/.exec(stalls[0]!.message)?.[1];
   expect(spans).toMatch(/(?:^|,)blocking_route:c1:\d+(?:,|$)/);
   expect(spans?.split(",")).toHaveLength(3);
-  expect(spans).toContain("view_projection:abcdef012345:");
+  expect(spans).not.toContain("later_short_work:");
   expect(
     spans?.split(",").filter((span) => span.startsWith("paired_route:c1:")),
   ).toHaveLength(1);

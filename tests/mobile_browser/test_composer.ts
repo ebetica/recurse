@@ -8,6 +8,7 @@ import {
   postFixture,
   routeArtifacts,
   runBrowserTests,
+  waitForLayout,
   type BrowserTest,
 } from "./common";
 
@@ -283,6 +284,134 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
 };
 
 export const tests: BrowserTest[] = [
+  async function offlineMessagesPersistAndDeliverOnce(browser, base) {
+    for (const width of [1280, 412]) {
+      const agent = `offline-send-${width}`;
+      await postFixture(base, "seed-model-selection-error", {
+        agent,
+        model: "fauxordinary/faux-1",
+      });
+      const context = await browser.newContext({
+        viewport: { width, height: 915 },
+        isMobile: width === 412,
+        hasTouch: width === 412,
+      });
+      const page = await context.newPage();
+      const deliveries: { content: string; client_message_id: string }[] = [];
+      let blocked = false;
+      let dropped = false;
+      await context.route(`${base}api/**`, async (route) => {
+        if (blocked) return route.abort("internetdisconnected");
+        if (route.request().url().endsWith(`/conversations/${agent}/deliver`)) {
+          deliveries.push(route.request().postDataJSON());
+          if (!dropped) {
+            dropped = true;
+            await route.fetch();
+            return route.abort("connectionreset");
+          }
+        }
+        return route.continue();
+      });
+      try {
+        await page.goto(`${base}#agent=${agent}`);
+        await page
+          .locator("#conv-title")
+          .filter({ hasText: "Choose a model" })
+          .waitFor();
+        blocked = true;
+        await context.setOffline(true);
+        const first = `Reply only Offline first ${width}`;
+        const second = `Reply only Offline second ${width}`;
+        for (const content of [first, second, "Remove this offline message"]) {
+          await page.locator("#input").fill(content);
+          await page.locator("#send").click();
+          await browserExpect(page.locator("#input")).toHaveValue("");
+          await page
+            .locator(".msg.user.pending")
+            .filter({ hasText: content })
+            .waitFor();
+        }
+        await page
+          .locator(".msg.user.pending")
+          .filter({ hasText: "Remove this offline message" })
+          .getByRole("button", { name: "Remove queued message" })
+          .click();
+        await browserExpect(page.locator(".msg.user.pending")).toHaveCount(2);
+        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/offline-pending-${width}.png`,
+          });
+        const removable = "Remove this message after reload";
+        await page.locator("#input").fill(removable);
+        await page.locator("#send").click();
+        await browserExpect(page.locator(".msg.user.pending")).toHaveCount(3);
+        blocked = true;
+        await context.setOffline(false);
+        const failedRead = page.waitForEvent("requestfailed", {
+          predicate: (request) =>
+            new URL(request.url()).pathname === `/api/conversations/${agent}`,
+        });
+        await page.reload();
+        await failedRead;
+        await waitForLayout(page);
+        await browserExpect(page.locator("#messages")).not.toHaveAttribute(
+          "inert",
+        );
+        await page
+          .locator(".msg.user.pending")
+          .filter({ hasText: removable })
+          .getByRole("button", { name: "Remove queued message" })
+          .click();
+        await browserExpect(page.locator(".msg.user.pending")).toHaveCount(2);
+        await page
+          .locator(".msg.user.pending")
+          .filter({ hasText: first })
+          .waitFor();
+        await page
+          .locator(".msg.user.pending")
+          .filter({ hasText: second })
+          .waitFor();
+        blocked = false;
+        await page.evaluate(() =>
+          (globalThis as any).dispatchEvent(new Event("online")),
+        );
+        for (const content of [first, second]) {
+          await page
+            .locator("#messages .msg.user:not(.pending)")
+            .filter({ hasText: content })
+            .waitFor();
+        }
+        await page
+          .getByText(second.replace("Reply only ", ""), { exact: true })
+          .waitFor();
+        await browserExpect(
+          page.locator("#messages .msg.user.pending"),
+        ).toHaveCount(0);
+        await browserExpect(
+          page.locator("#messages .msg.user").filter({ hasText: first }),
+        ).toHaveCount(1);
+        await browserExpect(
+          page.locator("#messages .msg.user").filter({ hasText: second }),
+        ).toHaveCount(1);
+        expect(deliveries.map((send) => send.content)).toEqual([
+          first,
+          first,
+          second,
+        ]);
+        expect(deliveries[0]!.client_message_id).toBe(
+          deliveries[1]!.client_message_id,
+        );
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/offline-delivered-${width}.png`,
+          });
+      } finally {
+        await context.close();
+      }
+    }
+  },
+
   async function compactComposerTargets(browser, base) {
     for (const width of [412, 1280]) {
       const context = await browser.newContext({

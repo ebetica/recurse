@@ -126,7 +126,7 @@ async function latest(host: DurableHost, kind: string, callId?: string) {
 
 describe("codemode on Durable", () => {
   // Regression: #2856 native read images must reach the next model request from scripts.
-  test("all native tools remain callable from scripts without a codemode section and with image results", async () => {
+  test("all native tools remain callable from scripts, the codemode section names deferred tools, and image results", async () => {
     const { host, faux, root, work } = setup("cm-read-image");
     await mkdir(host.collection("c1", {}), { recursive: true });
     writeFileSync(join(root, "mcp.json"), JSON.stringify({ mcpServers: {} }));
@@ -158,7 +158,14 @@ describe("codemode on Durable", () => {
       const sections = capture.context.messages.flatMap((message: Rec) =>
         message.sections?.codemode ? [message.sections.codemode] : [],
       );
-      expect(sections).toHaveLength(0);
+      const agent = await (await host.open("c1")).conversation.agent(context);
+      const deferred = agent.deferred.map((tool) => tool.name);
+      expect(deferred).toEqual(
+        expect.arrayContaining(["artifact", "recurse_settings"]),
+      );
+      expect(sections).toEqual([
+        `<codemode>\nOther tools scripts can call: ${deferred.join(", ")}. Use describeTool for arguments.\n</codemode>`,
+      ]);
       expect(
         capture.context.messages
           .flatMap((message: Rec) => message.toolsAdded ?? [])
@@ -172,7 +179,6 @@ describe("codemode on Durable", () => {
       expect(JSON.stringify(capture)).not.toContain(
         "The `codemode` section of the system prompt lists",
       );
-      const agent = await (await host.open("c1")).conversation.agent(context);
       const offered = new Set(agent.tools.map((tool) => tool.name));
       const native = agent.callable.filter((tool) => offered.has(tool.name));
       const block = ((await host.view("c1")).blocks as Rec[]).find(

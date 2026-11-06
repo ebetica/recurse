@@ -51,6 +51,9 @@ export const SIDE_ICON = outline(
 export const ARTIFACTS_ICON = outline(
   '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8zM14 3v5h5M9 13h6M9 17h6"/>',
 );
+export const TIPS_ICON = outline(
+  '<path d="M15 14c.2-1 .7-1.7 1.5-2.5 1-.9 1.5-2.2 1.5-3.5A6 6 0 0 0 6 8c0 1 .2 2.2 1.5 3.5.7.7 1.3 1.5 1.5 2.5M9 18h6M10 22h4"/>',
+);
 export const TERMINAL_ICON = outline(
   '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/>',
 );
@@ -143,6 +146,7 @@ const ICON_PATHS: Record<string, string> = {
   unpin: '<path d="M12 17v5M9 3h6l-1 7 4 4H6l4-4zM3 3l18 18"/>',
   restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
   tag: '<path d="M3 12V3h9l9 9-9 9zM7.5 7.5h.01"/>',
+  new: '<path d="M12 5v14M5 12h14"/>',
 };
 export const actionIcon = (name: string): string =>
   outline(ICON_PATHS[name] ?? ICON_PATHS.tag);

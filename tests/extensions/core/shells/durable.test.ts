@@ -24,6 +24,7 @@ import {
   stopConversationShells,
 } from "../../../../src/extensions/core/shells/shells.ts";
 import { procStartTime } from "../../../../src/extensions/core/shells/persist.ts";
+import { REMINDERS } from "../../../../src/reminder_text.ts";
 import {
   openShellHarness,
   stopGroup,
@@ -132,6 +133,143 @@ const shellTasks = async (harness: Harness) =>
   (await harness.inspect(context)).tasks.filter(
     (task) => task.record.kind === SHELL_TASK,
   );
+
+// Regression: #3155 fd240efab68ccd905d3753f72a7f9ae6da912e6f; bun test --preload "$RECURSE_AGENT_TMPDIR/heredoc-before-preload.ts" tests/extensions/core/shells/durable.test.ts -t 'shell hygiene preserves'; error: expect(received).toEndWith(expected).
+test("shell hygiene preserves heredocs and quoted bytes through the fake provider", async () => {
+  const exact =
+    "python3 - <<'EOF'\nx = 1\n y = 2\nEOF\nbun run x 2>&1 | tail -20";
+  const launched = join(root, "hygiene-launched-command");
+  const startup = join(root, "hygiene-bash-startup");
+  writeFileSync(
+    startup,
+    'printf \'%s\' "$BASH_EXECUTION_STRING" > "$HYGIENE_LAUNCHED"',
+  );
+  const { harness, conversation, shells } = await openShellHarness(
+    new MemoryStorage(),
+    {
+      cwd: root,
+      config: config(),
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: root,
+        BASH_ENV: startup,
+        HYGIENE_LAUNCHED: launched,
+      },
+    },
+  );
+  const payload = "begin  \t data  \n   end";
+  const quoted = `'${payload}'`;
+  const cases: Array<[string, string, string]> = [
+    [
+      `\t timeout 5 printf  '%s' ${quoted}  `,
+      `\t printf  '%s' ${quoted}  `,
+      payload,
+    ],
+    [`timeout 5 printf '%s' ${quoted}`, `printf '%s' ${quoted}`, payload],
+    [
+      `printf '%s' ${quoted}|tail -20 # keep  comment`,
+      `printf '%s' ${quoted} # keep  comment`,
+      payload,
+    ],
+    [`printf '%s' ${quoted} |& cat`, `printf '%s' ${quoted} | cat`, payload],
+    [`printf '%s' ${quoted} 2>&1`, `printf '%s' ${quoted} `, payload],
+    [`printf '%s' ${quoted} 1>&2`, `printf '%s' ${quoted} `, payload],
+    [`printf '%s' ${quoted} >&1`, `printf '%s' ${quoted} `, payload],
+    [`printf '%s' ${quoted} >&2`, `printf '%s' ${quoted} `, payload],
+    [`timeout 5 printf '%s' "${payload}"`, `printf '%s' "${payload}"`, payload],
+    [
+      String.raw`timeout 5 printf '%s' $'begin\'  2>&1  |& end'`,
+      String.raw`printf '%s' $'begin\'  2>&1  |& end'`,
+      "begin'  2>&1  |& end",
+    ],
+    [
+      'timeout 5 printf "%s" "$(printf \'%s\' "begin  2>&1  end")"',
+      'timeout 5 printf "%s" "$(printf \'%s\' "begin  2>&1  end")"',
+      "begin  2>&1  end",
+    ],
+    [
+      String.raw`timeout 5 printf '%s' "$(printf '%s' $'begin\'  2>&1  end')"`,
+      String.raw`timeout 5 printf '%s' "$(printf '%s' $'begin\'  2>&1  end')"`,
+      "begin'  2>&1  end",
+    ],
+    [
+      `printf '%s' "$(case x in x) printf '%s' "begin  2>&1  end";; esac)"`,
+      `printf '%s' "$(case x in x) printf '%s' "begin  2>&1  end";; esac)"`,
+      "begin  2>&1  end",
+    ],
+    [
+      `printf '%s' "$(printf x # )\nprintf '%s' "begin  |&  end")"`,
+      `printf '%s' "$(printf x # )\nprintf '%s' "begin  |&  end")"`,
+      "xbegin  |&  end",
+    ],
+    [
+      `timeout 5 printf '%s' "\`printf '%s' 'begin  2>&1  end'\`" 2>&1`,
+      `timeout 5 printf '%s' "\`printf '%s' 'begin  2>&1  end'\`" 2>&1`,
+      "begin  2>&1  end",
+    ],
+    [
+      "timeout 5 printf '%s' \"${UNSET:-begin  2>&1  end}\" 2>&1",
+      "timeout 5 printf '%s' \"${UNSET:-begin  2>&1  end}\" 2>&1",
+      "begin  2>&1  end",
+    ],
+    [
+      `timeout 5 cat <(printf '%s' ${quoted}) 2>&1`,
+      `timeout 5 cat <(printf '%s' ${quoted}) 2>&1`,
+      payload,
+    ],
+    [
+      `timeout 5 printf '%s' ${quoted} > >(cat) 2>&1`,
+      `timeout 5 printf '%s' ${quoted} > >(cat) 2>&1`,
+      payload,
+    ],
+    [
+      "cat <<'EOF' 2>&1\nbegin  \t data  \n  2>&1 |& end\nEOF",
+      "cat <<'EOF' 2>&1\nbegin  \t data  \n  2>&1 |& end\nEOF",
+      "begin  \t data  \n  2>&1 |& end",
+    ],
+    [
+      "cat <<-EOF 2>&1\n\tbegin  data  \n\tend\n\tEOF",
+      "cat <<-EOF 2>&1\n\tbegin  data  \n\tend\n\tEOF",
+      "begin  data  \nend",
+    ],
+    [`cat <<<${quoted} 2>&1`, `cat <<<${quoted} 2>&1`, payload],
+    [
+      "printf '%s' begin\\\n'  data  end' 2>&1",
+      "printf '%s' begin\\\n'  data  end' 2>&1",
+      "begin  data  end",
+    ],
+  ];
+  try {
+    expect(
+      await run(conversation, { command: exact }, "preserve-exact"),
+    ).toContain("IndentationError");
+    expect(readFileSync(launched, "utf8")).toEndWith(`\n${exact}`);
+    for (const [index, [command, expected, output]] of cases.entries()) {
+      expect(
+        await run(conversation, { command }, `preserve-${index}`),
+      ).toContain(output);
+      expect(readFileSync(launched, "utf8")).toEndWith(`\n${expected}`);
+    }
+    for (const operator of ["&>", ">&", "&>>"]) {
+      const file = join(
+        root,
+        `rewrite-${operator.length}-${operator.indexOf("&")}`,
+      );
+      const command = `printf '%s' ${quoted} ${operator} ${JSON.stringify(file)}`;
+      await run(conversation, { command }, `redirect-${operator}`);
+      expect(readFileSync(launched, "utf8")).toEndWith(
+        `\n${command.replace(
+          ` ${operator} `,
+          ` ${operator.includes(">>") ? ">>" : ">"} `,
+        )}`,
+      );
+      expect(readFileSync(file, "utf8")).toBe(payload);
+    }
+  } finally {
+    await harness.close(context);
+    await shells.shutdown();
+  }
+});
 
 // Regression: #3037 Record commits must retain immediate shell completions.
 test("a background completion wakes the idle conversation exactly once", async () => {
@@ -863,3 +1001,90 @@ for (const [owner, delayed] of [
     expect(third.lines.at(-1)!.lostNotices).toBe(1);
   }, 60_000);
 }
+
+// Feature: #3154 spaced shell reminders
+test("shell reminders repeat only after 30k tokens or when they name a new shell", async () => {
+  const { harness, conversation, shells } = await openShellHarness(
+    new MemoryStorage(),
+    { cwd: root, config: config() },
+  );
+  const dir = mkdtempSync(join(root, "spacing-"));
+  const monitor = await run(
+    conversation,
+    {
+      command: `for s in A B C; do while [ ! -e ${dir}/go-$s ]; do sleep 0.05; done; for i in 1 2 3; do echo line-$s-$i; done; done; sleep 30`,
+      monitor: true,
+    },
+    "monitor",
+  );
+  const batch = async (step: string) => {
+    writeFileSync(join(dir, `go-${step}`), "");
+    const text = await until(
+      async () =>
+        (await userTexts(conversation)).find((text) =>
+          text.includes(`line-${step}-3`),
+        ),
+      `monitor batch ${step}`,
+    );
+    await harness.waitForIdle(context);
+    return text.includes(REMINDERS["chatty-monitor"].text);
+  };
+  expect(await batch("A")).toBe(true);
+  expect(await batch("B")).toBe(false);
+  const advised: boolean[] = [];
+  const cd = async (command: string, requestId: string) =>
+    advised.push(
+      (
+        await run(conversation, { command: `cd . && ${command}` }, requestId)
+      ).includes(REMINDERS.cd.text),
+    );
+  for (const i of [1, 2, 3, 4]) await cd("echo small", `small-${i}`);
+  for (const i of [1, 2, 3])
+    await cd("printf '%025d\\n' $(seq 2000)", `big-${i}`);
+  await cd("echo small", "small-5");
+  expect(advised).toEqual([
+    false,
+    false,
+    true,
+    false,
+    false,
+    false,
+    false,
+    true,
+  ]);
+  expect(await batch("C")).toBe(true);
+  await run(
+    conversation,
+    { command: `kill -- -${pgidOf(monitor)}` },
+    "stop-monitor",
+  );
+  await until(
+    async () => (await shellTasks(harness)).length === 0,
+    "the monitor's shell task to finish",
+  );
+  await harness.waitForIdle(context);
+  const status = "Background shells still running";
+  const launch = (command: string, requestId: string) =>
+    run(conversation, { command, background: true }, requestId);
+  const idOf = (text: string) => /shell `([^`]+)`/.exec(text)![1]!;
+  const first = idOf(await launch("sleep 30", "bg-a"));
+  expect(await launch("sleep 30", "bg-b")).toContain(`- ${first} (running`);
+  const quick = await launch("sleep 0.3; echo quick", "bg-c");
+  expect(quick).toContain(status);
+  const quickId = idOf(quick);
+  const notice = await until(
+    async () =>
+      (await userTexts(conversation)).find((text) =>
+        text.includes(`Shell \`${quickId}\``),
+      ),
+    "the quick shell's completion notice",
+  );
+  expect(notice).toContain("quick");
+  expect(notice).not.toContain(status);
+  await harness.waitForIdle(context);
+  expect(await launch("sleep 30", "bg-d")).not.toContain(status);
+  expect(await launch("sleep 30", "bg-e")).toContain(status);
+  await stopConversationShells(harness, conversation.id, context);
+  await harness.close(context);
+  await shells.shutdown();
+});

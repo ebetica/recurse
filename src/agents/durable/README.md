@@ -16,9 +16,13 @@ manages context summaries.
 
 ## Harness and turns
 
-[host/open.ts](host/open.ts) opens a Harness on demand or for recovery. Pi owns
-the turn, tool calls and request boundaries; Recurse admits input and projects
-live state. Runs outlive HTTP requests. [host/clear.ts](host/clear.ts),
+[host/open.ts](host/open.ts) opens a Harness on demand or for recovery. Startup
+[recovery](host/recovery.ts) reads live task indexes, root/side inboxes and the
+report cursor without constructing a Harness. Only unfinished tasks, queued
+input, undelivered reports, pending clears, revivals or promotions reopen;
+idle conversations remain lazy. Unknown or older storage opens normally so
+inspection failures never suppress recovery. Pi owns the turn, tool calls and
+request boundaries; Recurse admits input and projects live state. Runs outlive HTTP requests. [host/clear.ts](host/clear.ts),
 [host/close.ts](host/close.ts) and [archive.ts](archive.ts) handle storage
 rotation, closing and retained history. SQLite work is off the event loop, in
 one lazy worker per database, so a busy database does not delay another.
@@ -81,6 +85,12 @@ message-search appends outside the reply path. Retained stores move their search
 sidecar with SQLite files after final sync; search service cleanup finishes before
 the archive index closes.
 
+[activity.ts](activity.ts) maintains a per-root `durable/activity` marker only
+while live tasks, queued input or undelivered reports remain, refreshing it each
+minute and removing it when idle or closed. Open storage and WAL files are not
+activity signals. Deployment adapters may use the fresh marker as a keepalive
+hint; recovery always reads authoritative storage, never the marker.
+
 A settled subagent run is reported to its parent. A report is held while the
 child or a local descendant works or owes a report; when holders stop, held
 reports are rechecked. The report cursor advances only after delivery or drop.
@@ -105,8 +115,10 @@ shutdown drains captures before terminating the thread. The
 `request_capture_snapshot` span measures the main-thread handoff, not encoding.
 Registry tool wrappers shorten Pi-owned model-facing descriptions;
 Pi's parameter schemas and execution stay unchanged. Pi wrappers put native
-codemode usage in the tool description and list only non-deferred script-only
-tool names in the codemode section, without schemas. Discovery is unchanged. Message provenance is separate from user text
+codemode usage in the tool description and list script-only tool names in the
+codemode section, without schemas, including deferred tools the model may call
+(`artifact`, `recurse_settings`); on-demand MCP tools appear only by server in
+`mcp_servers`. Discovery is unchanged. Message provenance is separate from user text
 ([../runtime/prompt_stamp.ts](../runtime/prompt_stamp.ts)).
 [models.ts](models.ts) and [model_selection.ts](model_selection.ts) resolve
 models; Settings owns credentials. Pi's credential store defers its first read

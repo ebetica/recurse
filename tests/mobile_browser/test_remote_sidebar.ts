@@ -13,6 +13,7 @@ import {
   type BrowserTest,
   openSettingsPanel,
 } from "./common";
+import { enableTagSidebar } from "./test_sidebar";
 
 export const tests: BrowserTest[] = [
   // Regression: #3112 cancel stalled discovery bodies after headers; #3067 keep the remote Stop generation live until cancellation. (also Feature #2702 connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures; #2793 remote sends work through ingresses that reject chunked bodies; #2729 the optimistic Queued panel precedes keyboard Stop; #3002 remote sections, tags and tag actions.)
@@ -250,6 +251,11 @@ export const tests: BrowserTest[] = [
         data: { label: "Laptop", url: ingress.url.href, password: LOGIN },
       });
       expect(connected.status()).toBe(200);
+      await enableTagSidebar(context, base, [
+        "agent-desktop",
+        "agent-mobile",
+        "project",
+      ]);
       await page.goto(base);
       const section = page.locator('.backend-section[data-backend="Laptop"]');
       await section.locator("hr").waitFor();
@@ -299,6 +305,14 @@ export const tests: BrowserTest[] = [
           }),
         ).toBe(true);
         await create.click();
+        await page.locator("#draft-model-host").waitFor();
+        await page.getByRole("button", { name: "No tag", exact: true }).click();
+        await page
+          .getByRole("textbox", { name: "Tag name", exact: true })
+          .fill("project");
+        await page
+          .getByRole("textbox", { name: "Tag name", exact: true })
+          .press("Enter");
         if (size === "desktop") {
           await page.evaluate(() => {
             (globalThis as any).sessionStorage.setItem(
@@ -312,6 +326,7 @@ export const tests: BrowserTest[] = [
                 draft: {
                   parent: null,
                   backendLabel: "Laptop",
+                  tags: ["project"],
                   creatorIndex: -1,
                 },
               }),
@@ -348,9 +363,9 @@ export const tests: BrowserTest[] = [
             request.url().endsWith("/api/backends/Laptop/conversations"),
         );
         await page.locator("#send").click();
-        expect((await creation).postDataJSON().level).toBe(
-          size === "desktop" ? 4 : undefined,
-        );
+        const creationBody = (await creation).postDataJSON();
+        expect(creationBody.level).toBe(size === "desktop" ? 4 : undefined);
+        expect(creationBody.tags).toEqual(["project"]);
         await page
           .locator(".msg.assistant")
           .filter({ hasText: reply })
@@ -366,6 +381,7 @@ export const tests: BrowserTest[] = [
         expect(created.ok()).toBe(true);
         const conversation = await created.json();
         expect(conversation.parent).toBeNull();
+        expect(conversation.tags.project).toMatchObject({ by: "operator" });
         expect(conversation.safety_off).not.toBe(true);
         expect(conversation.level).toBe(level);
         const createdView = await (
@@ -396,9 +412,10 @@ export const tests: BrowserTest[] = [
               let previous = element.previousElementSibling;
               while (previous && !previous.matches(".tree-section-header"))
                 previous = previous.previousElementSibling;
-              return (previous as any)?.dataset.section;
+              const key = (previous as any)?.dataset.sectionKey;
+              return key ? JSON.parse(key).slice(1).join("/") : undefined;
             });
-          await browserExpect.poll(sectionOf).toBe("Inbox");
+          await browserExpect.poll(sectionOf).toBe("project/Inbox");
           expect(
             (
               await remoteContext.request.post(
@@ -408,6 +425,15 @@ export const tests: BrowserTest[] = [
             ).ok(),
           ).toBe(true);
           await browserExpect(row.getByTitle("Tag: project")).toBeVisible();
+          await browserExpect.poll(sectionOf).toBe("project/Inbox");
+          const projectInbox = section.locator(
+            `.tree-section-header[data-section-key='${JSON.stringify(["Laptop", "project", "Inbox"])}'] .tree-section-toggle`,
+          );
+          await projectInbox.click();
+          await browserExpect(projectInbox).toHaveAttribute(
+            "aria-expanded",
+            "false",
+          );
           await page.clock.pauseAt(
             await page.evaluate(() => Date.now() + 1000),
           );
@@ -435,7 +461,24 @@ export const tests: BrowserTest[] = [
           );
           expect(await tagged.exited).toBe(0);
           await browserExpect(row.getByTitle(`Tag: ${tag}`)).toBeVisible();
+          await browserExpect.poll(sectionOf).toBe(`${tag}/Inbox`);
+          await browserExpect(
+            section.locator(
+              `.tree-section-header[data-section-key='${JSON.stringify(["Laptop", tag, "Inbox"])}'] .tree-section-toggle`,
+            ),
+          ).toHaveAttribute("aria-expanded", "true");
           await page.clock.resume();
+          expect(
+            (
+              await remoteContext.request.post(
+                `${remote.base}api/v1/agents/tags`,
+                {
+                  data: { ids: [id], clear: ["project", tag] },
+                },
+              )
+            ).ok(),
+          ).toBeTrue();
+          await browserExpect.poll(sectionOf).toBe("Inbox");
           for (const [action, destination] of [
             ["Pin", "Pinned"],
             ["Unpin", "Inbox"],
@@ -462,6 +505,14 @@ export const tests: BrowserTest[] = [
                 )
               ).json()
             ).tags;
+            await browserExpect(
+              section.locator('.tree-section-header[data-section="Pinned"]'),
+            ).toHaveCount(action === "Pin" ? 1 : 0);
+            await browserExpect(
+              page.locator(
+                '#agent-list > .tree-section-header[data-section="Pinned"]',
+              ),
+            ).toHaveCount(0);
             if (action === "Pin") expect(tags.pinned.by).toBe("operator");
             if (action === "Archive") expect(tags.archived.by).toBe("operator");
           }
@@ -495,6 +546,21 @@ export const tests: BrowserTest[] = [
             .click();
           expect((await restored).ok()).toBe(true);
           await browserExpect.poll(sectionOf).toBe("Inbox");
+          expect(
+            (
+              await remoteContext.request.post(
+                `${remote.base}api/v1/agents/tags`,
+                {
+                  data: { ids: [id], set: { project: null } },
+                },
+              )
+            ).ok(),
+          ).toBeTrue();
+          await browserExpect.poll(sectionOf).toBe("project/Inbox");
+          await browserExpect(projectInbox).toHaveAttribute(
+            "aria-expanded",
+            "false",
+          );
           await page.screenshot({
             path: join(
               process.env.RECURSE_SCREENSHOT_DIR ?? tmpdir(),

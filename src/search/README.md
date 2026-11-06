@@ -174,6 +174,11 @@ INFO events define the performance metrics:
 early limit prevents that footer. Query timings include admission and Worker IPC,
 not HTTP transport or agent-selection lookups. Append `ms` measures
 Worker file work; the benchmark separately reports dispatch-to-completion time.
+[Stall diagnostics](../observability/README.md) distinguish awaited per-store sync
+from main-thread result bookkeeping, `search_sync` logging, reply handling and
+message handoffs. State-cookie and archive-marker filesystem reads remain in the
+SQLite Worker, query Worker or startup child; their waits are not synchronous
+main-thread spans.
 
 ## Copied-corpus benchmark
 

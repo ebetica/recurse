@@ -34,18 +34,18 @@ preinstalled Java is needed. Downloads are cached and hash-checked before use.
 Each TLC case has a 110-second deadline and 1 GiB heap. Negative cases must exit
 12 naming the expected invariant; parser errors/timeouts/unexpected results fail.
 
-Pinned tooling, checked on 2026-11-03:
+Pinned tooling, checked on 2026-11-06:
 
 - Azul Zulu JRE Zulu21.40+17-CA, OpenJDK 21.0.6+7-LTS:
   <https://cdn.azul.com/zulu/bin/zulu21.40.17-ca-jre21.0.6-linux_x64.tar.gz>
-- TLC reports `2026.11.02.164701 (rev: dc6a944)` from:
-  <https://github.com/tlaplus/tlaplus/releases/download/v1.8.0/tla2tools.jar>
+- TLC reports `2.19 of 08 August 2024 (rev: 5a47802)` from:
+  <https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar>
 
-The release label differs from TLC's build; hashes pin the actual bytes:
+Hashes pin the downloaded bytes:
 
 ```text
 JRE SHA-256 8524ef3c76ae1e00bb020044557c5ae1a59d985eee0394d71fc9b2414d083d33
-JAR SHA-256 c57d4d7bbee3ed2c89c32cb9c60cac728f751e80e2570bc4b7368ae39291fc21
+JAR SHA-256 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
 ```
 
 ## Store correspondence
@@ -61,7 +61,7 @@ implementation sites.
 | `BeginWrite`, `Commit`, `ReadOwner`         | [worker] `WorkerSqliteDatabase.transaction/serial/direct`, `SqliteWorker.enqueue`; [native] `execute`.                                |
 | `AdmitRead`, `Read`, `ReleaseRead` (page)   | [view] `storageView`; [host] `DurableHost.waitStorageReads`.                                                                          |
 | `AdmitRead`, `Sync`, `ReleaseRead` (search) | [search] `MessageSearch.request/syncTarget`, `withFiles`; [worker] `syncSearch`; [native] `execute`; [sync] `sync`.                   |
-| `Prepare`                                   | Historical query-time preparation; removed from current queries.                                                                    |
+| `Prepare`                                   | Historical query-time preparation; removed from current queries.                                                                      |
 | `BeginRotation`, `Rename`                   | [host] `maybeRotate/keepStore`; [delete] `retire`; [clear] `retireCleared`; [search] `rotate/withStores`; [archive] `keep/moveStore`. |
 | `Restart`                                   | Environmental process-crash assumption, not an application function.                                                                  |
 

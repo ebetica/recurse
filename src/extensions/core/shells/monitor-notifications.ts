@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { wrapSystemReminder } from "./rewrite.ts";
+import { REMINDER_MARKER_BYTES, REMINDERS } from "../../../reminder_text.ts";
 
 export const DEFAULT_MONITOR_WAKE_DEBOUNCE_MS = 1000;
 export const DEFAULT_MONITOR_WAKE_COOLDOWN_MS = 60_000;
@@ -8,25 +8,20 @@ export const DEFAULT_MONITOR_HEARTBEAT_PATTERN = /^idle$/i;
 
 const TRUNCATED =
   "\n… monitor output truncated; read the full log for complete output";
-export const MONITOR_NOISE_REMINDER =
-  "This monitor is too chatty. Cancel it and restart it with output only when the state changes.";
-/** The noise reminder as a distinctly-rendered reminder block. */
-export const MONITOR_NOISE_REMINDER_BLOCK = wrapSystemReminder(
-  MONITOR_NOISE_REMINDER,
-);
-const MONITOR_NOISE_REMINDER_SEPARATOR = "\n\n";
 const MONITOR_NOISE_REMINDER_LINES = 3;
+/** Bytes a chatty batch reserves for the noise advice and its separator. */
+const NOISE_RESERVE_BYTES =
+  byteLength(REMINDERS["chatty-monitor"].text) + REMINDER_MARKER_BYTES + 2;
 // Smallest cap preserving exact reminder plus safely clipped monitor text.
 export const MIN_MONITOR_WAKE_MAX_BYTES = Math.max(
   256,
-  byteLength(TRUNCATED) +
-    byteLength(MONITOR_NOISE_REMINDER_SEPARATOR) +
-    byteLength(MONITOR_NOISE_REMINDER_BLOCK) +
-    1,
+  byteLength(TRUNCATED) + NOISE_RESERVE_BYTES + 1,
 );
 const MAX_PENDING_LINES_PER_MONITOR = 100;
 export interface MonitorBatchDetails {
   monitorBatchId: string;
+  /** At least three meaningful lines; the body leaves room for noise advice. */
+  chatty: boolean;
 }
 
 export type MonitorWakeDelivery = (
@@ -209,8 +204,11 @@ export class MonitorWakeCoalescer {
     }, delay);
   }
 
-  /** One wake-batch body exactly as it would be delivered. */
-  private formatBatch(batch: Array<[string, PendingMonitor]>): string {
+  /** One wake-batch body and whether it is chatty. */
+  private formatBatch(batch: Array<[string, PendingMonitor]>): {
+    message: string;
+    chatty: boolean;
+  } {
     const sections = batch.map(([shellId, pending]) => {
       const omitted =
         pending.omitted > 0
@@ -227,9 +225,12 @@ export class MonitorWakeCoalescer {
         ? `${sections.length} monitors emitted new output.\n\n`
         : "";
     const body = prefix + sections.join("\n\n");
-    return meaningfulLineCount >= MONITOR_NOISE_REMINDER_LINES
-      ? withNoiseReminder(body, this.cfg.maxBytes)
-      : clip(body, this.cfg.maxBytes);
+    const chatty = meaningfulLineCount >= MONITOR_NOISE_REMINDER_LINES;
+    const budget = this.cfg.maxBytes;
+    return {
+      message: clip(body, chatty ? budget - NOISE_RESERVE_BYTES : budget),
+      chatty,
+    };
   }
 
   private flush(): void {
@@ -242,7 +243,7 @@ export class MonitorWakeCoalescer {
       return;
     const batch = [...this.pending.entries()];
     this.pending.clear();
-    const message = this.formatBatch(batch);
+    const { message, chatty } = this.formatBatch(batch);
     if (!message) return;
     // Invariant: Mark before re-entrant delivery can schedule another turn.
     // Only this batch's message id releases the guard, never unrelated turns.
@@ -253,7 +254,7 @@ export class MonitorWakeCoalescer {
     };
     this.lastDeliveryAt = Date.now();
     try {
-      this.deliver(message, true, { monitorBatchId: batchId });
+      this.deliver(message, true, { monitorBatchId: batchId, chatty });
     } catch {
       this.inflight = undefined;
       // Invariant: Restore failed delivery ahead of callback-queued output,
@@ -277,13 +278,4 @@ export class MonitorWakeCoalescer {
       this.scheduleFlush();
     }
   }
-}
-
-function withNoiseReminder(body: string, maxBytes: number): string {
-  const budget = Math.max(MIN_MONITOR_WAKE_MAX_BYTES, Math.floor(maxBytes));
-  const bodyBudget =
-    budget -
-    byteLength(MONITOR_NOISE_REMINDER_BLOCK) -
-    byteLength(MONITOR_NOISE_REMINDER_SEPARATOR);
-  return `${clip(body, bodyBudget)}${MONITOR_NOISE_REMINDER_SEPARATOR}${MONITOR_NOISE_REMINDER_BLOCK}`;
 }

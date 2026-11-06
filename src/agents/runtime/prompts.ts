@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, stat, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { escapeReminderMarkers, wrapSystemReminder } from "../../reminder_text";
+import { escapeReminderMarkers, notice } from "../../reminder_text";
 import {
   normalizePiUsage,
   providerUsage,
@@ -361,11 +361,7 @@ Only with operator authorization, edit \`$PI_CODING_AGENT_DIR/pi-safety.md\` to 
       roots.sort((a, b) => updated(b) - updated(a));
       emit(roots, 0);
     }
-    lines.push(
-      wrapSystemReminder(
-        "Reap finished/stale agents you no longer need; do not stop work you were not asked to, including operator-started agents.",
-      ),
-    );
+    lines.push(notice("agent-tree"));
     return lines.join("\n");
   }
 

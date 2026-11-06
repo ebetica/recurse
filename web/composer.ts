@@ -1,7 +1,7 @@
-// Snapshot targets/text into independent concurrent sends; retain failed work.
+// Snapshot targets/text into sends; saved-agent jobs persist before clearing
+// the composer and retry in recipient order under the shared browser lock.
 // Boot sends wait for authoritative selection; draft creation happens once.
-// Own attachments/drafts/input; refuse reloads that would lose browser-only
-// work or ambiguously replay a send.
+// Own attachments/drafts/input; keep permanent failures for explicit retry.
 import { hasCommentSends } from "./artifacts/comment-outbox.js";
 import { treeOf } from "./backends/tree.js";
 import {
@@ -13,6 +13,14 @@ import { currentUiOwnerId, state, DRAFT, LAST_AGENT_KEY } from "./state.js";
 import { sharedTrees } from "./shared-trees.js";
 import { $, inputEl, sendEl } from "./dom.js";
 import { newClientMessageId } from "./composer/send.js";
+import {
+  savedSends,
+  persistSend,
+  forgetSend,
+  withSendLock,
+  outboxReady,
+  type SavedSend,
+} from "./composer/outbox.js";
 import { resizeTextarea } from "./composer/textarea.js";
 
 import {
@@ -22,9 +30,9 @@ import {
   asHistoryCorrection,
   refreshUpBtn,
 } from "./sidebar.js";
-import { renderDraft } from "./conversation/chrome.js";
+import { renderDraft, renderColdOutbox } from "./conversation/chrome.js";
 import { poll, waitForInitialAuthoritativeRead } from "./conversation/poll.js";
-import { pinOperatorSend } from "./conversation/thread.js";
+import { pinOperatorSend, paint } from "./conversation/thread.js";
 import {
   deliverQueuedOperatorMessage,
   startOperatorSend,
@@ -93,6 +101,7 @@ import {
 import { openAgentFinderRevive, openFoundAgent } from "./agent-finder/ui.js";
 import type { DraftCreator } from "./types.js";
 import { snapshotNewSubagentDefaults } from "./settings/preferences.js";
+import { newAgentSettings } from "./sidebar/script.js";
 import {
   activateComposerControl,
   activeComposerStopPreparation,
@@ -104,6 +113,8 @@ import {
 interface DraftSpec {
   parent: string | null;
   backendLabel?: string;
+  tags?: string[];
+  level?: number;
 }
 
 interface SendJob {
@@ -113,9 +124,12 @@ interface SendJob {
   attachmentIds: string[];
   // Retrying a job id replays its admitted ack, never a second send.
   clientId: string;
+  created?: number;
+  persisted?: boolean;
   retry: number;
   timer: number;
   inFlight: boolean;
+  locked?: boolean;
   failed: boolean;
   waitingForSelection?: boolean;
   error?: string;
@@ -125,6 +139,7 @@ interface SendJob {
   model?: string | null;
   effort?: string | null;
   level?: number | null;
+  tags?: string[];
   attachmentDraft?: string | null;
   muted?: boolean;
   messageId?: string;
@@ -161,7 +176,6 @@ export function focusComposerAtEnd(): boolean {
 
 // Independent jobs own snapshotted targets/text, retries and visible failures.
 const statusEl = $<HTMLButtonElement>("#send-status")!;
-const MAX_ATTEMPTS = 6;
 let jobs: SendJob[] = [];
 let composerCommandStatusKey: string | null = null;
 const AUTH_RECOVERY_KEY = "recurse.authRecovery.v1";
@@ -223,6 +237,7 @@ export function preserveUnsentForLogin(): boolean {
           model: state.draft.model,
           effort: state.draft.effort,
           level: state.draft.level,
+          tags: state.draft.tags,
           attachmentDraft: state.draft.attachmentDraft,
           muted: state.draft.muted,
         }
@@ -241,6 +256,7 @@ export function preserveUnsentForLogin(): boolean {
       model: job.model,
       effort: job.effort,
       level: job.level,
+      tags: job.tags,
       attachmentDraft: job.attachmentDraft,
       muted: job.muted,
       waitForIndex: job.waitFor ? jobs.indexOf(job.waitFor as SendJob) : -1,
@@ -289,6 +305,7 @@ function restoreAfterLogin(): void {
       model: saved.model,
       effort: saved.effort,
       level: typeof saved.level === "number" ? saved.level : null,
+      tags: saved.tags,
       attachmentDraft: saved.attachmentDraft,
       muted: saved.muted,
       convIdReady: creatorLease?.convIdReady,
@@ -318,6 +335,7 @@ function restoreAfterLogin(): void {
       model: typeof saved.model === "string" ? saved.model : null,
       effort: typeof saved.effort === "string" ? saved.effort : undefined,
       level: typeof saved.level === "number" ? saved.level : null,
+      tags: saved.tags,
       attachmentDraft:
         typeof saved.attachmentDraft === "string"
           ? saved.attachmentDraft
@@ -451,6 +469,7 @@ statusEl.onclick = () => {
       j.failed = false;
       j.error = "";
       j.retry = 0;
+      if (j.persisted) persistSend(savedJob(j));
       runJob(j);
     }
   renderSendStatus();
@@ -656,7 +675,7 @@ export function send(): void {
   }
   const composerOwner = currentUiOwnerId();
   const text = inputEl.value.trim();
-  const ready = takeAttachmentsForSend();
+  const ready = takeAttachmentsForSend(false);
   if (ready === null || (!text && !ready.length)) return;
   let content = text;
   for (const a of ready) {
@@ -704,6 +723,7 @@ export function send(): void {
         model: d.model,
         effort: d.effort,
         level: d.level,
+        tags: d.tags,
         attachmentDraft: d.attachmentDraft,
         muted: d.muted,
         convIdReady,
@@ -722,6 +742,7 @@ export function send(): void {
     startOperatorSend(job.convId, () => {
       jobs.push(job);
       (d.pending = d.pending || []).push({ role: "user", content });
+      takeAttachmentsForSend();
       clearComposer(composerOwner);
       renderDraft();
     });
@@ -737,9 +758,30 @@ export function send(): void {
       inFlight: false,
       failed: false,
     };
+    try {
+      if (job.convId) {
+        job.sinceOffset = newestCommittedOffset(job.convId);
+        job.created = Math.max(
+          Date.now(),
+          ...jobs.map((j) => (j.created ?? 0) + 1),
+        );
+        if (savedSends().length >= 100)
+          throw new Error("Too many pending messages");
+        persistSend(savedJob(job));
+        job.persisted = true;
+      }
+    } catch {
+      setSendStatus(
+        "Couldn't save this message. Keep it here and try again.",
+        "error",
+      );
+      return;
+    }
     startOperatorSend(job.convId, () => {
       jobs.push(job);
+      takeAttachmentsForSend();
       clearComposer(composerOwner);
+      repaintOutbox();
     });
   }
   runJob(job);
@@ -750,7 +792,80 @@ export function send(): void {
 // message. Guards on job.inFlight so a backoff timer and the "online" event
 // can't double-fire the same job; stores job.convId after create so a retry
 // never spawns a second agent.
+function savedJob(job: SendJob): SavedSend {
+  return {
+    convId: job.convId!,
+    content: job.content,
+    attachmentIds: job.attachmentIds,
+    clientId: job.clientId,
+    sinceOffset: job.sinceOffset ?? 0,
+    created: job.created ?? Date.now(),
+    failed: job.failed,
+    error: job.error,
+  };
+}
+
+function repaintOutbox(): void {
+  state.openConvHash = "";
+  if (state.currentConv?.id === state.selectedId) paint(state.currentConv);
+  else renderColdOutbox(state.selectedId);
+}
+
+const watchedHealth = new Set<string>();
+function watchSendConnection(convId: string): void {
+  const backend = backendFor(convId);
+  if (watchedHealth.has(backend.label)) return;
+  watchedHealth.add(backend.label);
+  let previous = backend.connectionHealth.snapshot().phase;
+  backend.connectionHealth.subscribe((snapshot) => {
+    const recovered =
+      snapshot.phase === "connected" && previous !== "connected";
+    previous = snapshot.phase;
+    if (recovered) queueMicrotask(retryPendingJobs);
+  });
+}
+
 async function runJob(job: SendJob): Promise<void> {
+  if (job.inFlight || job.locked || job.failed || !jobs.includes(job)) return;
+  if (!job.persisted || !job.convId) return runJobAttempt(job);
+  job.locked = true;
+  job.inFlight = true;
+  let waiting = false;
+  try {
+    await outboxReady;
+    watchSendConnection(job.convId);
+    await withSendLock(job.convId, async () => {
+      const pending = savedSends().filter((send) => send.convId === job.convId);
+      const current = pending.find((send) => send.clientId === job.clientId);
+      if (!current) {
+        jobs = jobs.filter((item) => item !== job);
+        return;
+      }
+      if (current.failed) {
+        job.failed = true;
+        job.error = current.error;
+        return;
+      }
+      if (pending[0]?.clientId !== job.clientId) {
+        waiting = true;
+        return;
+      }
+      job.inFlight = false;
+      await runJobAttempt(job);
+      if (jobs.includes(job)) persistSend(savedJob(job));
+    });
+  } catch {
+    job.retry = Math.min(job.retry + 1, 6);
+    job.timer = setTimeout(() => runJob(job), 30000) as unknown as number;
+  } finally {
+    job.inFlight = false;
+    job.locked = false;
+    if (!waiting) repaintOutbox();
+    renderSendStatus();
+  }
+}
+
+async function runJobAttempt(job: SendJob): Promise<void> {
   if (job.inFlight) return;
   job.inFlight = true;
   let r: Response | undefined,
@@ -775,6 +890,12 @@ async function runJob(job: SendJob): Promise<void> {
       renderSendStatus();
     }
     if (job.draft && !job.convId) {
+      if (job.level == null && job.parent === null && job.tags?.length) {
+        const settings = await newAgentSettings();
+        job.level = job.tags
+          .map((tag) => settings?.defaults?.[tag]?.effort)
+          .find((value) => value !== undefined);
+      }
       const backend = backendFor(
         job.backendLabel
           ? conversationId(job.backendLabel, DRAFT)
@@ -844,7 +965,7 @@ async function runJob(job: SendJob): Promise<void> {
     job.sinceOffset ??= job.convId ? newestCommittedOffset(job.convId) : 0;
     // Invariant: Every retry reuses the job id, safely replaying an admitted
     // ack. Network errors/5xx retain retries; permanent validation errors stay
-    // failed. No client timer aborts ambiguous commits.
+    // failed. Persisted sends can safely retry a timed-out response.
     r = await deliverQueuedOperatorMessage(
       job.convId || "",
       {
@@ -854,7 +975,7 @@ async function runJob(job: SendJob): Promise<void> {
           ? { attachment_ids: job.attachmentIds }
           : {}),
       },
-      { availability: "core", timeoutMs: 0 },
+      { availability: "core", timeoutMs: job.persisted ? 10_000 : 0 },
     );
   } catch {
     failed = true;
@@ -873,9 +994,8 @@ async function runJob(job: SendJob): Promise<void> {
     return;
   }
   if (
-    r?.status === 422 ||
-    (parseConversationId(job.convId || "").label &&
-      (r?.status === 424 || r?.status === 502))
+    (r && r.status >= 400 && r.status < 500) ||
+    (parseConversationId(job.convId || "").label && r?.status === 424)
   ) {
     let detail = "This message could not be accepted.";
     try {
@@ -897,16 +1017,11 @@ async function runJob(job: SendJob): Promise<void> {
         job.messageId = result.message_id;
       job.steered = result.steer === true;
       if (job.steered && job.convId) requestUiRefresh(job.convId);
+      jobSucceeded(job);
+      return;
     } catch {}
-    jobSucceeded(job);
-    return;
   }
-  job.retry++;
-  if (job.retry >= MAX_ATTEMPTS) {
-    job.failed = true;
-    renderSendStatus();
-    return;
-  }
+  job.retry = Math.min(job.retry + 1, 6);
   const delay = Math.min(30000, 1000 * 2 ** (job.retry - 1));
   job.timer = setTimeout(() => runJob(job), delay) as unknown as number;
   renderSendStatus();
@@ -914,7 +1029,9 @@ async function runJob(job: SendJob): Promise<void> {
 
 function jobSucceeded(job: SendJob): void {
   clearTimeout(job.timer);
+  if (job.persisted) forgetSend(job.clientId);
   jobs = jobs.filter((j) => j !== job);
+  queueMicrotask(retryPendingJobs);
   if (!job.draft && job.convId) clearStopForNewTurn(job.convId);
   if (!job.draft && job.convId && job.convId === state.selectedId)
     addOptimisticPending(
@@ -941,6 +1058,76 @@ function jobSucceeded(job: SendJob): void {
   poll();
   renderSendStatus();
 }
+
+function retryPendingJobs(): void {
+  for (const job of jobs)
+    if (!job.failed && !job.inFlight) {
+      clearTimeout(job.timer);
+      void runJob(job);
+    }
+  renderSendStatus();
+}
+
+function restoreOutbox(): void {
+  try {
+    const stored = savedSends();
+    for (const job of jobs.filter((job) => job.persisted)) {
+      if (
+        !stored.some((send) => send.clientId === job.clientId) &&
+        !job.inFlight
+      ) {
+        clearTimeout(job.timer);
+        jobs = jobs.filter((item) => item !== job);
+      }
+    }
+    for (const send of stored) {
+      const existing = jobs.find((job) => job.clientId === send.clientId);
+      if (existing) {
+        existing.persisted = true;
+        existing.created = send.created;
+      } else
+        jobs.push({
+          ...send,
+          draft: false,
+          persisted: true,
+          retry: 0,
+          timer: 0,
+          inFlight: false,
+        });
+    }
+    if (!state.selectedId && jobs.some((job) => job.persisted)) {
+      const requested =
+        new URLSearchParams(location.hash.slice(1)).get("agent") ||
+        localStorage.getItem(LAST_AGENT_KEY);
+      const target = jobs.find(
+        (job) => job.persisted && job.convId === requested,
+      )?.convId;
+      if (target) selectAgent(target, false);
+    }
+    repaintOutbox();
+    retryPendingJobs();
+  } catch {}
+}
+
+window.addEventListener("recurse:composer-outbox-change", restoreOutbox);
+window.addEventListener("recurse:backends-change", retryPendingJobs);
+window.addEventListener("recurse:remove-pending-send", (event) => {
+  const clientId = (event as CustomEvent<string>).detail;
+  const job = jobs.find((job) => job.clientId === clientId);
+  if (!job?.convId) return;
+  void withSendLock(job.convId, async () => {
+    forgetSend(clientId);
+    clearTimeout(job.timer);
+    jobs = jobs.filter((item) => item !== job);
+  })
+    .then(() => {
+      repaintOutbox();
+      retryPendingJobs();
+    })
+    .catch(() => {
+      setSendStatus("Couldn't remove this message. Try again.", "error");
+    });
+});
 
 window.addEventListener("online", () => {
   // Invariant: connection.ts updates health in synchronous online listeners.
@@ -973,8 +1160,8 @@ export function startDraft(spec: DraftSpec): void {
     window.dispatchEvent(new Event("recurse:selection-change"));
   const uiStateId = newDraftUiOwnerId();
   state.draft = {
-    ...spec,
     ...snapshotNewSubagentDefaults(),
+    ...spec,
     uiStateId,
   };
   state.selectedId = DRAFT;
@@ -993,9 +1180,17 @@ export function startDraft(spec: DraftSpec): void {
   refreshUpBtn();
   inputEl.focus();
 }
+/** Open a top-level draft immediately, with optional preselected tags. */
+export function startNewAgent(
+  _event: DOMRect | Event,
+  backendLabel = "",
+  tags?: string[],
+): void {
+  startDraft({ parent: null, backendLabel, tags });
+}
 const newTop = $<HTMLButtonElement>("#new-top")!;
 newTop.hidden = sharedTrees !== null;
-newTop.onclick = () => startDraft({ parent: null });
+newTop.onclick = () => void startNewAgent(newTop.getBoundingClientRect());
 
 sendEl.onclick = (event: MouseEvent) => {
   // Invariant: A long-press only peeked at the tip; it must neither send nor
@@ -1086,4 +1281,5 @@ addEventListener("pagehide", () => {
   conversationUiState.flush(ownerId);
 });
 restoreAfterLogin();
+void outboxReady.then(restoreOutbox);
 refreshRestoredComposer();

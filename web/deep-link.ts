@@ -102,7 +102,10 @@ export function readHistoryView(
     ?.recurseView;
   if (stamped && typeof stamped === "object") {
     const { agent, draft } = stamped as { agent?: unknown; draft?: unknown };
-    if (typeof agent === "string" && validAgentId(agent))
+    if (
+      typeof agent === "string" &&
+      (validAgentId(agent) || (agent === "" && draft === true))
+    )
       return { agent, draft: draft === true };
   }
   return { agent: readAgentLink(hash).id || "", draft: false };

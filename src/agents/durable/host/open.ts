@@ -18,7 +18,11 @@ import type { Reporter } from "../report.ts";
 import type { RequestCaptures } from "../request_capture.ts";
 import { modelRef, requireModel } from "../model_selection";
 import { INFO, WARNING } from "../../../observability/runtime_logging";
-import { slowSpan, startOpenPhase } from "../../../observability/slow_span";
+import {
+  awaitedSpan,
+  slowSpan,
+  startOpenPhase,
+} from "../../../observability/slow_span";
 import { resumeClear, submitHeld, type ClearState } from "./clear.ts";
 import { syncAgent } from "./send.ts";
 import {
@@ -29,6 +33,7 @@ import {
   type Tools,
 } from "./registry.ts";
 import { runtime, type Runtime } from "./load.ts";
+import { DurableActivity } from "../activity";
 
 type Rec = Record<string, unknown>;
 type Inspection = Awaited<ReturnType<Harness["inspect"]>>;
@@ -36,6 +41,7 @@ type Inspection = Awaited<ReturnType<Harness["inspect"]>>;
 const SLOW_OPEN_MS = 250;
 
 export interface Opened {
+  activity: DurableActivity;
   row: LiveRow;
   harness: Harness;
   conversation: Conversation;
@@ -83,6 +89,7 @@ export interface Opening extends Pick<
   env: Record<string, string>;
   /** A requested clear; once rotated, its held input awaits submission. */
   clear: ClearState | undefined;
+  activity?: DurableActivity;
   storage?: SqliteStorage;
   harness?: Harness;
   conversation?: Conversation;
@@ -229,29 +236,29 @@ async function openSteps(
     owners: new Map(),
     attached: new Map(),
   };
-  const tools = await installTools(
-    host,
-    rt,
-    target,
-    yieldToFocus,
-    timing.phase,
+  const tools = await awaitedSpan("durable_install_tools", cid, () =>
+    installTools(host, rt, target, yieldToFocus, timing.phase),
   );
   const close = closer(host, target, tools);
   allocated.close = close;
   timing.begin("safety");
-  const hooks = installHooks(host, rt, target, tools);
+  const hooks = slowSpan("durable_install_hooks", cid, () =>
+    installHooks(host, rt, target, tools),
+  );
   timing.phase("safety");
   await yieldToFocus();
   const harness = await openStorage(host, rt, target, tools, hooks, timing);
   const conversation = await openRoot(host, rt, target, hooks.readyMcp, timing);
   timing.phase("root");
   timing.begin("track");
-  const opened = handle(host, rt, target, tools, hooks, close);
+  const opened = slowSpan("durable_handle", cid, () =>
+    handle(host, rt, target, tools, hooks, close),
+  );
   await attachForks(host, rt, cid, opened);
   const tracking = await follow(host, cid, rt, opened, target.conv, () => {
     void tools.mcp.close();
   });
-  await tracking.track();
+  await awaitedSpan("pi_track_projection", cid, () => tracking.track());
   timing.phase("track");
   timing.begin("recover");
   // Invariant: Groups a killed server left behind stop before their tasks
@@ -270,8 +277,11 @@ async function openSteps(
   timing.begin("resume");
   if (target.clear?.rotated)
     await submitHeld(host, cid, target.clear, conversation);
-  const inspection = await harness.inspect(context);
+  const inspection = await awaitedSpan("pi_inspect", cid, () =>
+    harness.inspect(context),
+  );
   await showShells(host, rt, target, inspection);
+  opened.activity.start(inspection);
   if (typeof target.conv.revived_from === "string")
     await rt.settleRevive(
       harness,
@@ -280,7 +290,7 @@ async function openSteps(
       target.conv.revived_from,
       target.cwd,
     );
-  harness.resume();
+  slowSpan("durable_resume", cid, () => harness.resume());
   timing.phase("resume");
   timing.log(host, cid);
   opened.ready = true;
@@ -312,7 +322,7 @@ async function prepare(
   yieldToFocus: () => Promise<void>,
 ) {
   timing.begin("runtime");
-  const conv = host.deps.load(cid);
+  const conv = slowSpan("durable_load_record", cid, () => host.deps.load(cid));
   if (conv === null || !host.owns(conv))
     throw new Error(`not a durable conversation: ${cid}`);
   const rt = await runtime();
@@ -335,7 +345,9 @@ async function prepare(
   timing.envStep("dir");
   await yieldToFocus();
   timing.begin("env_build");
-  const env = await host.deps.agentEnv(conv, timing.env);
+  const env = await slowSpan("durable_agent_env_call", cid, () =>
+    host.deps.agentEnv(conv, timing.env),
+  );
   timing.envRestart();
   timing.begin("env_files");
   // Invariant: Every run, resumed or new, runs on an open Harness: publishing
@@ -356,6 +368,7 @@ function closer(
   const { cid, row, attached } = target;
   return async (options = {}) => {
     host.idle.forget(cid);
+    await target.activity?.close();
     tools.warmer.close();
     host.cacheWarmers.delete(tools.warmer);
     for (const [side, handle] of attached) {
@@ -398,6 +411,9 @@ async function openStorage(
       target.path,
       (code) => host.deps.log("durable_write_refused", { cid, code }, WARNING),
       timing.storage,
+      false,
+      false,
+      cid,
     ),
   );
   target.storage = storage;
@@ -478,13 +494,17 @@ async function openRoot(
   const { conv, model, effort } = target;
   const harness = target.harness!;
   timing.begin("root_conversation");
-  const conversation = await harness.root(context, {
-    agent: { model, thinkingLevel: effort as never, cwd: target.cwd },
-  });
+  const conversation = await awaitedSpan("pi_root", target.cid, () =>
+    harness.root(context, {
+      agent: { model, thinkingLevel: effort as never, cwd: target.cwd },
+    }),
+  );
   target.conversation = conversation;
   timing.rootStep("conversation");
   timing.begin("root_snapshot");
-  const live = await harness.snapshot(rt.LiveDoc, conversation.id, context);
+  const live = await awaitedSpan("pi_live_snapshot", target.cid, () =>
+    harness.snapshot(rt.LiveDoc, conversation.id, context),
+  );
   timing.rootStep("snapshot");
   timing.begin("root_mcp");
   if (live?.tools?.some((slot) => slot.name === "codemode"))
@@ -543,12 +563,31 @@ function handle(
           storage,
           deliver: (report) => deliver(cid, report),
           log: (event, fields) => host.deps.log(event, fields),
-          onCaughtUp: () => void host.maybeRotate(cid, true),
+          onCaughtUp: () => {
+            target.activity?.refresh();
+            void host.maybeRotate(cid, true);
+          },
           holds: host.reportHolds,
         });
   target.followed.set(String(conversation.id), conversation);
   target.owners.set(String(conversation.id), cid);
+  const activity = (target.activity = new DurableActivity(
+    join(target.path, "..", "activity"),
+    () =>
+      (reporter !== null && !reporter.caughtUp) ||
+      [...target.owners.values()].some((id) => {
+        const row = host.liveRows.get(id);
+        return Boolean(row?.runId || row?.queued || row?.shells.size);
+      }),
+    (error) =>
+      host.deps.log(
+        "durable_activity_failed",
+        { cid, error: String(error) },
+        WARNING,
+      ),
+  ));
   return {
+    activity,
     row: target.row,
     harness,
     conversation,
@@ -645,10 +684,15 @@ async function follow(
       deleting: host.deleting(cid),
     }),
     current: () => host.liveRows.get(cid) === row,
-    activityChanged: () => host.reconcileCacheWarmers(),
+    activityChanged: () => {
+      host.reconcileCacheWarmers();
+      opened.activity.refresh();
+    },
     committed: (publication) => {
-      if (opened.parent === undefined)
+      if (opened.parent === undefined) {
+        opened.activity.committed(publication);
         host.messageSearch.schedule(host.searchTarget(cid), publication);
+      }
     },
     contextChanged: () => host.invalidatePromptCache(cid),
     syncAgent: () => syncAgent(host, cid, opened.harness, opened.conversation),

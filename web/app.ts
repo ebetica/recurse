@@ -138,6 +138,7 @@ import {
   thumbnailFallback,
   threadImageLoaded,
 } from "./image-preview/inline.js";
+import { showExternalImage } from "./image-preview/references.js";
 import {
   agentFinderOpen,
   closeAgentFinder,
@@ -159,8 +160,10 @@ import { handleDownloadClick } from "./download.js";
 import { UI_STATUS_EVENT } from "./ui-events.js";
 import "./selection-comments.js";
 import "./comments/touch-selection-edge.js";
+import "./tips/pane.js";
 
 document.addEventListener("click", handleDownloadClick, true);
+document.addEventListener("click", showExternalImage);
 document.addEventListener("error", thumbnailFallback, true);
 document.addEventListener("load", threadImageLoaded, true);
 

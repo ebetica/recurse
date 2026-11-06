@@ -119,6 +119,9 @@ export async function renderContent(
     renderDocumentMarkdown(body, content || "", {
       title: info.title,
       signal: controller.signal,
+      agentId: pane._rs.agentId!,
+      documentPath: info.entry || info.filename,
+      artifactId: info.id,
       resolveRelative: (path, image) => {
         const url = artifactFileUrl(
           pane._rs.agentId!,

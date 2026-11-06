@@ -82,10 +82,10 @@
   /* mid-swipe: the row follows the finger with no transition lag */
   .agent.swiping { transition: none; will-change: transform, opacity; }
   /* swiped far enough that releasing will dismiss it — flag it red, like .armed */
-  .agent.dismiss-armed { background: color-mix(in srgb, var(--danger) 14%, transparent); border-color: var(--danger); }
+  .agent.dismiss-armed { --row-bg: color-mix(in srgb, var(--danger) 14%, var(--panel)); background: var(--row-bg); border-color: var(--danger); }
   .agent.dismiss-armed .title { color: var(--danger); }
-  .agent:hover { background: var(--panel-2); }
-  .agent.selected { background: var(--panel-2); border-color: var(--border-strong); }
+  .agent:hover { --row-bg: var(--panel-2); background: var(--row-bg); }
+  .agent.selected { --row-bg: var(--panel-2); background: var(--row-bg); border-color: var(--border-strong); }
   .agent.cursor { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: -2px; }
   /* Spec: compact sidebar overrides apply only on phones. */
   @media (max-width: 700px) {
@@ -94,7 +94,7 @@
     display: flex; flex-direction: column; justify-content: center; }
   #agent-list .agent .title { font-size: 0.9375rem; line-height: 24px; }
   #agent-list .agent.selected:not(.dismiss-armed, .armed, .drop-ok, .drop-bad, .drag-source) { border-color: transparent;
-    background: color-mix(in srgb, var(--accent) 12%, var(--panel)); }
+    --row-bg: color-mix(in srgb, var(--accent) 12%, var(--panel)); background: var(--row-bg); }
   #agent-list .agent.cursor:not(.dismiss-armed, .armed, .drop-ok, .drop-bad, .drag-source) { border-color: transparent;
     outline-width: 1px; outline-offset: -1px; }
   #sidebar #brand { padding: var(--space-3) var(--space-5); gap: var(--space-3); }
@@ -107,9 +107,9 @@
   .agent.drag-source { opacity: .6; border-style: dashed;
     border-color: var(--accent-dim); }
   .agent.drop-ok { border-color: var(--accent);
-    background: color-mix(in srgb, var(--accent) 14%, transparent); }
+    --row-bg: color-mix(in srgb, var(--accent) 14%, var(--panel)); background: var(--row-bg); }
   .agent.drop-bad { border-color: var(--danger);
-    background: color-mix(in srgb, var(--danger) 12%, transparent); cursor: no-drop; }
+    --row-bg: color-mix(in srgb, var(--danger) 12%, var(--panel)); background: var(--row-bg); cursor: no-drop; }
   .agent .row1 { display: flex; align-items: center; gap: var(--space-2); min-width: 0; flex-wrap: nowrap; }
   /* A compact colored, shaped marker for each state — no spelled-out word, so
      it stays small on a phone. The shape (filled dot, hollow ring, square,
@@ -182,7 +182,7 @@
     .agent .status.running { animation: none; }
   }
   /* armed for delete: modifier-X pressed once, awaiting the confirming second */
-  .agent.armed, .agent.armed:hover { background: color-mix(in srgb, var(--danger) 14%, transparent);
+  .agent.armed, .agent.armed:hover { --row-bg: color-mix(in srgb, var(--danger) 14%, var(--panel)); background: var(--row-bg);
     border-color: var(--danger); }
   .agent.armed .title { color: var(--danger); }
   #conv-title.armed, #conv-title.stop-armed { color: var(--danger); }
@@ -1107,6 +1107,12 @@
   .draft-hello .draft-sub { margin: var(--space-3) 0 0; font-size: 0.78125rem; color: var(--muted); }
   .draft-model-host { width: min(360px, calc(100vw - 48px)); margin: var(--space-5) auto 0;
     text-align: left; }
+  #draft-tag { display: inline-flex; align-items: center; gap: var(--space-3);
+    max-width: calc(100vw - 48px); min-height: 44px; padding: var(--space-2) var(--space-3);
+    border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+    font: inherit; font-size: 0.78125rem; cursor: pointer; }
+  #draft-tag:hover, #draft-tag:focus-visible { background: var(--panel-2); color: var(--text); }
+  #draft-tag:focus-visible { outline: 2px solid var(--accent-dim); }
   .agent.draft-row .title { color: var(--accent); font-style: italic; }
 
   /* markdown */

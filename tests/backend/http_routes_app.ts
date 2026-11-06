@@ -10,6 +10,7 @@ import {
   SupervisorReads,
   type ReadsDeps,
 } from "../../src/agents/supervisor/reads";
+import { BackendKeys } from "../../src/auth/backend_keys";
 import { ServiceAuth } from "../../src/auth/service";
 import { OperatorAuth } from "../../src/auth/session";
 import { logger } from "../../src/observability/runtime_logging";
@@ -38,6 +39,8 @@ export interface RoutesApp {
   readonly temp: ReturnType<typeof build>["temp"];
   readonly records: ReturnType<typeof build>["records"];
   readonly authEnv: Record<string, string | undefined>;
+  readonly backendKeys: BackendKeys;
+  readonly loopbackToken: string;
 }
 
 export const tmpKey = (cid: string) => `20260925-${cid}`;
@@ -121,6 +124,12 @@ export async function buildRoutesApp(
   };
   const filesDeps: FilesRoutesDeps = {
     themesFile: temp.config.paths.THEMES_FILE,
+    imageCwd: async (cid) => {
+      const conv = records.get(cid);
+      return !conv || nodes.get(cid)?.reaping
+        ? null
+        : String(conv.workdir || root);
+    },
     requireActionReady,
     drafts,
     files: {
@@ -173,6 +182,8 @@ export async function buildRoutesApp(
   registerFileRoutes(router, filesDeps);
   const sink = { write: () => {} };
   const authEnv = options.authEnv ?? {};
+  const backendKeys = new BackendKeys(paths.DATA_DIR);
+  const loopbackToken = await publishLoopbackToken(paths.DATA_DIR, 0);
   const handler = composeApp({
     router,
     logger: logger("http", sink),
@@ -187,7 +198,8 @@ export async function buildRoutesApp(
         principalsFile: join(paths.DATA_DIR, "principals.json"),
         tokenFile: null,
       }),
-      loopbackToken: await publishLoopbackToken(paths.DATA_DIR, 0),
+      backendKeys,
+      loopbackToken,
       serviceOwns: async () => false,
       logger: logger("web", sink),
     }),
@@ -204,5 +216,7 @@ export async function buildRoutesApp(
     temp,
     records,
     authEnv,
+    backendKeys,
+    loopbackToken,
   };
 }

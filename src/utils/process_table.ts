@@ -6,6 +6,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import fs from "node:fs";
 import { opendir, readFile, readdir, stat } from "node:fs/promises";
 import { errno } from "./libc";
+import { slowSpan } from "../observability/slow_span";
 
 export const PROC = "/proc";
 export const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
@@ -146,9 +147,11 @@ export function procTextSync(
   file: ProcFile,
   root = PROC,
 ): string {
-  if (emulated(root)) return macText(Number(pid), file);
-  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
-  return fs.readFileSync(`${root}/${pid}/${file}`, "utf8");
+  return slowSpan("process_identity_read_sync", undefined, () => {
+    if (emulated(root)) return macText(Number(pid), file);
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+    return fs.readFileSync(`${root}/${pid}/${file}`, "utf8");
+  });
 }
 
 /** Entry names of `root`; on macOS, every pid above 0, as in procfs. */
@@ -157,8 +160,10 @@ export async function procIds(root = PROC): Promise<string[]> {
 }
 
 export function procIdsSync(root = PROC): string[] {
-  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
-  return emulated(root) ? macIds() : fs.readdirSync(root);
+  return slowSpan("process_ids_read_sync", undefined, () => {
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+    return emulated(root) ? macIds() : fs.readdirSync(root);
+  });
 }
 
 /** Names under `root`, streamed on Linux; on macOS, every pid. */
@@ -185,8 +190,11 @@ export async function procEntry(root = PROC, pid?: number): Promise<void> {
 }
 
 export function procEntryExists(pid: number | string, root = PROC): boolean {
-  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
-  if (!emulated(root)) return fs.existsSync(`${root}/${pid}`);
+  if (!emulated(root))
+    return slowSpan("process_exists_sync", undefined, () =>
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+      fs.existsSync(`${root}/${pid}`),
+    );
   try {
     macStat(Number(pid));
     return true;
@@ -197,8 +205,11 @@ export function procEntryExists(pid: number | string, root = PROC): boolean {
 
 /** The kernel boot id: Linux boot_id, macOS kern.bootsessionuuid. */
 export function bootIdTextSync(path = BOOT_ID_PATH): string {
-  // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
-  if (!mac || path !== BOOT_ID_PATH) return fs.readFileSync(path, "utf8");
+  if (!mac || path !== BOOT_ID_PATH)
+    return slowSpan("boot_identity_read_sync", undefined, () =>
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers
+      fs.readFileSync(path, "utf8"),
+    );
   const name = new TextEncoder().encode("kern.bootsessionuuid\0");
   const buffer = new Uint8Array(64);
   const length = new BigUint64Array([64n]);

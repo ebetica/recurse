@@ -37,6 +37,8 @@ export interface SessionFile {
   storage: "upload" | "published";
   id?: string;
   name: string;
+  source_path?: string;
+  image_url?: string;
   size: number;
   media_type: string;
   preview?: "image" | "text" | "audio" | "video" | "pdf" | "none";

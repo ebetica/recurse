@@ -22,6 +22,7 @@ import {
   validateExternalKey,
 } from "../agents/conversation_store";
 import { linkedPrList } from "../agents/conversation_prs";
+import type { Tags } from "../agents/conversation_tags";
 import { TreeLifecycleBusy } from "../agents/mutation_guard";
 import { AttachmentError } from "../agents/runtime/attachments/base";
 import { pyTruthy } from "../agents/runtime/turn_prep";
@@ -45,6 +46,7 @@ import {
 } from "../observability/runtime_logging";
 import { cleanTitle } from "../title_text";
 import { conditionalJson } from "./caching";
+import { creationTags } from "./tags";
 import { compactConversation } from "./compact";
 import { conversationEvents } from "./conversation_events";
 import { createMessageSender } from "./deliver_message";
@@ -199,6 +201,7 @@ export interface ConversationsRoutesDeps {
       effort: string | null;
       level: number | null;
       attachmentDraft: string | null;
+      tags?: Tags;
       muted: boolean;
     }): Promise<Rec>;
     createOrRejoinServiceConversation(options: {
@@ -566,6 +569,7 @@ export function registerConversationRoutes(
           422,
           "fork and sibling agent creation are no longer supported",
         );
+      const tags = creationTags(ex, body.tags);
       const muted = body.muted ?? false;
       if (typeof muted !== "boolean")
         throw new HttpError(422, "muted must be a boolean");
@@ -596,6 +600,7 @@ export function registerConversationRoutes(
             effort: (body.effort ?? null) as string | null,
             level,
             attachmentDraft: (draft ?? null) as string | null,
+            tags,
             muted,
           }),
         );

@@ -40,7 +40,9 @@ It commits only after the whole group exited cleanly.
 Homes would otherwise re-poll a sleeping instance every hour, starting the big
 web container for its whole scale-down window each time. `sleep_check` (label
 `NAME-sleep-check`) answers those re-polls instead: Bun gets its URL as
-`RECURSE_SLEEP_CHECK_URL`. It is a separate function with a bare image, no
+`RECURSE_SLEEP_CHECK_URL`. Recurse advertises it at sign-in and in sleep
+answers; homes persist it and check it before startup and periodic relay polls.
+It is a separate function with a bare image, no
 Volume or secrets, 0.125 CPU/256 MiB and a 2-second scale-down window, reading
 the `NAME-sleep-check` Dict:
 
@@ -55,7 +57,11 @@ the `NAME-sleep-check` Dict:
 key's digest matches (constant-time). It answers `sleep_seconds` (another hour)
 only if the asleep token equals the awake token, so the container stopped after
 its last start, and nothing waits for that key. Otherwise, or if the Dict is
-unreadable, the home polls the web URL, which starts the container. A crash
+unreadable, the home polls the web URL, which starts the container. While the
+awake/asleep tokens differ, it returns 503 rather than rejecting a key against
+an old snapshot: keys issued by the current web container are not in that
+snapshot yet. This endpoint answers only empty/sleep polls, not queued message
+contents; a waiting message still requires the authenticated web poll. A crash
 without the exit hook leaves the tokens unequal, so homes poll as before. The
 start allows 5 seconds to write `awake` and look up the check-in URL; if that
 fails, Bun runs without `RECURSE_SLEEP_CHECK_URL`, and homes paused before it
@@ -131,8 +137,10 @@ receipts are ignored; nothing reads or repairs them.
 
 ## Keeping the app warm
 
-Recent Durable writes, unfinished intents and fresh running-shell records keep
-the app warm through HTTP. Bounded scans skip invalid files and include legacy
+Fresh Durable work markers, unfinished intents and fresh running-shell records
+keep the app warm through HTTP. Durable refreshes its marker once a minute while
+tasks, queued input or reports remain, and removes it when idle; an open session
+or recent SQLite/WAL writes alone do not keep the app warm. Bounded scans skip invalid files and include legacy
 `data/pi_bg_shell_state` (or `PI_BG_SHELL_STATE_DIR`). Old records expire; restart
 recovery resumes or retires intents. Each keepalive poke logs its reason and
 matching file path. Warmth never decides ownership.

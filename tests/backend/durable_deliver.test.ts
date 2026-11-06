@@ -397,7 +397,7 @@ describe("Stop", () => {
     await worker.close();
     const b = hostOn(w, [fauxAssistantMessage("second answer")]);
     try {
-      await b.host.open("c1");
+      await b.host.openLive();
       await until(async () =>
         (await assistantTexts(b.host)).includes("second answer"),
       );
@@ -540,7 +540,7 @@ describe("clear", () => {
     ]);
     try {
       expect(b.host.metadata("c1").pending_actions).toEqual([]);
-      await b.host.open("c1");
+      await b.host.openLive();
       await until(async () => (await assistantTexts(b.host)).includes("fresh"));
       expect(await userTexts(b.host)).toEqual(["after clear"]);
       expect(b.host.metadata("c1").pending_actions).toEqual([]);

@@ -6,7 +6,15 @@ import { html, nothing, render } from "lit";
 import { apiJson, jpost } from "../api.js";
 import { embedded, state as app } from "../state.js";
 import { SIDEBAR_CHANGE } from "./actions.js";
-import { checkSections, type ScriptSection } from "./arrangement.js";
+import {
+  checkSections,
+  checkNewAgent,
+  type NewAgent,
+  type Action,
+  type ScriptAction,
+  type ScriptSection,
+  type Section,
+} from "./arrangement.js";
 import type { SidebarRow } from "./rows.js";
 import type { ScriptResult } from "./sandbox.js";
 
@@ -35,6 +43,30 @@ const REFRESH_MS = 3000;
 
 let current: ScriptState | null = null;
 let output: unknown = null;
+let checkedIds: Set<string> | null = null;
+let newAgent: NewAgent | undefined;
+let latestRows: SidebarRow[] = [];
+let finished: Promise<void> = Promise.resolve();
+/** Read creation settings after the active script has been checked. */
+export async function newAgentSettings(): Promise<NewAgent | undefined> {
+  if (!current) {
+    const { response, data } = await apiJson<ScriptState>(
+      "/api/sidebar/script",
+    );
+    if (!response.ok)
+      throw new Error("Couldn't load New agent settings. Try again.");
+    setScriptState(data);
+  }
+  if (current?.script) {
+    schedule({
+      script: current.script,
+      rows: latestRows,
+      now: Date.now() / 1000,
+    });
+    await finished;
+  }
+  return current?.script && !failure ? newAgent : undefined;
+}
 let failure: Failure | null = null;
 let problem = "";
 try {
@@ -56,6 +88,7 @@ const store = (key: string, value: string | null) => {
  * script; a new run starts when the rows have changed.
  */
 export function scriptOutput(rows: SidebarRow[], now: number): unknown {
+  latestRows = rows;
   if (embedded) return null;
   refreshScript();
   if (current?.script) schedule({ script: current.script, rows, now });
@@ -65,10 +98,19 @@ export function scriptOutput(rows: SidebarRow[], now: number): unknown {
 /** The script state Settings shows, fetched again when it changes. */
 export const scriptState = (): ScriptState | null => current;
 
+/** New rows enter their checked section, never a temporary Unsorted section. */
+export function arrangedScriptRows(rows: SidebarRow[]): SidebarRow[] {
+  return current?.script && !failure && output && checkedIds
+    ? rows.filter((row) => checkedIds!.has(row.id))
+    : rows;
+}
+
 export function setScriptState(next: ScriptState): void {
   if (JSON.stringify(next) === JSON.stringify(current)) return;
   if (next.script !== current?.script) {
     [lastKey, failure, problem] = ["", null, ""];
+    newAgent = undefined;
+    checkedIds = null;
     if (!next.script) {
       output = null;
       store(LAYOUT_KEY, null);
@@ -113,7 +155,7 @@ function schedule(input: Input): void {
   const key = JSON.stringify([input.script, rows, Math.floor(input.now / 60)]);
   if (key === lastKey) return;
   [lastKey, next] = [key, input];
-  if (!running) void drain();
+  if (!running) finished = drain();
 }
 
 async function drain(): Promise<void> {
@@ -124,16 +166,20 @@ async function drain(): Promise<void> {
     const result = await runInWorker(input);
     if (next || input.script !== current?.script) continue;
     const before = JSON.stringify([output, failure]);
+    let addedRows = false;
     try {
       if ("error" in result) throw result;
+      newAgent = checkNewAgent(result.newAgent);
       [output, failure] = [compact(result.sections, input.rows), null];
+      addedRows = input.rows.some((row) => !checkedIds?.has(row.id));
+      checkedIds = new Set(input.rows.map((row) => row.id));
       store(LAYOUT_KEY, JSON.stringify(output));
     } catch (error) {
       failure = (error as Failure).error
         ? (error as Failure)
         : { error: String((error as Error).message), line: null };
     }
-    if (JSON.stringify([output, failure]) !== before) changed();
+    if (addedRows || JSON.stringify([output, failure]) !== before) changed();
   }
   running = false;
 }
@@ -144,11 +190,32 @@ function compact(sections: unknown, rows: SidebarRow[]): ScriptSection[] {
     0,
     (sections as unknown[]).length,
   );
-  return named.map(({ ids, actions, ...section }) => ({
+  const scriptAction = ({
+    ids,
+    clearAsked,
+    ...action
+  }: Action): ScriptAction =>
+    action.start
+      ? { label: action.label, icon: action.icon, start: true, set: action.set }
+      : {
+          ...action,
+          ...(clearAsked ? { clear: "ask" } : {}),
+          rows: ids,
+        };
+  const compactSection = ({
+    ids,
+    actions,
+    rowActions,
+    sections,
+    path: _path,
+    ...section
+  }: Section): ScriptSection => ({
     ...section,
-    rows: ids,
-    actions: actions.map(({ ids, ...action }) => ({ ...action, rows: ids })),
-  }));
+    ...(sections ? { sections: sections.map(compactSection) } : { rows: ids }),
+    actions: actions.map(scriptAction),
+    rowActions: rowActions.map(scriptAction),
+  });
+  return named.map(compactSection);
 }
 
 let worker: Worker | null = null;

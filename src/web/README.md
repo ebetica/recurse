@@ -11,6 +11,8 @@ With no configured identity or GitHub account, identity stays unset and a warnin
 in `recurse.log` asks the operator to set `user.name` and `user.email` or configure
 a GitHub token; Git refuses commits until an identity is supplied.
 HTTP drain and runtime shutdown run together; maintenance is best-effort.
+`GET /api/version` advertises the configured sleep check-in URL as `check_url`
+so connected homes can persist it before their first relay poll.
 Responses advertise the API major/revision in `X-Recurse-API` and request-to-header
 server duration in `Server-Timing` (`recurse`). Existing route timing is retained.
 Long routes lift idle timeout. HEAD drains the GET body but sends only headers.

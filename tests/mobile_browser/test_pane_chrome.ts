@@ -340,5 +340,157 @@ export const tests: BrowserTest[] = [
     expect(await original.text()).not.toContain('id="recurse-preview-size"');
     await context.close();
   },
+  // Regression: #3156 one phone tap keeps the Tips draft and its prompt after pane history closes.
+  async function test_tips_pane_hourly_dot(browser, base) {
+    const hour = 3_600_000;
+    const desktop = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+    });
+    await desktop.clock.install();
+    const page = await desktop.newPage();
+    const other = await desktop.newPage();
+    await gotoRoot(page, base);
+    await gotoRoot(other, base);
+    const rail = page.locator('#pane-rail-panels .rail-btn[data-pane="tips"]');
+    await rail.waitFor();
+    await other.locator('.rail-btn[data-pane="tips"]').waitFor();
+    expect(
+      await other.evaluate(() => (globalThis as any).document.visibilityState),
+    ).toBe("visible");
+    expect(
+      await page
+        .locator("#pane-rail-panels .rail-btn")
+        .last()
+        .getAttribute("data-pane"),
+    ).toBe("tips");
+    expect(await rail.getAttribute("class")).not.toContain("attention");
+    await desktop.clock.fastForward(hour / 2);
+    expect(await rail.getAttribute("class")).not.toContain("attention");
+    await desktop.clock.fastForward(hour / 2);
+    await page
+      .locator(
+        '.rail-btn.attention[data-pane="tips"][aria-label="Tips available"]',
+      )
+      .waitFor();
+    await rail.click();
+    const pane = page.locator('.pane-col[data-pane="tips"]');
+    await pane.locator(".tips-count", { hasText: "1 of 29" }).waitFor();
+    expect(await pane.locator(".tip-title").textContent()).toBe(
+      "Your sidebar is a script",
+    );
+    expect(await rail.getAttribute("class")).not.toContain("attention");
+    await pane.getByRole("button", { name: "Ask a new agent" }).click();
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector("#input").value ===
+        "Change my sidebar script to group agents by project, with a Needs you section at the top.",
+    );
+    await gotoRoot(page, base);
+    await pane
+      .locator(".tip-title", { hasText: "Your sidebar is a script" })
+      .waitFor();
+    await pane.getByRole("button", { name: "Next tip" }).click();
+    await pane.locator(".tips-count", { hasText: "2 of 29" }).waitFor();
+    expect(await pane.locator(".tip-title").textContent()).toBe(
+      "Group agents by project",
+    );
+    const hourly = pane.getByRole("switch", { name: "Show a tip every hour" });
+    await hourly.uncheck();
+    await page.locator('#pane-rail-panels .rail-btn[data-pane="tips"]').click();
+    await pane.waitFor({ state: "detached" });
+    await desktop.clock.fastForward(hour);
+    expect(await rail.getAttribute("class")).not.toContain("attention");
+    await rail.click();
+    await hourly.check();
+    await rail.click();
+    await pane.waitFor({ state: "detached" });
+    await desktop.clock.fastForward(hour);
+    await page.locator('.rail-btn.attention[data-pane="tips"]').waitFor();
+    await rail.click();
+    await pane.locator(".tips-count", { hasText: "3 of 29" }).waitFor();
+    expect(await pane.locator(".tip-title").textContent()).toBe(
+      "Let agents flag you",
+    );
+    await page.locator("#input").fill("Please look into this");
+    await pane.locator(".tips-all > summary").click();
+    await pane
+      .getByRole("button", { name: "Teach agents your workflows" })
+      .click();
+    await pane.getByRole("button", { name: "Show skills" }).click();
+    await page.locator("#skill-menu.on").waitFor();
+    expect(await page.locator("#input").inputValue()).toBe(
+      "Please look into this /",
+    );
+    await desktop.close();
+
+    const phone = await browser.newContext({
+      viewport: { width: 412, height: 915 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    const mobile = await phone.newPage();
+    await mobile.clock.install();
+    await gotoRoot(mobile, base);
+    const fab = mobile.locator("#pane-fab");
+    await fab.waitFor();
+    await mobile.clock.fastForward(hour);
+    await mobile
+      .locator(
+        '#pane-fab.attention[aria-label="More actions — Tips available"]',
+      )
+      .waitFor();
+    await fab.tap();
+    const item = mobile.locator("#pane-menu-panels .pane-menu-item").last();
+    expect(await item.getAttribute("data-pane")).toBe("tips");
+    expect(await item.getAttribute("class")).toContain("attention");
+    await item.tap();
+    const sheet = mobile.locator('.pane-col[data-pane="tips"]');
+    await sheet.locator(".tips-count", { hasText: "1 of 27" }).waitFor();
+    expect(await fab.getAttribute("class")).not.toContain("attention");
+    await sheet.getByRole("button", { name: "Ask a new agent" }).tap();
+    await mobile.waitForFunction(() => {
+      const browser = globalThis as any;
+      return (
+        browser.history.state?.recurseView?.draft &&
+        !browser.history.state?.phonePane
+      );
+    });
+    await mobile.locator(".draft-hello").waitFor();
+    expect(await mobile.locator("#input").inputValue()).toBe(
+      "Change my sidebar script to group agents by project, with a Needs you section at the top.",
+    );
+    await mobile.goBack();
+    await mobile.locator("html.phone-list").waitFor();
+    await gotoRoot(mobile, base);
+    await fab.tap();
+    await item.tap();
+    await sheet.getByRole("button", { name: "Next tip" }).tap();
+    await sheet.locator(".tips-count", { hasText: "2 of 27" }).waitFor();
+    await sheet.getByRole("button", { name: "Previous" }).tap();
+    await sheet.locator(".tips-count", { hasText: "1 of 27" }).waitFor();
+    await sheet.getByRole("button", { name: "Open Settings" }).tap();
+    await mobile.locator("#settings-overlay.on").waitFor();
+    await mobile.locator("#settings-close").tap();
+    await mobile.locator("#settings-overlay.on").waitFor({ state: "hidden" });
+    await sheet.locator(".tips-all > summary").tap();
+    await sheet
+      .getByRole("button", { name: "Teach agents your workflows" })
+      .tap();
+    await sheet.getByRole("button", { name: "Show skills" }).tap();
+    await sheet.waitFor({ state: "detached" });
+    await mobile.locator("#skill-menu.on").waitFor();
+    expect(await mobile.locator("#input").inputValue()).toBe("/");
+    await mobile.locator("#input").fill("");
+    await fab.tap();
+    await item.tap();
+    await sheet.locator(".tips-all > summary").tap();
+    await sheet.getByRole("button", { name: "Let agents flag you" }).tap();
+    await sheet.getByRole("button", { name: "Ask this agent" }).tap();
+    await sheet.waitFor({ state: "detached" });
+    expect(await mobile.locator("#input").inputValue()).toBe(
+      "Whenever you're blocked waiting on me, tag yourself needs-you, and remove the tag once I've answered.",
+    );
+    await phone.close();
+  },
 ];
 if (import.meta.main) await runBrowserTests([["pane-chrome", tests]]);

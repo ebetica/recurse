@@ -75,7 +75,7 @@ export interface LifecycleDeps {
   /** Durable conversations (src/agents/durable/host.ts). */
   durable?: {
     runningCount(): number;
-    /** Open every live Durable conversation so interrupted work resumes. */
+    /** Resume unfinished Durable work without opening idle conversations. */
     openLive(): Promise<void>;
     close(): Promise<void>;
   };

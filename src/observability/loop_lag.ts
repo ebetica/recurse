@@ -4,7 +4,11 @@
 // Bounded wall spans and overlapping open phases are context, not CPU causes.
 
 import { templateRoute } from "../http_transport";
-import { drainSlowSpans, overlappingOpenPhases } from "./slow_span";
+import {
+  drainSlowSpans,
+  drainWorkerReplies,
+  overlappingOpenPhases,
+} from "./slow_span";
 import { INFO, WARNING, logEvent, type RuntimeLogger } from "./runtime_logging";
 
 const SHOWN = 3;
@@ -50,6 +54,7 @@ export class LoopLag {
   start(): void {
     if (this.timer !== null) return;
     drainSlowSpans();
+    drainWorkerReplies(-Infinity);
     this.windowStart = this.now();
     this.schedule();
   }
@@ -80,14 +85,21 @@ export class LoopLag {
     const late = Math.max(0, now - this.expected);
     this.samples.push(late);
     if (this.options.runningCount() > 0) this.active = true;
-    const spans = drainSlowSpans();
-    if (late > this.stallMs) this.stall(late, now, spans);
+    const start = this.expected - this.intervalMs;
+    const spans = drainSlowSpans(start, now);
+    const replies = drainWorkerReplies(start);
+    if (late > this.stallMs) this.stall(late, now, spans, replies);
     this.finished = [];
     if (now - this.windowStart >= this.summaryMs) this.summarize(now);
     this.schedule();
   }
 
-  private stall(late: number, now: number, spans: string[]): void {
+  private stall(
+    late: number,
+    now: number,
+    spans: string[],
+    replies: string[],
+  ): void {
     const routes = new Set<string>();
     for (const request of [...this.inFlight, ...this.finished]) {
       if (routes.size >= SHOWN) break;
@@ -103,6 +115,7 @@ export class LoopLag {
         conversations,
         jobs,
         spans,
+        worker_replies: replies,
         phases: overlappingOpenPhases(this.expected - this.intervalMs, now),
         diagnostics_ms: Math.round(this.now() - now),
       },

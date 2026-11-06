@@ -181,6 +181,9 @@ export function publicMetadata(manifest: Manifest): Manifest {
     size: manifest.size,
     media_type: manifest.media_type,
     inline_media_type: manifest.inline_media_type ?? null,
+    ...(typeof manifest.source_path === "string"
+      ? { source_path: manifest.source_path }
+      : {}),
     source: Object.hasOwn(manifest, "source")
       ? manifest.source
       : SOURCE_PUBLICATION,

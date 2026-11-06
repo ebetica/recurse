@@ -10,7 +10,12 @@ import {
 } from "@earendil-works/pi-durable/storage/sqlite";
 import { resolve } from "node:path";
 import { stat } from "node:fs/promises";
-import { slowSpan } from "../../observability/slow_span";
+import {
+  awaitedReplyBytes,
+  awaitedSpan,
+  slowSpan,
+  workerReply,
+} from "../../observability/slow_span";
 import type { SearchTarget, SyncStats } from "../../search";
 import type {
   NativeOpenCosts,
@@ -39,6 +44,8 @@ interface Thread {
     PromiseWithResolvers<unknown> & {
       costs?: SqliteOpenCosts;
       dispatched: number;
+      op: ThreadRequest["op"];
+      replyBytes?: (bytes: number) => void;
     }
   >;
   dead: Error | null;
@@ -72,10 +79,22 @@ export class SqliteWorker {
       tail: Promise.resolve(),
     };
     thread.worker.onmessage = (event: MessageEvent<ThreadReply>) => {
-      const reply = event.data;
+      const reply = slowSpan(
+        "sqlite_reply_decode",
+        undefined,
+        () => event.data,
+      );
       const waiter = thread.waiting.get(reply.id);
       if (!waiter) return;
       thread.waiting.delete(reply.id);
+      if (reply.payload) {
+        waiter.replyBytes?.(reply.payload.string_bytes);
+        workerReply(
+          `sqlite_${waiter.op}`,
+          reply.payload.string_bytes,
+          reply.payload.sent,
+        );
+      }
       if (waiter.costs && reply.timing) {
         const { received, finished } = reply.timing;
         waiter.costs.dispatch_ms += Math.max(0, received - waiter.dispatched);
@@ -108,7 +127,9 @@ export class SqliteWorker {
     thread.dead = new Error(`SQLite worker died: ${cause}`);
     for (const waiter of thread.waiting.values()) waiter.reject(thread.dead);
     thread.waiting.clear();
-    thread.worker.terminate();
+    slowSpan("sqlite_worker_terminate", undefined, () =>
+      thread.worker.terminate(),
+    );
   }
 
   async release(thread: Thread, closeFailed = false): Promise<void> {
@@ -131,9 +152,13 @@ export class SqliteWorker {
       ...Promise.withResolvers<unknown>(),
       costs,
       dispatched: costs ? performance.timeOrigin + performance.now() : 0,
+      op: request.op,
+      replyBytes: awaitedReplyBytes(),
     };
     try {
-      thread.worker.postMessage({ ...request, id, measureRequest: !!costs });
+      slowSpan("sqlite_request_clone", undefined, () =>
+        thread.worker.postMessage({ ...request, id, measureRequest: !!costs }),
+      );
     } catch (error) {
       // Invariant: A parameter that cannot be cloned never reaches the Worker.
       return Promise.reject(error);
@@ -415,6 +440,7 @@ export async function openWorkerSqliteStorage(
   onCosts?: (costs: SqliteOpenCosts) => void,
   readOnly = false,
   nativeReadOnly = readOnly,
+  diagnosticCid?: string,
 ): Promise<SqliteStorage> {
   const costs = onCosts
     ? {
@@ -434,7 +460,30 @@ export async function openWorkerSqliteStorage(
     nativeReadOnly,
   );
   try {
-    return await SqliteStorage.open(database, { readOnly });
+    const open = () => SqliteStorage.open(database, { readOnly });
+    const storage = await (diagnosticCid
+      ? awaitedSpan("pi_storage_open", diagnosticCid, open)
+      : open());
+    if (!diagnosticCid) return storage;
+    const methods = new Map<PropertyKey, unknown>();
+    return new Proxy(storage, {
+      get(target, key) {
+        const value = Reflect.get(target, key, target);
+        if (
+          typeof value !== "function" ||
+          key === "constructor" ||
+          !Object.hasOwn(SqliteStorage.prototype, key)
+        )
+          return value;
+        if (!methods.has(key))
+          methods.set(key, (...args: unknown[]) =>
+            awaitedSpan(`pi_${String(key)}`, diagnosticCid, () =>
+              Promise.resolve(Reflect.apply(value, target, args)),
+            ),
+          );
+        return methods.get(key);
+      },
+    });
   } finally {
     database.finishOpenTiming();
     if (costs) onCosts?.(costs);

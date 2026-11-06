@@ -14,7 +14,7 @@ import {
   type FileHandle,
 } from "node:fs/promises";
 import { join } from "node:path";
-import { escapeReminderMarkers, wrapSystemReminder } from "./reminder_text";
+import { escapeReminderMarkers, notice } from "./reminder_text";
 import { lstatAt, openAt, readdirAt } from "./utils/dir_fd";
 import { groupSnapshot, procFields } from "./utils/proc_stat";
 import {
@@ -450,7 +450,8 @@ export class ShellRegistry {
       !Array.isArray(completion) &&
       typeof (completion as ShellRecord).message === "string"
     )
-      return wrapSystemReminder(
+      return notice(
+        "restarted-shell",
         `Background command ${shown} finished while Recurse was restarting; ` +
           "its completion details are in this session.",
       );
@@ -460,7 +461,7 @@ export class ShellRegistry {
     if (rec.status !== "lost")
       // Invariant: This notice is returned without a reminder wrapper.
       return rec.status === "running" && !isLive ? lost : null;
-    return wrapSystemReminder(lost);
+    return notice("restarted-shell", lost);
   }
 
   /** Unreported terminal shell work, bounded to one readable session. */

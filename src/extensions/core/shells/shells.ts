@@ -28,7 +28,9 @@ import {
   type TaskId,
   type TaskRuntime,
   type ToolExecutionResult,
+  UsageDoc,
 } from "@earendil-works/pi-durable";
+import { RecurseUsageDoc } from "../context/durable-compaction.ts";
 import { delayMsForStep, fmtWait } from "./backoff.ts";
 import { fileSize, readRange } from "./fileio.ts";
 import {
@@ -141,7 +143,7 @@ type Watch = {
   shell: Shell;
   exit?: string;
   monitor?: MonitorWakeCoalescer;
-  batches: { id: string; message: string }[];
+  batches: { id: string; message: string; chatty: boolean }[];
   wake?: () => void;
   // Wait timeout step; move the next still-running notice one step later.
   waitStep?: number;
@@ -227,6 +229,28 @@ function ownershipOf(shell: Shell): Ownership | undefined {
 function inactivityMs(seconds: number | undefined, fallbackMs: number): number {
   if (seconds === 0) return 0;
   return Math.max(0, (seconds ?? fallbackMs / 1000) * 1000);
+}
+
+/** Conversation growth so far: new input, cache-write and output tokens of
+ * every model response, Pi's and Recurse's compaction summaries included. */
+async function conversationTokens(
+  reader: DocumentReader,
+  conversationId: ConversationId,
+  context: Context,
+): Promise<number> {
+  const [pi, recurse] = await Promise.all([
+    reader.snapshot(UsageDoc, conversationId, context),
+    reader.snapshot(RecurseUsageDoc, conversationId, context),
+  ]);
+  const models = [
+    ...Object.values(pi?.models ?? {}),
+    ...Object.values(recurse?.models ?? {}),
+  ] as Partial<Record<"input" | "cacheWrite" | "output", unknown>>[];
+  let tokens = 0;
+  for (const usage of models)
+    for (const value of [usage.input, usage.cacheWrite, usage.output])
+      if (typeof value === "number") tokens += value;
+  return tokens;
 }
 
 function lostText(input: ShellInput, gone: boolean): string {
@@ -385,7 +409,11 @@ export function createShells(host: ShellsOptions) {
     const entry: Watch = { registry, shell, batches: [] };
     if (shell.mode === "monitor") {
       entry.monitor = new MonitorWakeCoalescer((message, _trigger, details) => {
-        entry.batches.push({ id: details.monitorBatchId, message });
+        entry.batches.push({
+          id: details.monitorBatchId,
+          message,
+          chatty: details.chatty,
+        });
         entry.wake?.();
       }, host.monitor);
     }
@@ -482,9 +510,15 @@ export function createShells(host: ShellsOptions) {
           return;
         }
         const { registry, shell } = entry;
-        const withReminder = (text: string) => {
-          const reminder = registry.backgroundShellReminder();
-          return reminder ? `${text}\n\n${reminder}` : text;
+        const withReminder = async (text: string, chatty = false) => {
+          registry.reminders.advance(
+            await conversationTokens(runtime, runtime.conversationId, context),
+          );
+          const notes = [
+            chatty ? registry.reminders.advice("chatty-monitor") : undefined,
+            registry.backgroundShellReminder(),
+          ];
+          return [text, ...notes.filter((note) => note)].join("\n\n");
         };
         let state = task.state.checkpoint;
         const advance = async (next: typeof state) => {
@@ -496,7 +530,7 @@ export function createShells(host: ShellsOptions) {
         };
         for (;;) {
           if (entry.exit !== undefined) {
-            const message = withReminder(entry.exit);
+            const message = await withReminder(entry.exit);
             await runtime.commit(
               () => ({
                 status: "running",
@@ -512,7 +546,7 @@ export function createShells(host: ShellsOptions) {
               runtime,
               input,
               `monitor:${state.batches}`,
-              withReminder(batch.message),
+              await withReminder(batch.message, batch.chatty),
               context,
             );
             entry.monitor?.turnEnded(new Set([batch.id]));
@@ -538,7 +572,7 @@ export function createShells(host: ShellsOptions) {
               runtime,
               input,
               `running:${state.step}`,
-              withReminder(running),
+              await withReminder(running),
               context,
             );
             const step = state.step + 1;
@@ -572,7 +606,7 @@ export function createShells(host: ShellsOptions) {
               runtime,
               input,
               `idle:${state.reminders}`,
-              withReminder(text),
+              await withReminder(text),
               context,
             );
             await advance({ ...state, reminders, quietSince: now });
@@ -686,6 +720,9 @@ export function createShells(host: ShellsOptions) {
       }
       const scope = await host.scope(api, context);
       const registry = registryFor(scope);
+      registry.reminders.advance(
+        await conversationTokens(api, api.conversationId, context),
+      );
       advisories = registry.commandAdvisories(command);
       const mode = args.monitor
         ? "monitor"

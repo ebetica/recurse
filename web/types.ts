@@ -520,6 +520,7 @@ export interface DraftCreator {
 
 export interface Draft {
   parent: string | null;
+  tags?: string[];
   backendLabel?: string;
   // ephemeral browser-only owner for this one live draft
   uiStateId?: string;
@@ -607,6 +608,8 @@ export interface PaneDef {
   // Called just before the policy opens this pane.
   autoOpened?(ctx: PaneContext): void;
   badge?(ctx: PaneContext): string | number | null | undefined;
+  /** Shows the attention dot on this pane's rail button and menu item. */
+  attention?(): boolean;
   viewState?: PaneViewStateDef;
   cache?: PaneCacheDef;
   render?(el: HTMLElement, ctx: PaneContext): void;

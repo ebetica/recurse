@@ -1,7 +1,7 @@
-// Service worker for agent-finished notifications, served as /push-worker.js
-// at root scope. Only push and notificationclick: no fetch handler, so it never
-// changes how pages load. Every received push shows a notification; visible
-// conversation suppression happens before sending. A tap opens the agent.
+// Agent-finished notification worker, served at /push-worker.js at root scope.
+// No fetch handler: app loading and authentication stay with the server.
+// Every push shows a notification; visible-view suppression is server-side.
+// Clicks reuse only app pages, falling back to an absolute conversation URL.
 (() => {
   interface Notice {
     cid: string;
@@ -19,6 +19,7 @@
   }
   interface Worker {
     registration: {
+      scope: string;
       showNotification(
         title: string,
         options: NotificationOptions,
@@ -29,7 +30,7 @@
         type: "window";
         includeUncontrolled: boolean;
       }): Promise<Tab[]>;
-      openWindow(url: string): Promise<unknown>;
+      openWindow(url: string): Promise<Tab | null>;
     };
     addEventListener(
       type: "push",
@@ -43,17 +44,22 @@
     ): void;
   }
   const worker = self as unknown as Worker;
+  const appUrl = new URL("/", worker.registration.scope);
   const tabs = async () =>
     (
       await worker.clients.matchAll({
         type: "window",
         includeUncontrolled: true,
       })
-    ).filter(
-      (tab) =>
+    ).filter((tab) => {
+      const url = new URL(tab.url);
+      return (
         tab.frameType === "top-level" &&
-        new URL(tab.url).searchParams.get("embed") !== "1",
-    );
+        url.origin === appUrl.origin &&
+        url.pathname === appUrl.pathname &&
+        url.searchParams.get("embed") !== "1"
+      );
+    });
   const showing = (tab: Tab, cid: string) =>
     new URLSearchParams(new URL(tab.url).hash.slice(1)).get("agent") === cid;
 
@@ -72,18 +78,19 @@
 
   const openAgent = async (cid: string) => {
     const open = await tabs();
-    const tab = open.find((each) => showing(each, cid)) ?? open[0];
-    if (tab === undefined) {
-      await worker.clients.openWindow(
-        `/#${new URLSearchParams({ agent: cid })}`,
-      );
-      return;
+    open.sort((a, b) => Number(showing(b, cid)) - Number(showing(a, cid)));
+    for (const tab of open) {
+      try {
+        await tab.focus();
+        tab.postMessage({ openAgent: cid });
+        return;
+      } catch {}
     }
-    tab.postMessage({ openAgent: cid });
-    await tab.focus();
+    const target = new URL(appUrl);
+    target.hash = new URLSearchParams({ agent: cid }).toString();
+    const opened = await worker.clients.openWindow(target.href);
+    await opened?.focus();
   };
-  // Spec: the Settings browser test runs a tap's action through this name.
-  Object.assign(worker, { openAgent });
 
   worker.addEventListener("notificationclick", (event) => {
     event.notification.close();

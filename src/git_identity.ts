@@ -86,11 +86,10 @@ async function resolveIdentity(
         redirect: "error",
       });
       if (response.ok) {
-        const account = (await response.json()) as {
-          id?: unknown;
-          login?: unknown;
-          name?: unknown;
-        };
+        const text = await response.text();
+        const account = slowSpan("git_identity_decode", undefined, () =>
+          JSON.parse(text),
+        ) as { id?: unknown; login?: unknown; name?: unknown };
         if (
           Number.isSafeInteger(account.id) &&
           Number(account.id) > 0 &&

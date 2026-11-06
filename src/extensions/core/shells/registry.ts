@@ -17,11 +17,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { DEFAULT_WAIT_SCHEDULE_SECONDS } from "./backoff.ts";
-import {
-  HYGIENE_TEACHING,
-  rewriteCommand,
-  wrapSystemReminder,
-} from "./rewrite.ts";
+import { rewriteCommand } from "./rewrite.ts";
+import { type AdviceKind, ReminderSpacing } from "../../../reminder_text.ts";
 import { fileSize, readLastLine, readRange, trimFile } from "./fileio.ts";
 import { capLines, splitCompleteLines } from "./lines.ts";
 import {
@@ -49,9 +46,6 @@ export type ShellLaunchError = "live-cap" | "spawn";
 
 // Notification command cap; logs and trimmed output retain details.
 const COMMAND_CHARS_IN_MESSAGES = 300;
-
-// Teach on first hygiene rewrite, then at most every N runs.
-export const HYGIENE_NOTE_EVERY_N_RUNS = 30;
 
 // Publish ownership call id; never inherited when a shell has no call id.
 export const TOOL_CALL_ID_ENV = "RECURSE_TOOL_CALL_ID";
@@ -112,7 +106,7 @@ export const DEFAULT_CONFIG: ShellConfig = {
   tailWindowBytes: 8192,
   monitorMaxChunkBytes: 128 * 1024,
   maxTrackedShells: 200,
-  maxLiveShells: 4,
+  maxLiveShells: 9,
   ownershipHeartbeatMs: 30_000,
   inactivityReminderMs: 1_800_000,
   environmentFile: undefined,
@@ -229,25 +223,12 @@ let idCounter = 0;
 const OPEN_DESCRIPTORS =
   process.platform === "linux" ? "/proc/self/fd" : "/dev/fd";
 
-const LOOP_NUDGE =
-  "Do not run commands in a loop manually, use monitor=true and end your turn. monitor=true will send you a message whenever the script prints to stdout/err.";
-const CD_NUDGE = "Prefer chdir over prefixing with cd.";
-const GREP_NUDGE =
-  "Use the built-in grep tool instead of shell grep for content searches: it ranks, scopes, and bounds results for you.";
-const FIND_NUDGE =
-  "Use the built-in find tool to locate files; prefer fd or rg over shell find when a shell search is genuinely needed.";
-
 const GREP_WORD = /\bgrep\b/;
 const FIND_WORD = /\bfind\b/;
 
 /** A shell search that ran directly rather than filtering a pipeline. */
 function nakedSearch(command: string, word: RegExp): boolean {
   return !command.includes("|") && word.test(command);
-}
-
-/** Nudges read as injected guidance, not tool output. */
-function reminder(note: string): string {
-  return wrapSystemReminder(note);
 }
 
 function shortId(): string {
@@ -434,10 +415,10 @@ export class ShellRegistry {
     { handle: FileHandle; close?: Promise<void> }
   >();
   private readonly recentCommands: string[] = [];
-  /** Every run() call, used to throttle the hygiene teaching note. */
+  /** Every run() call; orders launches. */
   private totalRuns = 0;
-  /** totalRuns at the last hygiene emission; undefined until the first. */
-  private lastHygieneNoteRun: number | undefined;
+  /** Spacing for this agent's shell reminders. */
+  readonly reminders = new ReminderSpacing();
   private disposed = false;
   // On-disk mirror; absent until session id is known or when degraded.
   private store: RegistryStore | undefined;
@@ -698,20 +679,11 @@ export class ShellRegistry {
     return Math.max(1, Math.floor(this.cfg.maxLiveShells));
   }
 
-  /** Wrapped hygiene teaching, throttled: the first run that drops an
-   * anti-pattern emits it, then only runs at least HYGIENE_NOTE_EVERY_N_RUNS
-   * past the last emission. Runs that drop nothing emit nothing and leave
-   * the throttle untouched. */
+  /** Spaced hygiene advice for a run whose rewrite dropped something. */
   commandHygieneNote(shell: Shell): string | undefined {
-    if (!shell.hygieneDropped) return undefined;
-    if (
-      this.lastHygieneNoteRun === undefined ||
-      this.totalRuns - this.lastHygieneNoteRun >= HYGIENE_NOTE_EVERY_N_RUNS
-    ) {
-      this.lastHygieneNoteRun = this.totalRuns;
-      return wrapSystemReminder(HYGIENE_TEACHING);
-    }
-    return undefined;
+    return shell.hygieneDropped
+      ? this.reminders.advice("shell-hygiene")
+      : undefined;
   }
 
   /** Record one invocation and return bounded-loop guidance for its result. */
@@ -719,16 +691,16 @@ export class ShellRegistry {
     this.recentCommands.push(command);
     if (this.recentCommands.length > 3) this.recentCommands.shift();
     if (this.recentCommands.length < 3) return [];
-    const notes: string[] = [];
+    const kinds: AdviceKind[] = [];
     if (this.recentCommands.every((item) => item === command))
-      notes.push(LOOP_NUDGE);
+      kinds.push("loop");
     if (this.recentCommands.every((item) => item.startsWith("cd ")))
-      notes.push(CD_NUDGE);
+      kinds.push("cd");
     if (this.recentCommands.every((item) => nakedSearch(item, GREP_WORD)))
-      notes.push(GREP_NUDGE);
+      kinds.push("grep");
     if (this.recentCommands.every((item) => nakedSearch(item, FIND_WORD)))
-      notes.push(FIND_NUDGE);
-    return notes.map(reminder);
+      kinds.push("find");
+    return kinds.flatMap((kind) => this.reminders.advice(kind) ?? []);
   }
 
   // Whether this foreground shell may become detached.
@@ -758,11 +730,10 @@ export class ShellRegistry {
     }));
   }
 
-  // Snapshot live background shells. Exclude the just-announced launch so
-  // reminders name only other live shells; completion/limit paths exclude none.
+  // Spaced snapshot of live background shells. Exclude the just-announced
+  // launch so reminders name only other live shells; completion/limit paths
+  // exclude none.
   backgroundShellReminder(excludeId?: string): string | undefined {
-    // Spec: Snapshot wrappers distinguish context from message content; readers
-    // also accept the legacy hyphen spelling.
     const shells: BackgroundReminderShell[] = [];
     for (const shell of this.liveShells.values()) {
       if (excludeId !== undefined && shell.id === excludeId) continue;
@@ -786,7 +757,13 @@ export class ShellRegistry {
       });
     }
     const snapshot = formatBackgroundShellReminder(shells);
-    return snapshot === undefined ? undefined : wrapSystemReminder(snapshot);
+    return snapshot === undefined
+      ? undefined
+      : this.reminders.status(
+          "background-shells",
+          snapshot,
+          shells.map((shell) => shell.id),
+        );
   }
 
   /** Keep a log until its output consumer finishes, including nested reads. */

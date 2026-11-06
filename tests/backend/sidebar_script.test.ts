@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   fauxAssistantMessage,
@@ -73,7 +74,8 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
       await fetch(url(`/api/v1/agents/${child}`))
     ).json()) as Rec;
     const { shells: _shells, ...stable } = apiAgent;
-    script = `export default (rows) => {
+    script = `export const newAgent = { ask: "tag", defaults: { recurse: { effort: 3 } } };
+    export default (rows) => {
       const child = rows.find((r) => r.id === "${child}");
       const expected = ${JSON.stringify(stable)};
       for (const key of Object.keys(expected)) {
@@ -83,8 +85,8 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
       if (child.depth !== 1 || child.remote !== false || !child.prs[0].merged)
         throw new Error("Missing sidebar extras");
       return [
-        { title: "All", rows: rows.filter((r) => r.depth === 0) },
-        { title: "Has PR", rows: rows.filter((r) => r.parent && r.prs.some((pr) => pr.number === 42 && pr.checks === "pass")) },
+        { title: "All", hideWhenEmpty: true, rows: rows.filter((r) => r.depth === 0), actions: [{ label: "Tag", ask: "tag", set: "fixed", clear: "other" }, { label: "Untag", ask: "tag", clear: "ask" }] },
+        { title: "Has PR", rows: rows.filter((r) => r.parent && r.prs.some((pr) => pr.number === 42 && pr.checks === "pass")), actions: [{ label: "New agent", icon: "new", start: true, set: "recurse" }] },
       ];
     };`;
     const initialResponse = await fetch(url("/api/sidebar/script"));
@@ -147,7 +149,33 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
                   action: "set_sidebar_script",
                   script: `// ${"x".repeat(16 * 1024)}`,
                 }),
+                call({
+                  action: "set_sidebar_script",
+                  script:
+                    'export default () => [{ title: "Invalid", hideWhenEmpty: "true", rows: [] }]',
+                }),
                 call({ action: "sidebar_script" }),
+                call({
+                  action: "set_sidebar_script",
+                  script:
+                    'export default rows => [{ title: "Invalid", rows, rowActions: [{ label: "Tag", ask: "name" }] }]',
+                }),
+                call({
+                  action: "set_sidebar_script",
+                  script:
+                    'export default rows => [{ title: "Invalid", rows, rowActions: [{ label: "Tag", clear: "ask" }] }]',
+                }),
+                ...[
+                  'export const newAgent = { ask: "name" }; export default () => [];',
+                  'export const newAgent = { defaults: { recurse: { workdir: "/tmp" } } }; export default () => [];',
+                  'export default rows => [{ title: "Invalid", rows, rowActions: [{ label: "New", start: true, set: "recurse" }] }];',
+                  'export default rows => [{ title: "Invalid", rows, actions: [{ label: "New", start: true, set: "pinned" }] }];',
+                  'export default rows => [{ title: "Invalid", rows, sections: [] }];',
+                  'export default () => [{ title: "Outer", sections: [{ title: "Inner", sections: [] }] }];',
+                  'export default () => [{ title: "Many", sections: Array.from({ length: 13 }, () => ({ title: "Child", rows: [] })) }];',
+                ].map((script) =>
+                  call({ action: "set_sidebar_script", script }),
+                ),
               ].join("\n"),
             },
             { id: "sidebar" },
@@ -173,8 +201,27 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
     expect(parts[2]).toContain("ERROR The script ran longer than 50 ms");
     expect(parts[3]).toContain("ERROR A section title must be non-empty text");
     expect(parts[4]).toContain("ERROR The script is over 16 KB.");
-    expect(parts[5]).toContain('"custom": true');
-    expect(parts[5]).toContain(`"by": "${agent}"`);
+    expect(parts[5]).toContain(
+      "ERROR Invalid: hideWhenEmpty must be a boolean",
+    );
+    expect(parts[6]).toContain('"custom": true');
+    expect(parts[6]).toContain(`"by": "${agent}"`);
+    expect(parts[7]).toContain('ERROR Tag: ask must be "tag"');
+    expect(parts[8]).toContain('ERROR Tag: clear "ask" needs ask: "tag"');
+    expect(parts[9]).toContain('ERROR newAgent.ask must be "tag"');
+    expect(parts[10]).toContain(
+      "ERROR newAgent defaults need a custom tag and effort 1-5",
+    );
+    for (const part of parts.slice(11, 13))
+      expect(part).toContain(
+        "ERROR New: start is a section action with only custom set tags",
+      );
+
+    expect(parts[13]).toContain("ERROR Invalid: use either rows or sections");
+    expect(parts[14]).toContain(
+      "ERROR Inner: sections may nest only one level",
+    );
+    expect(parts[15]).toContain("ERROR Many sections has more than 12 entries");
 
     const changed = await fetch(url("/api/sidebar/script"), {
       headers: { "if-none-match": etag! },
@@ -211,6 +258,26 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
     expect((await state()).history.map((v: Rec) => v.by)).toEqual([
       "operator",
       "operator",
+    ]);
+    expect(
+      (
+        await post("/api/sidebar/tags", {
+          ids: [agent],
+          set: { recurse: null },
+        })
+      ).ok,
+    ).toBeTrue();
+    const demo = await readFile(
+      join(import.meta.dir, "../../playground/sidebar/projects.js"),
+      "utf8",
+    );
+    expect(
+      await app.instance.sidebarScript.set(demo, "operator"),
+    ).toMatchObject([
+      { title: "Needs you", rows: 0 },
+      { title: "recurse", rows: 1 },
+      { title: "research", rows: 0 },
+      { title: "Other agents", rows: 1 },
     ]);
   } finally {
     await running.close();

@@ -498,9 +498,11 @@ async function publishTurn(
   cid: string,
   name: string,
   body: string | Uint8Array,
+  directory?: string,
 ): Promise<string> {
   const conv = load(cid)!;
-  const workdir = await mkdtemp(join(tmpdir(), "published-file-"));
+  const workdir =
+    directory ?? (await mkdtemp(join(tmpdir(), "published-file-")));
   await writeFile(join(workdir, name), body);
   const collection = await agentTemp.ensureUploadsDir(String(conv.tmp_key));
   const callId = `call-publish-${hex(8)}`;
@@ -1091,10 +1093,18 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
       "diagram.svg",
       '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="400"><rect width="160" height="400" fill="teal"/><text x="12" y="40" fill="white">Shared image</text></svg>',
     );
+    const directory = await mkdtemp(join(tmpdir(), "markdown-images-"));
+    const imagePath = join(directory, "path-image.svg");
+    await writeFile(
+      imagePath,
+      '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="160"><rect width="320" height="160" fill="teal"/><text x="66" y="88" fill="white" font-size="24">Document image</text></svg>',
+    );
     const id = await publishTurn(
       cid,
       "report.md",
-      '# Weekly report\n\n- shipped **previews**\n\n```mermaid\ngraph LR\n A[Files] --> B[Artifacts]\n```\n\nInline \\(x^2\\) and display math:\n\n\\[E = mc^2\\]\n\n![Local diagram](./diagram.svg)\n\n| Wide table | Value |\n| --- | --- |\n| WideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumn | readable |\n\n<img src="https://example.com/x.png" alt="remote">\n',
+      '# Weekly report\n\n- shipped **previews**\n\n```mermaid\ngraph LR\n A[Files] --> B[Artifacts]\n```\n\nInline \\(x^2\\) and display math:\n\n\\[E = mc^2\\]\n\n![Local diagram](./diagram.svg)\n\n| Wide table | Value |\n| --- | --- |\n| WideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumnWideColumn | readable |\n\n<img src="https://example.com/x.png" alt="remote">\n<button class="external-image" data-external-image="https://example.invalid/tracker.png" data-image-alt="spoof">Expand details</button>\n' +
+        `\n![Absolute path](${imagePath})\n\n![Unpublished relative path](./path-image.svg)\n`,
+      directory,
     );
     publishedFixture = { demo: cid, id };
     return publishedFixture;
@@ -1514,9 +1524,14 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     return { agent: cid };
   },
   "seed-model-selection-error": async (request) => {
-    const body = (await request.json()) as { agent: string; model: string };
+    const body = (await request.json()) as {
+      agent: string;
+      model: string;
+      workdir?: string;
+    };
     await createDurable(body.agent, "Choose a model", "fauxordinary/faux-1");
     const conv = load(body.agent)!;
+    if (body.workdir) conv.workdir = body.workdir;
     conv.level = null;
     conv.model = body.model;
     conv[SET_MODEL_MARKER] = true;

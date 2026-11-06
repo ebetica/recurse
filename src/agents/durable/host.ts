@@ -5,6 +5,7 @@
 import { runStateClock } from "../run_state_clock";
 import { ServerStoppingError } from "./stopping_error";
 import { IdleHarnesses } from "./idle_harnesses";
+import { needsRecovery } from "./host/recovery";
 import { ReportHolds } from "./report_holds";
 import { Promotions, type PromotionRecord } from "./promotion";
 import type { AbortScope } from "../../utils/tasks";
@@ -618,8 +619,7 @@ export class DurableHost {
     );
   }
 
-  // Open every live Durable conversation, one at a time, so interrupted work
-  // resumes.
+  /** Resume unfinished Durable work; idle conversations open on demand. */
   async openLive(): Promise<void> {
     const cids = this.deps
       .liveIds()
@@ -627,7 +627,8 @@ export class DurableHost {
     for (const cid of cids) {
       if (this.closing) break;
       try {
-        if (!this.closing) await this.getOpened(cid, true);
+        if ((await needsRecovery(this, cid)) && !this.closing)
+          await this.getOpened(cid, true);
         this.promotions.resume(cid);
       } catch {}
     }

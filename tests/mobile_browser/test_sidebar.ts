@@ -1,9 +1,61 @@
 import { expect } from "bun:test";
 import { join } from "node:path";
+import { readFile } from "node:fs/promises";
 import { ROOT } from "./common";
 import type { BrowserContext, Locator, Page, Request } from "playwright";
 import { expect as browserExpect } from "playwright/test";
-import { captureErrors, gotoRoot, type BrowserTest } from "./common";
+import {
+  captureErrors,
+  gotoRoot,
+  rootAgentId,
+  showAgentList,
+  type BrowserTest,
+} from "./common";
+
+export async function enableTagSidebar(
+  context: BrowserContext,
+  base: string,
+  projects: string[],
+): Promise<string> {
+  const settings = await (
+    await context.request.get(`${base}api/sidebar/script`)
+  ).json();
+  const demo = await readFile(
+    join(ROOT, "playground/sidebar/projects.js"),
+    "utf8",
+  );
+  const script =
+    demo
+      .replace('["recurse", "research"]', JSON.stringify(projects))
+      .replace("function sidebar(rows)", "function sidebar(rows, now)")
+      .replace(
+        `    {
+      title: "Other agents",
+      hideWhenEmpty: true,
+      rows: rows.sort(byRank),
+      rowActions: [TAG],
+    },`,
+        `    ...plain(rows, now).map(section => ({
+      ...section, rowActions: [...section.rowActions, TAG],
+    })),`,
+      ) +
+    `\nconst plain = (() => { ${settings.default.replace("export default function sidebar", "return function sidebar")} })();`;
+  expect(
+    (
+      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
+        data: { script, by: "operator" },
+      })
+    ).ok(),
+  ).toBeTrue();
+  return script;
+}
+
+const takeScreenshot = async (page: Page, filename: string) => {
+  if (process.env.RECURSE_SCREENSHOT_DIR)
+    await page.screenshot({
+      path: join(process.env.RECURSE_SCREENSHOT_DIR, filename),
+    });
+};
 
 type Ids = Record<
   "fresh" | "stale" | "busy" | "archived" | "child" | "grandchild",
@@ -28,13 +80,16 @@ const sectionOf = (page: Page, id: string) =>
     for (const el of doc.querySelectorAll(
       "#agent-list .tree-section-header, #agent-list .agent",
     )) {
-      if (el.dataset.section) section = el.dataset.section;
+      if (el.dataset.section)
+        section = JSON.parse(el.dataset.sectionKey).slice(1).join("/");
       else if (el.dataset.id === id) return section;
     }
     return null;
   }, id);
 const header = (page: Page, title: string) =>
-  page.locator(`.tree-section-header[data-section="${title}"]`);
+  page.locator(
+    `.tree-section-header[data-section-key='${JSON.stringify(["", title])}']`,
+  );
 const serverTags = async (context: BrowserContext, base: string, id: string) =>
   ((await (await context.request.get(`${base}api/tree`)).json()) as any[]).find(
     (row) => row.id === id,
@@ -73,13 +128,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#sidebar").evaluate(async () => {
         await (globalThis as any).document.fonts.ready;
       });
-      if (process.env.RECURSE_SCREENSHOT_DIR)
-        await page.screenshot({
-          path: join(
-            process.env.RECURSE_SCREENSHOT_DIR,
-            `compact-sidebar-${width}.png`,
-          ),
-        });
+      await takeScreenshot(page, `compact-sidebar-${width}.png`);
       const boxes = await rows.evaluateAll((elements) =>
         elements.map((el) => {
           const rect = el.getBoundingClientRect();
@@ -141,6 +190,52 @@ export const tests: BrowserTest[] = [
       await page
         .locator('.agent.selected[data-id="compact-sidebar-0"]')
         .waitFor();
+      if (width === 412) {
+        await page.locator("#menu-btn").click();
+        await page.waitForFunction(
+          () =>
+            (globalThis as any).document
+              .querySelector("#sidebar")
+              .getBoundingClientRect().x === 0,
+        );
+      }
+      const created = await context.request.post(`${base}api/conversations`, {
+        data: { title: "Empty section example" },
+      });
+      expect(created.ok()).toBeTrue();
+      const { id } = await created.json();
+      const example = page.locator(`.agent[data-id="${id}"]`);
+      await example.waitFor();
+      const titles = () =>
+        page.locator("#agent-list .tree-section-title").allTextContents();
+      expect(await titles()).toEqual(["Inbox"]);
+      await takeScreenshot(page, `empty-sections-hidden-${width}.png`);
+      const pin = async (pinned: boolean) => {
+        const response = await context.request.post(`${base}api/sidebar/tags`, {
+          data: {
+            ids: [id],
+            ...(pinned ? { set: { pinned: null } } : { clear: ["pinned"] }),
+          },
+        });
+        expect(response.ok()).toBeTrue();
+      };
+      await pin(true);
+      await browserExpect(header(page, "Pinned")).toHaveCount(1);
+      expect(await titles()).toEqual(["Pinned", "Inbox"]);
+      await example.waitFor();
+      await takeScreenshot(page, `empty-section-returned-${width}.png`);
+      await header(page, "Pinned").locator(".tree-section-toggle").click();
+      await pin(false);
+      await browserExpect(header(page, "Pinned")).toHaveCount(0);
+      await pin(true);
+      await browserExpect(
+        header(page, "Pinned").locator(".tree-section-toggle"),
+      ).toHaveAttribute("aria-expanded", "false");
+      expect(await titles()).toEqual(["Pinned", "Inbox"]);
+      await browserExpect(example).toHaveCount(0);
+      expect(
+        (await context.request.delete(`${base}api/conversations/${id}`)).ok(),
+      ).toBeTrue();
       await context.close();
     }
   },
@@ -220,10 +315,7 @@ export const tests: BrowserTest[] = [
       "no-operator",
       "agent-active",
     ]);
-    if (process.env.RECURSE_SCREENSHOT_DIR)
-      await page.screenshot({
-        path: join(process.env.RECURSE_SCREENSHOT_DIR, "sidebar-1280.png"),
-      });
+    await takeScreenshot(page, "sidebar-1280.png");
     await context.close();
   },
   // Feature: #2869 shared tree links limit discovery and copy a subagent's root.
@@ -376,7 +468,7 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await context.close();
   },
-  // Feature: #2953 Inbox, Active and Archive sections with row actions.
+  // Regression: #3140 scroll section headers into view before mobile touch input. (also Regression #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
   async function test_sidebar_sections(browser, base) {
     let context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -420,10 +512,7 @@ export const tests: BrowserTest[] = [
       expect(
         await fresh.getByRole("button", { name: `${name} Fresh idle` }).count(),
       ).toBe(1);
-    if (process.env.RECURSE_SCREENSHOT_DIR)
-      await page.screenshot({
-        path: join(process.env.RECURSE_SCREENSHOT_DIR, "sections-desktop.png"),
-      });
+    await takeScreenshot(page, "sections-desktop.png");
     expect(await bounds(content)).toEqual(beforeHover);
     for (const button of await fresh.locator(".row-actions button").all()) {
       expect(await button.getAttribute("title")).toBe(
@@ -638,13 +727,7 @@ export const tests: BrowserTest[] = [
       singleLine: true,
       timeAtRight: true,
     });
-    if (process.env.RECURSE_SCREENSHOT_DIR)
-      await page.screenshot({
-        path: join(
-          process.env.RECURSE_SCREENSHOT_DIR,
-          "sections-long-title.png",
-        ),
-      });
+    await takeScreenshot(page, "sections-long-title.png");
     await fresh.hover();
     expect((await fresh.boundingBox())!.height).toBe(rowHeight);
     expect(errors).toEqual([]);
@@ -657,6 +740,16 @@ export const tests: BrowserTest[] = [
     });
     await phoneHold(context, base, await seedSections(context, base));
     await context.close();
+
+    for (const width of [1280, 412]) {
+      context = await browser.newContext({
+        viewport: { width, height: 915 },
+        isMobile: width === 412,
+        hasTouch: width === 412,
+      });
+      await typedTags(context, base, await seedSections(context, base), width);
+      await context.close();
+    }
 
     context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -679,7 +772,7 @@ export const tests: BrowserTest[] = [
       await context.request.get(`${base}api/sidebar/script`)
     ).json();
     const script = settings.default
-      .replace("collapsed: true", "collapsed: false")
+      .replaceAll("collapsed: true", "collapsed: false")
       .replace(
         "actions: stale.length ? [archiveStale] : [],",
         'actions: [ARCHIVE, PIN].map(a => ({...a, label: a.label + " all", rows: inbox})),',
@@ -822,6 +915,559 @@ export const tests: BrowserTest[] = [
   },
 ];
 
+async function typedTags(
+  context: BrowserContext,
+  base: string,
+  ids: Ids,
+  width: number,
+): Promise<void> {
+  expect(
+    (
+      await context.request.post(`${base}api/sidebar/tags`, {
+        data: {
+          ids: [ids.archived],
+          set: { "recurse-dev": null, research: null },
+        },
+      })
+    ).ok(),
+  ).toBeTrue();
+  const page = await context.newPage();
+  const errors = captureErrors(page);
+  await gotoRoot(page, base);
+  if (width === 412) {
+    await page.locator("#menu-btn").click();
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document
+          .querySelector("#sidebar")
+          .getBoundingClientRect().x === 0,
+    );
+  }
+  const newButton = page.locator(width === 412 ? "#new-list" : "#new-top");
+  await page.locator(`.agent[data-id="${ids.fresh}"]`).waitFor();
+  expect(await page.getByRole("button", { name: /^Tag… / }).count()).toBe(0);
+  await newButton.click();
+  await browserExpect(page.locator("#input")).toBeFocused();
+  await page.locator("#draft-model-host").waitFor();
+  expect(await page.locator("#draft-tag").count()).toBe(0);
+  await takeScreenshot(page, `draft-built-in-${width}.png`);
+  const tagScript = await enableTagSidebar(context, base, [
+    "recurse-dev",
+    "research",
+  ]);
+  await page.reload();
+  await showAgentList(page);
+  await header(page, "recurse-dev").waitFor();
+  const row = page.locator(`.agent[data-id="${ids.fresh}"]`);
+  const act = async (label: string) => {
+    if (width === 1280) {
+      await row.hover();
+      await row
+        .getByRole("button", { name: `${label} Fresh idle`, exact: true })
+        .click();
+    } else {
+      await row.scrollIntoViewIfNeeded();
+      const touch = await context.newCDPSession(page);
+      const box = (await row.boundingBox())!;
+      await touch.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: box.x + 50, y: box.y + box.height / 2 }],
+      });
+      await page.locator("#hold-menu").getByRole("menu").waitFor();
+      await touch.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      await page
+        .locator("#hold-menu")
+        .getByRole("menuitem", { name: label, exact: true })
+        .tap();
+      await touch.detach();
+    }
+  };
+  const input = page.getByRole("textbox", { name: "Tag name", exact: true });
+  const dialog = page.getByRole("dialog", { name: "Tag name", exact: true });
+  await row.waitFor();
+  await act("Tag…");
+  await browserExpect(input).toBeFocused();
+  await input.fill("rcd");
+  await browserExpect(dialog.locator(".tag-suggestions button")).toHaveText([
+    "recurse-dev",
+  ]);
+  expect(
+    await dialog.getByRole("button", { name: "pinned", exact: true }).count(),
+  ).toBe(0);
+  if (width === 412) {
+    for (const control of await dialog.locator("input, button").all())
+      expect(
+        await control.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return [
+            [box.left + 1, box.y + box.height / 2],
+            [box.right - 1, box.y + box.height / 2],
+            [box.x + box.width / 2, box.top + 1],
+            [box.x + box.width / 2, box.bottom - 1],
+          ].every(([x, y]) => {
+            const hit = element.ownerDocument.elementFromPoint(x!, y!);
+            return !!hit && element.contains(hit);
+          });
+        }),
+      ).toBeTrue();
+  }
+  await takeScreenshot(page, `tag-box-${width}.png`);
+  await input.press("Escape");
+  await browserExpect(dialog).toHaveCount(0);
+  expect((await serverTags(context, base, ids.fresh))["rcd"]).toBeUndefined();
+  await act("Tag…");
+  await input.fill("cancelled");
+  await header(page, "Inbox").locator(".tree-section-title").click();
+  await browserExpect(dialog).toHaveCount(0);
+  await header(page, "Inbox").locator(".tree-section-toggle").click();
+  await act("Tag…");
+  for (const name of ["pinned", "archived", "snoozed"]) {
+    await input.fill(name);
+    await input.press("Enter");
+    await browserExpect(dialog.getByRole("status")).toHaveText(
+      "This tag is reserved. Choose another name.",
+    );
+  }
+  await input.fill("");
+  await input.pressSequentially("Recurse Dev");
+  await browserExpect(input).toHaveValue("recurse-dev");
+  await input.press("Enter");
+  await browserExpect
+    .poll(() => sectionOf(page, ids.fresh))
+    .toBe("recurse-dev/Inbox");
+  await browserExpect
+    .poll(() => serverTags(context, base, ids.fresh))
+    .toMatchObject({ "recurse-dev": { by: "operator" } });
+  await takeScreenshot(page, `tag-section-${width}.png`);
+  await act("Untag");
+  await browserExpect.poll(() => sectionOf(page, ids.fresh)).toBe("Inbox");
+  await browserExpect(header(page, "recurse-dev")).toHaveCount(1);
+  await browserExpect
+    .poll(
+      async () => (await serverTags(context, base, ids.fresh))["recurse-dev"],
+    )
+    .toBeUndefined();
+  await takeScreenshot(page, `tag-removed-${width}.png`);
+  await act("Tag…");
+  await input.fill("rcd");
+  await input.press("ArrowDown");
+  await input.press("Enter");
+  await browserExpect
+    .poll(() => sectionOf(page, ids.fresh))
+    .toBe("recurse-dev/Inbox");
+  await browserExpect(header(page, "research")).toHaveCount(0);
+  expect(
+    (
+      await context.request.post(`${base}api/sidebar/tags`, {
+        data: { ids: [ids.busy, ids.stale], set: { research: null } },
+      })
+    ).ok(),
+  ).toBeTrue();
+  const childHeader = (group: string, title: string) =>
+    page.locator(
+      `.tree-section-header[data-section-key='${JSON.stringify(["", group, title])}']`,
+    );
+  await childHeader("research", "Active").waitFor();
+  await childHeader("recurse-dev", "Archive").waitFor();
+  await browserExpect(childHeader("recurse-dev", "Active")).toHaveCount(0);
+  await takeScreenshot(page, `nested-tags-${width}.png`);
+  const recurseInbox = childHeader("recurse-dev", "Inbox").locator(
+    ".tree-section-toggle",
+  );
+  await recurseInbox.click();
+  await browserExpect(recurseInbox).toHaveAttribute("aria-expanded", "false");
+  await browserExpect(
+    childHeader("research", "Inbox").locator(".tree-section-toggle"),
+  ).toHaveAttribute("aria-expanded", "true");
+  await recurseInbox.click();
+  const groupToggle = header(page, "recurse-dev").locator(
+    ".tree-section-toggle",
+  );
+  await groupToggle.click();
+  await browserExpect(childHeader("recurse-dev", "Inbox")).toHaveCount(0);
+  await browserExpect(childHeader("recurse-dev", "Archive")).toHaveCount(0);
+  await takeScreenshot(page, `nested-folded-${width}.png`);
+  await groupToggle.press("Enter");
+  await browserExpect(recurseInbox).toHaveAttribute("aria-expanded", "true");
+  if (width === 412) {
+    await page.locator("#new-list").focus();
+    for (const toggle of await page.locator(".tree-section-toggle").all()) {
+      await toggle.scrollIntoViewIfNeeded();
+      expect((await toggle.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      expect(
+        await toggle.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return [
+            [box.left + 1, box.y + box.height / 2],
+            [box.right - 1, box.y + box.height / 2],
+            [box.x + box.width / 2, box.top + 1],
+            [box.x + box.width / 2, box.bottom - 1],
+          ].every(([x, y]) => {
+            const hit = element.ownerDocument.elementFromPoint(x!, y!);
+            return !!hit && element.contains(hit);
+          });
+        }),
+      ).toBeTrue();
+    }
+  }
+  await newButton.click();
+  await browserExpect(page.locator("#input")).toBeFocused();
+  await page.locator("#draft-model-host").waitFor();
+  expect(await dialog.count()).toBe(0);
+  const tagControl = page.locator("#draft-tag");
+  await browserExpect(tagControl).toHaveAccessibleName("No tag");
+  expect(
+    await tagControl.evaluate((button) => {
+      const box = button.getBoundingClientRect();
+      return [
+        [-21, -21],
+        [21, -21],
+        [21, 21],
+        [-21, 21],
+      ].every(([x, y]) => {
+        const hit = button.ownerDocument.elementFromPoint(
+          box.x + box.width / 2 + x!,
+          box.y + box.height / 2 + y!,
+        );
+        return !!hit && button.contains(hit);
+      });
+    }),
+  ).toBeTrue();
+  await takeScreenshot(page, `draft-no-tag-${width}.png`);
+  await tagControl.focus();
+  await tagControl.press("Enter");
+  await browserExpect(input).toBeFocused();
+  await takeScreenshot(page, `draft-tag-box-${width}.png`);
+  await input.press("Escape");
+  await browserExpect(dialog).toHaveCount(0);
+  await browserExpect(tagControl).toBeFocused();
+  await tagControl.click();
+  await input.fill("Recurse Dev");
+  await input.press("Enter");
+  await browserExpect(tagControl).toHaveAccessibleName("Tag: recurse-dev");
+  await takeScreenshot(page, `draft-tag-chosen-${width}.png`);
+  const sendDraft = async (text: string, tagged = true) => {
+    const created = page.waitForResponse(
+      (response) =>
+        response.url() === `${base}api/conversations` &&
+        response.request().method() === "POST",
+    );
+    await page.locator("#input").fill(text);
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      browser.newAgentPlacements = [];
+      browser.newAgentObserver = new browser.MutationObserver(() => {
+        let section = "";
+        for (const element of browser.document.querySelectorAll(
+          "#agent-list .tree-section-header, #agent-list .agent[data-id]",
+        )) {
+          if (element.dataset.section)
+            section = JSON.parse(element.dataset.sectionKey).slice(1).join("/");
+          else
+            browser.newAgentPlacements.push({
+              id: element.dataset.id,
+              section,
+            });
+        }
+      });
+      browser.newAgentObserver.observe(
+        browser.document.querySelector("#agent-list"),
+        { childList: true, subtree: true },
+      );
+    });
+    await page.locator("#send").click();
+    const response = await created;
+    expect(response.ok()).toBeTrue();
+    expect(response.request().postDataJSON().tags).toEqual(
+      tagged ? ["recurse-dev"] : undefined,
+    );
+    const agent = await response.json();
+    if (tagged)
+      expect(agent.tags["recurse-dev"]).toMatchObject({ by: "operator" });
+    else expect(agent.tags?.["recurse-dev"]).toBeUndefined();
+    const sectionPattern = tagged
+      ? /^recurse-dev\/(Active|Inbox)$/
+      : /^(Active|Inbox)$/;
+    await browserExpect
+      .poll(() => sectionOf(page, agent.id))
+      .toMatch(sectionPattern);
+    const placements = await page.evaluate((id) => {
+      const browser = globalThis as any;
+      browser.newAgentObserver.disconnect();
+      return browser.newAgentPlacements
+        .filter((placement: any) => placement.id === id)
+        .map((placement: any) => placement.section);
+    }, agent.id);
+    expect(placements.length).toBeGreaterThan(0);
+    for (const section of new Set<string>(placements))
+      expect(section).toMatch(sectionPattern);
+    await showAgentList(page);
+    return agent.id as string;
+  };
+  const newId = await sendDraft("New agent inside recurse-dev");
+  await takeScreenshot(page, `new-agent-tagged-${width}.png`);
+  const sectionAction = async (
+    title: string,
+    label: string,
+    screenshot?: string,
+  ) => {
+    const section = header(page, title);
+    if (width === 1280) await section.hover();
+    else {
+      await section.scrollIntoViewIfNeeded();
+      const touch = await context.newCDPSession(page);
+      const box = (await section.boundingBox())!;
+      await touch.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: box.x + 50, y: box.y + box.height / 2 }],
+      });
+      await page.locator("#hold-menu").getByRole("menu").waitFor();
+      await touch.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      await touch.detach();
+    }
+    if (screenshot && process.env.RECURSE_SCREENSHOT_DIR)
+      await page.screenshot({
+        path: join(
+          process.env.RECURSE_SCREENSHOT_DIR,
+          `${screenshot}-${width}.png`,
+        ),
+      });
+    if (width === 1280)
+      await section.getByRole("button", { name: label, exact: true }).click();
+    else
+      await page
+        .locator("#hold-menu")
+        .getByRole("menuitem", { name: label, exact: true })
+        .tap();
+  };
+  await sectionAction("recurse-dev", "New agent", "new-agent-section-action");
+  await page.locator(".draft-row").waitFor({ state: "attached" });
+  expect(await dialog.count()).toBe(0);
+  await browserExpect(tagControl).toHaveAccessibleName("Tag: recurse-dev");
+  await takeScreenshot(page, `draft-tag-section-${width}.png`);
+  const sectionId = await sendDraft("New agent from section action");
+  expect(sectionId).not.toBe(newId);
+  expect(
+    (await serverTags(context, base, sectionId))["recurse-dev"],
+  ).toMatchObject({ by: "operator" });
+  await sectionAction("recurse-dev", "New agent");
+  await browserExpect(tagControl).toHaveAccessibleName("Tag: recurse-dev");
+  await tagControl.click();
+  await dialog.getByRole("button", { name: "No tag", exact: true }).click();
+  await browserExpect(tagControl).toHaveAccessibleName("No tag");
+  await sendDraft("New agent with tag cleared", false);
+  const defaultsScript = tagScript
+    .replace(
+      "defaults: { recurse: { effort: 3 }, research: { effort: 4 } }",
+      'defaults: { "recurse-dev": { effort: 4 } }',
+    )
+    .replace("title: tag,", 'title: tag + " defaults",');
+  expect(
+    (
+      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
+        data: { script: defaultsScript, by: "operator" },
+      })
+    ).ok(),
+  ).toBeTrue();
+  let releaseWorker!: () => void;
+  const workerHeld = new Promise<void>((resolve) => (releaseWorker = resolve));
+  await page.route("**/static/sidebar-worker.js?*", async (route) => {
+    await workerHeld;
+    await route.continue();
+  });
+  await page.reload();
+  await showAgentList(page);
+  await sectionAction("recurse-dev", "New agent");
+  await browserExpect(page.locator("#input")).toBeFocused();
+  const earlyCreation = page.waitForResponse(
+    (response) =>
+      response.url() === `${base}api/conversations` &&
+      response.request().method() === "POST",
+  );
+  await page.locator("#input").fill("Send before tag defaults finish loading");
+  await page.locator("#send").click();
+  await page.locator("#messages .working").waitFor();
+  releaseWorker();
+  const earlyResponse = await earlyCreation;
+  expect(earlyResponse.ok()).toBeTrue();
+  expect(earlyResponse.request().postDataJSON().level).toBe(4);
+  expect(earlyResponse.request().postDataJSON().tags).toEqual(["recurse-dev"]);
+  const earlyAgent = await earlyResponse.json();
+  await page
+    .locator(`.agent.selected[data-id="${earlyAgent.id}"]`)
+    .waitFor({ state: "attached" });
+  await page.unroute("**/static/sidebar-worker.js?*");
+  await showAgentList(page);
+  await header(page, "recurse-dev defaults").waitFor();
+  await newButton.click();
+  await tagControl.click();
+  await input.fill("rcdv");
+  await dialog
+    .getByRole("button", { name: "recurse-dev", exact: true })
+    .click();
+  await browserExpect(page.locator("#effort-range")).toHaveValue("4");
+  await page.locator("#model-trigger").click();
+  await page.locator("#effort-range").focus();
+  await page.locator("#effort-range").press("ArrowLeft");
+  await browserExpect(page.locator("#effort-range")).toHaveValue("3");
+  await showAgentList(page);
+  const script = `export default rows => [{ title: "Projects", rows: rows.filter(r => r.depth === 0), actions: [{ label: "Tag all", ask: "tag", set: "fixed", clear: "research" }, { label: "Remove tag", ask: "tag", clear: "ask" }] }];`;
+  expect(
+    (
+      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
+        data: { script, by: "operator" },
+      })
+    ).ok(),
+  ).toBeTrue();
+  await page.reload();
+  await showAgentList(page);
+  await header(page, "Projects").waitFor();
+  await newButton.click();
+  await page.locator(".draft-row").waitFor({ state: "attached" });
+  expect(await dialog.count()).toBe(0);
+  await browserExpect(tagControl).toHaveCount(0);
+  await showAgentList(page);
+  await sectionAction("Projects", "Tag all");
+  await input.fill("team");
+  await input.press("Enter");
+  await page
+    .locator("#sidebar-popover")
+    .getByRole("button", { name: "Tag", exact: true })
+    .click();
+  for (const id of [ids.fresh, ids.busy, ids.archived])
+    await browserExpect
+      .poll(() => serverTags(context, base, id))
+      .toMatchObject({ team: { by: "operator" }, fixed: { by: "operator" } });
+  expect(
+    (await serverTags(context, base, ids.archived)).research,
+  ).toBeUndefined();
+  await sectionAction("Projects", "Remove tag");
+  const remove = page.getByRole("dialog", { name: "Remove tag", exact: true });
+  const removeInput = remove.getByRole("textbox", {
+    name: "Remove tag",
+    exact: true,
+  });
+  await removeInput.fill("not-present");
+  await browserExpect(remove.getByRole("status")).toHaveText(
+    "Choose a tag on these conversations.",
+  );
+  await removeInput.fill("team");
+  await remove.getByRole("button", { name: "team", exact: true }).click();
+  await page
+    .locator("#sidebar-popover")
+    .getByRole("button", { name: "Remove", exact: true })
+    .click();
+  await browserExpect
+    .poll(async () => (await serverTags(context, base, ids.fresh)).team)
+    .toBeUndefined();
+  expect(errors).toEqual([]);
+  const demo = await readFile(
+    join(ROOT, "playground/sidebar/projects.js"),
+    "utf8",
+  );
+  expect(
+    (
+      await context.request.post(`${base}api/sidebar/tags`, {
+        data: { ids: [ids.busy], set: { "needs-you": null } },
+      })
+    ).ok(),
+  ).toBeTrue();
+  expect(
+    (
+      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
+        data: { script: demo, by: "operator" },
+      })
+    ).ok(),
+  ).toBeTrue();
+  for (const [id, tag] of [
+    [ids.fresh, "recurse"],
+    [ids.archived, "research"],
+  ])
+    expect(
+      (
+        await context.request.post(`${base}api/sidebar/tags`, {
+          data: { ids: [id], set: { [tag!]: null } },
+        })
+      ).ok(),
+    ).toBeTrue();
+  await page.reload();
+  await showAgentList(page);
+  await header(page, "Needs you").waitFor();
+  await header(page, "recurse").waitFor();
+  await header(page, "research").waitFor();
+  await takeScreenshot(page, `nested-demo-${width}.png`);
+  const all = await (await context.request.get(`${base}api/tree`)).json();
+  expect(
+    (
+      await context.request.post(`${base}api/sidebar/tags`, {
+        data: {
+          ids: all.map((row: any) => row.id),
+          clear: ["fixed", "recurse", "recurse-dev", "research", "needs-you"],
+        },
+      })
+    ).ok(),
+  ).toBeTrue();
+  expect(
+    (
+      await context.request.post(`${base}api/sidebar/script`, {
+        data: { action: "reset" },
+      })
+    ).ok(),
+  ).toBeTrue();
+  if (width === 1280) {
+    const tags = Array.from({ length: 9 }, (_, i) => `project-${i}`);
+    expect(
+      (
+        await context.request.post(`${base}api/sidebar/tags`, {
+          data: {
+            ids: [ids.archived],
+            set: Object.fromEntries(tags.map((name) => [name, null])),
+          },
+        })
+      ).ok(),
+    ).toBeTrue();
+    expect(
+      (
+        await context.request.post(`${base}api/sidebar/tags`, {
+          data: { ids: [ids.fresh], set: { "project-8": null } },
+        })
+      ).ok(),
+    ).toBeTrue();
+    await browserExpect.poll(() => sectionOf(page, ids.fresh)).toBe("Inbox");
+    const settings = await (
+      await context.request.get(`${base}api/sidebar/script`)
+    ).json();
+    const checked = await context.request.post(
+      `${base}__browser-test/save-sidebar-script`,
+      { data: { script: settings.default, by: "operator" } },
+    );
+    expect(checked.ok()).toBeTrue();
+    expect((await checked.json()).sections).toHaveLength(4);
+    expect(await page.getByRole("button", { name: /^Tag… / }).count()).toBe(0);
+    expect(await header(page, "project-8").count()).toBe(0);
+    expect(
+      (
+        await context.request.post(`${base}api/sidebar/tags`, {
+          data: { ids: [ids.fresh, ids.archived], clear: tags },
+        })
+      ).ok(),
+    ).toBeTrue();
+    expect(
+      (
+        await context.request.post(`${base}api/sidebar/script`, {
+          data: { action: "reset" },
+        })
+      ).ok(),
+    ).toBeTrue();
+  }
+}
+
 async function beforeTagAnswer(
   page: Page,
   act: () => Promise<void>,
@@ -864,6 +1510,8 @@ async function customScript(
     `    { title: "Mine", rows: rows.filter((r) => r.id === "${ids.fresh}") },`,
     `    { title: "Has PR", rows: rows.filter((r) => r.parent === "${ids.fresh}" && r.depth === 1 && r.prs.some((pr) => pr.number === 42 && pr.checks === "pass" && !pr.merged)) },`,
     `    { title: "Others", rows: rows.filter((r) => r.depth === 0 && r.id !== "${ids.fresh}") },`,
+    `    { title: "Hidden", hideWhenEmpty: true, rows: ["${ids.fresh}", "unknown"], empty: "Hidden empty text", actions: [{ label: "Hidden action", set: "pinned", rows }] },`,
+    '    { title: "Visible empty", hideWhenEmpty: false, rows: [], empty: "Visible empty text" },',
     "  ];",
     "}",
   ].join("\n");
@@ -876,12 +1524,27 @@ async function customScript(
       { title: "Mine", rows: 1 },
       { title: "Has PR", rows: 1 },
       { title: "Others" },
+      { title: "Hidden", rows: 0 },
+      { title: "Visible empty", rows: 0 },
     ],
   });
   const page = await context.newPage();
   const errors = captureErrors(page);
   await gotoRoot(page, base);
   await header(page, "Mine").waitFor();
+  await browserExpect(header(page, "Visible empty")).toHaveCount(1);
+  await browserExpect(
+    page.getByText("Visible empty text", { exact: true }),
+  ).toBeVisible();
+  expect(await header(page, "Hidden").count()).toBe(0);
+  expect(
+    await page.getByText("Hidden empty text", { exact: true }).count(),
+  ).toBe(0);
+  expect(
+    await page
+      .getByRole("button", { name: "Hidden action", exact: true })
+      .count(),
+  ).toBe(0);
   expect(await sectionOf(page, ids.fresh)).toBe("Mine");
   expect(await sectionOf(page, ids.stale)).toBe("Others");
   await page.locator(`.agent[data-id="${ids.child}"]`).waitFor();
@@ -920,6 +1583,8 @@ async function customScript(
   });
   await page.reload();
   await header(page, "Mine").waitFor();
+  await header(page, "Visible empty").waitFor();
+  expect(await header(page, "Hidden").count()).toBe(0);
   expect(await header(page, "Inbox").count()).toBe(0);
   release();
 
@@ -949,6 +1614,9 @@ async function phoneHold(
   const page = await context.newPage();
   const errors = captureErrors(page);
   await gotoRoot(page, base);
+  await browserExpect(
+    page.locator(`.agent[data-id="${rootAgentId()}"]`),
+  ).toHaveClass(/selected/);
   await page.locator("#menu-btn").click();
   await page.waitForFunction(
     () =>
@@ -1001,10 +1669,7 @@ async function phoneHold(
   );
   await send("touchMove", ax, ay);
   await menu.locator(".hold-bubble", { hasText: "Archive" }).waitFor();
-  if (process.env.RECURSE_SCREENSHOT_DIR)
-    await page.screenshot({
-      path: join(process.env.RECURSE_SCREENSHOT_DIR, "sections-phone.png"),
-    });
+  await takeScreenshot(page, "sections-phone.png");
   await send("touchEnd");
   await fresh.waitFor({ state: "detached" });
   await header(page, "Archive")

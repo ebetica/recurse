@@ -37,6 +37,18 @@ directly still works, as a standalone preview with no image navigation. The
 Files pane is a separate all-files list and continues to show operator uploads.
 There is no setting or toggle for this default.
 
+Markdown in replies, Files and Artifacts also displays absolute, `~/` and
+relative image paths through an operator-authenticated, byte-validated route.
+Relative paths use the conversation's working directory, or the document's
+source directory when recorded; published sibling images take precedence.
+Clicking a local image opens the existing viewer with the original and Download.
+Missing or non-image paths show “Image not found” with the reference.
+Web images do not load automatically: “Show image from host” loads just that
+image directly on click, without a referrer. This avoids a server-side fetch
+proxy and keeps external network access an explicit operator decision. Small
+raster data URLs render without a request. Other Markdown resource surfaces
+remain stripped before insertion into the document.
+
 The thread, the composer and the Files list (and images inside rendered
 Markdown files) show `/thumbnail`: PNG, JPEG and WebP images from 128 KB to
 25 MB arrive as WebP with the long side at most 1024 px

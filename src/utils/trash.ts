@@ -6,6 +6,7 @@ import fs from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
+import { slowSpan } from "../observability/slow_span";
 import {
   lstatAtSync,
   mkdirAtSync,
@@ -65,32 +66,34 @@ function filesystemPath(path: string): string {
 }
 
 function openVerified(root: string, dirFd?: number): number {
-  const path = filesystemPath(root);
-  const visible = () =>
-    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
-    dirFd === undefined ? fs.lstatSync(path) : lstatAtSync(dirFd, root);
-  const before = visible();
-  if (!before.isDirectory()) {
-    throw systemError("ENOTDIR", "trash root is not a directory", root);
-  }
-  const fd =
-    dirFd === undefined
-      ? // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
-        fs.openSync(path, DIR_FLAGS)
-      : openAtSync(dirFd, root, DIR_FLAGS);
-  try {
-    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
-    const opened = fs.fstatSync(fd);
-    const after = visible();
-    if (!sameDirectory(opened, before) || !sameDirectory(after, before)) {
-      throw systemError("ESTALE", "trash root changed while opening", root);
+  return slowSpan("trash_open_sync", undefined, () => {
+    const path = filesystemPath(root);
+    const visible = () =>
+      // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+      dirFd === undefined ? fs.lstatSync(path) : lstatAtSync(dirFd, root);
+    const before = visible();
+    if (!before.isDirectory()) {
+      throw systemError("ENOTDIR", "trash root is not a directory", root);
     }
-    return fd;
-  } catch (error) {
-    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
-    fs.closeSync(fd);
-    throw error;
-  }
+    const fd =
+      dirFd === undefined
+        ? // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+          fs.openSync(path, DIR_FLAGS)
+        : openAtSync(dirFd, root, DIR_FLAGS);
+    try {
+      // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+      const opened = fs.fstatSync(fd);
+      const after = visible();
+      if (!sameDirectory(opened, before) || !sameDirectory(after, before)) {
+        throw systemError("ESTALE", "trash root changed while opening", root);
+      }
+      return fd;
+    } catch (error) {
+      // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+      fs.closeSync(fd);
+      throw error;
+    }
+  });
 }
 
 function openRoot(root: string): number {
@@ -202,25 +205,29 @@ function retireEntry(
   name: string,
   openRootCallback: () => number,
 ): boolean {
-  if (!name || name === "." || name === ".." || name.includes("/")) {
-    throw new TypeError("a retired entry is named by a single path component");
-  }
-  try {
-    lstatAtSync(dirFd, name);
-  } catch (error) {
-    if (errorCode(error) === "ENOENT") return false;
-    throw error;
-  }
-  const rootFd = openRootCallback();
-  try {
-    // Invariant: rename raises EXDEV across filesystems; it never
-    // copy-deletes.
-    renameAtSync(dirFd, name, rootFd, randomBytes(16).toString("hex"));
-  } finally {
-    // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
-    fs.closeSync(rootFd);
-  }
-  return true;
+  return slowSpan("trash_retire_sync", undefined, () => {
+    if (!name || name === "." || name === ".." || name.includes("/")) {
+      throw new TypeError(
+        "a retired entry is named by a single path component",
+      );
+    }
+    try {
+      lstatAtSync(dirFd, name);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") return false;
+      throw error;
+    }
+    const rootFd = openRootCallback();
+    try {
+      // Invariant: rename raises EXDEV across filesystems; it never
+      // copy-deletes.
+      renameAtSync(dirFd, name, rootFd, randomBytes(16).toString("hex"));
+    } finally {
+      // oxlint-disable-next-line no-restricted-properties -- known: shared trash lifecycle filesystem call; main-thread callers remain
+      fs.closeSync(rootFd);
+    }
+    return true;
+  });
 }
 
 function removeTreeAt(parentFd: number, name: string): void {

@@ -3,6 +3,7 @@
 // file and publish snapshots only after atomic, private-mode disk replacement.
 // Older reads cannot undo own writes; close aborts reads and drains writes.
 import { randomUUID } from "node:crypto";
+import { slowSpan } from "./observability/slow_span";
 import fs from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
@@ -15,7 +16,9 @@ type Snapshot = {
 
 function parsed(text: string | undefined): unknown {
   try {
-    return text === undefined ? undefined : JSON.parse(text);
+    return text === undefined
+      ? undefined
+      : slowSpan("settings_json_decode", undefined, () => JSON.parse(text));
   } catch {
     return undefined;
   }
@@ -37,8 +40,10 @@ export class ConfigFiles {
     if (!(this.recheckMs > 0)) {
       let text: string | undefined;
       try {
-        // oxlint-disable-next-line no-restricted-properties -- known: zero-window CLI snapshots remain synchronous
-        text = fs.readFileSync(path, "utf8");
+        text = slowSpan("settings_read_sync", undefined, () =>
+          // oxlint-disable-next-line no-restricted-properties -- known: zero-window CLI snapshots remain synchronous
+          fs.readFileSync(path, "utf8"),
+        );
       } catch {}
       return { text, value: parsed(text), checkedAt: this.now() };
     }
@@ -76,7 +81,7 @@ export class ConfigFiles {
     const work = (this.writes.get(path) ?? Promise.resolve())
       .catch(() => undefined)
       .then(async () => {
-        const next = await update();
+        const next = await slowSpan("settings_update", undefined, update);
         if (next.text === undefined) return next.value;
         await mkdir(dirname(path), { recursive: true });
         const tmp = join(

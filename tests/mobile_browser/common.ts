@@ -447,8 +447,8 @@ export async function openSettingsPanel(page: Page): Promise<void> {
 }
 export async function startNewAgent(page: Page): Promise<void> {
   if (await page.locator("#new-top").isVisible())
-    return page.locator("#new-top").click();
-  await page.locator("#new-list").click();
+    await page.locator("#new-top").click();
+  else await page.locator("#new-list").click();
 }
 export async function gotoRoot(page: Page, base: string): Promise<void> {
   await page.goto(`${base}#agent=${rootAgentId()}`, {

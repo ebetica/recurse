@@ -12,6 +12,7 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, parse } from "node:path";
+import { slowSpan } from "./slow_span";
 
 export const LOG_MAX_BYTES = 5 * 1024 * 1024;
 export const LOG_BACKUP_COUNT = 4;
@@ -294,7 +295,11 @@ export class RotatingFileSink implements LogSink {
 
   write(record: RuntimeLogRecord): void {
     if (this.closed) return;
-    const bytes = `${formatRecord(record)}\n`;
+    const bytes = slowSpan(
+      "log_record_format",
+      undefined,
+      () => `${formatRecord(record)}\n`,
+    );
     this.queue = this.queue.then(async () => {
       if (this.failure !== undefined) return;
       try {
@@ -316,22 +321,28 @@ export class RotatingFileSink implements LogSink {
   }
 
   private async append(text: string): Promise<void> {
-    const boundedText = boundRecordText(text, this.maxBytes);
+    const boundedText = slowSpan("log_record_bound", undefined, () =>
+      boundRecordText(text, this.maxBytes),
+    );
     const incomingBytes = Buffer.byteLength(boundedText, "utf8");
     let currentBytes = 0;
     try {
-      currentBytes = (await stat(this.path)).size;
+      currentBytes = (
+        await slowSpan("log_stat_call", undefined, () => stat(this.path))
+      ).size;
     } catch (error) {
       if (!isMissingFile(error)) throw error;
     }
     if (currentBytes + incomingBytes >= this.maxBytes) {
       await this.rotate();
     }
-    await appendFile(this.path, boundedText, {
-      encoding: "utf8",
-      mode: 0o600,
-    });
-    await chmod(this.path, 0o600);
+    await slowSpan("log_append_call", undefined, () =>
+      appendFile(this.path, boundedText, {
+        encoding: "utf8",
+        mode: 0o600,
+      }),
+    );
+    await slowSpan("log_chmod_call", undefined, () => chmod(this.path, 0o600));
   }
 
   private async rotate(): Promise<void> {
@@ -340,7 +351,9 @@ export class RotatingFileSink implements LogSink {
       const destination = `${this.path}.${index}`;
       await removeIfPresent(destination);
       try {
-        await rename(source, destination);
+        await slowSpan("log_rotate_call", undefined, () =>
+          rename(source, destination),
+        );
       } catch (error) {
         if (!isMissingFile(error)) throw error;
       }
@@ -457,7 +470,7 @@ function isMissingFile(error: unknown): boolean {
 
 async function removeIfPresent(path: string): Promise<void> {
   try {
-    await unlink(path);
+    await slowSpan("log_unlink_call", undefined, () => unlink(path));
   } catch (error) {
     if (!isMissingFile(error)) throw error;
   }

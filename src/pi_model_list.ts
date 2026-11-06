@@ -3,6 +3,7 @@
 // Failed providers keep catalogs; missing reasoning levels log why.
 // Config filters login state on reads, not in this catalog loader.
 import { PI_MODEL_ROUTES, type Config } from "./config";
+import { slowSpan } from "./observability/slow_span";
 
 const MAX_LIST_BYTES = 4 * 1024 * 1024;
 
@@ -53,7 +54,9 @@ async function requestList(
 /** List Pi's models and store them; returns how many were stored. */
 export async function listPiModels(deps: PiModelListDeps): Promise<number> {
   const { models } = await requestList(deps, false);
-  return deps.config.setPiModelList(models);
+  return slowSpan("pi_model_list_store_call", undefined, () =>
+    deps.config.setPiModelList(models),
+  );
 }
 
 export interface PiModelUpdateStatus {

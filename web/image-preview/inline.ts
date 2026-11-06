@@ -1,9 +1,16 @@
-// Allows only shape-pinned same-origin uploads or validated preview routes.
-// Rejects external/protocol-relative/data/script/traversal sources so authored
-// Markdown cannot track users or smuggle active content past sanitization.
+// Upload image gates, captions and loading feedback. Authored local paths use
+// the separate operator-only image route; web references require a click.
 // Server owns admission; no tree gates. Scoped raw bytes are inert downloads.
 
 import { responseFilename } from "../download.js";
+import {
+  externalImageButton,
+  imageFailure,
+  imageHost,
+  originalPathImage,
+  referenceImageUrl,
+} from "./references.js";
+import { type Backend, resolveUrl } from "../backends/backend.js";
 
 // Block-sized, capped, lazy images bound layout and network work.
 export const INLINE_IMAGE_STYLE =
@@ -14,15 +21,40 @@ export const INLINE_IMAGE_STYLE =
 export function captionInlineImage(image: HTMLImageElement): void {
   image.loading = "lazy";
   image.decoding = "async";
+  image.referrerPolicy = "no-referrer";
   image.setAttribute("style", INLINE_IMAGE_STYLE);
   if (!image.alt.trim()) image.alt = "image";
   const frame = document.createElement("span");
   frame.className = "thread-image";
   const caption = document.createElement("span");
   caption.className = "image-filename";
-  caption.textContent = "Image";
+  const path = image.dataset.imagePath;
+  caption.textContent = path?.split("/").pop() || "Image";
+  caption.title = path || "";
   image.replaceWith(frame);
   frame.append(image, caption);
+}
+
+/** Classify reply image sources before the inert fragment enters the page. */
+export function renderReferenceImages(
+  root: DocumentFragment,
+  cid: string | null,
+  backend: Backend,
+): void {
+  for (const image of root.querySelectorAll("img")) {
+    const source = image.getAttribute("src");
+    const attachment = isAllowedInlineImageSrc(source)
+      ? source
+      : scopedAttachmentPreviewHref(source);
+    const reference = referenceImageUrl(source, cid);
+    if (attachment || reference) {
+      image.src = attachment ? resolveUrl(backend, attachment) : reference!;
+      image.dataset.imagePath = source || "";
+      captionInlineImage(image);
+    } else if (imageHost(source))
+      image.replaceWith(externalImageButton(source!, image.alt));
+    else image.replaceWith(imageFailure(source || ""));
+  }
 }
 
 const filenames = new Map<string, Promise<string>>();
@@ -103,6 +135,10 @@ export function thumbnailFallback(event: Event): void {
   const src = image.getAttribute("src") ?? "";
   if (/\/attachments\/[^/]+\/thumbnail$/.test(src))
     image.src = src.replace(/\/thumbnail$/, "/preview");
+  else if (originalPathImage(src) || src.startsWith("data:image/"))
+    (image.closest(".thread-image") || image).replaceWith(
+      imageFailure(image.dataset.imagePath || src),
+    );
 }
 
 // Derives /thumbnail only from a shape-validated scoped upload href. Raster

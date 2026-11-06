@@ -92,6 +92,32 @@ test("sidebar tags round-trip for the operator and agents, survive stale saves a
     const cid = await create();
     const agent = await create();
     const conversations = server.app.instance.conversations;
+    const taggedCreate = await post("/api/conversations", {
+      tags: ["recurse"],
+    });
+    expect(taggedCreate.status).toBe(200);
+    const initial = (await taggedCreate.json()) as Rec;
+    expect(initial.tags.recurse).toMatchObject({ by: "operator" });
+    expect((await row(initial.id)).tags).toEqual(initial.tags);
+    expect(conversations.load(initial.id)!.tags).toEqual(initial.tags);
+    for (const tags of [
+      ["pinned"],
+      ["snoozed"],
+      ["bad tag"],
+      [42],
+      "recurse",
+      Array.from({ length: 17 }, (_, i) => `tag-${i}`),
+    ])
+      expect((await post("/api/conversations", { tags })).status).toBe(422);
+    expect(
+      (
+        await post(
+          "/api/conversations",
+          { tags: ["recurse"] },
+          { "x-recurse-agent": agent },
+        )
+      ).status,
+    ).toBe(403);
     const stale = conversations.load(cid)!;
 
     const changed = await post("/api/sidebar/tags", {

@@ -43,9 +43,16 @@ export function deliverQueuedOperatorMessage(
   body: OperatorMessage,
   options?: DeliveryOptions,
 ): Promise<Response> {
-  return backendFor(recipient).jpost(
+  return backendFor(recipient).api(
     `/api/conversations/${recipient}/deliver`,
-    body,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      ...(options?.timeoutMs
+        ? { signal: AbortSignal.timeout(options.timeoutMs) }
+        : {}),
+    },
     options,
   );
 }

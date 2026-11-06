@@ -7,7 +7,7 @@ const allowed = new Map([
     "deliverQueuedOperatorMessage",
     new Set([
       `${owner}:sendOperatorMessage`,
-      "web/composer.ts:runJob",
+      "web/composer.ts:runJobAttempt",
       "web/artifacts/comment-outbox.ts:attempt",
     ]),
   ],
@@ -77,7 +77,8 @@ for await (const file of new Bun.Glob("web/**/*.{ts,tsx,js,mjs}").scan(".")) {
       ) {
         const queue = node.expression.expression.getText(source);
         const restoration =
-          (file === "web/composer.ts" && scope === "restoreAfterLogin") ||
+          (file === "web/composer.ts" &&
+            ["restoreAfterLogin", "restoreOutbox"].includes(scope)) ||
           (file === "web/artifacts/comment-outbox.ts" && scope === "reconcile");
         if (
           ((file === "web/composer.ts" && queue === "jobs") ||

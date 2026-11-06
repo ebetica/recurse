@@ -1109,16 +1109,40 @@ export const tests: BrowserTest[] = [
                   .width,
             ),
         ).toBeTrue();
-        expect(
-          await detail
-            .locator(".files-markdown .artifact-blocked-image")
-            .count(),
-        ).toBe(1);
+        for (const alt of ["Absolute path", "Unpublished relative path"]) {
+          const local = detail.locator(
+            `.files-markdown img[alt="${alt}"]:not([hidden])`,
+          );
+          await local.waitFor();
+          await local.evaluate((image: any) => image.decode());
+          expect(await local.getAttribute("src")).toContain("/path-image?");
+        }
+        await detail
+          .getByRole("button", {
+            name: "Show image from example.com",
+            exact: true,
+          })
+          .waitFor();
+        const disguised = detail.getByRole("button", {
+          name: "Expand details",
+          exact: true,
+        });
+        expect(await disguised.getAttribute("data-external-image")).toBeNull();
+        await disguised.click();
+        expect(await disguised.innerText()).toBe("Expand details");
+        expect(remote).toEqual([]);
         expect(await pane.locator(".files-grid").count()).toBe(0);
-        if (process.env.SCREENSHOT_DIR)
+        if (process.env.SCREENSHOT_DIR) {
+          const screenshotWidth = width === 390 ? 412 : width;
+          await page.setViewportSize({ width: screenshotWidth, height: 844 });
+          await detail
+            .locator('img[alt="Absolute path"]')
+            .scrollIntoViewIfNeeded();
           await page.screenshot({
-            path: `${process.env.SCREENSHOT_DIR}/files-detail-markdown-${width}.png`,
+            path: `${process.env.SCREENSHOT_DIR}/files-detail-markdown-${screenshotWidth}.png`,
           });
+          await page.setViewportSize({ width, height: 844 });
+        }
         await dispatchArtifactSelection(
           page,
           width === 390 ? "touch" : "mouse",

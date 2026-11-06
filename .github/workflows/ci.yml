@@ -44,5 +44,10 @@ jobs:
           tar -xzf "$RUNNER_TEMP/rtk.tar.gz" -C "$RUNNER_TEMP/rtk-bin" rtk
           echo "$RUNNER_TEMP/rtk-bin" >> "$GITHUB_PATH"
 
+      - name: Install desktop notification test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends xvfb dbus dunst
+
       - name: Mobile boot and upgrade in Chromium
         run: tests/check.sh browser
