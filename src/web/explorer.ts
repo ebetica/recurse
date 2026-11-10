@@ -17,8 +17,6 @@ export interface ExplorerRoutesDeps {
     query: string,
     signal: AbortSignal,
   ): Promise<FileNameSearch>;
-  dataDir: string;
-  privateRoots: readonly string[];
   signal?: AbortSignal;
 }
 const SAFE_HEADERS = {
@@ -45,13 +43,7 @@ export function registerExplorerRoutes(
     if (!root) throw new HttpError(404, "conversation not found");
     const path = typeof ex.query.path === "string" ? ex.query.path : "";
     if (path.length > 4096) throw new HttpError(422, "file path is too long");
-    return {
-      owner,
-      root,
-      path,
-      dataDir: deps.dataDir,
-      privateRoots: deps.privateRoots,
-    };
+    return { owner, root, path };
   };
   const pathQuery = { path: { type: "str" as const } };
   router.get(

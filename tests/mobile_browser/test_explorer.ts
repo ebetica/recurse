@@ -26,8 +26,8 @@ async function openExplorer(page: Page, width: number): Promise<void> {
 }
 
 export const tests: BrowserTest[] = [
-  async function explorer_pages_previews_and_fuzzy_search(browser, base) {
-    const temporary = await mkdtemp(join(tmpdir(), "browser-explorer-"));
+  async function explorer_pages_previews_and_fuzzy_search(browser, base, data) {
+    const temporary = await mkdtemp(join(data, "data", "browser-explorer-"));
     const root = join(
       temporary,
       "workspace".repeat(15),
@@ -61,7 +61,7 @@ export const tests: BrowserTest[] = [
         join(root, "src", "😀app-types.ts"),
         "export type Application = { name: string };\n",
       );
-      await writeFile(join(root, ".env.local"), "fixture only\n");
+      await writeFile(join(root, ".env"), "fixture only\n");
       await mkdir(join(root, "node_modules"));
       await writeFile(
         join(root, "node_modules", "application-ignored.ts"),
@@ -228,6 +228,22 @@ export const tests: BrowserTest[] = [
             expect(await search.inputValue()).toBe("j");
             await search.fill("");
           }
+          const env = pane.locator('.explorer-row[data-path=".env"]');
+          await browserExpect(env).toBeEnabled();
+          await env.click();
+          const envFile = fileFor(".env");
+          await browserExpect(envFile.locator(".explorer-source")).toHaveText(
+            "fixture only\n",
+          );
+          if (width === 1280)
+            await page
+              .locator(".dv-tab", { hasText: ".env" })
+              .getByRole("button", { name: "Close .env", exact: true })
+              .click();
+          else
+            await envFile
+              .getByRole("button", { name: "Files", exact: true })
+              .click();
           const src = pane.locator(".explorer-row", { hasText: "src" });
           if (width === 1280) {
             await src.focus();

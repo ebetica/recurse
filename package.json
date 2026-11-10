@@ -1,6 +1,6 @@
 {
   "name": "recurse",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "A coding harness for agents that work on their own, and a web app for working with many of them at once.",
   "license": "MIT",
   "repository": {

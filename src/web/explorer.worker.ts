@@ -22,7 +22,6 @@ import {
   pathParts,
   regularFile,
   sameFile,
-  restricted,
   refuse,
   textChunk,
 } from "./explorer_paths.worker";
@@ -31,10 +30,6 @@ type Listing = {
   owner: string;
   root: string;
   path: string;
-  dataDir: string;
-  location: string;
-  realData: string;
-  realPrivateRoots: readonly string[];
   dir: FileHandle;
   iterator: AsyncIterator<string>;
   next: IteratorResult<string>;
@@ -133,7 +128,6 @@ async function list(
       item.owner !== scope.owner ||
       item.root !== scope.root ||
       item.path !== scope.path ||
-      item.dataDir !== scope.dataDir ||
       item.expires < Date.now()
     )
       refuse(409, "folder listing expired; refresh the folder");
@@ -141,12 +135,7 @@ async function list(
   } else {
     const releaseSlot = reserve();
     try {
-      const opened = await directory(
-        scope.root,
-        parts,
-        scope.dataDir,
-        scope.privateRoots,
-      );
+      const opened = await directory(scope.root, parts);
       try {
         const iterable = await entriesAt(opened.dir.fd);
         const iterator = iterable[Symbol.asyncIterator]();
@@ -171,12 +160,7 @@ async function list(
   item.busy = true;
   try {
     if (scope.cursor) {
-      const current = await directory(
-        scope.root,
-        parts,
-        scope.dataDir,
-        scope.privateRoots,
-      );
+      const current = await directory(scope.root, parts);
       try {
         if (!sameFile(await current.dir.stat(), await item.dir.stat()))
           refuse(409, "the folder changed; refresh the folder");
@@ -217,11 +201,6 @@ async function list(
         type,
         size: type === "file" ? stat.size : 0,
         ignored: ignoredPaths.has(prefix + name),
-        restricted: restricted(
-          `${item.location}/${name}`,
-          item.realData,
-          item.realPrivateRoots,
-        ),
       });
     });
     entries.sort(
@@ -252,8 +231,6 @@ async function preview(
   const { handle, stats } = await regularFile(
     scope.root,
     pathParts(scope.path),
-    scope.dataDir,
-    scope.privateRoots,
   );
   try {
     const version = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
@@ -323,8 +300,6 @@ async function request(message: ExplorerMessage, signal: AbortSignal) {
     const root = await directory(
       message.args.root,
       pathParts(message.args.path),
-      message.args.dataDir,
-      message.args.privateRoots,
     );
     await root.dir.close();
     return null;
@@ -332,12 +307,7 @@ async function request(message: ExplorerMessage, signal: AbortSignal) {
   const releaseSlot = reserve();
   try {
     const scope = args as ExplorerScope;
-    const opened = await regularFile(
-      scope.root,
-      pathParts(scope.path),
-      scope.dataDir,
-      scope.privateRoots,
-    );
+    const opened = await regularFile(scope.root, pathParts(scope.path));
     if (opened.stats.size > EXPLORER_DOWNLOAD_BYTES) {
       await opened.handle.close();
       refuse(413, "file is too large to download here");

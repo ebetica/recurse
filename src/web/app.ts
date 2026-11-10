@@ -630,8 +630,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
   registerFileRoutes(router, filesDeps);
   const explorer = registerExplorerRoutes(router, {
     cwd: filesDeps.imageCwd,
-    dataDir: paths.DATA_DIR,
-    privateRoots: [credentialRoots.state, credentialDir],
     signal: instance.shutdownController.signal,
     search: (cid, cwd, query, signal) =>
       durable.searchService(FffWorker).fileNames(cid, cwd, query, signal),

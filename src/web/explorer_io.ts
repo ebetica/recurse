@@ -10,8 +10,6 @@ export const EXPLORER_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 export interface ExplorerScope {
   owner: string;
   root: string;
-  dataDir: string;
-  privateRoots: readonly string[];
   path: string;
 }
 export interface ExplorerEntry {
@@ -19,7 +17,6 @@ export interface ExplorerEntry {
   type: "directory" | "file" | "symlink" | "other";
   size: number;
   ignored: boolean;
-  restricted: boolean;
 }
 export interface ExplorerListing {
   root: string;

@@ -103,7 +103,7 @@ use these routes. Remote conversations do not expose an Explorer control.
 **Source files:** [explorer_io.ts](explorer_io.ts) owns Worker admission and
 shutdown; [explorer.worker.ts](explorer.worker.ts) owns directory cursors,
 previews and streamed downloads; [explorer_paths.worker.ts](explorer_paths.worker.ts)
-owns pinned-descriptor path validation and credential refusals.
+owns pinned-descriptor path validation.
 
 Directory expansion reads one lazy page of 48 entries plus one lookahead, and
 stats only that page. Pages sort folders first within the page, not across the
@@ -127,17 +127,15 @@ attachments, never active same-origin content.
 
 Every descendant is checked with no-follow metadata and matched to the opened
 inode, including directory components. Symlinks, FIFOs and other special files
-are refused. Credential names, SSH files, known credential configs, Recurse
-state and the separate Settings/Pi roots are refused. Marker-backed managed
-worktrees beneath the data directory are the only state exception; Settings/Pi
-roots never receive that exception. Checks use the opened root's real location
-and resolved private roots, including aliases.
+are refused. All readable regular files and folders beneath the conversation's
+working folder are available, including dotfiles and folders in the data directory.
+Names and managed-worktree markers do not restrict operator reads.
 
 Filename search runs the existing agent `find` tool in the shared fff child,
 borrowing the conversation's connection without opening an index ahead of a
 search. Its waiting/indexing policy is unchanged. After admitting the current
 root, it returns the finder's 50-result page unchanged, without opening the
-candidates or truncating their names. Credential and symlink checks apply when
+candidates or truncating their names. Symlink checks apply when
 opening a file. No independent indexer, watcher, refresh policy or search cache
 is added. Superseded requests are cancelled.
 

@@ -32,24 +32,17 @@ import { captureFixture } from "./fixture_subprocess";
 import { fauxHost, idle, until } from "./fixtures/durable_host/host";
 import { exchange, normalise, requestBytes } from "./http_corpus";
 
-// Feature: #3168 Explorer pages folders and refuses private or escaped paths.
+// Feature: #3168 Explorer pages working folders with bounded reads and no path escape.
 test("operator Explorer reads only the current folder with bounded pages and previews", async () => {
   const dir = await mkdtemp(join(tmpdir(), "http-explorer-"));
   const state = join(dir, "state");
-  const settings = join(dir, "settings");
-  const privateWorktree = join(state, "worktrees", "demo", "settings");
+  const workspace = join(state, "workspace");
   await mkdir(state);
   const { host, faux, work, records } = fauxHost(join(dir, "host"));
   records.repo = { id: "repo", backend: "durable", workdir: process.cwd() };
   const roots = new Map([
-    ["state", state],
-    ["worktree", join(state, "worktrees", "demo")],
+    ["state", workspace],
     ["other", work],
-    ["unmanaged", join(state, "worktrees", "unmanaged")],
-    ["home", dir],
-    ["settings", settings],
-    ["settings-alias", join(dir, "settings-alias")],
-    ["private-worktree", privateWorktree],
   ]);
   const keys = new BackendKeys(state);
   const remote = await keys.mint("remote");
@@ -66,8 +59,6 @@ test("operator Explorer reads only the current folder with bounded pages and pre
   const router = new Router();
   const nativeResults = new Map<string, string[]>();
   const io = registerExplorerRoutes(router, {
-    dataDir: state,
-    privateRoots: [settings, join(settings, "pi-agent"), privateWorktree],
     cwd: async (cid) =>
       records[cid]
         ? (await host.effectiveCwd(cid)) || String(records[cid]!.workdir)
@@ -178,72 +169,19 @@ test("operator Explorer reads only the current folder with bounded pages and pre
       (await captureFixture(["mkfifo", join(work, "pipe")], { cwd: work }))
         .exitCode,
     ).toBe(0);
-    const credentials = [
-      ".env.local",
-      "server.pem",
-      "id_ed25519",
-      ".netrc",
-      ".npmrc",
-      "auth.json",
-      "terraform.tfstate",
-      ".ssh/config",
-      ".SSH/config",
-      ".git/config",
-      ".GIT/CONFIG",
-      ".kube/config",
-      ".docker/config.json",
-      ".config/gh/hosts.yml",
-    ];
-    for (const path of credentials) {
-      await mkdir(join(work, path, ".."), { recursive: true });
-      await writeFile(
-        join(work, path),
-        path.toLowerCase() === ".git/config"
-          ? "[core]\nrepositoryformatversion = 0\n"
-          : "fixture only\n",
-      );
-    }
-    await mkdir(join(state, "worktrees", "demo"), { recursive: true });
-    await writeFile(
-      join(state, "worktrees", "demo", "allowed.txt"),
-      "managed worktree\n",
-    );
-    await mkdir(join(state, "worktrees", ".markers"));
-    await writeFile(
-      join(state, "worktrees", ".markers", "demo.json"),
-      JSON.stringify({
-        version: 1,
-        name: "demo",
-        path: join(state, "worktrees", "demo"),
-        holders: {},
-      }),
-    );
-    await mkdir(join(state, "worktrees", "unmanaged"));
-    await writeFile(
-      join(state, "worktrees", "unmanaged", "private.txt"),
-      "fixture only\n",
-    );
-    await writeFile(join(state, "private.txt"), "private state\n");
-    await symlink(state, join(dir, "state-alias"));
+    await writeFile(join(work, ".env"), "fixture only\n");
+    await mkdir(workspace);
+    await writeFile(join(workspace, ".env"), "data folder fixture\n");
+    await writeFile(join(workspace, "notes.txt"), "data folder notes\n");
+    await symlink(workspace, join(dir, "state-alias"));
     roots.set("alias", join(dir, "state-alias"));
-    await mkdir(join(settings, "pi-agent"), { recursive: true });
-    await writeFile(
-      join(settings, "pi-agent", "recurse-backends.json"),
-      JSON.stringify({ fixture: "not-a-secret" }),
-    );
-    await symlink(settings, join(dir, "settings-alias"));
-    await mkdir(privateWorktree);
-    await writeFile(
-      join(privateWorktree, "recurse-backends.json"),
-      JSON.stringify({ fixture: "not-a-secret" }),
-    );
     const root = await json<ExplorerListing>("");
     expect(
       root.entries.find((entry) => entry.name === "ignored.log")?.ignored,
     ).toBe(true);
-    expect(
-      root.entries.find((entry) => entry.name === ".env.local")?.restricted,
-    ).toBe(true);
+    expect(root.entries.find((entry) => entry.name === ".env")?.type).toBe(
+      "file",
+    );
     expect(
       root.entries.find((entry) => entry.name === "linked-file")?.type,
     ).toBe("symlink");
@@ -284,42 +222,25 @@ test("operator Explorer reads only the current folder with bounded pages and pre
           `${suffix}: ${path}`,
         ).toBe(422);
     expect((await get("?path=linked-parent")).status).toBe(422);
-    for (const path of credentials)
-      for (const suffix of ["file", "raw"])
-        expect(
-          (await get(`/${suffix}?path=${encodeURIComponent(path)}`)).status,
-        ).toBe(403);
-    for (const cid of ["state", "alias", "unmanaged"]) {
-      expect((await get("", cid)).status).toBe(403);
-      expect((await get("/file?path=private.txt", cid)).status).toBe(403);
-      expect((await get("/raw?path=private.txt", cid)).status).toBe(403);
-      expect((await get("/search?q=private", cid)).status).toBe(403);
+    expect((await json<ExplorerPreview>("/file?path=.env")).text).toBe(
+      "fixture only\n",
+    );
+    for (const cid of ["state", "alias"]) {
+      const listing = await json<ExplorerListing>("", cid);
+      expect(listing.entries.map((entry) => entry.name).sort()).toEqual([
+        ".env",
+        "notes.txt",
+      ]);
+      expect((await json<ExplorerPreview>("/file?path=.env", cid)).text).toBe(
+        "data folder fixture\n",
+      );
+      const raw = await get("/raw?path=.env", cid);
+      expect(raw.status).toBe(200);
+      expect(await raw.text()).toBe("data folder fixture\n");
+      expect(
+        (await json<{ results: string[] }>("/search?q=notes", cid)).results,
+      ).toContain("notes.txt");
     }
-    expect(
-      (await get("/file?path=settings/pi-agent/recurse-backends.json", "home"))
-        .status,
-    ).toBe(403);
-    expect(
-      (await get("/raw?path=settings/pi-agent/recurse-backends.json", "home"))
-        .status,
-    ).toBe(403);
-    for (const cid of ["settings", "settings-alias", "private-worktree"]) {
-      const path =
-        cid === "private-worktree"
-          ? "recurse-backends.json"
-          : "pi-agent/recurse-backends.json";
-      expect((await get("", cid)).status).toBe(403);
-      expect((await get(`/file?path=${path}`, cid)).status).toBe(403);
-      expect((await get(`/raw?path=${path}`, cid)).status).toBe(403);
-      expect((await get("/search?q=recurse", cid)).status).toBe(403);
-    }
-    const home = await json<ExplorerListing>("", "home");
-    expect(
-      home.entries.find((entry) => entry.name === "settings")?.restricted,
-    ).toBe(true);
-    expect(
-      (await json<ExplorerPreview>("/file?path=allowed.txt", "worktree")).text,
-    ).toBe("managed worktree\n");
     for (const suffix of [
       "",
       "/file?path=notes.md",

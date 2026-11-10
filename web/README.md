@@ -137,8 +137,8 @@ named tabs after the conversation paints. Unavailable files are skipped for the
 visit without changing the saved layout. Phones keep in-place previews.
 
 Read-only UTF-8 previews offer Download and chunked Load more, capped at 256K
-characters; remaining or non-text content is download-only. Credential files,
-symlinks and special files are marked unavailable and cannot be opened.
+characters; remaining or non-text content is download-only. Readable files,
+including dotfiles, can open. Symlinks and special files stay unavailable.
 HTML Preview uses the [offline viewer](document-preview.ts).
 
 Selecting text stages the same quote-and-line comments as Files and Artifacts.

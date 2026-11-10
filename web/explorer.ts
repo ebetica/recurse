@@ -430,9 +430,7 @@ function tree(view: View, item: Folder, depth = 0): TemplateResult {
           const child = view.folders.get(path);
           const isFolder = entry.type === "directory";
           const unavailable =
-            entry.restricted ||
-            entry.type === "symlink" ||
-            entry.type === "other";
+            entry.type === "symlink" || entry.type === "other";
           return html`<li>
             <button
               class="explorer-row ${entry.ignored ? "ignored" : ""}"
@@ -444,7 +442,7 @@ function tree(view: View, item: Folder, depth = 0): TemplateResult {
                 ? String(!!child)
                 : nothing}
               title=${unavailable
-                ? "Unavailable: private file, symbolic link or special file"
+                ? "Unavailable: symbolic link or special file"
                 : entry.name}
               @click=${() =>
                 isFolder ? toggle(view, path) : void openFile(view, path)}
