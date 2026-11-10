@@ -125,7 +125,9 @@ export const tests: BrowserTest[] = [
         await scroller.evaluate((node) => {
           node.scrollTop = 0;
         });
-        await page.locator('.pane-col[data-pane="diff"] .pane-head .x').click();
+        await page
+          .getByRole("button", { name: "Close Changes", exact: true })
+          .click();
         await page.locator(".pane-col").waitFor({ state: "detached" });
         expect(
           await page

@@ -117,7 +117,7 @@ export const tests: BrowserTest[] = [
       await page.close();
     }
   },
-  // Regression: #3101 Ctrl+Enter stages box comments and returns keyboard focus for sending; #2891 desktop comments send zoomed crops with original coordinates.
+  // Regression: #3213 reveal the lazy crop preview's frame before waiting for its image.
   async function test_published_image_box_crop(browser, base) {
     const page = await browser.newPage({
       viewport: { width: 1200, height: 844 },
@@ -151,11 +151,10 @@ export const tests: BrowserTest[] = [
       await page.waitForFunction(
         "document.querySelector('#conv-title')?.textContent === 'Published quadrant image'",
       );
-      await page.locator('.rail-btn[data-pane="files"]').click();
-      const files = page.locator('.pane-col[data-pane="files"]');
-      await files
-        .getByRole("button", { name: "Open quadrants.png", exact: true })
-        .click();
+      const imagePreview = page
+        .locator("#messages")
+        .getByRole("button", { name: "Open quadrants.png", exact: true });
+      await imagePreview.click();
       const pane = page.locator(".image-popout");
       await pane
         .locator(".files-detail img")
@@ -235,9 +234,7 @@ export const tests: BrowserTest[] = [
       );
       await page.keyboard.press("Escape");
       await pane.waitFor({ state: "detached" });
-      await files
-        .getByRole("button", { name: "Open quadrants.png", exact: true })
-        .click();
+      await imagePreview.click();
       await pane
         .locator(".files-detail img")
         .evaluate((image: any) => image.decode());
@@ -544,6 +541,7 @@ export const tests: BrowserTest[] = [
         .filter({ hasText: "Acknowledged. Images: 2" })
         .waitFor();
       const image = page.locator('#messages img[alt="quadrants-box-1.jpg"]');
+      await image.locator("..").scrollIntoViewIfNeeded();
       await image.waitFor();
       expect(await image.getAttribute("src")).toContain(cropUrl!);
       const pixels = await image.evaluate(async (image: any) => {

@@ -1,0 +1,409 @@
+/* Desktop windows: Greg's tabs and card frames on the shared shell tokens.
+   Loaded with dockview's CSS only on desktop; phones keep their pane overlay. */
+#panes.docked {
+  flex-direction: column;
+  z-index: var(--z-raised);
+  --dock-gutter: var(--content-inset, 8px);
+  --dock-tab-radius: 8px;
+  --dock-tab-gap: 4px;
+}
+body #panes.docked.on {
+  margin: calc(var(--dock-gutter) / 2);
+  display: flex;
+  gap: 0;
+}
+#panes.docked > .resize-grip {
+  display: none;
+}
+#agent-finder.dock-finder,
+#pane-finder.dock-finder {
+  position: fixed;
+  top: 32dvh;
+  max-height: min(390px, calc(68dvh - var(--space-5)));
+  bottom: auto;
+  left: 50%;
+  right: auto;
+  width: min(480px, calc(100vw - 2 * var(--space-5)));
+  transform: translateX(-50%);
+}
+#dock {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+#dock .dv-view:has(> .dv-groupview) {
+  box-sizing: border-box;
+  padding: calc(var(--dock-gutter) / 2);
+}
+#dock .dv-dockview {
+  background: transparent;
+}
+/* Windows are separate cards, so the gutter between them needs no divider
+   line; the resize handle still shows the accent on hover. */
+#dock .dv-split-view-container.dv-separator-border .dv-view::before {
+  content: none;
+}
+#dock .dockview-theme-abyss-spaced {
+  background-color: transparent;
+  color-scheme: inherit;
+  font-family: var(--font-sans);
+  --dv-border-radius: var(--content-radius, 10px);
+  --dv-spacing-padding: 0px;
+  --dv-group-view-background-color: var(--bg);
+  --dock-strip: light-dark(
+    color-mix(in srgb, var(--bg) 93%, var(--text)),
+    color-mix(in srgb, var(--bg) 80%, var(--shadow))
+  );
+  --dv-tabs-and-actions-container-background-color: var(--dock-strip);
+  --dv-tabs-and-actions-container-height: 36px;
+  --dv-tabs-and-actions-container-font-size: 13px;
+  --dv-tab-font-size: 13px;
+  --dv-tab-margin: 0;
+  --dv-tab-border-radius: 0px;
+  --dv-scrollbar-background-color: var(--scrollbar);
+  --dv-activegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--dock-strip);
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--bg);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--dock-strip);
+  --dv-activegroup-visiblepanel-tab-color: var(--text);
+  --dv-activegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--text);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--muted);
+  --dv-tab-divider-color: transparent;
+  --dv-separator-border: var(--pane-border, var(--border));
+  --dv-paneview-header-border-color: transparent;
+  --dv-paneview-active-outline-color: transparent;
+  --dv-drag-over-background-color: color-mix(
+    in srgb,
+    var(--accent) 22%,
+    transparent
+  );
+  --dv-drag-over-border-color: var(--accent);
+  --dv-edge-dock-indicator-color: var(--accent);
+  --dv-icon-hover-background-color: color-mix(
+    in srgb,
+    var(--text) 12%,
+    transparent
+  );
+  --dv-active-sash-color: var(--accent);
+  --dv-dnd-compass-color: var(--accent);
+  --dv-dnd-compass-cell-color: color-mix(
+    in srgb,
+    var(--accent) 25%,
+    transparent
+  );
+  --dv-dnd-compass-edge-cell-color: color-mix(
+    in srgb,
+    var(--accent) 12%,
+    transparent
+  );
+  --dv-dnd-compass-active-cell-color: color-mix(
+    in srgb,
+    var(--accent) 50%,
+    transparent
+  );
+  --dv-max-tab-rows: 1;
+  --dv-wrap-vertical-tab-height: auto;
+  --dv-pinned-sticky-left: 0px;
+  --dv-tab-group-color: var(--accent);
+  --dv-context-menu-background-color: var(--panel);
+  --dv-context-menu-color: var(--text);
+  --dv-smart-guides-color: var(--accent);
+  --dv-smart-guides-preview-color: color-mix(
+    in srgb,
+    var(--accent) 18%,
+    transparent
+  );
+}
+#dock .dv-groupview {
+  overflow: hidden;
+  background: var(--bg);
+  box-shadow: var(--content-ring, 0 0 0 1px var(--border));
+}
+#dock .dv-content-container {
+  background: var(--bg);
+}
+#dock .dv-tabs-and-actions-container {
+  padding: 0;
+}
+#dock .dv-tabs-overflow-dropdown-default,
+#dock .dv-tabs-overflow-dropdown-root {
+  display: none;
+}
+#dock .dv-tabs-container {
+  min-width: 0;
+  overflow-y: hidden;
+  scrollbar-color: var(--border) transparent;
+  box-sizing: border-box;
+  /* Tabs fill the strip below this gap, shrinking above a native scrollbar;
+     the side padding keeps the active tab's curved feet inside the strip. */
+  padding: var(--dock-tab-gap) var(--dock-tab-radius) 0;
+}
+#dock .dock-window-actions {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  padding: var(--dock-tab-gap) var(--space-2) 0;
+}
+#dock .dock-window-actions:not(:has(> :not([hidden]))) {
+  display: none;
+}
+#dock .dock-opening-hint {
+  color: var(--accent);
+  font-size: 0.6875rem;
+  padding: 0 var(--space-3);
+  white-space: nowrap;
+}
+#dock .dv-tab {
+  position: relative;
+  height: auto;
+  box-sizing: border-box;
+  padding: 0;
+  min-width: 0;
+  max-width: none;
+  flex-shrink: 0;
+  font-weight: 400;
+  border-radius: var(--dock-tab-radius) var(--dock-tab-radius) 0 0;
+}
+#dock .dv-tab.dv-active-tab {
+  z-index: var(--z-raised);
+}
+#dock .dv-tab.dv-active-tab .dv-default-tab::before,
+#dock .dv-tab.dv-active-tab .dv-default-tab::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: var(--dock-tab-radius);
+  height: var(--dock-tab-radius);
+  pointer-events: none;
+}
+#dock .dv-tab.dv-active-tab .dv-default-tab::before {
+  left: calc(-1 * var(--dock-tab-radius));
+  background: radial-gradient(
+    circle at 0 0,
+    transparent calc(var(--dock-tab-radius) - 0.5px),
+    var(--bg) var(--dock-tab-radius)
+  );
+}
+#dock .dv-tab.dv-active-tab .dv-default-tab::after {
+  right: calc(-1 * var(--dock-tab-radius));
+  background: radial-gradient(
+    circle at 100% 0,
+    transparent calc(var(--dock-tab-radius) - 0.5px),
+    var(--bg) var(--dock-tab-radius)
+  );
+}
+#dock .dv-default-tab {
+  gap: calc(var(--space-2) + var(--space-1));
+  min-width: 0;
+  padding: 0 var(--space-2) 0 var(--space-4);
+}
+#dock .dv-default-tab-content {
+  flex: none;
+  white-space: nowrap;
+  padding: 0;
+  margin: 0;
+}
+/* Squeezed strips show inactive tabs as their icon plus room for the close
+   button, which appears on hover. The icon side is wider so the tab's centre
+   stays on the icon: clicking a squeezed tab shows it rather than closing it. */
+#dock .dock-compact .dv-inactive-tab .dv-default-tab-content {
+  display: none;
+}
+#dock .dock-compact .dv-inactive-tab .dv-default-tab {
+  gap: 0;
+  padding: 0 calc(var(--space-1) / 2) 0 calc(var(--space-1) * 1.5);
+}
+#dock .dock-compact .dv-inactive-tab .dv-default-tab-action {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+#dock .dv-tab.dock-new :is(.dv-default-tab-content, .dock-tab-icon) {
+  color: var(--accent);
+  font-weight: 600;
+}
+#dock .dv-tab.dv-inactive-tab:hover {
+  background: color-mix(in srgb, var(--dock-strip) 70%, var(--bg));
+}
+#dock .dock-tab-icon {
+  display: inline-flex;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  align-items: center;
+  justify-content: center;
+}
+#dock .dock-tab-icon:empty {
+  display: none;
+}
+#dock .dock-tab-icon svg {
+  width: 14px;
+  height: 14px;
+}
+#dock .dv-default-tab-action {
+  flex: none;
+  position: relative;
+  width: 18px;
+  height: 18px;
+  margin-left: calc(-1 * var(--space-2));
+  border: 0;
+  background: none;
+  padding: 0;
+  box-sizing: border-box;
+  border-radius: var(--space-2);
+  color: var(--muted);
+  cursor: pointer;
+}
+#dock .dv-default-tab-action::before,
+#dock .dv-default-tab-action::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 1.25px;
+  background: currentColor;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+#dock .dv-default-tab-action::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+#dock .dv-default-tab-action:hover {
+  color: var(--text);
+  background: var(--dv-icon-hover-background-color);
+}
+@media (hover: hover) {
+  #dock .dv-inactive-tab:not(:hover):not(:focus-within) .dv-default-tab-action {
+    visibility: hidden;
+  }
+}
+#dock .dock-focused .dv-active-tab::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: auto;
+  height: auto;
+  background: none;
+  border-top: 2px solid var(--accent);
+  border-radius: inherit;
+  pointer-events: none;
+}
+#dock .dock-flash {
+  animation: dock-focus-flash calc(var(--motion-enter) * 2) ease-out;
+}
+@keyframes dock-focus-flash {
+  from {
+    box-shadow: 0 0 0 2px var(--accent);
+  }
+  to {
+    box-shadow: var(--content-ring, 0 0 0 1px var(--border));
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  #dock .dock-flash {
+    animation: none;
+  }
+}
+#dock #main {
+  margin: 0;
+  height: 100%;
+  border-radius: 0;
+  box-shadow: none;
+}
+.dock-parking {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+#dock .dock-panel {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+#panes.docked #dock .dock-panel > .pane-col {
+  flex: 1;
+  min-height: 0;
+  border-radius: 0;
+  box-shadow: none;
+  border-left: 0;
+  background: var(--bg);
+}
+body:has(#dock .pane-col.fullscreen, #dock #main.fullscreen) #panes.docked {
+  z-index: calc(var(--z-drawer) + 4);
+}
+#dock .dv-render-overlay:has(.pane-col.fullscreen, #main.fullscreen) {
+  position: fixed;
+  inset: 0 !important;
+  width: 100vw !important;
+  height: 100dvh !important;
+  contain: none;
+  transform: none;
+  will-change: auto;
+  z-index: calc(var(--z-drawer) + 4);
+}
+#dock .pane-powerbar {
+  border-radius: 0;
+  background: var(--bg);
+}
+#dock
+  .pane-col:not(.fullscreen)
+  > .pane-powerbar:not(:has(.pane-powerbar-controls > *)) {
+  height: 0;
+  min-height: 0;
+  padding: 0;
+}
+#dock .pane-col:not(.fullscreen) > .pane-powerbar .pane-title {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+#dock .pane-powerbar-controls {
+  margin-left: auto;
+}
+#dock .pane-powerbar .x {
+  display: none;
+}
+#dock .pane-powerbar-overflow {
+  position: static;
+}
+#dock .pane-powerbar-menu {
+  left: auto;
+  right: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+#window-key-hints:not([hidden]) {
+  position: fixed;
+  right: var(--space-6);
+  bottom: var(--space-6);
+  z-index: var(--z-menu);
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-3) var(--space-5);
+  max-width: calc(100vw - var(--space-6) * 2);
+  padding: var(--space-4);
+  border: 1px solid var(--border);
+  border-radius: var(--content-radius);
+  background: var(--panel);
+  box-shadow: var(--menu-shadow);
+  color: var(--text);
+  font-size: 0.75rem;
+  pointer-events: none;
+}
+#window-key-hints > div {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+#window-key-hints kbd {
+  color: var(--accent);
+  font-family: var(--font-mono);
+}

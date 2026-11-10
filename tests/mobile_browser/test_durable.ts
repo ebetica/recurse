@@ -558,62 +558,85 @@ export const tests: BrowserTest[] = [
     const { agent } = await postFixture(base, "seed-durable-clear");
     const page = await browser.newPage();
     const errors = captureErrors(page);
-    await page.goto(`${base}#agent=${agent}`, {
-      waitUntil: "domcontentloaded",
-    });
-    await page.locator("#input").waitFor();
-    const deliver = async (id: string) => {
-      const response = await page.request.post(
-        `${base}api/conversations/${agent}/deliver`,
-        {
-          data: { content: id, client_message_id: id },
-        },
-      );
-      expect(response.ok()).toBeTrue();
-    };
-    await deliver("before-clear");
-    await page.getByText("Before Durable clear.", { exact: true }).waitFor();
-    await page.locator("#conv-status.running").waitFor({ state: "detached" });
-    const tokens = page.locator("#context-token-label");
-    await tokens.waitFor();
-    expect(await tokens.innerText()).toMatch(/tokens$/);
     let releaseContext!: () => void;
+    let releaseTree!: () => void;
     const heldContext = new Promise<void>((resolve) => {
       releaseContext = resolve;
     });
-    await page.route(
-      `${base}api/conversations/${agent}/context-usage`,
-      async (route) => {
+    const heldTree = new Promise<void>((resolve) => {
+      releaseTree = resolve;
+    });
+    try {
+      await page.route(
+        `${base}api/conversations/${agent}/context-usage`,
+        async (route) => {
+          const response = await route.fetch();
+          await heldContext;
+          await route.fulfill({ response });
+        },
+      );
+      await page.goto(`${base}#agent=${agent}`, {
+        waitUntil: "domcontentloaded",
+      });
+      await page.locator("#input").waitFor();
+      const deliver = async (id: string) => {
+        const response = await page.request.post(
+          `${base}api/conversations/${agent}/deliver`,
+          {
+            data: { content: id, client_message_id: id },
+          },
+        );
+        expect(response.ok()).toBeTrue();
+      };
+      await deliver("before-clear");
+      await page.getByText("Before Durable clear.", { exact: true }).waitFor();
+      await page.locator("#conv-status.running").waitFor({ state: "detached" });
+      const tokens = page.locator("#context-token-label");
+      await tokens.waitFor();
+      expect(await tokens.innerText()).toMatch(/tokens$/);
+      await page.route(`${base}api/tree`, async (route) => {
         const response = await route.fetch();
-        await heldContext;
+        await heldTree;
         await route.fulfill({ response });
-      },
-    );
-    await page.locator("#input").fill("/clear");
-    page.once("dialog", (dialog) => void dialog.accept());
-    const cleared = page.waitForResponse(
-      `${base}api/conversations/${agent}/clear`,
-    );
-    await page
-      .locator("#skill-menu .skill-option.action", { hasText: "/clear" })
-      .click();
-    expect((await cleared).ok()).toBeTrue();
-    await page
-      .getByText("Before Durable clear.", { exact: true })
-      .waitFor({ state: "detached" });
-    const afterClear = await tokens.innerText();
-    releaseContext();
-    await page.unrouteAll({ behavior: "wait" });
-    expect(afterClear).toBe("");
-    await deliver("after-clear");
-    await page
-      .getByText("After Durable clear.", { exact: true })
-      .waitFor({ timeout: 10_000 });
-    expect(
-      await page.getByText("Before Durable clear.", { exact: true }).count(),
-    ).toBe(0);
-    expect(errors).toEqual([]);
-    await page.close();
+      });
+      await page.locator("#input").fill("/clear");
+      page.once("dialog", (dialog) => void dialog.accept());
+      const cleared = page.waitForResponse(
+        `${base}api/conversations/${agent}/clear`,
+      );
+      await page
+        .locator("#skill-menu .skill-option.action", { hasText: "/clear" })
+        .click();
+      expect((await cleared).ok()).toBeTrue();
+      await page
+        .getByText("Before Durable clear.", { exact: true })
+        .waitFor({ state: "detached" });
+      expect(await tokens.innerText()).toBe("");
+      await deliver("after-clear");
+      await page
+        .getByText("After Durable clear.", { exact: true })
+        .waitFor({ timeout: 10_000 });
+      const freshView = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname ===
+          `/api/conversations/${agent}/view`,
+      );
+      await page.evaluate(() => window.dispatchEvent(new Event("pageshow")));
+      expect((await (await freshView).json()).status).toBe("ready");
+      await waitForLayout(page);
+      await page.locator(`#agent-list .agent[data-id="${agent}"]`).click();
+      await waitForLayout(page);
+      expect(await tokens.innerText()).toBe("");
+      expect(
+        await page.getByText("Before Durable clear.", { exact: true }).count(),
+      ).toBe(0);
+      expect(errors).toEqual([]);
+    } finally {
+      releaseContext();
+      releaseTree();
+      await page.unrouteAll({ behavior: "wait" });
+      await page.close();
+    }
   },
 
   async function test_durable_refused_turn_is_left_out_and_resent(
@@ -1127,12 +1150,22 @@ export const tests: BrowserTest[] = [
             row.getBoundingClientRect().top -
             document.querySelector("#scroll").getBoundingClientRect().top,
         );
+      const scroll = page.locator("#scroll");
+      await scroll.hover();
+      const beforeWheel = await scroll.evaluate((el) => el.scrollTop);
+      await page.mouse.wheel(0, 40);
+      await page.waitForFunction(
+        (before) => document.querySelector("#scroll").scrollTop !== before,
+        beforeWheel,
+      );
+      await waitForLayout(page);
       await reader.evaluate((row) => {
         row.scrollIntoView({ block: "start" });
         document.querySelector("#scroll").scrollTop += 4;
       });
       await waitForLayout(page);
       const left = await readerTop();
+      expect(left).toBeCloseTo(-4, 0);
       for (let n = 0; n < 8; n += 1)
         await open(`${agent}-${n}`, `Neighbour ${n}`);
       await postFixture(base, "durable-history-more", {

@@ -173,14 +173,16 @@ test("sidebar tags round-trip for the operator and agents, survive stale saves a
         .status,
     ).toBe(200);
     await until(() => logged("durable_report_delivered", cid).length > 0);
+    await until(() => server.app.instance.durable.reportHolds.settled(cid));
     store.flush = flush;
-    expect(flushes).toEqual([false, true]);
+    expect(flushes).toEqual([false, true, true]);
     expect(logged("durable_report_failed", cid)).toHaveLength(1);
     const tagged = await row(cid);
     const run = String(conversations.load(cid)!.replied_run);
     expect(logged("durable_report_delivered", cid)[0]).toContain(run);
     expect(typeof firstStamp).toBe("number");
     expect(tagged.replied_at).toBe(firstStamp);
+    expect(tagged.unread).toBe(true);
     expect(Object.keys(tagged.tags).sort()).toEqual([
       "archived",
       "needs-review",
@@ -190,6 +192,7 @@ test("sidebar tags round-trip for the operator and agents, survive stale saves a
     await conversations.save(stale);
     expect((await row(cid)).tags).toEqual(tagged.tags);
     expect((await row(cid)).replied_at).toBe(tagged.replied_at);
+    expect((await row(cid)).unread).toBe(true);
 
     const later = Date.now() / 1000 + 3600;
     await post("/api/sidebar/tags", { ids: [cid], set: { snoozed: later } });
@@ -209,6 +212,7 @@ test("sidebar tags round-trip for the operator and agents, survive stale saves a
     const after = await row(cid);
     expect(after.tags).toEqual(before.tags);
     expect(after.replied_at).toBe(before.replied_at);
+    expect(after.unread).toBe(true);
   } finally {
     await stop(server);
     await fixture.host.close();

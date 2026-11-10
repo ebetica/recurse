@@ -1,0 +1,22 @@
+/* Inline file suggestions share menu tokens and composer popup placement. */
+#file-menu {
+  position: absolute;
+  top: auto;
+  z-index: var(--z-menu);
+  left: -1px;
+  right: -1px;
+  bottom: calc(100% + 7px);
+  max-height: 270px;
+  overflow-y: auto;
+}
+#file-menu[hidden] {
+  display: none;
+}
+#file-menu .file-option {
+  width: 100%;
+  height: auto;
+  margin: 0;
+  justify-content: flex-start;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}

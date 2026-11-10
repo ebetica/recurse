@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import {
   PNG_1X1,
   assertArtifactVersionMenuEscape,
@@ -7,6 +8,7 @@ import {
   gotoRoot,
   mockConversation,
   postFixture,
+  rootAgentId,
   routeArtifacts,
   runBrowserTests,
   visibleAndUncovered,
@@ -63,6 +65,123 @@ const turn = (id: string, user: string, assistant: string) => ({
   ],
 });
 export const tests: BrowserTest[] = [
+  // Regression: #3246 rendering a diagram during navigation must not squeeze the phone conversation.
+  async function test_phone_switch_keeps_full_width_while_diagram_loads(
+    browser,
+    base,
+  ) {
+    const { demo } = await postFixture(base, "seed-theme-surfaces");
+    try {
+      for (const width of [390, 430]) {
+        const context = await browser.newContext({
+          viewport: { width, height: width === 390 ? 844 : 932 },
+          isMobile: true,
+          hasTouch: true,
+          deviceScaleFactor: 3,
+        });
+        const page = await context.newPage();
+        const cdp = await context.newCDPSession(page);
+        await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
+        let release!: () => void;
+        let requested!: () => void;
+        const held = new Promise<void>((resolve) => (release = resolve));
+        const loading = new Promise<void>((resolve) => (requested = resolve));
+        await page.route(/\/static\/flowDiagram-[^/]+\.js$/, async (route) => {
+          requested();
+          await held;
+          await route.continue();
+        });
+        try {
+          await gotoRoot(page, base);
+          await page
+            .locator("#input")
+            .fill(`Reply only Phone width ready ${width}`);
+          await page.locator("#send").click();
+          await page
+            .getByText(`Phone width ready ${width}`, { exact: true })
+            .waitFor();
+          await page.locator("#menu-btn").click();
+          await page.locator("html.phone-list").waitFor();
+          await page.evaluate(() => {
+            const browser = globalThis as any;
+            browser.__phoneWidths = [];
+            browser.__samplePhoneWidths = true;
+            const sample = () => {
+              if (!browser.__samplePhoneWidths) return;
+              if (
+                !browser.document.documentElement.classList.contains(
+                  "phone-list",
+                )
+              )
+                browser.__phoneWidths.push({
+                  viewport: browser.innerWidth,
+                  widths: ["#main", "#scroll", "#messages"].map(
+                    (selector) =>
+                      browser.document
+                        .querySelector(selector)
+                        .getBoundingClientRect().width,
+                  ),
+                });
+              browser.requestAnimationFrame(sample);
+            };
+            browser.requestAnimationFrame(sample);
+          });
+          await page.locator(`.agent[data-id="${demo}"]`).click();
+          await loading;
+          await page.evaluate(
+            () =>
+              new Promise<void>((resolve) => {
+                const browser = globalThis as any;
+                browser.requestAnimationFrame(() =>
+                  browser.requestAnimationFrame(() => resolve()),
+                );
+              }),
+          );
+          if (process.env.RECURSE_SCREENSHOT_DIR)
+            await page.screenshot({
+              path: `${process.env.RECURSE_SCREENSHOT_DIR}/phone-diagram-${width}.png`,
+            });
+          release();
+          await page.locator("#messages .mermaid-done svg").waitFor();
+          await page.locator("#menu-btn").click();
+          await page.locator("html.phone-list").waitFor();
+          await page.locator(`.agent[data-id="${rootAgentId()}"]`).click();
+          await waitForLayout(page);
+          const frames = await page.evaluate(() => {
+            const browser = globalThis as any;
+            browser.__samplePhoneWidths = false;
+            return browser.__phoneWidths as Array<{
+              viewport: number;
+              widths: number[];
+            }>;
+          });
+          console.log("Phone width trace:", JSON.stringify({ width, frames }));
+          expect(frames.length).toBeGreaterThan(0);
+          expect(
+            frames.filter((frame) =>
+              frame.widths.some((value) => value < frame.viewport - 1),
+            ),
+          ).toEqual([]);
+        } finally {
+          release();
+          await closeWithRoutes(context);
+        }
+      }
+    } finally {
+      expect(
+        (await fetch(`${base}api/conversations/${demo}`, { method: "DELETE" }))
+          .ok,
+      ).toBeTrue();
+      await browserExpect
+        .poll(async () => {
+          const tree = (await (
+            await fetch(`${base}api/tree`)
+          ).json()) as Array<{ id: string }>;
+          return tree.some((agent) => agent.id === demo);
+        })
+        .toBe(false);
+    }
+  },
   // Feature: #2991 installed fullscreen apps keep controls below the display cutout.
   async function test_fullscreen_safe_area(browser, base) {
     const context = await browser.newContext({
@@ -71,6 +190,12 @@ export const tests: BrowserTest[] = [
       hasTouch: true,
     });
     const page = await context.newPage();
+    const dockRequests: string[] = [];
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (/^\/static\/(?:host-[^/]+\.js|dockview\.css)$/.test(path))
+        dockRequests.push(path);
+    });
     await gotoRoot(page, base);
     const manifest = await page
       .locator('link[rel="manifest"]')
@@ -84,6 +209,7 @@ export const tests: BrowserTest[] = [
       insets: { top: 60, bottom: 24 },
     });
     await page.locator(".agent").first().waitFor();
+    await page.locator("#pane-fab.on").waitFor();
     expect(
       await page
         .locator("#topbar")
@@ -113,6 +239,8 @@ export const tests: BrowserTest[] = [
     await page
       .locator("dialog.settings-sheet[open] .settings-sheet-close")
       .click();
+    expect(await page.locator("#dock, #dockview-css").count()).toBe(0);
+    expect(dockRequests).toEqual([]);
     await page.setViewportSize({ width: 915, height: 412 });
     await cdp.send("Emulation.setSafeAreaInsetsOverride", {
       insets: { left: 60, right: 0, top: 0, bottom: 24 },
@@ -301,15 +429,40 @@ export const tests: BrowserTest[] = [
         expect(
           await page.locator("#pane-fab").getAttribute("aria-expanded"),
         ).toBe("true");
-        const menu = await page.locator("#pane-menu").boundingBox();
-        expect(menu && menu.x + menu.width <= viewport.width - 12).toBeTrue();
+        const menuFits = () =>
+          page.locator("#pane-menu").evaluate((menu) => {
+            const document = menu.ownerDocument;
+            const box = menu.getBoundingClientRect();
+            const rows = [...menu.querySelectorAll(".pane-menu-item")].filter(
+              (row: any) => row.getBoundingClientRect().height > 0,
+            );
+            return {
+              inside:
+                box.left >= 0 &&
+                box.top >= 0 &&
+                box.right <= document.documentElement.clientWidth &&
+                box.bottom <= document.documentElement.clientHeight,
+              rowsHit: rows.map((row: any) => {
+                const rect = row.getBoundingClientRect();
+                return row.contains(
+                  document.elementFromPoint(
+                    rect.left + rect.width / 2,
+                    rect.top + rect.height / 2,
+                  ),
+                );
+              }),
+            };
+          });
+        const ltr = await menuFits();
+        expect(ltr.inside).toBeTrue();
+        expect(ltr.rowsHit.length).toBeGreaterThan(0);
+        expect(ltr.rowsHit.every(Boolean)).toBeTrue();
         await page
           .locator("#pane-backdrop")
           .click({ position: { x: 1, y: 1 } });
         await page.evaluate("document.documentElement.dir = 'rtl'");
         await page.locator("#pane-fab").click();
-        const rtlMenu = await page.locator("#pane-menu").boundingBox();
-        expect(rtlMenu && rtlMenu.x >= 12).toBeTrue();
+        expect(await menuFits()).toEqual(ltr);
         const item = page.locator('.pane-menu-item[data-pane="report"]');
         expect(await item.getAttribute("role")).toBe("menuitem");
         expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
@@ -328,6 +481,14 @@ export const tests: BrowserTest[] = [
             .evaluate((element) => (element as any).inert),
         ).toBeFalse();
         await page.locator("#settings-btn").focus();
+        await page.keyboard.press("Tab");
+        expect(
+          await page
+            .locator("#trash-btn")
+            .evaluate(
+              (element) => element.ownerDocument.activeElement === element,
+            ),
+        ).toBeTrue();
         await page.keyboard.press("Tab");
         expect(
           await page.evaluate(

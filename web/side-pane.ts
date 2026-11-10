@@ -1,12 +1,15 @@
-// Side pane: /btw and New forks share one embedded app frame
-// (`/?embed=1#agent=<id>`), warmed behind the focused read. Switching changes
-// its hash; closing parks it, still loaded. Deletes hide immediately,
-// survive stale tree reads, and restore on failure.
-import { html } from "lit";
+// Side pane: /btw and new forks share a frame, warmed behind focused reads.
+// Switching changes its hash; closing parks it. Deletes hide in stale reads
+// and restore on failure. Desktop lists retain the frame and unsent draft;
+// desktop navigation uses the owning pane while editors retain native keys.
+import { html, nothing, render } from "lit";
+import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "./backends/backend.js";
 import { poll } from "./conversation/poll.js";
+import { agentLinkUrl } from "./deep-link.js";
 import {
+  BACK_ICON,
   CHEVRON_DOWN_ICON,
   DELETE_ICON,
   NEW_ICON,
@@ -16,8 +19,10 @@ import {
 } from "./icons.js";
 import { fetchPaneData, openPane, registerPane, syncPanes } from "./panes.js";
 import { renderPowerbarControls } from "./panes/powerbar.js";
+import { paneItem, scrollPane } from "./panes/navigation.js";
+import { copyText } from "./tool_details.js";
 import { embedded, state } from "./state.js";
-import type { PaneContext } from "./types.js";
+import type { PaneContext, PaneNavigation } from "./types.js";
 
 const PANE_ID = "side";
 // Parent id -> the side conversation its pane shows.
@@ -36,11 +41,54 @@ let busy = false;
 let notice = "";
 // The page's one embedded app, in the pane body or parked while closed.
 let frame: HTMLIFrameElement | null = null;
+let browsing = false;
+let filter = "";
+let shownContext: PaneContext | null = null;
+const coarsePointer = matchMedia("(pointer: coarse)");
+coarsePointer.addEventListener("change", () => {
+  browsing = false;
+  syncPanes();
+});
 
 // Without moveBefore, moving reloads frames: never park/warm; boot on open.
 const canPark = "moveBefore" in Element.prototype;
 
 const frameUrl = (id: string) => `/?embed=1#agent=${encodeURIComponent(id)}`;
+
+function owningSideFrame(): Element | null {
+  if (!embedded || coarsePointer.matches) return null;
+  const owner = window.frameElement;
+  return owner?.matches("#panes iframe.side-frame") &&
+    owner.ownerDocument.activeElement === owner
+    ? owner
+    : null;
+}
+
+/** Relay reader keys to the focused, mounted Side pane's dispatcher. */
+export function relaySideKey(event: KeyboardEvent): void {
+  if (event.defaultPrevented || event.isComposing || event.keyCode === 229)
+    return;
+  const owner = owningSideFrame();
+  if (!owner) return;
+  const forwarded = new CustomEvent("recurse:side-key", {
+    bubbles: true,
+    cancelable: true,
+    detail: event,
+  });
+  if (!owner.dispatchEvent(forwarded)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
+
+if (embedded)
+  for (const type of ["focusin", "click"])
+    document.addEventListener(type, () => {
+      // Invariant: A native dock click focuses pane chrome and steals an inner
+      // editor's focus; only notify the key dispatcher about the interaction.
+      const forwarded = type === "click" ? "recurse:side-click" : type;
+      owningSideFrame()?.dispatchEvent(new Event(forwarded, { bubbles: true }));
+    });
 
 function parking(): HTMLElement {
   let lot = document.getElementById("side-frame-parking");
@@ -124,6 +172,7 @@ function shownSide(parent: string): string | null {
 export function showSide(parent: string, id: string): void {
   if (!state.sides.some((side) => side.id === id)) pending.set(id, parent);
   chosen.set(parent, id);
+  browsing = false;
   notice = "";
   openPane(PANE_ID, { userInitiated: true });
   syncPanes();
@@ -214,8 +263,97 @@ function rename(id: string, title: string): Promise<void> {
   });
 }
 
+function selectSide(el: HTMLElement, ctx: PaneContext, id: string): void {
+  if (busy || renaming) return;
+  chosen.set(ctx.agentId, id);
+  browsing = false;
+  syncPanes();
+  el.focus({ preventScroll: true });
+}
+
+function browse(el: HTMLElement, ctx: PaneContext, search = false): void {
+  if (coarsePointer.matches || busy || renaming) return;
+  browsing = true;
+  paint(el, ctx);
+  [...el.querySelectorAll<HTMLElement>(".side-list-item")]
+    .find((item) => item.dataset.side === shownSide(ctx.agentId))
+    ?.focus({ preventScroll: true });
+  paneItem(el, ".side-list-item", "open");
+  if (search) el.querySelector<HTMLInputElement>(".side-filter")?.focus();
+}
+
+function navigate(el: HTMLElement, command: PaneNavigation): boolean {
+  const ctx = shownContext;
+  if (coarsePointer.matches || !ctx) return false;
+  if (command === "back" || command === "filter") {
+    browse(el, ctx, command === "filter");
+    return true;
+  }
+  const listing = browsing;
+  if (command === "copy") {
+    const id = listing
+      ? paneItem(el, ".side-list-item", "open")?.dataset.side
+      : shownSide(ctx.agentId);
+    const focus = document.activeElement;
+    if (id)
+      void copyText(agentLinkUrl(location.href, id, false)).then((ok) => {
+        if (state.selectedId !== ctx.agentId) return;
+        notice = ok ? "Link copied." : "Could not copy link.";
+        syncPanes();
+        if (
+          focus instanceof HTMLElement &&
+          focus.isConnected &&
+          document.activeElement === document.body
+        )
+          focus.focus({ preventScroll: true });
+      });
+  } else if (
+    listing &&
+    [
+      "next",
+      "previous",
+      "top",
+      "bottom",
+      "next-section",
+      "previous-section",
+      "open",
+    ].includes(command)
+  ) {
+    const item = paneItem(el, ".side-list-item", command);
+    if (command === "open") item?.click();
+  } else if (command === "next-section" || command === "previous-section") {
+    const sides = sidesOf(ctx.agentId);
+    const index = sides.findIndex((side) => side.id === shownSide(ctx.agentId));
+    const side =
+      sides[
+        Math.max(
+          0,
+          Math.min(
+            sides.length - 1,
+            index + (command === "next-section" ? 1 : -1),
+          ),
+        )
+      ];
+    if (side) selectSide(el, ctx, side.id);
+  } else {
+    const scroll = listing
+      ? el
+      : frame?.contentDocument?.getElementById("scroll");
+    if (scroll) scrollPane(scroll, command);
+  }
+  return true;
+}
+
 function paint(el: HTMLElement, ctx: PaneContext): void {
   const parent = ctx.agentId;
+  if (shownContext?.agentId !== parent) {
+    browsing = false;
+    filter = "";
+  }
+  shownContext = ctx;
+  const listing = browsing && !coarsePointer.matches;
+  const wasListing = el.classList.contains("side-browsing");
+  el.classList.toggle("side-browsing", listing);
   const sides = sidesOf(parent);
   const id = shownSide(parent);
   const title = (sid: string) =>
@@ -273,54 +411,65 @@ function paint(el: HTMLElement, ctx: PaneContext): void {
         >`;
   renderPowerbarControls(
     el,
-    html`${picker}
-      <button
-        type="button"
-        class="icon-btn side-rename-btn"
-        title="Rename side conversation"
-        aria-label="Rename side conversation"
-        ?disabled=${busy || !id || !!renaming}
-        @click=${() => {
-          renaming = id;
-          syncPanes();
-          el.closest(".pane-col")
-            ?.querySelector<HTMLInputElement>(".side-rename")
-            ?.select();
-        }}
-      >
-        ${unsafeHTML(PEN_ICON)}
-      </button>
-      <button
-        type="button"
-        class="icon-btn side-new"
-        title="New side conversation"
-        aria-label="New side conversation"
-        ?disabled=${busy}
-        @click=${() => void create(parent)}
-      >
-        ${unsafeHTML(NEW_ICON)}
-      </button>
-      <button
-        type="button"
-        class="icon-btn side-promote"
-        title="Promote to subagent"
-        aria-label="Promote to subagent"
-        ?disabled=${busy || !idle}
-        @click=${() => id && void promote(id)}
-      >
-        ${unsafeHTML(PROMOTE_ICON)}
-      </button>
-      <button
-        type="button"
-        class="icon-btn side-delete"
-        title="Delete side conversation"
-        aria-label="Delete side conversation"
-        ?disabled=${busy || !id}
-        @click=${() => id && void remove(parent, id)}
-      >
-        ${unsafeHTML(DELETE_ICON)}
-      </button>`,
-    true,
+    listing
+      ? nothing
+      : html`<button
+            type="button"
+            class="icon-btn side-browse-btn"
+            title="All side conversations"
+            aria-label="All side conversations"
+            ?disabled=${busy || !!renaming}
+            @click=${() => browse(el, ctx)}
+          >
+            ${unsafeHTML(BACK_ICON)}</button
+          >${picker}
+          <button
+            type="button"
+            class="icon-btn side-rename-btn"
+            title="Rename side conversation"
+            aria-label="Rename side conversation"
+            ?disabled=${busy || !id || !!renaming}
+            @click=${() => {
+              renaming = id;
+              syncPanes();
+              el.closest(".pane-col")
+                ?.querySelector<HTMLInputElement>(".side-rename")
+                ?.select();
+            }}
+          >
+            ${unsafeHTML(PEN_ICON)}
+          </button>
+          <button
+            type="button"
+            class="icon-btn side-new"
+            title="New side conversation"
+            aria-label="New side conversation"
+            ?disabled=${busy}
+            @click=${() => void create(parent)}
+          >
+            ${unsafeHTML(NEW_ICON)}
+          </button>
+          <button
+            type="button"
+            class="icon-btn side-promote"
+            title="Promote to subagent"
+            aria-label="Promote to subagent"
+            ?disabled=${busy || !idle}
+            @click=${() => id && void promote(id)}
+          >
+            ${unsafeHTML(PROMOTE_ICON)}
+          </button>
+          <button
+            type="button"
+            class="icon-btn side-delete"
+            title="Delete side conversation"
+            aria-label="Delete side conversation"
+            ?disabled=${busy || !id}
+            @click=${() => id && void remove(parent, id)}
+          >
+            ${unsafeHTML(DELETE_ICON)}
+          </button>`,
+    !listing,
   );
   let status = el.querySelector<HTMLElement>(".side-notice");
   if (!status) {
@@ -338,8 +487,56 @@ function paint(el: HTMLElement, ctx: PaneContext): void {
         : "");
   status.textContent = shownNotice;
   status.hidden = !shownNotice;
+  let list = el.querySelector<HTMLElement>(".side-list");
+  if (!list) {
+    list = document.createElement("div");
+    list.className = "side-list";
+    el.append(list);
+  }
+  const matches = sides.filter((side) =>
+    title(side.id).toLowerCase().includes(filter.trim().toLowerCase()),
+  );
+  render(
+    listing
+      ? html`<input
+            class="text-field side-filter"
+            type="search"
+            aria-label="Filter side conversations"
+            placeholder="Filter side conversations"
+            .value=${filter}
+            @input=${(event: Event) => {
+              filter = (event.target as HTMLInputElement).value;
+              paint(el, ctx);
+            }}
+            @keydown=${(event: KeyboardEvent) => {
+              if (event.key === "Enter" && !event.isComposing) {
+                event.preventDefault();
+                paneItem(el, ".side-list-item", "open")?.click();
+              }
+            }}
+          />${repeat(
+            matches,
+            (side) => side.id,
+            (side) =>
+              html`<button
+                class="btn side-list-item"
+                data-side=${side.id}
+                @click=${() => selectSide(el, ctx, side.id)}
+              >
+                ${title(side.id)}
+              </button>`,
+          )}${matches.length
+            ? nothing
+            : html`<p role="status">No side conversations match.</p>`}`
+      : nothing,
+    list,
+  );
   if (id) placeFrame(el, id, title(id));
-  else {
+  if (wasListing !== listing)
+    frame?.contentWindow?.dispatchEvent(
+      new Event("recurse:embedded-visibility"),
+    );
+  if (!id) {
     frame?.remove();
     frame = null;
   }
@@ -366,6 +563,17 @@ registerPane({
   id: PANE_ID,
   title: "Side conversations",
   icon: SIDE_ICON,
+  finder: {
+    kind: "sidechat",
+    items() {
+      const parent = state.selectedId;
+      return sidesOf(parent).map((side) => ({
+        key: side.id,
+        name: titles.get(side.id) || side.title || "New side conversation",
+        open: () => showSide(parent, side.id),
+      }));
+    },
+  },
   available: (ctx: PaneContext) =>
     !!ctx.node &&
     (sidesOf(ctx.agentId).length > 0 ||
@@ -374,5 +582,10 @@ registerPane({
     fetchPaneData(PANE_ID, agentId, () => warmFrame(agentId)),
   render: paint,
   refresh: paint,
-  leave: parkFrame,
+  navigate,
+  leave(el: HTMLElement) {
+    shownContext = null;
+    browsing = false;
+    parkFrame(el);
+  },
 });

@@ -1,4 +1,4 @@
-// Tag change notices share the focused conversation's coalesced SSE transport.
+// Tag and unread notices share the focused conversation's coalesced SSE.
 // One browser stream includes connected backends so HTTP/1 connection limits
 // cannot starve tree reads. Remote streams close during existing sleep pauses;
 // notifications precede durable metadata flushes.

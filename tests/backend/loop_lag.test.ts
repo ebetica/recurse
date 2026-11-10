@@ -40,8 +40,12 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
     while (performance.now() < until) {}
     return ["c1"];
   });
+  let publishedDuringBlock = false;
   const router = new Router();
   router.get("/api/block/{name}", async () => {
+    const state = (loopLag as unknown as { observer: { state: BigInt64Array } })
+      .observer.state;
+    const version = Atomics.load(state, 1);
     slowSpan("blocking_route", "c1", () => {
       for (let i = 0; i < 6; i++)
         slowSpan("view_projection", "abcdef012345", () => {
@@ -58,6 +62,7 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
       const until = performance.now() + 51;
       while (performance.now() < until) {}
     });
+    publishedDuringBlock = Atomics.load(state, 1) > version;
     return jsonResponse({ ok: true });
   });
   const log = logger("http", { write: () => {} });
@@ -69,8 +74,12 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
   });
   loopLag.start();
   try {
-    while ((loopLag as unknown as { samples: number[] }).samples.length === 0)
-      await Bun.sleep(5);
+    const observer = (
+      loopLag as unknown as {
+        observer: { state: BigInt64Array };
+      }
+    ).observer;
+    while (Atomics.load(observer.state, 3) === 0n) await Bun.sleep(5);
     const response = await fetch(`${server.url}/api/block/x`);
     expect(await response.json()).toEqual({ ok: true });
     while (
@@ -90,6 +99,8 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
   console.log(stalls[0]!.message);
   expect(stalls[0]!.message).toContain(" routes=/api/block/:name");
   expect(stalls[0]!.message).toContain(" conversations=c1");
+  expect(publishedDuringBlock).toBe(true);
+  expect(stalls[0]!.message).toMatch(/ observer_late_ms=\d+(?: |$)/);
   expect(stalls[0]!.message).not.toMatch(
     / (?:cpu_ms|main_cpu_ms|heap_mb|rss_mb)=/,
   );

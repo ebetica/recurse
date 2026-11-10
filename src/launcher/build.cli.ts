@@ -142,6 +142,7 @@ export async function buildFrontend(
         "build",
         "web/app.ts",
         "web/sidebar-worker.ts",
+        "web/document-preview.worker.ts",
         "--splitting",
         "--outdir",
         staging,

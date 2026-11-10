@@ -277,6 +277,7 @@ export function buildRow(
     // for one release.
     pinned: pyTruthy(conv.taken_over),
     replied_at: typeof conv.replied_at === "number" ? conv.replied_at : null,
+    unread: conv.unread === true,
     tags: conv.tags ?? {},
     restart_parked: pyTruthy(conv.restart_parked) && status === "interrupted",
     reap_deferred: pyTruthy(conv.reap_deferred),
@@ -330,7 +331,7 @@ export class TreeView {
 
   constructor(private readonly deps: TreeViewDeps) {}
 
-  /** Observe admitted tag changes before their durable flush completes. */
+  /** Observe admitted tag and unread changes before their durable flush. */
   subscribe(wake: () => void): () => void {
     this.listeners.add(wake);
     return () => this.listeners.delete(wake);
@@ -396,7 +397,11 @@ export class TreeView {
         }),
       );
       this.recomputeDerived();
-      if (previous && !isDeepStrictEqual(previous.tags, conv.tags ?? {}))
+      if (
+        previous &&
+        (previous.unread !== (conv.unread === true) ||
+          !isDeepStrictEqual(previous.tags, conv.tags ?? {}))
+      )
         this.changed();
       return this.rows.get(cid) ?? null;
     } catch (error) {

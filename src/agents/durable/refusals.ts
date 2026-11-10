@@ -1,7 +1,7 @@
 // Omit refused runs from later requests, retaining stored entries for the view.
 // Never omit system messages or compaction summaries, or edit in-flight input.
 // If a crash precedes the refusal's commit, restore before the next request.
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type {
   ContextEdit,
   EntryId,

@@ -28,6 +28,12 @@ open agent. On phones, asking a new agent closes Tips and keeps the new draft
 and its suggested prompt while the pane's Back step is removed. The prompt is
 never sent automatically.
 
+On desktop, `h` opens All tips and `/` opens its title filter. `j`/`k` and
+`gg`/`G` move a neutral cursor; `l`/Enter opens its tip. Moving the cursor does
+not mark a tip seen. Detail `j`/`k`, `d`/`u` and `gg`/`G` scroll without changing
+tips; `[`/`]` use Previous/Next. `y` copies the cursor tip's title and text, or
+the shown tip in detail. Phone controls and the unfiltered All tips remain native.
+
 ## Rules for changes
 
 - Check each tip against the code it describes, and keep its text in plain

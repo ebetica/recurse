@@ -21,10 +21,18 @@ type Waiting = PromiseWithResolvers<SearchValue> & {
 };
 type Connection = {
   cwd: string;
+  owner?: string;
   flags: FffFlags;
   child?: Child;
   opening?: Promise<SearchValue>;
+  find?: string;
+  users: number;
+  retiring?: boolean;
+  drained?: PromiseWithResolvers<void>;
 };
+export interface FileNameSearch {
+  paths: string[];
+}
 type Ownership = {
   own(proc: OwnedProcess): Promise<void>;
   release(proc: OwnedProcess): Promise<boolean>;
@@ -211,12 +219,21 @@ export class FffWorker {
     return this.send(child, request, signal, onUpdate);
   }
 
-  async open(cwd: string, flags: FffFlags = {}) {
+  async open(cwd: string, flags: FffFlags = {}, owner?: string) {
     const connection = this.nextConnection++;
     const tools = await this.request({ op: "open", connection, cwd, flags });
     if (!Array.isArray(tools))
       throw new Error("Search worker returned invalid tool definitions");
-    this.connections.set(connection, { cwd, flags, child: this.child });
+    this.connections.set(connection, {
+      cwd,
+      owner,
+      flags,
+      child: this.child,
+      users: 0,
+      find: tools.find(
+        (tool) => tool.name === "find" || tool.name === "fff_find",
+      )?.name,
+    });
     let closing: Promise<void> | undefined;
     const thisWorker = this;
     const definitions: FffDefinition[] = tools.map((tool) => ({
@@ -235,15 +252,67 @@ export class FffWorker {
     }));
     return {
       definitions,
+      connection,
       close: () =>
         (closing ??= (async () => {
           const state = this.connections.get(connection);
+          if (state) {
+            state.retiring = true;
+            if (state.users)
+              await (state.drained ??= Promise.withResolvers<void>()).promise;
+          }
           this.connections.delete(connection);
           if (this.shutdown) return this.shutdown;
           if (state?.child && state.child === this.child)
             await this.request({ op: "close", connection });
         })()),
     };
+  }
+
+  /** Run find unchanged, borrowing the conversation's existing connection. */
+  async fileNames(
+    owner: string,
+    cwd: string,
+    query: string,
+    signal: AbortSignal,
+  ): Promise<FileNameSearch> {
+    if (!query.trim()) return { paths: [] };
+    let selected = [...this.connections.entries()].find(
+      ([, state]) => state.owner === owner && state.find && !state.retiring,
+    )?.[0];
+    const temporary = selected === undefined ? await this.open(cwd) : undefined;
+    selected ??= temporary!.connection;
+    const connection = this.connections.get(selected);
+    if (!connection?.find || connection.retiring) {
+      await temporary?.close();
+      throw new Error("Search connection closed");
+    }
+    connection.users++;
+    try {
+      const value = await this.request(
+        {
+          op: "execute",
+          connection: selected,
+          cwd,
+          name: connection.find,
+          args: { pattern: query, limit: 50 },
+        },
+        signal,
+      );
+      if (!value || Array.isArray(value))
+        throw new Error("Invalid file search response");
+      const details = value.details as Record<string, unknown> | undefined;
+      if (!Array.isArray(details?.paths))
+        throw new Error("Invalid file search paths");
+      return {
+        paths: details.paths.filter(
+          (path): path is string => typeof path === "string",
+        ),
+      };
+    } finally {
+      if (--connection.users === 0) connection.drained?.resolve();
+      await temporary?.close();
+    }
   }
 
   /** Spawn the child and import pi-fff without loading its native library. */

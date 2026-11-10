@@ -15,7 +15,8 @@ import { constants } from "node:fs";
 import { dirname, join } from "node:path";
 import { setImmediate } from "node:timers/promises";
 import { BACKGROUND_CONTEXT as background } from "@earendil-works/chord/context";
-import type { Context, JsonValue } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
+import type { JsonValue } from "@earendil-works/chord/json";
 import type {
   Models,
   ModelThinkingLevel,

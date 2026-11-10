@@ -1,0 +1,261 @@
+/* Explorer owns its lazy tree, bounded file preview and filename results. */
+.pane-body[data-pane="explorer"] {
+  padding: 0;
+}
+.explorer {
+  min-width: 0;
+  font-size: 0.8125rem;
+}
+.explorer-row,
+.explorer-status,
+.explorer-more {
+  --explorer-indent: calc(var(--explorer-depth, 0) * 14px);
+}
+.explorer-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3) 0 var(--space-4);
+}
+.explorer-root {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 0.71875rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.explorer-head .icon-btn {
+  width: 28px;
+  height: 28px;
+}
+.explorer-head .icon-btn svg {
+  width: 15px;
+  height: 15px;
+}
+.explorer-controls {
+  padding: var(--space-2) var(--space-3);
+}
+.explorer-controls input {
+  width: 100%;
+  min-width: 0;
+  height: 30px;
+  padding: 0 var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+}
+.explorer-controls input:focus {
+  border-color: var(--accent);
+  outline: none;
+}
+.explorer-tree {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+.explorer > .explorer-tree {
+  padding: 0 var(--space-2) var(--space-4);
+}
+.explorer-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  width: 100%;
+  min-height: 24px;
+  padding: 0 var(--space-2) 0 calc(var(--space-2) + var(--explorer-indent));
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.explorer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.explorer-row:hover:not(:disabled),
+.explorer-result:hover {
+  background: var(--panel-2);
+}
+.explorer-row.ignored .explorer-name {
+  opacity: 0.5;
+}
+.explorer-row:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+.explorer-unavailable {
+  flex: none;
+  font-size: 0.6875rem;
+  color: var(--muted);
+}
+.explorer-twisty {
+  flex: none;
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  color: var(--muted);
+  transition: transform var(--motion-fast);
+}
+.explorer-twisty svg {
+  width: 14px;
+  height: 14px;
+  margin: auto;
+}
+.explorer-twisty.open {
+  transform: rotate(90deg);
+}
+#explorer-results {
+  padding: 0 var(--space-2) var(--space-4);
+}
+.explorer-result {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  min-height: 26px;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: start;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.explorer-result-folder {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted);
+}
+.explorer-result-name {
+  flex: none;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.explorer-result[aria-selected="true"] {
+  background: var(--panel-2);
+}
+.explorer-result mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 700;
+}
+.explorer-status {
+  padding: var(--space-2) var(--space-3) var(--space-2)
+    calc(var(--space-4) + var(--explorer-indent));
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.explorer-more {
+  margin: var(--space-2) var(--space-2) var(--space-2)
+    calc(var(--space-6) + var(--explorer-indent));
+}
+.explorer-filebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+}
+.explorer-filebar svg {
+  width: 16px;
+  height: 16px;
+}
+.explorer-modes {
+  display: flex;
+  gap: var(--space-1);
+}
+.explorer-modes [aria-pressed="true"] {
+  background: var(--panel-2);
+}
+.explorer-preview-mode .explorer-source-only {
+  display: none;
+}
+.explorer-filename {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.explorer-download {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  color: var(--text);
+}
+.explorer-source {
+  margin: 0;
+  padding: var(--space-4);
+  overflow: auto;
+  font: 0.75rem/1.6 var(--font-mono);
+  tab-size: 4;
+  color: var(--text);
+}
+.explorer .report-comments:not(:empty) {
+  margin: 0;
+  padding: var(--space-4);
+}
+.explorer .report-sendbar {
+  bottom: 0;
+  margin: 0;
+}
+.explorer:has(.report-sendbar.on) {
+  padding-bottom: 0;
+}
+@media (min-width: 701px) {
+  .file-tab .explorer-back {
+    display: none;
+  }
+  .explorer-row.pane-item-cursor,
+  .explorer-result.pane-item-cursor {
+    background: var(--panel-2);
+    outline: 1px solid var(--muted);
+    outline-offset: -1px;
+  }
+}
+@media (max-width: 700px) {
+  .explorer-row,
+  .explorer-result,
+  .explorer-download {
+    min-height: 44px;
+  }
+  .explorer-row,
+  .explorer-result {
+    font-size: 0.9375rem;
+  }
+  .explorer-controls input {
+    height: 44px;
+    font-size: 1rem;
+  }
+  .explorer-head .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .explorer {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

@@ -178,3 +178,51 @@ test("dataRootFlock queues in process, bounded, and nests under its token", () =
       await fd.close();
     }
   }));
+
+// Regression: #3259 slow lease preparation must still try an uncontended lock.
+test("slow preparation still tries the lifecycle lock", () =>
+  withRoot(async (root) => {
+    let now = 0;
+    const { guard } = lifecycle(root, { now: () => now });
+    const entered: string[] = [];
+    const preparing = guard.guardAsync(
+      "create",
+      "main",
+      async (_token, lease) => {
+        expect(lease).not.toBeNull();
+        entered.push("uncontended");
+      },
+      undefined,
+      { timeoutSeconds: 3 },
+    );
+    expect(guard.currentHolder()?.site).toBe("create");
+    now = 3.267;
+    await preparing;
+    expect(guard.currentHolder()).toBeNull();
+    const contender = lifecycle(root, { now: () => now });
+    await guard.guardAsync("real_holder", "main", async () => {
+      const blocked = contender.guard.guardAsync(
+        "create",
+        "blocked",
+        async () => {
+          entered.push("contended");
+        },
+        undefined,
+        { timeoutSeconds: 3 },
+      );
+      now += 3.267;
+      await expect(blocked).rejects.toThrow(TreeLifecycleBusy);
+      expect(
+        contender.lines.some(
+          (line) =>
+            line.message.includes("event=tree_lifecycle_lease_wait") &&
+            line.message.includes("outcome=busy"),
+        ),
+      ).toBe(true);
+      expect(contender.guard.currentHolder()).toBeNull();
+    });
+    await contender.guard.guardAsync("after_holder", "main", async () => {
+      entered.push("released");
+    });
+    expect(entered).toEqual(["uncontended", "released"]);
+  }));

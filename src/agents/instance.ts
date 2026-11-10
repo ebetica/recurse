@@ -442,7 +442,8 @@ export async function buildInstance(options: InstanceOptions) {
     loadConversation: async (cid) => conversations.load(cid),
     effectiveWorkdir: (conv) => conversations.effectiveWorkdir(conv),
     agentTempPath: (conv) => agentTemp.agentTempPath(conv),
-    listSkills: (o) => listSkills(roots.piAgent, o),
+    listSkills: (o) =>
+      listSkills(roots.piAgent, { ...o, home: config.env.HOME }),
   });
   prompts = new Prompts({
     displayName: config.displayName,
@@ -633,7 +634,12 @@ export async function buildInstance(options: InstanceOptions) {
       const { snapshotRecursePrompt } =
         await import("./durable/prompt_sections");
       const memory = await prompts.captureMemoryPrompt(conv);
-      const resources = await durable.promptResources(cwd, roots.piAgent, []);
+      const resources = await durable.promptResources(
+        cwd,
+        roots.piAgent,
+        [],
+        config.env.HOME,
+      );
       return snapshotRecursePrompt(
         prompts,
         conv,
@@ -698,6 +704,11 @@ export async function buildInstance(options: InstanceOptions) {
               durable.shells(child).active_count === 0,
           )
       ) {
+        await conversations.finishUnread(
+          cid,
+          report.key,
+          !notifications.hasViewer(cid),
+        );
         notifiedRuns.delete(cid);
         notifiedRuns.set(cid, report.key);
         if (notifiedRuns.size > 1000)

@@ -1,14 +1,37 @@
 import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
+import type { Page } from "playwright";
+import { renderThemeCss, themePalettes } from "../../src/themes";
 import {
   gotoRoot,
   mockConversation,
   postFixture,
   runBrowserTests,
   themeColors,
+  waitForLayout,
   type BrowserTest,
 } from "./common";
 import { idleConv, row, tree } from "./fixtures";
+
+async function assertTouchTarget(page: Page, selector: string) {
+  const hits = await page.locator(selector).evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return [-19, 19].flatMap((x) =>
+      [-19, 19].map((y) =>
+        element.contains(
+          element.ownerDocument.elementFromPoint(
+            box.x + box.width / 2 + x,
+            box.y + box.height / 2 + y,
+          ),
+        ),
+      ),
+    );
+  });
+  expect({ selector, hits }).toEqual({
+    selector,
+    hits: [true, true, true, true],
+  });
+}
 
 export const tests: BrowserTest[] = [
   // Regression: #2297 desktop actions must remain reachable without overflow. (also Feature #2310 viewport changes move actions between phone and desktop hosts.; #2363 parent navigation can replace rail buttons during box reads.)
@@ -51,13 +74,28 @@ export const tests: BrowserTest[] = [
       const actions = page.locator("#pane-rail > button");
       expect(
         await actions.evaluateAll((els) => els.map((el) => el.id)),
-      ).toEqual(["trash-btn", "takeover-btn", "share-link-btn"]);
+      ).toEqual(["takeover-btn", "share-link-btn"]);
+      expect(
+        await page
+          .locator("#agent-list-foot > button")
+          .evaluateAll((els) => els.map((el) => el.id)),
+      ).toEqual(["settings-btn", "trash-btn"]);
+      expect(
+        await page
+          .locator("#agent-list-foot")
+          .getByRole("button", { name: "Delete", exact: true })
+          .count(),
+      ).toBe(1);
+      expect(
+        await page.locator("#settings-btn .settings-label").isVisible(),
+      ).toBe(false);
+      expect(
+        await page.locator('#pane-rail [aria-label="Agents"]').count(),
+      ).toBe(0);
+      for (const selector of ["#settings-btn", "#trash-btn", "#takeover-btn"])
+        await assertTouchTarget(page, selector);
       const first = page.locator("#pane-rail [data-pane]").first();
       const childTop = (await first.boundingBox())!.y;
-      expect((await page.locator("#trash-btn").boundingBox())!.height).toBe(44);
-      expect((await page.locator("#takeover-btn").boundingBox())!.height).toBe(
-        44,
-      );
       expect(
         await page
           .locator("#pane-rail-panels")
@@ -70,6 +108,15 @@ export const tests: BrowserTest[] = [
         "armed",
       );
       expect(await page.locator(".hold-tip.on").isVisible()).toBe(true);
+      expect(
+        await page
+          .locator("#agent-list-foot")
+          .getByRole("button", {
+            name: "Confirm delete agent and descendants",
+            exact: true,
+          })
+          .count(),
+      ).toBe(1);
       await page.locator("#takeover-btn").click();
       await page.waitForFunction(
         () =>
@@ -94,10 +141,14 @@ export const tests: BrowserTest[] = [
       if ((await first.getAttribute("aria-expanded")) === "false")
         await first.click();
       await page.locator(`.pane-col[data-pane="${ids[0]}"] .pane-body`).focus();
-      let index = 0;
-      for (const key of ["j", "j", "k", "k"]) {
-        index = (index + (key === "j" ? 1 : -1) + ids.length) % ids.length;
-        await page.keyboard.press(key);
+      for (let index = 0; index < Math.min(9, ids.length); index++) {
+        expect(
+          await page
+            .locator(`#pane-rail [data-pane="${ids[index]}"]`)
+            .getAttribute("title"),
+        ).toContain(`(g${index + 1})`);
+        await page.keyboard.press("g");
+        await page.keyboard.press(String(index + 1));
         await page.waitForFunction(
           (id) =>
             (globalThis as any).document.activeElement?.closest(".pane-col")
@@ -110,23 +161,296 @@ export const tests: BrowserTest[] = [
               ?.dataset.pane,
         );
         expect(active).toBe(ids[index]);
+        if (ids[index] === "explorer") await page.keyboard.press("Escape");
         expect(
           await page.locator("#trash-btn").getAttribute("class"),
         ).not.toContain("armed");
       }
+      for (const key of ["j", "k"]) {
+        await page.keyboard.press(key);
+        expect(
+          await page.evaluate(
+            () =>
+              (globalThis as any).document.activeElement?.closest(".pane-col")
+                ?.dataset.pane,
+          ),
+        ).toBe(ids[Math.min(8, ids.length - 1)]);
+      }
+      await page.locator('.rail-btn[data-pane="report"]').click();
+      await page.waitForFunction(
+        () =>
+          (globalThis as any).document.activeElement?.closest(".pane-col")
+            ?.dataset.pane === "report",
+      );
+      await page.keyboard.press("o");
+      await page.locator("#pane-finder-query").fill("Files");
+      if (dir)
+        await page.screenshot({
+          path: `${dir}/${stage}-${width}-pane-finder.png`,
+        });
+      await page.keyboard.press("Enter");
+      await page.waitForFunction(
+        () =>
+          (globalThis as any).document.activeElement?.closest(".pane-col")
+            ?.dataset.pane === "files",
+      );
+      expect(await page.locator(".pane-col").count()).toBeGreaterThan(1);
+      const strip = page
+        .locator('#dock .dv-tab[data-dock-panel="files"]')
+        .locator("..");
+      expect(
+        await strip.evaluate((strip) => {
+          const bounds = strip.getBoundingClientRect();
+          const title = strip.querySelector(
+            ".dv-active-tab .dv-default-tab-content",
+          )!;
+          const pane = strip.ownerDocument.querySelector(
+            '.pane-col[data-pane="files"]',
+          )!;
+          return {
+            activeTitleFull: title.clientWidth >= title.scrollWidth,
+            emptyHeaderHeight: pane
+              .querySelector(".pane-head")!
+              .getBoundingClientRect().height,
+            windowActions: strip.ownerDocument.querySelectorAll(
+              '.dock-window-actions[data-dock-panel="files"] .fs',
+            ).length,
+            unfocusedFlashes: strip.ownerDocument.querySelectorAll(
+              "#dock .dock-flash:not(.dock-focused)",
+            ).length,
+            clippedTabs: Array.from(strip.children)
+              .filter((tab: any) => {
+                const box = tab.getBoundingClientRect();
+                return box.left < bounds.left || box.right > bounds.right;
+              })
+              .map((tab: any) => tab.getAttribute("data-dock-panel")),
+          };
+        }),
+      ).toEqual({
+        activeTitleFull: true,
+        emptyHeaderHeight: 0,
+        windowActions: 1,
+        unfocusedFlashes: 0,
+        clippedTabs: [],
+      });
+      await page.keyboard.press("Shift+H");
+      await page.locator("#sidebar").waitFor({ state: "hidden" });
+      await page.waitForFunction(() => {
+        const strip = (globalThis as any).document.querySelector(
+          '#dock .dv-tab[data-dock-panel="files"]',
+        )?.parentElement;
+        return (
+          strip &&
+          !strip.classList.contains("dock-compact") &&
+          Array.from(strip.querySelectorAll(".dv-default-tab-content")).every(
+            (title: any) => title.clientWidth >= title.scrollWidth,
+          )
+        );
+      });
+      if (dir)
+        await page.screenshot({ path: `${dir}/${stage}-1280-full-titles.png` });
+      await page.keyboard.press("Shift+H");
+      await page.locator("#sidebar").waitFor({ state: "visible" });
+      await page.waitForFunction(() =>
+        (globalThis as any).document
+          .querySelector('#dock .dv-tab[data-dock-panel="files"]')
+          ?.parentElement.classList.contains("dock-compact"),
+      );
+      expect(
+        await strip.locator(".dv-inactive-tab").evaluateAll((tabs) =>
+          tabs.map((tab) => ({
+            name: tab.getAttribute("aria-label"),
+            tooltip: tab
+              .querySelector(".dv-default-tab")!
+              .getAttribute("title"),
+            titleWidth: tab
+              .querySelector(".dv-default-tab-content")!
+              .getBoundingClientRect().width,
+          })),
+        ),
+      ).toEqual([
+        { name: "Artifacts", tooltip: "Artifacts", titleWidth: 0 },
+        { name: "Explorer", tooltip: "Explorer", titleWidth: 0 },
+      ]);
+      await page.setViewportSize({ width: 740, height: 915 });
+      await page.waitForFunction(() => {
+        const strip = (globalThis as any).document.querySelector(
+          '#dock .dv-tab[data-dock-panel="files"]',
+        )?.parentElement;
+        return strip && strip.scrollWidth > strip.clientWidth;
+      });
+      const stripBox = (await strip.boundingBox())!;
+      await page.mouse.move(
+        stripBox.x + stripBox.width / 2,
+        stripBox.y + stripBox.height / 2,
+      );
+      await page.mouse.wheel(0, 1000);
+      await page.waitForFunction(() => {
+        const tab = (globalThis as any).document.querySelector(
+          '#dock .dv-tab[data-dock-panel="explorer"]',
+        );
+        const strip = tab?.parentElement;
+        return (
+          strip?.scrollLeft > 0 &&
+          tab.getBoundingClientRect().right <=
+            strip.getBoundingClientRect().right
+        );
+      });
+      const scrolled = await strip.evaluate((node) => node.scrollLeft);
+      const panel = page.locator('.dock-panel[data-dock-panel="files"]');
+      const height = await panel.evaluate((node) => node.clientHeight);
+      await page.setViewportSize({ width: 740, height: 916 });
+      await page.waitForFunction(
+        (height) =>
+          (globalThis as any).document.querySelector(
+            '.dock-panel[data-dock-panel="files"]',
+          )?.clientHeight ===
+          height + 1,
+        height,
+      );
+      expect(await strip.evaluate((node) => node.scrollLeft)).toBe(scrolled);
+      await page.mouse.wheel(0, -1000);
+      await page.waitForFunction(() => {
+        const strip = (globalThis as any).document.querySelector(
+          '#dock .dv-tab[data-dock-panel="files"]',
+        )?.parentElement;
+        return strip?.scrollLeft === 0;
+      });
+      await page.setViewportSize({ width, height: 915 });
+      await page.waitForFunction(() => {
+        const strip = (globalThis as any).document.querySelector(
+          '#dock .dv-tab[data-dock-panel="files"]',
+        )?.parentElement;
+        if (!strip) return false;
+        const bounds = strip.getBoundingClientRect();
+        return Array.from(strip.children).every((tab: any) => {
+          const box = tab.getBoundingClientRect();
+          return box.left >= bounds.left && box.right <= bounds.right;
+        });
+      });
+      const fullscreen = page.locator(
+        '.dock-window-actions[data-dock-panel="files"] .fs',
+      );
+      const nativeFullscreen = await fullscreen.elementHandle();
+      await fullscreen.focus();
+      await page.keyboard.press("Escape");
+      expect(
+        await page.locator('.pane-col[data-pane="files"]').isVisible(),
+      ).toBe(true);
+      expect(
+        await page.evaluate(
+          () => !!(globalThis as any).document.activeElement?.closest(".agent"),
+        ),
+      ).toBe(true);
+      await fullscreen.focus();
+      await page.keyboard.press("Enter");
+      const fullPane = page.locator('.pane-col[data-pane="files"].fullscreen');
+      await fullPane.waitFor();
+      expect(
+        await fullPane
+          .getByRole("button", { name: "Exit fullscreen", exact: true })
+          .evaluate(
+            (button, original) => button === original,
+            nativeFullscreen,
+          ),
+      ).toBe(true);
+      expect(
+        await fullPane
+          .getByRole("button", { name: "Exit fullscreen", exact: true })
+          .evaluate((button) => button.ownerDocument.activeElement === button),
+      ).toBe(true);
+      await page.keyboard.press("Enter");
+      await fullscreen.waitFor({ state: "visible" });
+      expect(
+        await fullscreen.evaluate(
+          (button) =>
+            button.ownerDocument.activeElement === button &&
+            button.getAttribute("aria-pressed") === "false",
+        ),
+      ).toBe(true);
+      await page
+        .locator('#dock .dv-tab[data-dock-panel="report"] .dock-tab-icon')
+        .click();
+      expect(
+        await page
+          .locator('.dock-window-actions[data-dock-panel="report"] .fs')
+          .count(),
+      ).toBe(1);
+      expect(await fullscreen.count()).toBe(0);
+      await page
+        .locator('#dock .dv-tab[data-dock-panel="files"] .dock-tab-icon')
+        .click();
+      expect(
+        await fullscreen.evaluate(
+          (button, original) => button === original,
+          nativeFullscreen,
+        ),
+      ).toBe(true);
+      await page.mouse.move(640, 400);
+      if (dir)
+        await page.screenshot({ path: `${dir}/${stage}-desktop-windows.png` });
+      await page
+        .locator('#dock .dv-tab[data-dock-panel="report"] .dock-tab-icon')
+        .click();
+      await page
+        .locator('.dock-window-actions[data-dock-panel="report"] .fs')
+        .focus();
+      await page.keyboard.press("q");
+      await page
+        .locator('.pane-col[data-pane="report"]')
+        .waitFor({ state: "detached" });
+      expect(await page.locator('.pane-col[data-pane="files"]').count()).toBe(
+        1,
+      );
+      await fullscreen.focus();
       await page.setViewportSize({ width: 412, height: 915 });
       await page
         .locator("#pane-menu #trash-btn")
         .waitFor({ state: "attached" });
       expect(await page.locator("#pane-menu #trash-btn").count()).toBe(1);
+      expect(await page.locator(".pane-col").count()).toBe(1);
+      expect(await page.locator(".dock-window-actions").count()).toBe(0);
+      expect(
+        await page
+          .locator('.pane-col[data-pane="files"] .pane-head .fs')
+          .evaluate(
+            (button, original) => button === original,
+            nativeFullscreen,
+          ),
+      ).toBe(true);
+      expect(
+        await page.locator(".pane-col.mobile-active").getAttribute("data-pane"),
+      ).toBe("files");
+      if (dir)
+        await page.screenshot({ path: `${dir}/${stage}-phone-overlay.png` });
+      await page.locator(".pane-col.mobile-active .pane-head .x").click();
+      await page.locator("#panes").waitFor({ state: "hidden" });
+      expect(await page.locator("#main").isVisible()).toBeTrue();
       await page.setViewportSize({ width, height: 915 });
       await page
-        .locator("#pane-rail #trash-btn")
+        .locator("#agent-list-foot #trash-btn")
         .waitFor({ state: "attached" });
-      expect(await page.locator("#pane-rail #trash-btn").count()).toBe(1);
-      await page.locator("#up-top").click();
+      expect(await page.locator("#agent-list-foot #trash-btn").count()).toBe(1);
+      expect(await page.locator("#agent-list-foot #settings-btn").count()).toBe(
+        1,
+      );
+      const nodes = (await (
+        await page.request.get(`${base}api/tree`)
+      ).json()) as Array<{ id: string; parent: string | null }>;
+      const parent = nodes.find((node) => node.id === demo)?.parent;
+      if (!parent) throw new Error("Published fixture parent is missing");
+      await page.locator('#pane-rail [data-pane="files"]').click();
+      await fullscreen.focus();
+      await page.evaluate((id) => {
+        (globalThis as any).location.hash = `agent=${encodeURIComponent(id)}`;
+      }, parent);
       await page.locator("#takeover-btn.on").waitFor({ state: "hidden" });
       await page.locator('#pane-rail [data-pane="report"]').waitFor();
+      expect(
+        await page.evaluate(
+          () => !!(globalThis as any).document.activeElement?.closest(".agent"),
+        ),
+      ).toBe(true);
       const parentBox = await page.waitForFunction(() => {
         const button = (globalThis as any).document.querySelector(
           "#pane-rail [data-pane]",
@@ -139,9 +463,9 @@ export const tests: BrowserTest[] = [
       await parentBox.dispose();
       if (!parentGeometry) throw new Error("Parent rail button is not visible");
       expect(childTop - parentGeometry.y).toBe(44);
-      expect(await page.locator("#pane-rail #trash-btn").isVisible()).toBe(
-        true,
-      );
+      expect(
+        await page.locator("#agent-list-foot #trash-btn").isVisible(),
+      ).toBe(true);
       if (dir)
         await page.screenshot({
           path: `${dir}/${stage}-${width}-rail-root.png`,
@@ -233,26 +557,6 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator("#takeover-btn svg [stroke-dasharray]").count(),
       ).toBe(0);
-      expect(
-        await page.evaluate(() =>
-          [...(globalThis as any).document.querySelectorAll("#pane-menu > *")]
-            .filter((el: any) => el.getBoundingClientRect().height > 0)
-            .sort(
-              (a: any, b: any) =>
-                a.getBoundingClientRect().top - b.getBoundingClientRect().top,
-            )
-            .map((el: any) => {
-              const css = (globalThis as any).getComputedStyle(el);
-              return `${el.id} ${css.borderTopWidth} ${css.borderBottomWidth}`;
-            }),
-        ),
-      ).toEqual([
-        "trash-btn 0px 0px",
-        "takeover-btn 0px 0px",
-        "pane-menu-divider 1px 0px",
-        "share-link-btn 0px 0px",
-        "pane-menu-panels 1px 0px",
-      ]);
       parent = null;
       await page.reload();
       await page.locator("#conv-title").waitFor();
@@ -407,13 +711,29 @@ export const tests: BrowserTest[] = [
     );
     await context.close();
   },
+  // Regression: #3250 Phone menus paint above the header fade; #3233 header geometry waits for mounted desktop Chat.
   async function test_single_row_header(browser, base) {
     await postFixture(base, "seed-artifact-app?reader=long");
-    for (const width of [412, 1280]) {
+    for (const [width, height, theme] of [
+      [412, 915, "Material Dark"],
+      [412, 915, "GitHub Light"],
+      [390, 844, "Material Dark"],
+      [390, 844, "GitHub Light"],
+      [390, 280, "Material Dark"],
+      [390, 280, "GitHub Light"],
+      [1280, 900, "Material Dark"],
+    ] as const) {
       const context = await browser.newContext({
-        viewport: { width, height: width === 412 ? 915 : 900 },
-        hasTouch: width === 412,
-        isMobile: width === 412,
+        viewport: { width, height },
+        deviceScaleFactor: width === 412 ? 2.6 : 1,
+        hasTouch: width < 700,
+        isMobile: width < 700,
+        ...(width === 412
+          ? {
+              userAgent:
+                "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36",
+            }
+          : {}),
       });
       const page = await context.newPage();
       const title = "A conversation name long enough to truncate on a phone";
@@ -436,7 +756,10 @@ export const tests: BrowserTest[] = [
           row(
             "a1",
             "assistant",
-            "```text\n" + "horizontal content ".repeat(100) + "\n```",
+            "Header menu reading content.\n\n".repeat(50) +
+              "```text\n" +
+              "horizontal content ".repeat(100) +
+              "\n```",
           ),
         ]),
         title,
@@ -457,25 +780,32 @@ export const tests: BrowserTest[] = [
       });
       await gotoRoot(page, base);
       await page.locator("#conv-status.running").waitFor();
+      await page.evaluate(
+        (css) => {
+          (globalThis as any).document.querySelector("#theme").textContent =
+            css;
+        },
+        renderThemeCss(
+          themePalettes.find((palette) => palette.name === theme)!,
+        ),
+      );
       const shot = async (stage: string) => {
         const dir = process.env.RECURSE_SCREENSHOT_DIR;
         if (!dir) return;
         await mkdir(dir, { recursive: true });
         await page.screenshot({
-          path: `${dir}/${process.env.RECURSE_SCREENSHOT_STAGE || "after"}-${width}-${stage}.png`,
+          path: `${dir}/${process.env.RECURSE_SCREENSHOT_STAGE || "after"}-${width}x${height}-${theme.replaceAll(" ", "-")}-${stage}.png`,
         });
       };
+      if (width === 1280)
+        await page
+          .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
+          .waitFor();
+      await waitForLayout(page);
       const boxes = await Promise.all(
-        (width === 412
+        (width < 700
           ? ["#up-top", "#conv-status", "#conv-title"]
-          : [
-              "#menu-btn",
-              "#up-top",
-              "#conv-status",
-              "#conv-title",
-              "#chip-kids",
-              "#new-top",
-            ]
+          : ["#up-top", "#conv-status", "#conv-title", "#chip-kids", "#new-top"]
         ).map((id) => page.locator(id).boundingBox()),
       );
       const header = (await page.locator("#topbar").boundingBox())!;
@@ -490,7 +820,7 @@ export const tests: BrowserTest[] = [
         expect(boxes[i]!.x).toBeGreaterThanOrEqual(
           boxes[i - 1]!.x + boxes[i - 1]!.width,
         );
-      if (width === 412) {
+      if (width < 700) {
         expect(
           await page
             .locator("#conv-title")
@@ -498,23 +828,22 @@ export const tests: BrowserTest[] = [
         ).toBe(true);
       }
       for (const id of [
-        "#menu-btn",
         "#up-top",
         "#conv-title",
-        ...(width === 412 ? ["#pane-fab"] : ["#new-top"]),
-      ]) {
-        const box = (await page.locator(id).boundingBox())!;
-        expect(box.width).toBeGreaterThanOrEqual(44);
-        expect(box.height).toBeGreaterThanOrEqual(44);
-      }
+        ...(width < 700 ? ["#menu-btn", "#pane-fab"] : ["#new-top"]),
+      ])
+        await assertTouchTarget(page, id);
       await shot("closed");
       if (width === 1280) {
         expect(
           await page.locator("#menu-btn").getAttribute("aria-expanded"),
         ).toBe("true");
         const sidebarHeader = await page.locator("#brand").boundingBox();
-        await page.locator("#menu-btn").click();
+        expect(await page.locator("#menu-btn").isVisible()).toBe(false);
+        await page.locator("#input").blur();
+        await page.keyboard.press("Shift+H");
         expect(await page.locator("#sidebar").isVisible()).toBe(false);
+        await assertTouchTarget(page, "#menu-btn");
         expect(
           await page.locator("#menu-btn").getAttribute("aria-expanded"),
         ).toBe("false");
@@ -528,17 +857,73 @@ export const tests: BrowserTest[] = [
           await page.locator("#menu-btn").getAttribute("aria-expanded"),
         ).toBe("true");
         expect(await page.locator("#pane-fab").isVisible()).toBe(false);
-        expect(await page.locator("#pane-rail #trash-btn").isVisible()).toBe(
-          true,
-        );
+        expect(await page.locator("#menu-btn").isVisible()).toBe(false);
+        expect(
+          await page.locator("#agent-list-foot #trash-btn").isVisible(),
+        ).toBe(true);
         await context.close();
         continue;
       }
+      await page.locator("#scroll.content-above").waitFor();
+      if (width === 412)
+        await (
+          await context.newCDPSession(page)
+        ).send(
+          "Emulation.setSafeAreaInsetsOverride" as any,
+          {
+            insets: { top: 40, topMax: 40, bottom: 24, bottomMax: 24 },
+          } as any,
+        );
       await page.locator("#pane-fab").click();
+      expect(
+        await page.locator("#pane-menu.on").evaluate((menu) => {
+          const document = menu.ownerDocument;
+          const header = document.querySelector("#topbar")!;
+          const box = menu.getBoundingClientRect();
+          const more = document.querySelector("#pane-fab")!;
+          const button = more.getBoundingClientRect();
+          return {
+            moreHits: more.contains(
+              document.elementFromPoint(
+                button.left + button.width / 2,
+                button.top + button.height / 2,
+              ),
+            ),
+            nearRightEdge:
+              document.documentElement.clientWidth - box.right <= 16,
+            aboveHeader:
+              Number((globalThis as any).getComputedStyle(menu).zIndex) >
+              Number((globalThis as any).getComputedStyle(header).zIndex),
+            belowHeader: box.top >= header.getBoundingClientRect().bottom,
+            topEdgeHits: [
+              box.left + 12,
+              box.left + box.width / 2,
+              box.right - 12,
+            ].map((x) =>
+              menu.contains(document.elementFromPoint(x, box.top + 3)),
+            ),
+          };
+        }),
+      ).toEqual({
+        moreHits: true,
+        nearRightEdge: true,
+        aboveHeader: true,
+        belowHeader: true,
+        topEdgeHits: [true, true, true],
+      });
+      await assertTouchTarget(page, "#trash-btn");
+      const menuTop = (await page.locator("#pane-menu").boundingBox())!.y;
       const items = page.locator("#pane-menu .pane-menu-item:visible");
       const iconBoxes = [];
       for (const item of await items.all()) {
-        expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+        await item.scrollIntoViewIfNeeded();
+        const id = await item.getAttribute("id");
+        await assertTouchTarget(
+          page,
+          id
+            ? `#${id}`
+            : `#pane-menu [data-pane="${await item.getAttribute("data-pane")}"]`,
+        );
         const icon = item.locator("svg");
         expect(await icon.count()).toBe(1);
         expect(await icon.getAttribute("aria-hidden")).toBe("true");
@@ -549,6 +934,22 @@ export const tests: BrowserTest[] = [
         expect(box.height).toBe(16);
         expect(box.x).toBe(iconBoxes[0].x);
       }
+      if (height === 280) {
+        expect(
+          await page.locator("#pane-menu").evaluate((menu) => menu.scrollTop),
+        ).toBeGreaterThan(0);
+        expect((await page.locator("#pane-menu").boundingBox())!.y).toBe(
+          menuTop,
+        );
+        const menuBottom = await page
+          .locator("#pane-menu")
+          .evaluate((menu) => menu.getBoundingClientRect().bottom);
+        expect(menuBottom).toBeLessThanOrEqual(height);
+      }
+      await page.locator("#pane-fab").click();
+      await page.locator("#pane-menu").waitFor({ state: "hidden" });
+      await page.locator("#pane-fab").click();
+      await assertTouchTarget(page, "#trash-btn");
       const labels = await items.allTextContents();
       expect(labels.slice(0, 3).map((s) => s.trim())).toEqual([
         "Delete",

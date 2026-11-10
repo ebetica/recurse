@@ -2,11 +2,19 @@ import { afterEach, expect, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 import { lstat, readFile, writeFile } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
+import {
+  createModels,
+  fauxAssistantMessage,
+  fauxProvider,
+} from "@earendil-works/pi-ai";
 import * as artifacts from "../../src/artifacts";
 import { buildApp, WebLogSink, type App } from "../../src/web/app";
 import { tailscaleSocket, type RunningServer } from "../../src/server";
-import { appWorld } from "./web_app_support";
+import { retire } from "../../src/utils/trash";
+import { seedPiModelList } from "./pi_model_list_fixture";
+import { appWorld, PASSWORD } from "./web_app_support";
 
 const cleanup: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -455,4 +463,71 @@ test("creating from an attachment draft reuses the held title guard", async () =
   expect(response.status).toBe(200);
   const cid = String((await json(response)).id);
   expect(conversations.load(cid)!.attachment_draft).toBeUndefined();
+});
+
+// Regression: #3232 Deletion intent makes history unavailable, not an unhandled HTTP error.
+test("deleting conversations return unavailable history and retryable events", async () => {
+  const { root, env } = appWorld({ password: true });
+  cleanup.push(() => void retire(root, join(dirname(root), ".trash")));
+  seedPiModelList(join(root, "data", "config"));
+  const app = await compose(env);
+  const faux = fauxProvider({ tokensPerSecond: 20_000 });
+  faux.setResponses([fauxAssistantMessage("Deletion view reply.")]);
+  const models = createModels();
+  models.setProvider(faux.provider);
+  app.instance.durable.deps.models = models;
+  app.instance.durable.deps.settings = () => ["faux/faux-1", "off"];
+  const running = await app.serve({ port: 0, installSignals: false });
+  cleanup.push(() => running.close());
+  await until(async () => app.instance.lifecycle.readinessSnapshot().ready);
+  const cid = String(
+    (await app.instance.create.create({ title: "Deletion view" })).id,
+  );
+  const { conversation } = await app.instance.durable.open(cid);
+  await app.instance.delivery.deliver(cid, "Reply once.", {
+    origin: "operator",
+    messageId: "deleting-view-regression",
+  });
+  await conversation.waitForIdle(BACKGROUND_CONTEXT);
+  const login = await fetch(`${running.url}/login`, {
+    method: "POST",
+    redirect: "manual",
+    body: new URLSearchParams({ password: PASSWORD }),
+  });
+  expect(login.status).toBe(303);
+  const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
+  await login.arrayBuffer();
+  const get = (path: string) =>
+    fetch(`${running.url}/api/conversations/${path}`, {
+      headers: { cookie },
+    });
+  const before = await get(`${cid}/view`);
+  expect(before.status).toBe(200);
+  expect((await json(before)).blocks).toContainEqual(
+    expect.objectContaining({
+      role: "assistant",
+      text: "Deletion view reply.",
+    }),
+  );
+  expect(
+    await app.instance.reap.stampDeletionRequested(cid, null),
+  ).toMatchObject({
+    status: "deleting",
+  });
+  const view = await get(`${cid}/view`);
+  expect(view.status).toBe(200);
+  expect(await json(view)).toEqual({
+    status: "unavailable",
+    instance_id: null,
+    revision: 0,
+    blocks: [],
+    older: false,
+    newer: false,
+  });
+  const events = await get(`${cid}/events`);
+  expect(events.status).toBe(503);
+  await events.arrayBuffer();
+  const absent = await get("deleting-view-absent/view");
+  expect(absent.status).toBe(404);
+  await absent.arrayBuffer();
 });

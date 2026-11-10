@@ -1082,10 +1082,24 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         expect(await secondEye.getAttribute("aria-expanded")).toBe("true");
         await secondEye.click();
         expect(await boundaries.nth(0).locator(".turn-tool").count()).toBe(0);
-        await firstEye.evaluate((element) =>
-          element.scrollIntoView({ block: "center" }),
-        );
-        await waitForLayout(page);
+        const centerForReader = async (control: typeof firstEye) => {
+          const scroll = page.locator("#scroll");
+          await scroll.hover();
+          const previous = await scroll.evaluate(
+            (element) => element.scrollTop,
+          );
+          await page.mouse.wheel(0, previous > 0 ? -40 : 40);
+          await page.waitForFunction(
+            (top) => document.querySelector("#scroll").scrollTop !== top,
+            previous,
+          );
+          await waitForLayout(page);
+          await control.evaluate((element) =>
+            element.scrollIntoView({ block: "center" }),
+          );
+          await waitForLayout(page);
+        };
+        await centerForReader(firstEye);
         const beforeGroup = (await firstEye.boundingBox())!;
         if (shotDir)
           await page.screenshot({ path: `${shotDir}/${name}-closed.png` });
@@ -1114,10 +1128,7 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
           name: "Hide activity",
           exact: true,
         });
-        await rail.evaluate((element) =>
-          element.scrollIntoView({ block: "center" }),
-        );
-        await waitForLayout(page);
+        await centerForReader(rail);
         const railBox = (await rail.boundingBox())!;
         expect(railBox.y + railBox.height).toBeLessThan(
           (await marker.boundingBox())!.y,
@@ -1140,10 +1151,7 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         expect(await marker.isVisible()).toBeTrue();
 
         const latestEye = page.locator(".activity-group-toggle").last();
-        await latestEye.evaluate((element) =>
-          element.scrollIntoView({ block: "center" }),
-        );
-        await waitForLayout(page);
+        await centerForReader(latestEye);
         const before = await latestEye.boundingBox();
         expect(before).not.toBeNull();
         const beforeScroll = await page

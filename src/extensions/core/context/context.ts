@@ -1,7 +1,7 @@
 // Durable context keeps installed extension names and snapshots the Settings
 // cap at open; the model stays live. Only the host commits conversation
 // documents. Detached compaction notices outlive the compact tool.
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { Models } from "@earendil-works/pi-ai";
 import {

@@ -1030,7 +1030,7 @@ async function test_turn_footer_controls_keep_order_and_hover_guard(
   await context.close();
 }
 
-// Feature: #2424 reply controls share the reply line. (also #2503 inline footer centered the last text line and separated its buttons.; #2513 list/summary endings stranded a footer row and inflated wrapped lines.)
+// Regression: #3211 desktop window layout moved the reply after selection coordinates were measured.
 async function test_turn_footer_shares_reply_line(browser: any, base: string) {
   const measurements: any[] = [];
   for (const width of [412, 1280]) {
@@ -1163,6 +1163,12 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
       if (running) await page.locator("#live-bar .live-panel").waitFor();
       if (shape === "short" || shape === "running")
         await target.locator(".content > p").last().waitFor();
+      if (width === 1280) {
+        await page
+          .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
+          .waitFor();
+        await waitForLayout(page);
+      }
       const measure = () =>
         target.evaluate((block: any) => {
           const foot = block.querySelector(".turn-foot")!;

@@ -139,7 +139,7 @@ async function listFromPackageCopy(
 }
 
 test("Pi's model list still lists when its reasoning levels cannot be read", async () => {
-  const levels = (source: string) => ({ version: "1.5.0", source });
+  const levels = (source: string) => ({ version: "1.5.1", source });
   for (const [piAi, reason] of [
     [null, "pi_ai_unresolved"],
     [{ version: "0.98.0", source: "export const x = 1;" }, "pi_ai_unresolved"],

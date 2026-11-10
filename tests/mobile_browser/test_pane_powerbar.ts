@@ -13,7 +13,7 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
-  // Regression: #2300 phone pane bars reveal on scroll-up; #2861 pane menu actions dismiss their owning menu.
+  // Regression: #2300 phone pane bars reveal on scroll-up; #2861 pane menu actions dismiss their owning menu; #3197 containment uses one geometry snapshot after dock resize.
   async function test_pane_powerbar(browser, base) {
     const app = await postFixture(base, "seed-pane-reading");
     const fixture = app;
@@ -76,15 +76,33 @@ export const tests: BrowserTest[] = [
         }
         if (width === 1280)
           await page.locator("#panes").evaluate((node) => {
-            node.style.width = "330px";
+            node.style.width = "660px";
             node.style.flex = "none";
           });
-        const pane = page.locator(`.pane-col[data-pane="${id}"]`);
+        const panelId =
+          id === "files" && width === 1280
+            ? (await page
+                .locator(".pane-col.file-tab:visible")
+                .getAttribute("data-pane"))!
+            : id;
+        const paneSelector = `.pane-col[data-pane="${panelId}"]`;
+        const pane = page.locator(paneSelector);
         await pane.waitFor();
         if (id === "diff")
           await pane.locator(".diff-row.add").first().waitFor();
         else await pane.locator("h1").first().waitFor();
-        await waitForPaneTransition(page, `.pane-col[data-pane="${id}"]`);
+        if (width === 1280)
+          await page.waitForFunction(() => {
+            const document = (globalThis as any).document;
+            const panes = document.querySelector("#panes");
+            const dock = document.querySelector("#dock");
+            const grid = dock?.querySelector(".dv-grid-view");
+            return (
+              panes?.clientWidth === 660 &&
+              grid?.style.width === `${dock.clientWidth}px`
+            );
+          });
+        await waitForPaneTransition(page, paneSelector);
         const screenshot = async (stage: string) => {
           const dir = process.env.RECURSE_SCREENSHOT_DIR;
           if (!dir) return;
@@ -95,33 +113,65 @@ export const tests: BrowserTest[] = [
         const bar = pane.locator(".pane-powerbar");
         expect(await bar.count()).toBe(1);
         expect(await pane.locator(".pane-top-controls").count()).toBe(0);
-        expect(await bar.getByRole("button", { name: /^Close / }).count()).toBe(
-          1,
-        );
+        const closeHost =
+          width === 412
+            ? bar
+            : page.locator(`#dock .dv-tab[data-dock-panel="${panelId}"]`);
+        expect(
+          await closeHost.getByRole("button", { name: /^Close / }).count(),
+        ).toBe(1);
+        if (id === "report") {
+          const browse = bar.getByRole("button", {
+            name: "All artifacts",
+            exact: true,
+            includeHidden: true,
+          });
+          expect(await browse.count()).toBe(1);
+          expect(await browse.isVisible()).toBe(width === 1280);
+        }
         const controls =
           id === "report"
-            ? ".artifact-title-select, .artifact-icon-btn"
+            ? width === 412
+              ? ".artifact-title-select, .artifact-icon-btn:not(.artifact-browse-btn)"
+              : ".artifact-title-select, .artifact-icon-btn"
             : id === "files"
-              ? ".files-back, .files-actions .artifact-icon-btn, .pane-powerbar-overflow > summary"
+              ? `${width === 412 ? ".files-back, " : ""}.files-actions .icon-btn, .pane-powerbar-overflow > summary`
               : ".diff-base-btn, .pane-powerbar-overflow > summary";
-        const boxes = await bar
-          .locator(controls + ", .x")
-          .evaluateAll((nodes) =>
-            nodes.map((node) => {
+        await page.waitForFunction(
+          ([selector, paneSelector]) => {
+            const bar = (globalThis as any).document.querySelector(
+              `${paneSelector} .pane-powerbar`,
+            );
+            const bounds = bar.getBoundingClientRect();
+            return [...bar.querySelectorAll(selector)].every((control: any) => {
+              const rect = control.getBoundingClientRect();
+              return rect.left >= bounds.left && rect.right <= bounds.right;
+            });
+          },
+          [controls, paneSelector] as const,
+        );
+        const { boxes, bounds, paneBox } = await bar.evaluate(
+          (bar, selector) => ({
+            boxes: [...bar.querySelectorAll(selector)].map((node) => {
               const rect = node.getBoundingClientRect();
               return {
                 top: rect.top,
                 bottom: rect.bottom,
                 left: rect.left,
                 right: rect.right,
-                height: rect.height,
-                width: rect.width,
+                touchCornersHit: [rect.left + 8, rect.right - 8].every((x) =>
+                  [rect.top + 8, rect.bottom - 8].every((y) =>
+                    node.contains(node.ownerDocument.elementFromPoint(x, y)),
+                  ),
+                ),
               };
             }),
-          );
+            bounds: bar.getBoundingClientRect().toJSON(),
+            paneBox: bar.closest(".pane-col")!.getBoundingClientRect().toJSON(),
+          }),
+          controls + (width === 412 ? ", .x" : ""),
+        );
         expect(boxes.length).toBeGreaterThan(1);
-        const bounds = (await bar.boundingBox())!;
-        const paneBox = (await pane.boundingBox())!;
         for (const box of boxes) {
           expect(box.top).toBeGreaterThanOrEqual(bounds.y);
           expect(box.bottom).toBeLessThanOrEqual(bounds.y + bounds.height);
@@ -129,10 +179,7 @@ export const tests: BrowserTest[] = [
           expect(box.right).toBeLessThanOrEqual(bounds.x + bounds.width);
           expect(box.left).toBeGreaterThanOrEqual(paneBox.x);
           expect(box.right).toBeLessThanOrEqual(paneBox.x + paneBox.width);
-          if (width === 412) {
-            expect(box.height).toBeGreaterThanOrEqual(44);
-            expect(box.width).toBeGreaterThanOrEqual(44);
-          }
+          if (width === 412) expect(box.touchCornersHit).toBe(true);
         }
         const first = pane
           .locator(id === "diff" ? ".diff-file-head" : "h1")
@@ -143,10 +190,10 @@ export const tests: BrowserTest[] = [
         );
         const scrollerSelector =
           width === 412
-            ? `.pane-col[data-pane="${id}"]`
+            ? paneSelector
             : id === "diff"
               ? ".diff-list"
-              : `.pane-col[data-pane="${id}"] .pane-body`;
+              : `${paneSelector} .pane-body`;
         const scroller =
           width === 412
             ? pane
@@ -157,20 +204,12 @@ export const tests: BrowserTest[] = [
           await scroller.evaluate((node) => {
             node.scrollTop = 24;
           });
-          await waitForPaneScroll(
-            page,
-            scrollerSelector,
-            `.pane-col[data-pane="${id}"]`,
-          );
+          await waitForPaneScroll(page, scrollerSelector, paneSelector);
         }
         await scroller.evaluate((node) => {
           node.scrollTop = 600;
         });
-        await waitForPaneScroll(
-          page,
-          scrollerSelector,
-          `.pane-col[data-pane="${id}"]`,
-        );
+        await waitForPaneScroll(page, scrollerSelector, paneSelector);
         await screenshot("down");
         const down = (await bar.boundingBox())!;
         expect(
@@ -179,11 +218,7 @@ export const tests: BrowserTest[] = [
         await scroller.evaluate((node) => {
           node.scrollTop = 560;
         });
-        await waitForPaneScroll(
-          page,
-          scrollerSelector,
-          `.pane-col[data-pane="${id}"]`,
-        );
+        await waitForPaneScroll(page, scrollerSelector, paneSelector);
         await screenshot("up");
         if (width === 412) {
           const appBar = (await page.locator("#topbar").boundingBox())!;
@@ -197,11 +232,7 @@ export const tests: BrowserTest[] = [
           await scroller.evaluate((node) => {
             node.scrollTop = 600;
           });
-          await waitForPaneScroll(
-            page,
-            scrollerSelector,
-            `.pane-col[data-pane="${id}"]`,
-          );
+          await waitForPaneScroll(page, scrollerSelector, paneSelector);
           expect(
             (await bar.boundingBox())!.y + powerbar.height,
           ).toBeLessThanOrEqual(0);
@@ -214,11 +245,7 @@ export const tests: BrowserTest[] = [
         await scroller.evaluate((node) => {
           node.scrollTop = 0;
         });
-        await waitForPaneScroll(
-          page,
-          scrollerSelector,
-          `.pane-col[data-pane="${id}"]`,
-        );
+        await waitForPaneScroll(page, scrollerSelector, paneSelector);
         const top = (await bar.boundingBox())!;
         expect((await first.boundingBox())!.y).toBeGreaterThanOrEqual(
           top.y + top.height,
@@ -257,12 +284,23 @@ export const tests: BrowserTest[] = [
               .evaluateAll((options) => options.map((option) => option.value));
             await version.selectOption(versions[versions.length - 1]);
             expect(await bar.locator("details[open]").count()).toBe(0);
+            if (width === 1280)
+              await page
+                .locator(`.dv-tab[data-dock-panel="${panelId}"]`)
+                .click();
             await summary[act]();
             await version.focus();
             if (width === 412)
               expect(
-                (await version.boundingBox())!.height,
-              ).toBeGreaterThanOrEqual(44);
+                await version.evaluate((node) => {
+                  const rect = node.getBoundingClientRect();
+                  return [rect.left + 8, rect.right - 8].every((x) =>
+                    [rect.top + 8, rect.bottom - 8].every((y) =>
+                      node.contains(node.ownerDocument.elementFromPoint(x, y)),
+                    ),
+                  );
+                }),
+              ).toBe(true);
           }
           await page.keyboard.press("Escape");
           expect(await pane.isVisible()).toBe(true);
@@ -280,11 +318,18 @@ export const tests: BrowserTest[] = [
             node.scrollTop = 300;
           });
           await page.keyboard.press("Escape");
-        } else await bar.getByRole("button", { name: /^Close / })[act]();
+        } else if (id === "files")
+          await page.locator('.dv-tab[data-dock-panel="chat"]').click();
+        else await closeHost.getByRole("button", { name: /^Close / })[act]();
         if (width === 412) {
           await page.locator("#pane-fab").tap();
           await page.locator(`.pane-menu-item[data-pane="${id}"]`).tap();
-        } else await page.locator(`.rail-btn[data-pane="${id}"]`).click();
+        } else if (id === "files")
+          await page
+            .getByRole("button", { name: "Open reading.md in Files" })
+            .first()
+            .click();
+        else await page.locator(`.rail-btn[data-pane="${id}"]`).click();
         await pane.waitFor();
         expect(await bar.count()).toBe(1);
         if (width === 412) {
@@ -342,7 +387,10 @@ export const tests: BrowserTest[] = [
         String((globalThis as any).document.activeElement?.id),
       ),
     ).toBe("pane-title-report");
-    const close = pane.getByRole("button", { name: "Close Artifacts" });
+    const close = page.getByRole("button", {
+      name: "Close Artifacts",
+      exact: true,
+    });
     expect(
       await close.evaluate((node) => node.closest("[inert]") === null),
     ).toBe(true);

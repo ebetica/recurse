@@ -55,9 +55,14 @@ export const tests: BrowserTest[] = [
     await viewer
       .getByRole("button", { name: "Open in Files", exact: true })
       .click();
-    await pane.locator(".files-detail").waitFor();
-    await pane.getByRole("button", { name: "All files", exact: true }).click();
+    const file = page.locator(".pane-col.file-tab:visible");
+    await file.locator(".files-detail").waitFor();
+    if (!(await pane.isVisible()))
+      await page.locator('.rail-btn[data-pane="files"]').click();
     await pane.locator(".files-thumb").first().click();
+    await file.locator(".files-image").evaluate((image: any) => image.decode());
+    await page.locator('.dv-tab[data-dock-panel="chat"]').click();
+    await page.locator("#messages .agent-attachment-preview").first().click();
     await viewer
       .locator(".files-image")
       .evaluate((image: any) => image.decode());
@@ -67,13 +72,18 @@ export const tests: BrowserTest[] = [
     await page.mouse.wheel(0, -70);
     await page.keyboard.up("Control");
     await page.waitForFunction(
-      "new DOMMatrix(getComputedStyle(document.querySelector('.files-image-frame')).transform).a > 1.5",
+      "new DOMMatrix(getComputedStyle(document.querySelector('.image-popout .files-image-frame')).transform).a > 1.5",
     );
     const url = page.url();
     await page.keyboard.press("Escape");
     await viewer.waitFor({ state: "detached" });
     expect(page.url()).toBe(url);
     await page.setViewportSize({ width: 320, height: 844 });
+    await page.locator("#dock").waitFor({ state: "detached" });
+    if (!(await pane.isVisible()))
+      await page
+        .getByRole("button", { name: "All files", exact: true })
+        .click();
     await pane.locator(".files-thumb").first().click();
     await viewer
       .getByRole("button", { name: "Close image", exact: true })

@@ -25,7 +25,9 @@ The CLI and Settings update paths run the checkout's installer. The supervisor
 then builds and validates the new generation before replacing the server.
 Failed builds leave the last good frontend and server available. Old process
 groups must be gone before restart. [frontend_assets.ts](frontend_assets.ts)
-copies the browser assets used by both package and staged builds.
+copies the browser assets used by both package and staged builds. Both builds
+include the document conversion worker and notebookjs's browser-only asset;
+format libraries remain separate lazy chunks.
 
 ## File ownership
 

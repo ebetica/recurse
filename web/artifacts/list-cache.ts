@@ -1,6 +1,7 @@
 // Artifacts-pane list cache. This module owns fetching and invalidating the
 // per-agent artifact list, including the stale-selection retry and the
-// out-of-band rediscovery bound.
+// out-of-band rediscovery bound. Closed-list completion updates availability
+// for the visible selected conversation without waiting for its next poll.
 import {
   backendFor,
   parseConversationId,
@@ -13,7 +14,8 @@ import {
   shouldPreserveArtifactView,
   stableArtifactView,
 } from "./pane-state.js";
-import { fetchPaneData } from "../panes.js";
+import { fetchPaneData, syncPanes } from "../panes.js";
+import { phoneListEntry } from "../phone-nav.js";
 import { renderShell } from "./pane.js";
 import { showArtifact } from "./artifact-detail.js";
 import { DRAFT, state } from "../state.js";
@@ -156,6 +158,14 @@ export async function refreshList(
         renderShell(artifactMount.current);
         void showArtifact(artifactMount.current);
       }
+      if (
+        !controller.signal.aborted &&
+        artifactMount.current?._rs.agentId !== agentId &&
+        state.selectedId === agentId &&
+        !document.hidden &&
+        !phoneListEntry()
+      )
+        syncPanes();
     }
   })();
   cache.pending = pending;

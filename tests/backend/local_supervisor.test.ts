@@ -478,10 +478,21 @@ function fakeVendorAssets(root: string): void {
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(join(ROOT, "web", name), target);
   }
+  const dock = join(root, "node_modules/dockview/dist/styles");
+  mkdirSync(dock, { recursive: true });
+  copyFileSync(
+    join(ROOT, "node_modules/dockview/dist/styles/dockview.css"),
+    join(dock, "dockview.css"),
+  );
   const dist = join(root, "node_modules/katex/dist");
   mkdirSync(join(dist, "fonts"), { recursive: true });
   writeFileSync(join(dist, "katex.min.css"), ".katex {}");
   writeFileSync(join(dist, "fonts/KaTeX_Main-Regular.woff2"), "font");
+  mkdirSync(join(root, "node_modules/notebookjs"));
+  copyFileSync(
+    join(ROOT, "node_modules/notebookjs/notebook.min.js"),
+    join(root, "node_modules/notebookjs/notebook.min.js"),
+  );
   const pdfjs = join(root, "node_modules/pdfjs-dist");
   mkdirSync(join(pdfjs, "legacy/build"), { recursive: true });
   writeFileSync(join(pdfjs, "legacy/build/pdf.worker.min.mjs"), "worker");
@@ -534,6 +545,9 @@ test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
   const builtCss = readFileSync(join(root, "web/dist/app.css"), "utf8");
   expect(builtCss).not.toContain("@import");
   expect(builtCss).toBe(styles.join(""));
+  const dockCss = readFileSync(join(root, "web/dist/dockview.css"), "utf8");
+  expect(dockCss).toContain(".dv-dockview");
+  expect(dockCss).toContain("#dock .dockview-theme-abyss-spaced");
   expect(readFileSync(join(root, "web/dist/katex.css"), "utf8")).toBe(
     ".katex {}",
   );

@@ -8,6 +8,7 @@ import { rowThreads } from "./row-thread-state.js";
 import { startBackendDiscovery } from "./backends/discovery.js";
 import { backends } from "./backends/backend.js";
 import { treeOf } from "./backends/tree.js";
+import { keepSubagentsOpen } from "./sidebar/agent-folds.js";
 import {
   state,
   chordLabel,
@@ -35,7 +36,8 @@ startMainThreadTiming(
 startBackendDiscovery();
 import { openEffortMenu } from "./models.js";
 import { closePowerbarOverflow } from "./panes/powerbar.js";
-import type { TreeNode } from "./types.js";
+import type { PaneNavigation, TreeNode } from "./types.js";
+import type { WindowCommand } from "./dock/commands.js";
 import { $, inputEl } from "./dom.js";
 import {
   insertTextAtSelection,
@@ -50,6 +52,8 @@ import {
 import { installKeyboardModeController } from "./modal-mode.js";
 import {
   SHORTCUT_GROUPS,
+  G_BINDINGS,
+  WINDOW_BINDINGS,
   adjacentCursor,
   formatShortcutKey,
   initialKeymapState,
@@ -116,11 +120,14 @@ import { closePrompt, promptOpen } from "./prompt.js";
 import {
   closePaneKeyboardLayer,
   paneKeyboardLayerOpen,
+  hasFullscreenPane,
   paneActionable,
-  togglePaneFromKeyboard,
-  focusPaneFromKeyboard,
+  paneForTarget,
+  openPaneByIndex,
+  scrollFocusedPane,
+  runWindowCommand,
   closeFocusedPaneFromKeyboard,
-  switchPane,
+  navigateFocusedPane,
   toggleFocusedPaneFullscreen,
 } from "./panes.js";
 import {
@@ -145,13 +152,20 @@ import {
   configureAgentFinderNavigation,
   openAgentFinderNavigate,
 } from "./agent-finder/ui.js";
+import {
+  openPaneFinder,
+  closePaneFinder,
+  paneFinderOpen,
+} from "./pane-finder.js";
 import "./resize.js";
 import {
   artifactVersionMenuOpen,
   closeArtifactVersionMenuKeyboardLayer,
 } from "./artifacts/pane.js";
 import { openPullRequestFinder } from "./diff.js";
+import { relaySideKey } from "./side-pane.js";
 import { closeImageFromKeyboard } from "./files.js";
+import { explorerSearchOwnsKey } from "./explorer.js";
 import {
   closeSelectionCommentFromKeyboard,
   hasStagedCommentsIn,
@@ -183,7 +197,8 @@ function syncMobileShellHeight(): void {
 }
 if (topbarEl) {
   const resizeObserver = new ResizeObserver(syncMobileShellHeight);
-  resizeObserver.observe(topbarEl);
+  // Invariant: Safe-area insets change only padding; watch the border box.
+  resizeObserver.observe(topbarEl, { box: "border-box" });
   syncMobileShellHeight();
 }
 
@@ -200,11 +215,21 @@ let keyTimer = 0;
 // Detached optional chrome keeps mixed-generation shells able to boot polling.
 const modeEl = $("#key-mode") ?? document.createElement("span");
 const topActionsEl = $("#top-actions") ?? document.createElement("div");
+const windowKeysEl = document.createElement("div");
+windowKeysEl.id = "window-key-hints";
+windowKeysEl.setAttribute("role", "note");
+windowKeysEl.setAttribute("aria-label", "Window shortcuts");
+windowKeysEl.hidden = true;
+document.body.append(windowKeysEl);
 
 function paintKeyState(): void {
   const label = keymapModeLabel(keyState);
   modeEl.textContent = label;
-  modeEl.classList.toggle("pending", keyState.mode === "t-prefix");
+  modeEl.style.display = keyState.mode === "dialog" ? "none" : "";
+  modeEl.classList.toggle(
+    "pending",
+    ["t-prefix", "g-prefix", "w-prefix"].includes(keyState.mode),
+  );
   modeEl.classList.toggle(
     "danger",
     keyState.mode === "delete-pending" || keyState.mode === "interrupt-pending",
@@ -215,6 +240,24 @@ function paintKeyState(): void {
   );
   topActionsEl.classList.toggle("prefix-on", keyState.mode === "t-prefix");
   topActionsEl.setAttribute("aria-label", "Agent actions");
+  const bindings =
+    keyState.mode === "g-prefix"
+      ? G_BINDINGS
+      : keyState.mode === "w-prefix"
+        ? WINDOW_BINDINGS
+        : [];
+  windowKeysEl.hidden = !bindings.length;
+  windowKeysEl.replaceChildren(
+    ...bindings.map(({ keys, description }) => {
+      const item = document.createElement("div");
+      const key = document.createElement("kbd");
+      key.textContent = keys[0] || "";
+      const text = document.createElement("span");
+      text.textContent = description;
+      item.append(key, text);
+      return item;
+    }),
+  );
 }
 
 function setKeyState(next: KeymapState): void {
@@ -240,6 +283,7 @@ installKeyboardModeController((mode) => setKeyState(initialKeymapState(mode)));
 
 function flashKeyStatus(text: string): void {
   modeEl.textContent = text;
+  modeEl.style.display = "";
   setTimeout(() => paintKeyState(), 900);
 }
 window.addEventListener(UI_STATUS_EVENT, (event) => {
@@ -260,6 +304,7 @@ function localLayerOpen(): boolean {
     paneKeyboardLayerOpen() ||
     skillAutocompleteOpen() ||
     agentFinderOpen() ||
+    paneFinderOpen() ||
     drawingEditorOpen() ||
     shellSurfaceOpen() ||
     agentSurfaceOpen()
@@ -279,6 +324,7 @@ function closeLocalLayer(): void {
     closeShellSurface() ||
     closeAgentSurface();
   if (!closed) closed = closeWorkingActivity();
+  if (!closed && paneFinderOpen()) closed = closePaneFinder();
   if (!closed && agentFinderOpen()) closed = closeAgentFinder();
   if (!closed && skillAutocompleteOpen()) closeSkillAutocomplete();
   // Invariant: Preserve focus restored by a closer; blur only if the same local
@@ -292,20 +338,19 @@ function keyTarget(target: EventTarget | null): KeyTarget {
   const element = target as HTMLElement | null;
   const textEditor =
     isTextEditorTarget(target) || isTextEditorTarget(document.activeElement);
-  const insidePane = !!element?.closest?.("#panes");
-  return classifyKeyTarget({
+  const insidePane = !!paneForTarget(target);
+  const kind = classifyKeyTarget({
     composer: element === inputEl,
     rename: !!element?.closest?.(".rename-input"),
-    finder: !!element?.closest?.("[data-agent-finder]"),
+    finder: !!element?.closest?.("[data-agent-finder], [data-pane-finder]"),
     insidePane,
     textEditor,
     interactiveControl: !!element?.closest?.(
       "button, a[href], summary, [role='button']",
     ),
-    // Invariant: Fullscreen/mobile changes a pane's ARIA layer, not its
-    // keyboard contract: o still toggles it and pane editors must retain
-    // native input. The pane menu remains a local dialog because it is outside
-    // #panes.
+    // Invariant: Phone overlays change ARIA, not the pane keyboard contract;
+    // desktop fullscreen is only a layout. Pane editors retain native input.
+    // The pane menu remains a local dialog because it is outside #panes.
     modalLayer:
       settingsOpen() ||
       promptOpen() ||
@@ -315,6 +360,9 @@ function keyTarget(target: EventTarget | null): KeyTarget {
         !element?.closest?.("#scroll, #sidebar")) ||
       (!insidePane && isDialogTarget(target)),
   });
+  return kind === "control" && element?.closest?.("#main, [data-dock-panel]")
+    ? "window-control"
+    : kind;
 }
 
 function hasTextSelection(target: EventTarget | null): boolean {
@@ -324,7 +372,10 @@ function hasTextSelection(target: EventTarget | null): boolean {
     (control.tagName === "INPUT" || control.tagName === "TEXTAREA")
   )
     return control.selectionStart !== control.selectionEnd;
-  const selection = getSelection();
+  const selection =
+    target instanceof HTMLIFrameElement && target.matches("iframe.side-frame")
+      ? target.contentDocument?.getSelection()
+      : getSelection();
   return !!selection && !selection.isCollapsed;
 }
 
@@ -335,7 +386,7 @@ function keyContext(
   // Invariant: Activity buttons keep focus after a tap without blocking thread
   // shortcuts. Enter and Space still activate the focused button natively.
   if (
-    target === "control" &&
+    (target === "control" || target === "window-control") &&
     event.key !== "Enter" &&
     event.key !== " " &&
     (event.target as HTMLElement | null)?.closest?.(
@@ -376,6 +427,7 @@ function openCursor(): void {
   if (treeExpandIfCollapsed()) return;
   if (!state.nodes[state.cursorId]) return;
   if (state.cursorId !== state.selectedId && !guardLeaveComments()) return;
+  keepSubagentsOpen(state.cursorId);
   selectAgent(state.cursorId);
 }
 
@@ -401,6 +453,11 @@ async function toggleCursorTakeover(): Promise<void> {
 }
 
 function execute(command: KeyCommand | null): void {
+  if (command?.startsWith("window-")) {
+    if (!runWindowCommand(command.slice(7) as WindowCommand))
+      setKeyState(initialKeymapState());
+    return;
+  }
   if (
     state.selectedId.includes("/") &&
     command &&
@@ -435,6 +492,8 @@ function execute(command: KeyCommand | null): void {
       break;
     }
     case "compose":
+      if (hasFullscreenPane() || paneKeyboardLayerOpen())
+        closePaneKeyboardLayer();
       if (!focusComposerAtEnd()) setKeyState(initialKeymapState());
       break;
     case "find-agent":
@@ -455,17 +514,39 @@ function execute(command: KeyCommand | null): void {
     case "find-pull-request":
       openPullRequestFinder();
       break;
-    case "toggle-pane":
-      togglePaneFromKeyboard();
+    case "open-pane-finder":
+      openPaneFinder();
       break;
-    case "focus-pane":
-      focusPaneFromKeyboard();
+    case "pane-1":
+    case "pane-2":
+    case "pane-3":
+    case "pane-4":
+    case "pane-5":
+    case "pane-6":
+    case "pane-7":
+    case "pane-8":
+    case "pane-9":
+      openPaneByIndex(Number(command.slice(5)));
+      break;
+    case "scroll-pane-top":
+      scrollFocusedPane("top");
+      break;
+    case "scroll-pane-bottom":
+      scrollFocusedPane("bottom");
       break;
     case "focus-thread": {
       const thread = $("#scroll");
       if (thread) {
-        thread.tabIndex = -1;
-        thread.focus({ preventScroll: true });
+        const focus = () => {
+          thread.tabIndex = -1;
+          thread.focus({ preventScroll: true });
+        };
+        const show = new CustomEvent("recurse:show-chat", {
+          cancelable: true,
+          detail: focus,
+        });
+        dispatchEvent(show);
+        if (!show.defaultPrevented) focus();
       }
       break;
     }
@@ -473,10 +554,16 @@ function execute(command: KeyCommand | null): void {
       restoreAgentFocus();
       break;
     case "pane-next":
-      switchPane(1);
-      break;
     case "pane-previous":
-      switchPane(-1);
+    case "pane-half-down":
+    case "pane-half-up":
+    case "pane-open":
+    case "pane-back":
+    case "pane-previous-section":
+    case "pane-next-section":
+    case "pane-filter":
+    case "pane-copy":
+      navigateFocusedPane(command.slice(5) as PaneNavigation);
       break;
     case "pane-fullscreen":
       toggleFocusedPaneFullscreen();
@@ -539,13 +626,62 @@ function dispatchKey(event: KeyboardEvent, target?: KeyTarget): boolean {
   return result.handled;
 }
 
+document.addEventListener("recurse:side-key", (event: Event) => {
+  const frame = event.target;
+  const key = (event as CustomEvent<KeyboardEvent>).detail;
+  if (
+    !(frame instanceof HTMLIFrameElement) ||
+    !frame.matches("#panes iframe.side-frame") ||
+    frame !== document.activeElement ||
+    keyTarget(frame) !== "pane" ||
+    !key ||
+    typeof key.key !== "string"
+  )
+    return;
+  // Invariant: Side Escape cancels window commands without ever arming agent
+  // shortcuts, including when a pending chord has expired. Keep native Escape.
+  if (key.key === "Escape") {
+    setKeyState(initialKeymapState("pane"));
+    execute("window-cancel");
+    return;
+  }
+  const forwarded = new KeyboardEvent("keydown", key);
+  frame.dispatchEvent(forwarded);
+  if (forwarded.defaultPrevented) event.preventDefault();
+});
+
 window.addEventListener("message", (event: MessageEvent) => {
   // Invariant: Opaque origins cannot authenticate Artifacts; only the
   // focused mounted frame may relay keys through the keymap dispatcher.
   const key: unknown = event.data?.recurseArtifactKey;
   if (
     typeof key !== "string" ||
-    !["j", "k", "z", "o", "p", "Escape", "h", "P", "G"].includes(key)
+    ![
+      "j",
+      "k",
+      "d",
+      "u",
+      "l",
+      "Enter",
+      "[",
+      "]",
+      "/",
+      "y",
+      "z",
+      "o",
+      "p",
+      "Escape",
+      "h",
+      "H",
+      "P",
+      "G",
+      "g",
+      "w",
+      ...WINDOW_BINDINGS.flatMap(({ keys }) => keys),
+      "q",
+      "i",
+      ..."123456789",
+    ].includes(key)
   )
     return;
   const frame = document.activeElement;
@@ -562,9 +698,26 @@ window.addEventListener("message", (event: MessageEvent) => {
 document.addEventListener(
   "keydown",
   (event: KeyboardEvent) => {
-    // Invariant: An embedded view has no tree or panes; only its composer's
-    // keys run, and nothing reaches the page around the frame.
-    if (embedded && keyTarget(event.target) !== "composer") return;
+    // Invariant: Embedded editors and local controls keep native keys. Reader
+    // shortcuts belong to the mounted Side pane, never the embedded agent tree.
+    if (embedded && keyTarget(event.target) !== "composer") {
+      const target = keyTarget(event.target);
+      const element = event.target as HTMLElement | null;
+      if (
+        !localLayerOpen() &&
+        ["chrome", "control", "window-control"].includes(target) &&
+        !element?.closest?.("#model-menu") &&
+        !element
+          ?.closest?.(".model-box")
+          ?.querySelector('[aria-expanded="true"]') &&
+        !(
+          ["Enter", " "].includes(event.key) &&
+          element?.closest?.("button, a[href], summary, select, [role=button]")
+        )
+      )
+        relaySideKey(event);
+      return;
+    }
     // Invariant: The drawing editor owns its keys; idle Escape still closes.
     if (drawingEditorOwnsKey(event)) return;
     if (
@@ -602,15 +755,16 @@ document.addEventListener(
       shellSurfaceOpen() ||
       agentSurfaceOpen() ||
       skillAutocompleteOpen() ||
-      agentFinderOpen();
+      agentFinderOpen() ||
+      paneFinderOpen();
     if (mobileDrawerEscape && !higherLayerOpen) {
       event.preventDefault();
       event.stopPropagation();
       return;
     }
-    const focusedPane = (
-      event.target as HTMLElement | null
-    )?.closest<HTMLElement>(".pane-col");
+    // Invariant: Nonempty search clears before pane navigation.
+    if (!higherLayerOpen && explorerSearchOwnsKey(event)) return;
+    const focusedPane = paneForTarget(event.target);
     if (
       event.key === "Escape" &&
       !higherLayerOpen &&
@@ -627,7 +781,7 @@ document.addEventListener(
     // visible focus.
     if (primaryPointerIsCoarse() && event.key === "Escape") {
       const eventElement = event.target as HTMLElement | null;
-      const paneColumn = eventElement?.closest?.(".pane-col");
+      const paneColumn = paneForTarget(event.target);
       const paneMenu = eventElement?.closest?.("#pane-menu");
       const closed = drawingEditorOpen()
         ? closeDrawingFromKeyboard()
@@ -659,7 +813,7 @@ document.addEventListener(
         ?.querySelector?.('[aria-expanded="true"]')
     )
       return;
-    const paneElement = eventElement?.closest?.(".pane-col");
+    const paneElement = paneForTarget(event.target);
     // Invariant: Focused pane content keeps Pane shortcuts even when
     // fullscreen. A nested menu retains its dialog keys; Escape from ordinary
     // pane editors returns focus to agents without changing pane layout.
@@ -715,6 +869,13 @@ document.addEventListener(
       return;
     }
 
+    // Invariant: Enter activates native pane controls, not an unrelated item.
+    if (
+      target === "pane" &&
+      event.key === "Enter" &&
+      eventElement?.closest("button,a,summary,select")
+    )
+      return;
     if (dispatchKey(event, target)) return;
 
     // Invariant: Insert's send/newline behavior stays native on touch. IME
@@ -754,6 +915,7 @@ document.addEventListener(
       shouldTypeToCompose(event, {
         desktop: !primaryPointerIsCoarse(),
         composerFocused: false,
+        paneFocused: !!paneForTarget(event.target),
         composerAvailable,
         textEditorFocused:
           isTextEditorTarget(event.target) ||
@@ -787,9 +949,7 @@ document.addEventListener(
 
 document.addEventListener("focusin", (event: FocusEvent) => {
   const target = keyTarget(event.target);
-  const focusedPane = (event.target as HTMLElement | null)?.closest?.(
-    ".pane-col",
-  );
+  const focusedPane = paneForTarget(event.target);
   if (target === "composer") setKeyState(initialKeymapState("insert"));
   else if (target === "rename") setKeyState(initialKeymapState("rename"));
   else if (target === "finder") setKeyState(initialKeymapState("finder"));
@@ -798,7 +958,8 @@ document.addEventListener("focusin", (event: FocusEvent) => {
     setKeyState(initialKeymapState("pane"));
   else if (target === "dialog" || target === "editor")
     setKeyState(initialKeymapState("dialog"));
-  else if (target === "control") setKeyState(initialKeymapState());
+  else if (target === "control" || target === "window-control")
+    setKeyState(initialKeymapState());
 });
 document.addEventListener("focusout", () => {
   // Invariant: Blur captures the old key-state identity. A later key replaces
@@ -809,24 +970,21 @@ document.addEventListener("focusout", () => {
       setKeyState(initialKeymapState());
   }, 0);
 });
-document.addEventListener(
-  "click",
-  () => {
-    if (
-      ["t-prefix", "delete-pending", "interrupt-pending"].includes(
-        keyState.mode,
-      )
-    )
-      setKeyState(initialKeymapState());
-  },
-  true,
-);
-window.addEventListener("recurse:selection-change", () => {
+function cancelKeyPrefix(): void {
   if (
-    ["t-prefix", "delete-pending", "interrupt-pending"].includes(keyState.mode)
+    [
+      "t-prefix",
+      "g-prefix",
+      "w-prefix",
+      "delete-pending",
+      "interrupt-pending",
+    ].includes(keyState.mode)
   )
     setKeyState(initialKeymapState());
-});
+}
+document.addEventListener("click", cancelKeyPrefix, true);
+document.addEventListener("recurse:side-click", cancelKeyPrefix, true);
+window.addEventListener("recurse:selection-change", cancelKeyPrefix);
 
 // The sole shortcuts UI is rendered from dispatch metadata, including the live
 // platform modifier spelling. On touch it starts collapsed but remains

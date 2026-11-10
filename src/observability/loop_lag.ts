@@ -1,8 +1,9 @@
-// One unref'd timer measures lag; active windows summarize, idle emit nothing.
-// No native CPU or memory reads: process accounting can itself block.
-// window_ms covers the timer interval; diagnostics_ms measures stall details.
-// Bounded wall spans and overlapping open phases are context, not CPU causes.
+// Unref'd main/Worker timers; idle emits nothing. No native CPU/memory reads.
+// observer_late_ms: max observer lateness in window, including overdue ticks.
+// Both late suggests shared pause; only main late suggests main-thread work.
+// No snapshot waits. window_ms excludes diagnostics; spans aren't CPU causes.
 
+import { Worker } from "node:worker_threads";
 import { templateRoute } from "../http_transport";
 import {
   drainSlowSpans,
@@ -37,6 +38,7 @@ export class LoopLag {
   private readonly summaryMs: number;
   private readonly now: () => number;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private observer: { worker: Worker; state: BigInt64Array } | null = null;
   private expected = 0;
   private windowStart = 0;
   private samples: number[] = [];
@@ -56,12 +58,67 @@ export class LoopLag {
     drainSlowSpans();
     drainWorkerReplies(-Infinity);
     this.windowStart = this.now();
+    this.startObserver();
     this.schedule();
   }
 
   stop(): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    const observer = this.observer;
+    this.observer = null;
+    void observer?.worker.terminate();
+  }
+
+  private startObserver(): void {
+    try {
+      const state = new BigInt64Array(new SharedArrayBuffer(5 * 8));
+      Atomics.store(state, 0, this.observerClock());
+      const worker = new Worker(
+        new URL("./loop_lag.worker.ts", import.meta.url),
+        {
+          workerData: {
+            buffer: state.buffer,
+            intervalMs: Math.max(50, this.intervalMs),
+          },
+        },
+      );
+      const observer = { worker, state };
+      this.observer = observer;
+      const failed = () => {
+        if (this.observer !== observer) return;
+        this.observer = null;
+        void worker.terminate();
+      };
+      worker.on("error", failed);
+      worker.on("exit", failed);
+      worker.unref();
+    } catch {
+      this.observer = null;
+    }
+  }
+
+  private observerClock(): bigint {
+    return BigInt(Math.floor(performance.timeOrigin + performance.now()));
+  }
+
+  private observerLateness(): number | undefined {
+    const state = this.observer?.state;
+    if (!state) return undefined;
+    const now = this.observerClock();
+    const start = Atomics.load(state, 0);
+    const version = Atomics.load(state, 1);
+    const window = Atomics.load(state, 2);
+    const expected = Atomics.load(state, 3);
+    const maximum = Atomics.load(state, 4);
+    const endVersion = Atomics.load(state, 1);
+    if (!expected || version % 2n !== 0n || version !== endVersion)
+      return undefined;
+    return Math.max(
+      0,
+      window === start ? Number(maximum) : 0,
+      Number(now - (expected > start ? expected : start)),
+    );
   }
 
   /** Track one request until the returned function is called. */
@@ -76,6 +133,8 @@ export class LoopLag {
 
   private schedule(): void {
     this.expected = this.now() + this.intervalMs;
+    if (this.observer)
+      Atomics.store(this.observer.state, 0, this.observerClock());
     this.timer = setTimeout(() => this.sample(), this.intervalMs);
     this.timer.unref?.();
   }
@@ -88,7 +147,8 @@ export class LoopLag {
     const start = this.expected - this.intervalMs;
     const spans = drainSlowSpans(start, now);
     const replies = drainWorkerReplies(start);
-    if (late > this.stallMs) this.stall(late, now, spans, replies);
+    if (late > this.stallMs)
+      this.stall(late, now, spans, replies, this.observerLateness());
     this.finished = [];
     if (now - this.windowStart >= this.summaryMs) this.summarize(now);
     this.schedule();
@@ -99,6 +159,7 @@ export class LoopLag {
     now: number,
     spans: string[],
     replies: string[],
+    observerLate: number | undefined,
   ): void {
     const routes = new Set<string>();
     for (const request of [...this.inFlight, ...this.finished]) {
@@ -110,6 +171,9 @@ export class LoopLag {
     logEvent(this.options.logger, WARNING, "event_loop_stall", {
       fields: {
         ms: Math.round(late),
+        ...(observerLate === undefined
+          ? {}
+          : { observer_late_ms: observerLate }),
         window_ms: Math.round(now - this.expected + this.intervalMs),
         routes: [...routes],
         conversations,

@@ -356,7 +356,7 @@ test("branch PR lookups are rate-limited, skip final and default-branch closed P
       ...env,
       ...BUILD_ENV,
     });
-  expect((await git.worktreeDiff(wt)).reason).toBe("clean");
+  expect((await git.worktreeDiff(wt)).baseSource).toBe("auto:origin/main");
   expect(await lookup()).toBe("OPEN");
   const automatic = await git.worktreeDiff(wt);
   expect(automatic.base).toBe("origin/main");
@@ -431,6 +431,179 @@ test("branch PR lookups are rate-limited, skip final and default-branch closed P
   expect(await lookup()).toBe("MERGED");
   expect(await called()).toHaveLength(207);
 }, 60_000);
+
+// Regression: #3180 bases meet HEAD; same-name upstreams are skipped
+test("default diffs meet the base branch and typed refs select committed work", async () => {
+  const [root, env] = setupRoot();
+  const run = (ops: Json[][]) => build(ops, root, { ...env, ...BUILD_ENV });
+  await run([
+    ["mkdir", "r"],
+    ["git", "r", "init", "-q", "-b", "main"],
+    ["write", "r/a", "base\n"],
+    ["git", "r", "add", "-A"],
+    ["git", "r", "commit", "-qm", "base"],
+    ["git", "r", "update-ref", "refs/remotes/origin/dev", "HEAD"],
+    ["git", "r", "checkout", "-qb", "feature"],
+    ["write", "r/a", "branch\n"],
+    ["git", "r", "commit", "-qam", "branch"],
+    ["git", "r", "update-ref", "refs/remotes/origin/feature", "HEAD"],
+    ["git", "r", "checkout", "-q", "main"],
+    ["write", "r/later", "landed on main later\n"],
+    ["git", "r", "add", "-A"],
+    ["git", "r", "commit", "-qm", "later"],
+    ["git", "r", "update-ref", "refs/remotes/origin/main", "HEAD"],
+    [
+      "git",
+      "r",
+      "symbolic-ref",
+      "refs/remotes/origin/HEAD",
+      "refs/remotes/origin/main",
+    ],
+    ["git", "r", "checkout", "-q", "feature"],
+    ["git", "r", "remote", "add", "origin", "https://github.com/o/r"],
+    ["git", "r", "config", "branch.feature.remote", "origin"],
+    ["git", "r", "config", "branch.feature.merge", "refs/heads/feature"],
+    ["write", "r/a", "branch\nuncommitted\n"],
+  ]);
+  const git = new WorkdirGit({
+    repoUrl: "unused",
+    repoDir: root,
+    dataDir: root,
+    env,
+  });
+  const wt = join(root, "r");
+  const sha = async (ref: string) =>
+    (await captureFixture([GIT, "rev-parse", ref], { cwd: wt, env })).stdout
+      .toString()
+      .trim();
+  const [start, branched] = [await sha("main~1"), await sha("feature")];
+  const base = async (override?: string) => {
+    const diff = await git.worktreeDiff(wt, override);
+    return {
+      base: diff.base,
+      baseSha: diff.baseSha,
+      baseSource: diff.baseSource,
+      defaultBase: diff.defaultBase,
+      files: diff.files.map((file) => file.path),
+    };
+  };
+  expect(await base()).toEqual({
+    base: "origin/main",
+    baseSha: start,
+    baseSource: "auto:origin/main",
+    defaultBase: "origin/main",
+    files: ["a"],
+  });
+  expect((await git.diffFile(wt, "a")).patch).toContain("+branch");
+  await run([["git", "r", "config", "branch.feature.merge", "refs/heads/dev"]]);
+  expect(await base()).toMatchObject({
+    base: "origin/dev",
+    baseSha: start,
+    baseSource: "upstream:origin/dev",
+  });
+  expect(await base(branched)).toEqual({
+    base: branched,
+    baseSha: start,
+    baseSource: `override:${branched}`,
+    defaultBase: "origin/dev",
+    files: ["a"],
+  });
+  const committed = await git.diffFile(wt, "a", branched, true);
+  expect(committed.patch).toContain("+branch");
+  expect(committed.patch).not.toContain("uncommitted");
+  expect(committed.newContent).toBe("branch\n");
+  rmSync(join(wt, "a"));
+  symlinkSync(join(root, "outside"), join(wt, "a"));
+  expect((await git.diffFile(wt, "a", branched, true)).newContent).toBe(
+    "branch\n",
+  );
+  expect((await git.diffFile(wt, "a", "HEAD")).reason).toBe(
+    "path-outside-repo",
+  );
+  rmSync(join(wt, "a"));
+  await run([["git", "r", "checkout", "-q", "--", "a"]]);
+  expect(await git.worktreeDiff(wt, branched)).toMatchObject({
+    selectedWork: { ref: branched, stop: "origin/main", commits: 1 },
+  });
+  expect(await base("main")).toMatchObject({
+    baseSha: start,
+    files: ["later"],
+  });
+  expect(await git.worktreeDiff(wt, "main")).toMatchObject({
+    selectedWork: { stop: null, headSha: await sha("main"), commits: 1 },
+  });
+  expect((await git.diffFile(wt, "later", "main", true)).newContent).toBe(
+    "landed on main later\n",
+  );
+  expect(await base(start)).toMatchObject({ files: ["a"] });
+  await run([
+    ["git", "r", "checkout", "-q", "--", "a"],
+    ["git", "r", "checkout", "-qb", "feature-b"],
+    ["write", "r/stacked", "stacked\n"],
+    ["git", "r", "add", "-A"],
+    ["git", "r", "commit", "-qm", "stacked"],
+    ["git", "r", "tag", "stacked-tag"],
+    ["write", "r/untracked", "not committed\n"],
+  ]);
+  const stacked = await sha("feature-b");
+  for (const ref of [stacked, "feature-b", "stacked-tag"]) {
+    expect(await git.worktreeDiff(wt, ref)).toMatchObject({
+      baseSha: branched,
+      headSha: stacked,
+      untracked: [],
+      selectedWork: { ref, stop: "feature", commits: 1 },
+      files: [{ path: "stacked" }],
+    });
+    expect((await git.diffFile(wt, "stacked", ref)).patch).toContain(
+      "+stacked",
+    );
+  }
+  const snapshot = (diff: Awaited<ReturnType<typeof git.worktreeDiff>>) =>
+    `${diff.baseSha}..${diff.headSha}`;
+  const selected = await git.worktreeDiff(wt, "feature-b");
+  await run([
+    ["write", "r/stacked", "stacked\nmore\n"],
+    ["git", "r", "commit", "-qam", "more stacked work"],
+  ]);
+  const pinned = await git.diffFile(
+    wt,
+    "stacked",
+    "feature-b",
+    true,
+    snapshot(selected),
+  );
+  expect(pinned.patch).not.toContain("+more");
+  expect(pinned.newContent).toBe("stacked\n");
+  const beforeParent = await git.worktreeDiff(wt, "feature-b");
+  await run([["git", "r", "branch", "feature-parent", stacked]]);
+  expect((await git.worktreeDiff(wt, "feature-b")).baseSha).toBe(stacked);
+  expect(
+    (
+      await git.diffFile(
+        wt,
+        "stacked",
+        "feature-b",
+        true,
+        snapshot(beforeParent),
+      )
+    ).patch,
+  ).toContain("+stacked");
+  expect(
+    (await git.diffFile(wt, "stacked", "feature-b", true, "HEAD..HEAD")).reason,
+  ).toBe("bad-snapshot");
+  await run([
+    ["git", "r", "checkout", "-q", "main"],
+    ["git", "r", "merge", "--no-ff", "-qm", "merge feature", "feature"],
+    ["git", "r", "update-ref", "refs/remotes/origin/main", "HEAD"],
+  ]);
+  expect(await git.worktreeDiff(wt, "main")).toMatchObject({
+    baseSha: await sha("main^1"),
+    selectedWork: { stop: null, commits: 1 },
+    files: [{ path: "a" }],
+    untracked: [],
+  });
+  expect((await git.diffFile(wt, "a", "main")).patch).toContain("+branch");
+});
 
 // Regression: #2142 Git 2.55 ambiguous ref names must remain selectable
 test("diff candidates keep ambiguous short names and <remote>/HEAD on every Git", async () => {

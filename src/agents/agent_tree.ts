@@ -310,25 +310,29 @@ export class AgentTree {
     return null;
   }
 
-  /** A human-readable reason the move is invalid, or null when legal. */
+  /** Reject invalid moves; a null destination parent means top-level. */
   reparentError(
     cid: string,
     newParent: unknown,
     convs?: ConversationRecord[],
   ): string | null {
-    if (typeof newParent !== "string" || !newParent)
+    if (newParent !== null && (typeof newParent !== "string" || !newParent))
       return "a target parent id is required.";
     if (newParent === cid) return "an agent cannot be moved under itself.";
     const { conversations } = this.deps;
     const rows = convs ?? conversations.allConvs({ withPending: false });
     const ids = new Set(rows.map((c) => c.id));
     if (!ids.has(cid)) return `no such agent '${cid}'.`;
-    if (!ids.has(newParent)) return `no such target agent '${newParent}'.`;
-    const side = (id: string) =>
+    if (newParent !== null && !ids.has(newParent))
+      return `no such target agent '${newParent}'.`;
+    const side = (id: string | null) =>
       typeof rows.find((c) => c.id === id)?.side_of === "string";
     if (side(cid) || side(newParent))
       return "side conversations cannot be moved or receive agents.";
-    if (conversations.descendants(cid, rows).includes(newParent))
+    if (
+      newParent !== null &&
+      conversations.descendants(cid, rows).includes(newParent)
+    )
       return (
         `'${newParent}' is a descendant of '${cid}'; moving there would ` +
         "create a cycle."
@@ -339,7 +343,7 @@ export class AgentTree {
   /** Validate a move and apply it as one direct edge write. */
   async requestReparent(
     cid: string,
-    newParent: string,
+    newParent: string | null,
     _options: { by?: string | null } = {},
   ): Promise<Json> {
     const { conversations } = this.deps;

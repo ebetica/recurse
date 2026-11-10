@@ -1,3 +1,5 @@
+<p align="center"><img src="../web/brand/mark.svg" alt="Recurse logo" width="96"></p>
+
 # Recurse
 
 Recurse is a minimal agentic harness built on top of [Pi](https://pi.dev) and a web UI for autonomous work.
@@ -19,11 +21,12 @@ one you can write yourself. Each subagent usually works in its own Git
 worktree of your project, so parallel agents never edit the same files.
 
 The QoL plugins we provide include:
-* timestamps
-* "auto mode" for destructive commands (you should still use a sandbox)
-* worktrees
-* side conversations
-* remote control
+
+- timestamps
+- "auto mode" for destructive commands (you should still use a sandbox)
+- worktrees
+- side conversations
+- remote control
 
 The web UI provides a desktop-like experience without an app - so you can access
 it from anywhere you can run a browser.
@@ -204,6 +207,20 @@ that particular agent; agent-tree memories are shared between all agents in
 that tree. Agents use ordinary file reads and writes to save and recall
 memories, and see the titles before every reply.
 
+### Skills
+
+A skill is a folder containing a `SKILL.md` with a name and description in YAML
+frontmatter, followed by instructions. Recurse advertises skills automatically;
+the agent reads their instructions when a task matches. Use `/skill:name` to
+request one explicitly.
+
+Put shared skills in `~/.agents/skills/`, or project skills in `.agents/skills/`.
+Project discovery walks from the agent's working folder up to the nearest Git
+root, or the filesystem root outside a repository. Pi's own agent-directory
+`skills/` and working-folder `.pi/skills/` also load, along with Recurse's bundled
+settings skill. Changes appear on the next model request without a restart.
+Only names, descriptions and paths enter the initial prompt, not skill bodies.
+
 ### Environment
 
 An agent can set environment variables for its own commands: an API key a
@@ -219,6 +236,9 @@ an agent works and it reads it at its next step; **Stop** ends its current
 work. The effort level and safety review are in the conversation header. Open
 any message to see the exact request that went to the model, including the
 system prompt: nothing is sent that you cannot read.
+
+`/rename <title>` renames the open conversation, just like the sidebar rename,
+without sending a message to the model.
 
 ### Side conversations
 
@@ -237,8 +257,8 @@ Drop a file or an image on the composer to give it to the agent. Anything an
 agent publishes comes back the same way: it is attached to the reply and
 listed in **Files**, and publishing the same name again adds a version.
 
-An Artifact is a document or a small interactive app, shown in its own pane, 
-with a version history. Ask for one ("put the report in an Artifact") and 
+An Artifact is a document or a small interactive app, shown in its own pane,
+with a version history. Ask for one ("put the report in an Artifact") and
 the agent creates it. Comments you leave on an Artifact go to the agent as a message.
 
 ### Changes

@@ -17,6 +17,7 @@ import {
   type ReapDeps,
 } from "../../src/agents/supervisor";
 import { DeferredReaps } from "../../src/agents/retry_schedule";
+import { archiveLiveRecord } from "../../src/agents/reap_history";
 import { TreeLifecycle } from "../../src/agents/mutation_guard";
 import { flockExclusive } from "../../src/utils/flock";
 import { until } from "./fixtures/durable_host/host";
@@ -309,6 +310,42 @@ test("an unexpected failure parks the root once and re-raises", async () => {
   expect(env.world.conversations.load("a")!.reap_deferred_reason).toBe(
     "deletion failed (Error)",
   );
+});
+
+// Regression: #3165 a failed live archive hid its error code behind stale status.
+test("a failed live archive names its error code, then a retry archives and deletes", async () => {
+  const stale =
+    "Deletion requested; the backend is removing this agent. | Reap deferred (live-archive failed); uncommitted turn dropped.";
+  const rows = [
+    { id: "solo", parent: "boss", status: "interrupted", status_reason: stale },
+    { id: "boss" },
+  ];
+  const env = setup({ rows });
+  await seed(env, { rows, ledgers: ["solo.jsonl"] });
+  const history = join(env.root, "history");
+  writeFileSync(history, "");
+  env.deps.archiveLiveRecord = (cid, conv, paths, date, key) =>
+    archiveLiveRecord(cid, conv, paths, date, key, {
+      historyDir: history,
+      trashDir: join(env.root, "trash"),
+    });
+  await expect(env.reap.reap("solo", null)).rejects.toThrow(
+    "live-archive failed: ENOTDIR",
+  );
+  expect(env.world.conversations.load("solo")!.status_reason).toBe(
+    "Deletion requested; the backend is removing this agent. | Reap deferred (live-archive failed: ENOTDIR); uncommitted turn dropped.",
+  );
+  expect(env.logs.map((row) => row[1]).join("\n")).toMatch(
+    /event=live_archive_failed .*error_code=ENOTDIR/,
+  );
+  rmSync(history);
+  expect(await env.reap.reap("solo", null)).toEqual(["solo"]);
+  expect(env.world.conversations.load("solo")).toBeNull();
+  const [partition] = await readdir(history);
+  const [archived] = await readdir(join(history, partition!));
+  expect(
+    await readdir(join(history, partition!, archived!, "messages")),
+  ).toEqual(["solo.jsonl"]);
 });
 
 test("a failed taken-over deletion notice is logged, the intent dropped", async () => {

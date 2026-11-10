@@ -1,6 +1,7 @@
 // On-the-fly mermaid rendering. `mermaid` is a large dependency, so it loads
 // through a dynamic import — the main bundle never pays for it, and the
 // diagram module is only fetched when a ```mermaid fence first appears.
+// Connected staging stays outside the app's flex layout and is always removed.
 
 // Recognizes bare and MIME-style Mermaid fence language names.
 const LANG_RE =
@@ -34,21 +35,12 @@ export function mermaidErrorMessage(err: unknown): string {
   return first.length > 160 ? first.slice(0, 157) + "\u2026" : first;
 }
 
-// Mermaid appends its error diagram to document.body (the `d<id>` element)
-// unless suppressErrorRendering is set; sweep any stray node for this
-// render id so a failed render can never leave layout-breaking SVG behind.
-function removeStrayMermaidErrorNodes(id: string): void {
-  for (const strayId of ["d" + id, id]) {
-    document.getElementById(strayId)?.remove();
-  }
-}
-
 function renderOne(host: HTMLElement, code: string): Promise<void> {
   const id = "mmd-" + Math.random().toString(36).slice(2);
   host.dataset.renderId = id;
   const chain = queue
     .then(() => loadMermaid())
-    .then((m) => {
+    .then(async (m) => {
       const style = getComputedStyle(document.documentElement);
       const token = (name: string) =>
         style.getPropertyValue(`--${name}`).trim();
@@ -70,7 +62,17 @@ function renderOne(host: HTMLElement, code: string): Promise<void> {
           textColor: token("text"),
         },
       });
-      return m.render(id, code);
+      const staging = document.createElement("div");
+      staging.inert = true;
+      staging.style.cssText =
+        "position:fixed;left:0;top:0;visibility:hidden;pointer-events:none";
+      staging.style.width = `${host.clientWidth || document.documentElement.clientWidth}px`;
+      document.body.append(staging);
+      try {
+        return await m.render(id, code, staging);
+      } finally {
+        staging.remove();
+      }
     });
   queue = chain.catch(() => {});
   return chain
@@ -80,7 +82,6 @@ function renderOne(host: HTMLElement, code: string): Promise<void> {
       host.classList.add("mermaid-done");
     })
     .catch((err) => {
-      removeStrayMermaidErrorNodes(id);
       if (host.dataset.renderId !== id) return;
       host.classList.add("mermaid-error");
       const note = document.createElement("code");

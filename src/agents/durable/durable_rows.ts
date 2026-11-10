@@ -12,7 +12,7 @@ import type {
   LiveState,
 } from "@earendil-works/pi-durable";
 import { InboxDoc, LiveDoc } from "@earendil-works/pi-durable";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {
   SERVER_COMPACTION_MARKER,
   serverCompactionSource,

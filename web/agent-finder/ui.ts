@@ -42,6 +42,9 @@ import {
   type ArchivedAgentRow,
 } from "./revive.js";
 
+import { placeFinder } from "../finder-placement.js";
+import { LazyResults } from "../lazy-results.js";
+
 const LIST_ID = "agent-menu";
 const shellFinderEl = document.querySelector<HTMLElement>("#agent-finder");
 const shellMenuEl = document.querySelector<HTMLElement>(`#${LIST_ID}`);
@@ -73,9 +76,9 @@ let composing = false;
 let menuPointerDown = false;
 let focusOrigin: HTMLElement | null = null;
 let navigate: (id: string) => boolean = () => false;
-// Revive mode: the server's best page for the query; the latest query wins.
+// Revive mode retains completed rows until a newer response replaces them.
 let archived: ArchivedAgentRow[] = [];
-let archiveSeq = 0;
+const archiveResults = new LazyResults();
 let archiveTimer = 0;
 let reviving = false;
 let onRevived: (result: RevivedAgent) => void = () => undefined;
@@ -137,10 +140,11 @@ export function closeAgentFinder(restoreFocus = true): boolean {
   mode = null;
   finderEl.classList.remove("on", "mention", "navigate", "revive");
   clearTimeout(archiveTimer);
-  archiveSeq++;
+  archiveResults.clear();
   archived = [];
   menuEl.textContent = "";
   queryEl.hidden = true;
+  placeFinder(finderEl, false);
   statusEl.hidden = true;
   matches = [];
   active = 0;
@@ -333,15 +337,11 @@ function renderResults(next: AgentMentionResult[], preferredId?: string): void {
 
 /** Fetch the best page of archived agents for the current query. */
 async function searchArchive(): Promise<void> {
-  const seq = ++archiveSeq;
-  if (!archived.length) {
-    statusEl.hidden = false;
-    statusEl.textContent = "Searching the archive…";
-  }
+  const seq = archiveResults.next();
   const page = await api(archiveSearchPath(queryEl.value))
     .then((r) => (r.ok ? (r.json() as Promise<ArchivePage>) : null))
     .catch(() => null);
-  if (seq !== archiveSeq || mode !== "revive") return;
+  if (mode !== "revive" || !archiveResults.accept(seq)) return;
   if (page === null) {
     statusEl.hidden = false;
     statusEl.textContent = "Could not read the archive";
@@ -349,7 +349,10 @@ async function searchArchive(): Promise<void> {
   }
   archived = page.agents;
   const now = Date.now() / 1000;
-  renderResults(archived.map((row) => reviveResult(row, now)));
+  renderResults(
+    archived.map((row) => reviveResult(row, now)),
+    matches[active]?.id,
+  );
 }
 
 async function revive(row: ArchivedAgentRow): Promise<void> {
@@ -388,10 +391,7 @@ function refreshResults(preserveActive = false): void {
   const query = currentQuery();
   const index = cache.index();
   if (!index && mode === "navigate") {
-    matches = [];
-    menuEl.textContent = "";
-    statusEl.hidden = false;
-    statusEl.textContent = "Loading agents…";
+    statusEl.hidden = true;
     return;
   }
   if (query == null || !index) {
@@ -409,6 +409,7 @@ function open(nextMode: AgentFinderMode): void {
   if (!finderReady) return;
   if (mode && mode !== nextMode) closeAgentFinder(false);
   mode = nextMode;
+  placeFinder(finderEl, nextMode !== "mention");
   finderEl.classList.add("on", nextMode);
   finderEl.classList.toggle("mention", nextMode === "mention");
   finderEl.classList.toggle("navigate", nextMode === "navigate");

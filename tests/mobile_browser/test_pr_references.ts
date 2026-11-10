@@ -112,7 +112,9 @@ export const tests: BrowserTest[] = [
     const pane = page.locator('.pane-col[data-pane="diff"]');
     await pane.getByRole("option", { name: /#7/ }).waitFor();
     expect(
-      (await pane.getByRole("option").allTextContents()).slice(0, 3),
+      (await pane.getByRole("option").allTextContents()).filter(
+        (text) => text === "Working directory" || text.startsWith("#"),
+      ),
     ).toEqual([
       "Working directory",
       "#7 · Link branch pull requests · open · checks pass",
@@ -191,7 +193,9 @@ export const tests: BrowserTest[] = [
     ])
       await pane.getByRole("option", { name }).waitFor();
     expect(refreshes).toHaveLength(1);
-    await pane.locator(".pane-powerbar .x").click();
+    await page
+      .getByRole("button", { name: "Close Changes", exact: true })
+      .click();
     await pane.waitFor({ state: "detached" });
     const reopened = [
       "/pr-branch/prs?refresh=1",

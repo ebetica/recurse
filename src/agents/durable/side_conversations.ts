@@ -26,7 +26,7 @@ import {
   type Extension,
   type Harness,
 } from "@earendil-works/pi-durable";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 
 /** The only tools that run in a side conversation, directly or nested. */

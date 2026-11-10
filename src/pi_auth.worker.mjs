@@ -9,7 +9,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline";
 
-const EXPECTED_PI_VERSION = "1.5.0";
+const EXPECTED_PI_VERSION = "1.5.1";
 const ANTHROPIC_OAUTH_MODULE = new URL(
 	"./auth/anthropic_oauth.ts", import.meta.url).href;
 const MAX_INPUT_CHARS = 64 * 1024;
@@ -275,7 +275,7 @@ async function main(request, root, imported, FileAuthStorageBackend) {
 		}
 		const runtime = await makeRuntime(imported, authPath);
 		if (typeof runtime.refresh !== "function"
-			|| typeof runtime.getModels !== "function") {
+			|| typeof runtime.getProvider !== "function") {
 			throw new Error("package_mismatch");
 		}
 		const errors = [];
@@ -302,7 +302,8 @@ async function main(request, root, imported, FileAuthStorageBackend) {
 		let levelsUnavailable = levels.unavailable;
 		const models = [];
 		for (const id of ids) {
-			for (const model of runtime.getModels(id)) {
+			const provider = runtime.getProvider(id);
+			for (const model of provider?.getModels() ?? []) {
 				if (typeof model?.id !== "string" || !model.id
 					|| !Number.isSafeInteger(model.contextWindow)
 					|| model.contextWindow <= 0) continue;

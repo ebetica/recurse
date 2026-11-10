@@ -185,7 +185,7 @@ function composeMessage(
   if (!notes.length) return "";
   const lines = [
     displayed.noun === "file"
-      ? `Comments on file "${displayed.title}" (id: ${displayed.id}):`
+      ? `Comments on file "${displayed.title}" (${displayed.path ? `path: ${displayed.path}` : `id: ${displayed.id}`}):`
       : `Comments on artifact "${displayed.title}" (id: ${displayed.id}, version: ${displayed.version}, path: ${artifactWorkingPath(displayed.owner_agent_id ?? parseConversationId(pane._rs.agentId!).cid, displayed.id)}):`,
     "",
   ];
@@ -243,7 +243,7 @@ export function renderBar(pane: CommentPane): void {
     renderBar(pane);
   };
   const clear = () => {
-    cancelSelectionComment();
+    cancelSelectionComment(pane);
     const key = currentCommentKey(pane);
     if (key) dropComments(key);
     for (const root of commentRoots(pane)) unmarkAll(root);
@@ -385,7 +385,7 @@ export function renderBar(pane: CommentPane): void {
 export function discardCurrent(pane: CommentPane): boolean {
   const id = currentCommentKey(pane);
   if (!confirmDiscard(pendingFor(id))) return false;
-  cancelSelectionComment();
+  cancelSelectionComment(pane);
   if (id) dropComments(id);
   for (const root of commentRoots(pane)) unmarkAll(root);
   return true;
@@ -503,7 +503,7 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
   rs.imageAbort = null;
   rs.deleting = true;
   rs.versionMenuOpen = false;
-  cancelSelectionComment();
+  cancelSelectionComment(pane);
   setNotice(pane, `Deleting “${info.title}”…`, false);
   renderComments(pane);
   try {

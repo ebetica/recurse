@@ -1,10 +1,8 @@
 /* One row for every pane; item pickers can take the static title's space. */
 .pane-col { position: relative; --pane-powerbar-height: 48px; }
-/* A hard line, not a fade, separates every pane's bar from content scrolling
-   under it. Controls share the bar's spacing, so icon buttons sit evenly. */
+/* Controls share the bar's spacing without divider lines against content. */
 .pane-powerbar { position: relative; z-index: var(--z-chrome);
-  box-sizing: border-box; background: var(--panel); min-width: 0; min-height: var(--pane-powerbar-height);
-  border-bottom: 1px solid var(--border); }
+  box-sizing: border-box; background: var(--panel); min-width: 0; min-height: var(--pane-powerbar-height); }
 .pane-powerbar .pane-title { flex: none; }
 .pane-powerbar-item .pane-title { position: absolute; width: 1px; height: 1px;
   padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); }
@@ -38,12 +36,13 @@
   .pane-col .pane-powerbar button, .pane-col .pane-powerbar a, .pane-col .pane-powerbar select,
   .pane-col .pane-powerbar-overflow > summary { min-width: 44px; min-height: 44px; }
   .pane-powerbar .artifact-icon-btn, .pane-powerbar-overflow > summary { width: 44px; }
-  /* While the Changes base finder is open, its input gets the row: the title
-     is only announced, and the options and close buttons step aside until
-     Apply or Cancel. */
-  .pane-powerbar:has(.diff-base-edit.open) .pane-title { position: absolute;
-    width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
-    clip-path: inset(50%); }
-  .pane-powerbar:has(.diff-base-edit.open) :is(.pane-powerbar-overflow, .fs, .x) {
-    display: none; }
+  /* Phones also move the full-screen and close buttons aside. */
+  .pane-powerbar:has(.diff-base-edit.open) :is(.fs, .x) { display: none; }
 }
+/* While the Changes base finder is open, its input gets the row: the title
+   is only announced and the options button steps aside until Apply or
+   Cancel. */
+.pane-powerbar:has(.diff-base-edit.open) .pane-title { position: absolute;
+  width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden;
+  clip-path: inset(50%); }
+.pane-powerbar:has(.diff-base-edit.open) .pane-powerbar-overflow { display: none; }

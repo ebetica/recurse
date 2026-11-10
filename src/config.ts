@@ -324,7 +324,7 @@ export const PI_MODEL_LIST_VERSION = 1;
 const SUGGESTED_EFFORTS: readonly [RegExp, Thinking][] = [
   [/.*sonnet.*5$/iu, "xhigh"],
   [/.*opus.*5$/iu, "medium"],
-  [/.*fable.*5-1$/iu, "low"],
+  [/.*fable.*5-[12]$/iu, "low"],
   [/.*fable.*5$/iu, "medium"],
   [/.*gpt-5\.6-sol$/iu, "high"],
   [/.*luna$/iu, "xhigh"],

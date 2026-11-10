@@ -1,10 +1,11 @@
 // Reap checks topology/pins under lease, persists intent, quiesces outside.
-// Gate processes; retire files before agent databases, legacy before detach.
-// Blocked members keep rows for retry; memory detach is await-free.
-// Cancellation propagates unparked; durable fences replay at startup.
+// Processes and legacy files retire before databases and await-free detach.
+// Blocked members retry; cancellation propagates; durable fences replay.
+// Archive diagnostics allow native codes only, never exception text or paths.
 import { createHash } from "node:crypto";
 import { readdir, stat, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { constants } from "node:os";
 import { AGENT_TEMP_KEY_RE } from "../../config";
 import {
   ERROR,
@@ -293,6 +294,13 @@ const RETIRE_STAGES: ReadonlyArray<[string, string]> = [
   ["pi session retirement failed", "pi_session_retirement_failed"],
 ];
 
+/** A bounded archive failure without exception text or filesystem paths. */
+function liveArchiveFailure(code: string | null): string {
+  if (code === "EXDEV")
+    return "live-archive failed: EXDEV, storage refused a folder rename or file link; deletion resumes when storage allows it";
+  return code ? `live-archive failed: ${code}` : "live-archive failed";
+}
+
 /** A safe stage label for a failed retirement diagnostic. */
 export function retireReasonCode(reason: string): string {
   for (const [prefix, code] of RETIRE_STAGES)
@@ -508,7 +516,20 @@ export class SupervisorReap {
             );
           } catch (exc) {
             if (exc instanceof Cancelled) throw exc;
-            archived = false;
+            const candidate = (exc as NodeJS.ErrnoException | null)?.code;
+            const code =
+              typeof candidate === "string" &&
+              Object.hasOwn(constants.errno, candidate)
+                ? candidate
+                : null;
+            logEvent(this.deps.log, ERROR, "live_archive_failed", {
+              conversation_id: d,
+              fields: {
+                error_code: code ?? "unknown",
+                error_type: exc instanceof Error ? "Error" : typeof exc,
+              },
+            });
+            return [false, liveArchiveFailure(code), null, tempEntry];
           }
           if (!archived) return [false, "live-archive failed", null, tempEntry];
           if (!truthy(conv.reap_deferred)) conv.reap_retry_attempt = 0;

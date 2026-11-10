@@ -1,6 +1,7 @@
 // Follow an open Harness conversation's live watches and commits: run, shells,
 // queue, model, committed usage and safety state. Promote queued input at idle;
-// write lost-task rows; kick its run reporter.
+// write lost-task rows; kick its run reporter. Usage belongs to its storage
+// session.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
   AgentDoc,
@@ -18,7 +19,7 @@ import { assistantContextUsage } from "../runtime/context_usage.ts";
 import { createdPrUrls } from "../conversation_prs.ts";
 import { pendingRows } from "./durable_rows.ts";
 import { lostTasks, taskFailures } from "./failure_log.ts";
-import type { Reporter } from "./report.ts";
+import { ReportDoc, type Reporter } from "./report.ts";
 import { forConversation } from "./side_conversations.ts";
 import { SHELL_TASK } from "../../extensions/core/shells/shells.ts";
 import {
@@ -131,6 +132,12 @@ export async function followConversation(input: FollowInput): Promise<{
   stop(): void;
 }> {
   const { cid, harness, conversation, row, reporter } = input;
+  const generation = (await harness.snapshot(
+    ReportDoc,
+    conversation.id,
+    context,
+  ))!.generation;
+  const session = `${cid}:d-${generation}`;
   const blocked = () => {
     const { closing, rotating, deleting } = input.state();
     return closing || rotating || deleting;
@@ -269,10 +276,12 @@ export async function followConversation(input: FollowInput): Promise<{
     for (const change of publication.changes) {
       if (change.type !== "entry") continue;
       if (change.value.kind === "pi.compaction") row.contextUsage = null;
-      else if (change.value.kind === "pi.assistant")
-        row.contextUsage = assistantContextUsage(
+      else if (change.value.kind === "pi.assistant") {
+        const usage = assistantContextUsage(
           change.value.model?.[0] as Rec | undefined,
         );
+        row.contextUsage = usage ? { ...usage, session } : null;
+      }
     }
     let moved = false;
     for (const change of publication.changes)

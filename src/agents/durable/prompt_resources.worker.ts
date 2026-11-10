@@ -8,12 +8,17 @@ import {
 
 const port = parentPort!;
 let pending = Promise.resolve();
-port.on("message", ({ cwd, agentDir, skillPaths }: PromptResourcesRequest) => {
-  pending = pending.then(async () => {
-    try {
-      port.postMessage(await loadPromptResources(cwd, agentDir, skillPaths));
-    } catch (error) {
-      port.postMessage({ error: String(error) });
-    }
-  });
-});
+port.on(
+  "message",
+  ({ cwd, agentDir, skillPaths, home }: PromptResourcesRequest) => {
+    pending = pending.then(async () => {
+      try {
+        port.postMessage(
+          await loadPromptResources(cwd, agentDir, skillPaths, home),
+        );
+      } catch (error) {
+        port.postMessage({ error: String(error) });
+      }
+    });
+  },
+);

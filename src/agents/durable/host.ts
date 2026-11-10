@@ -11,6 +11,7 @@ import { Promotions, type PromotionRecord } from "./promotion";
 import type { AbortScope } from "../../utils/tasks";
 import { join } from "node:path";
 import { splitPiUserText } from "../view/session_entries";
+import { unavailable } from "../view/reader";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ImageContent, MutableModels } from "@earendil-works/pi-ai";
 import type { CustomProviderSpec } from "./models";
@@ -1019,11 +1020,13 @@ export class DurableHost {
     cwd: string,
     agentDir: string,
     skillPaths: string[],
+    home?: string,
   ): Promise<PromptResources> {
     const { PromptResourcesWorker, loadPromptResources } =
       await import("./prompt_resources.ts");
 
-    if (this.closing) return loadPromptResources(cwd, agentDir, skillPaths);
+    if (this.closing)
+      return loadPromptResources(cwd, agentDir, skillPaths, home);
     this.promptWorker ??= new PromptResourcesWorker((error) =>
       this.deps.log(
         "durable_prompt_resources_fallback",
@@ -1031,14 +1034,13 @@ export class DurableHost {
         WARNING,
       ),
     );
-    return this.promptWorker.load(cwd, agentDir, skillPaths);
+    return this.promptWorker.load(cwd, agentDir, skillPaths, home);
   }
 
-  /** The /view page of a Durable conversation. */
+  /** The /view page; a deleting conversation has no available history. */
   async view(cid: string, options: PageOptions = {}): Promise<Rec> {
     if (this.closing) throw new ServerStoppingError("server is stopping");
-    if (this.deleting(cid))
-      throw new Error(`conversation is being deleted: ${cid}`);
+    if (this.deleting(cid)) return unavailable();
     const pending = this.opened.get(cid);
     let opened =
       pending &&

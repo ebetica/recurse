@@ -67,6 +67,55 @@ test("a failing real group exits nonzero and names its test", async () => {
   expect(text.match(/FAIL: fail\/test_failure/g)?.length).toBe(1);
   expect(text).toContain("fail/test_failure");
   expect(text).toContain("Browser summary: 1/2 passed");
+  const dir = await mkdtemp(join(tmpdir(), "browser-timing-report-"));
+  try {
+    const log = join(dir, "run.log");
+    await Bun.write(log, text);
+    const weights = join(import.meta.dir, "fixtures/previous-group-times.json");
+    const previous = await Bun.file(weights).json();
+    const tool = join(import.meta.dir, "group-times.ts");
+    const report = Bun.spawn(
+      [process.execPath, tool, log, "--weights", weights],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [exit, diagnostic, errors] = await Promise.all([
+      report.exited,
+      new Response(report.stdout).text(),
+      new Response(report.stderr).text(),
+    ]);
+    expect(exit, errors).toBe(0);
+    const missing = groups.filter(
+      ([name]) => !Object.hasOwn(previous.seconds, name),
+    );
+    expect(diagnostic).toContain(`Missing recorded weights: ${missing.length}`);
+    expect(diagnostic).toContain("visible-attachments");
+    expect(diagnostic).toContain("remotes");
+    expect(diagnostic).toContain("Worker group work (seconds):");
+    expect(diagnostic).toContain("Worker imbalance:");
+    const target = join(dir, "not-created.json");
+    const refresh = Bun.spawn(
+      [
+        process.execPath,
+        tool,
+        log,
+        target,
+        previous.codeHead,
+        "--weights",
+        weights,
+      ],
+      { stdout: "pipe", stderr: "pipe" },
+    );
+    const [refreshExit, , refreshError] = await Promise.all([
+      refresh.exited,
+      new Response(refresh.stdout).text(),
+      new Response(refresh.stderr).text(),
+    ]);
+    expect(refreshExit).not.toBe(0);
+    expect(refreshError).toContain("successful full browser run");
+    expect(await Bun.file(target).exists()).toBeFalse();
+  } finally {
+    retire(dir, join(tmpdir(), ".trash"));
+  }
 }, 30_000);
 
 for (const blocked of [false, true])

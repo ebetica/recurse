@@ -1,3 +1,5 @@
+<p align="center"><img src="web/brand/mark.svg" alt="Recurse logo" width="96"></p>
+
 # recurse
 
 Recurse is yet another coding harness built off of [Pi](https://pi.dev). We

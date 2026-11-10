@@ -297,24 +297,52 @@ export const tests: BrowserTest[] = [
   async function test_idle_stalled_stream_reconnects(browser, base) {
     const { agent } = await postFixture(base, "seed-durable-clear");
     const page = await browser.newPage();
-    await page.addInitScript(() => {
+    const reads = new Set<unknown>();
+    let advanced = false;
+    let failedReads = 0;
+    page.on("request", (request) => {
+      const path = new URL(request.url()).pathname;
+      if (
+        [
+          `/api/conversations/${agent}`,
+          `/api/conversations/${agent}/view`,
+        ].includes(path)
+      )
+        reads.add(request);
+    });
+    page.on("requestfinished", (request) => reads.delete(request));
+    page.on("requestfailed", (request) => {
+      if (reads.delete(request) && advanced) failedReads++;
+    });
+    await page.addInitScript((agent) => {
       const browser = globalThis as any;
       const fetch = browser.fetch.bind(browser);
+      const now = browser.performance.now.bind(browser.performance);
+      browser.idleClockOffset = 0;
+      browser.performance.now = () => now() + browser.idleClockOffset;
       browser.stallIdleEvents = false;
       browser.idleStreamChunks = 0;
+      browser.idleDroppedChunks = 0;
+      browser.idleWakeEvents = 0;
+      for (const event of ["focus", "pageshow", "online"])
+        browser.addEventListener(event, () => browser.idleWakeEvents++);
+      browser.document.addEventListener(
+        "visibilitychange",
+        () => browser.idleWakeEvents++,
+      );
       browser.fetch = async (...args: any[]) => {
         const response = await fetch(...args);
         if (
-          !new URL(String(args[0]), browser.location.href).pathname.endsWith(
-            "/events",
-          ) ||
+          new URL(String(args[0]), browser.location.href).pathname !==
+            `/api/conversations/${agent}/events` ||
           !response.body
         )
           return response;
         const body = response.body.pipeThrough(
           new TransformStream({
             transform(chunk, controller) {
-              if (!browser.stallIdleEvents) {
+              if (browser.stallIdleEvents) browser.idleDroppedChunks++;
+              else {
                 browser.idleStreamChunks++;
                 controller.enqueue(chunk);
               }
@@ -326,7 +354,7 @@ export const tests: BrowserTest[] = [
           headers: response.headers,
         });
       };
-    });
+    }, agent);
     try {
       const connected = page.waitForResponse(
         (response) =>
@@ -339,8 +367,12 @@ export const tests: BrowserTest[] = [
       await page.waitForFunction(
         () => (globalThis as any).idleStreamChunks > 0,
       );
+      expect(await page.locator("#send.stop").count()).toBe(0);
       const before = await page.evaluate(
         () => (globalThis as any).idleStreamChunks,
+      );
+      const wakes = await page.evaluate(
+        () => (globalThis as any).idleWakeEvents,
       );
       await page.route(
         (url) => url.pathname === `/api/conversations/${agent}/events`,
@@ -355,14 +387,39 @@ export const tests: BrowserTest[] = [
         (request) =>
           new URL(request.url()).pathname ===
           `/api/conversations/${agent}/events`,
-        { timeout: 160_000 },
       );
+      void reconnected.catch(() => {});
       await page.evaluate(() => ((globalThis as any).stallIdleEvents = true));
+      const cleared = await page.request.post(
+        `${base}api/conversations/${agent}/clear`,
+      );
+      expect(cleared.ok()).toBeTrue();
+      await page.waitForFunction(
+        () => (globalThis as any).idleDroppedChunks > 0,
+      );
+      await browserExpect.poll(() => reads.size).toBe(0);
+      expect(
+        await page.evaluate(() => (globalThis as any).idleStreamChunks),
+      ).toBe(before);
+      expect(
+        await page.evaluate(() => (globalThis as any).stallIdleEvents),
+      ).toBeTrue();
+      advanced = true;
+      console.log(
+        "Idle stream: dropped real bytes with no focused read pending; advancing clock",
+      );
+      await page.evaluate(
+        () => ((globalThis as any).idleClockOffset += 135_000),
+      );
       await reconnected;
       await page.waitForFunction(
         (count) => (globalThis as any).idleStreamChunks > count,
         before,
       );
+      expect(failedReads).toBe(0);
+      expect(
+        await page.evaluate(() => (globalThis as any).idleWakeEvents),
+      ).toBe(wakes);
       await page.route(`**/api/conversations/${agent}/view**`, (route) =>
         route.abort(),
       );
@@ -416,10 +473,10 @@ export const tests: BrowserTest[] = [
         .getByRole("button", { name: "Open in Files" })
         .click();
       const detail = page.locator(
-        '.pane-col[data-pane="files"] .files-detail img',
+        ".pane-col.file-tab:visible .files-detail img",
       );
       await page.waitForFunction(
-        `document.querySelector('.pane-col[data-pane="files"] .files-detail img')?.naturalWidth === 800`,
+        `document.querySelector(".pane-col.file-tab .files-detail img")?.naturalWidth === 800`,
       );
       expect(await detail.getAttribute("src")).toMatch(/\/preview$/);
       const older = await browser.newPage({
@@ -442,7 +499,7 @@ export const tests: BrowserTest[] = [
       await page.close();
     }
   },
-  // Regression: #2917 departed image downloads must not hold the next conversation's connections.
+  // Regression: #3219 Reloaded gallery images must enter the viewport before loading.
   async function test_departed_images_cancel_on_switch(browser, base) {
     const gallery = await postFixture(base, "seed-large-image-gallery");
     const target = await postFixture(base, "seed-image-navigation");
@@ -452,7 +509,7 @@ export const tests: BrowserTest[] = [
     const held: import("playwright").Route[] = [];
     const targetHeld: import("playwright").Route[] = [];
     let onRestored: ((route: import("playwright").Route) => void) | undefined;
-    let restoredSrc: string | null = null;
+    let restoredUrl: string | null = null;
     try {
       await page.route(`**/api/conversations/${target.demo}**`, (route) => {
         targetHeld.push(route);
@@ -461,8 +518,7 @@ export const tests: BrowserTest[] = [
         `**/api/conversations/${gallery.demo}/attachments/**`,
         (route) => {
           held.push(route);
-          if (restoredSrc && route.request().url().endsWith(restoredSrc))
-            onRestored?.(route);
+          if (route.request().url() === restoredUrl) onRestored?.(route);
         },
       );
       const imageRequest = page.waitForRequest((request) =>
@@ -473,26 +529,17 @@ export const tests: BrowserTest[] = [
       await page.goto(`${base}#agent=${gallery.demo}`, {
         waitUntil: "domcontentloaded",
       });
-      await imageRequest;
-      await page
-        .locator("#messages img")
-        .first()
-        .waitFor({ state: "attached" });
-      await page.waitForFunction(
-        () =>
-          (globalThis as any).document.querySelectorAll("#messages img[src]")
-            .length > 0,
-      );
-      const outgoing = await page
-        .locator("#messages img")
-        .first()
-        .elementHandle();
+      const requested = await imageRequest;
+      const imagePath = new URL(requested.url()).pathname;
+      const selected = page.locator(`#messages img[src="${imagePath}"]`);
+      await selected.waitFor({ state: "attached" });
+      const outgoing = await selected.elementHandle();
       expect(outgoing).not.toBeNull();
       const originalSrc = await outgoing!.getAttribute("src");
-      const cancelled = page.waitForEvent("requestfailed", (request) =>
-        request
-          .url()
-          .includes(`/api/conversations/${gallery.demo}/attachments/`),
+      expect(new URL(originalSrc!, base).href).toBe(requested.url());
+      const cancelled = page.waitForEvent(
+        "requestfailed",
+        (request) => request.url() === requested.url(),
       );
       await page.locator(`.agent[data-id="${target.demo}"]`).click();
       await page.waitForFunction(
@@ -500,7 +547,7 @@ export const tests: BrowserTest[] = [
         outgoing,
       );
       await cancelled;
-      restoredSrc = originalSrc;
+      restoredUrl = requested.url();
       const restoredRequest = new Promise<import("playwright").Route>(
         (resolve, reject) => {
           onRestored = resolve;
@@ -512,6 +559,7 @@ export const tests: BrowserTest[] = [
       await page.locator(`.agent[data-id="${gallery.demo}"]`).click();
       expect(await outgoing!.getAttribute("src")).toBe(originalSrc);
       expect(await outgoing!.evaluate((image) => image.isConnected)).toBeTrue();
+      await selected.scrollIntoViewIfNeeded();
       await (await restoredRequest).continue();
       await outgoing!.evaluate((image) => (image as any).decode());
       for (const route of targetHeld) await route.abort().catch(() => {});
@@ -534,14 +582,14 @@ export const tests: BrowserTest[] = [
       await page.goto(`${base}?image-test=1#agent=${gallery.demo}`, {
         waitUntil: "domcontentloaded",
       });
-      const image = page.locator("#messages img").first();
-      await image.waitFor({ state: "attached" });
-      await page.waitForFunction(() => {
+      await selected.waitFor({ state: "attached" });
+      await selected.scrollIntoViewIfNeeded();
+      await page.waitForFunction((path) => {
         const image = (globalThis as any).document.querySelector(
-          "#messages img",
+          `#messages img[src="${path}"]`,
         );
         return image?.complete && image.naturalWidth > 0;
-      });
+      }, imagePath);
     } finally {
       for (const route of targetHeld) await route.abort().catch(() => {});
       for (const route of held) await route.abort().catch(() => {});

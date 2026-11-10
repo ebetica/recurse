@@ -1,4 +1,6 @@
 import { afterAll, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { defineDoc } from "@earendil-works/pi-durable";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -48,7 +50,22 @@ test("a reply's model time is its finish minus its request start", async () => {
   }
 }, 30_000);
 
-test("the newest replies are kept, up to the cap", async () => {
+function revisions(path: string): number {
+  const db = new Database(path, { readonly: true });
+  try {
+    return db
+      .query<{ count: number }, [string]>(
+        `SELECT count(*) AS count FROM document_revisions
+         WHERE document_id IN (SELECT id FROM documents WHERE kind = ?)`,
+      )
+      .get(JSON.stringify("recurse.reply-times"))!.count;
+  } finally {
+    db.close();
+  }
+}
+
+// Regression: #3169 reply writes must not retain an ever-growing delta chain.
+test("the newest replies are kept with one persisted checkpoint", async () => {
   const root = mkdtempSync(join(tmpdir(), "durable-reply-times-"));
   roots.push(root);
   const { host } = fauxHost(root);
@@ -80,4 +97,63 @@ test("the newest replies are kept, up to the cap", async () => {
   } finally {
     await host.close();
   }
+  expect(revisions(host.storagePath("c1"))).toBe(1);
+}, 30_000);
+
+// Regression: #3169 the next reply replaces legacy deltas for later opens.
+test("a reply checkpoints legacy history for the next open", async () => {
+  const root = mkdtempSync(join(tmpdir(), "durable-reply-times-"));
+  roots.push(root);
+  const legacy = defineDoc({
+    ...ReplyTimesDoc.definition,
+    scope: "conversation",
+    history: "latest",
+    fork: "initial",
+    checkpointWhen: () => false,
+  });
+  const first = fauxHost(root).host;
+  let expected: Readonly<{ finished: Record<string, number> }>;
+  try {
+    const { harness, conversation } = await first.open("c1");
+    for (let n = 1; n <= MAX_REPLIES; n++)
+      await conversation.commit(async (tx) => {
+        (await tx.doc(legacy, conversation.id)).finished[String(n)] = n + 1;
+      }, context);
+    expected = (await harness.snapshot(legacy, conversation.id, context))!;
+  } finally {
+    await first.close();
+  }
+  const path = first.storagePath("c1");
+  expect(revisions(path)).toBeGreaterThan(1);
+  const resumed = fauxHost(root).host;
+  try {
+    const { harness, conversation } = await resumed.open("c1");
+    expect(
+      await harness.snapshot(ReplyTimesDoc, conversation.id, context),
+    ).toEqual(expected);
+    await conversation.commit(
+      (tx) =>
+        recordReplyTimes(tx, conversation.id, [
+          [MAX_REPLIES + 1, MAX_REPLIES + 2],
+        ]),
+      context,
+    );
+    expected = {
+      finished: { ...expected.finished, [MAX_REPLIES + 1]: MAX_REPLIES + 2 },
+    };
+    delete expected.finished["1"];
+  } finally {
+    await resumed.close();
+  }
+  expect(revisions(path)).toBe(1);
+  const reopened = fauxHost(root).host;
+  try {
+    const { harness, conversation } = await reopened.open("c1");
+    expect(
+      await harness.snapshot(ReplyTimesDoc, conversation.id, context),
+    ).toEqual(expected);
+  } finally {
+    await reopened.close();
+  }
+  expect(revisions(path)).toBe(1);
 }, 30_000);

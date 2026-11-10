@@ -42,6 +42,9 @@ export const PANE_ICON = outline(
 export const FILES_ICON = outline(
   '<path d="M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"/>',
 );
+export const EXPLORER_ICON = outline(
+  '<path d="M10 19H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v1"/><circle cx="16" cy="16" r="4"/><path d="m19 19 3 3"/>',
+);
 export const CHANGES_ICON = outline(
   '<path d="M6 3v12M18 9a9 9 0 0 1-9 9"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>',
 );

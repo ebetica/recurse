@@ -1,0 +1,766 @@
+{
+  "api": 1,
+  "revision": 7,
+  "routes": {
+    "GET /api/v1/version": {
+      "response": {
+        "type": "object",
+        "required": ["api", "revision", "release", "display_name"],
+        "properties": {
+          "api": {
+            "type": "number",
+            "const": 1
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "release": {
+            "type": "string"
+          },
+          "display_name": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "GET /api/v1/schema": {
+      "response": {
+        "type": "object"
+      }
+    },
+    "POST /api/v1/agents/tags": {
+      "request": {
+        "type": "object",
+        "required": ["ids", "set", "clear"],
+        "properties": {
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 500
+          },
+          "set": {
+            "type": "object",
+            "patternProperties": {
+              "^.*$": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          },
+          "clear": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["missing"],
+        "properties": {
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "GET /api/v1/agents": {
+      "query": {
+        "type": "object",
+        "properties": {
+          "root": {
+            "type": "string"
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["agents"],
+        "properties": {
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "parent",
+                "title",
+                "status",
+                "status_reason",
+                "queued",
+                "background_shells",
+                "monitor_shells",
+                "taken_over",
+                "workdir",
+                "updated",
+                "context"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "parent": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "title": {
+                  "type": "string"
+                },
+                "status": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "idle"
+                    },
+                    {
+                      "type": "string",
+                      "const": "running"
+                    },
+                    {
+                      "type": "string",
+                      "const": "stopping"
+                    },
+                    {
+                      "type": "string",
+                      "const": "interrupted"
+                    },
+                    {
+                      "type": "string",
+                      "const": "error"
+                    },
+                    {
+                      "type": "string",
+                      "const": "deleting"
+                    },
+                    {
+                      "type": "string",
+                      "const": "unknown"
+                    }
+                  ]
+                },
+                "status_reason": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "queued": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "background_shells": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "monitor_shells": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "taken_over": {
+                  "type": "boolean"
+                },
+                "side_of": {
+                  "type": "string"
+                },
+                "workdir": {
+                  "anyOf": [
+                    {
+                      "type": "string"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Configured initial work directory; not the current chdir directory."
+                },
+                "updated": {
+                  "type": "number"
+                },
+                "tags": {
+                  "type": "object",
+                  "patternProperties": {
+                    "^.*$": {
+                      "type": "object",
+                      "required": ["at", "by"],
+                      "properties": {
+                        "at": {
+                          "type": "number"
+                        },
+                        "by": {
+                          "type": "string"
+                        },
+                        "until": {
+                          "type": "number"
+                        }
+                      }
+                    }
+                  }
+                },
+                "operator_message_at": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "replied_at": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "context": {
+                  "anyOf": [
+                    {
+                      "type": "object",
+                      "required": ["tokens", "window"],
+                      "properties": {
+                        "tokens": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "window": {
+                          "anyOf": [
+                            {
+                              "type": "integer",
+                              "minimum": 1
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "session": {
+                          "type": "string",
+                          "description": "History identity matching /view session."
+                        }
+                      }
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "description": "Last measured prompt usage committed while live; null when cold or unknown. No store is opened by status reads."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "GET /api/v1/agents/{id}": {
+      "response": {
+        "allOf": [
+          {
+            "type": "object",
+            "required": [
+              "id",
+              "parent",
+              "title",
+              "status",
+              "status_reason",
+              "queued",
+              "background_shells",
+              "monitor_shells",
+              "taken_over",
+              "workdir",
+              "updated",
+              "context"
+            ],
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "parent": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "title": {
+                "type": "string"
+              },
+              "status": {
+                "anyOf": [
+                  {
+                    "type": "string",
+                    "const": "idle"
+                  },
+                  {
+                    "type": "string",
+                    "const": "running"
+                  },
+                  {
+                    "type": "string",
+                    "const": "stopping"
+                  },
+                  {
+                    "type": "string",
+                    "const": "interrupted"
+                  },
+                  {
+                    "type": "string",
+                    "const": "error"
+                  },
+                  {
+                    "type": "string",
+                    "const": "deleting"
+                  },
+                  {
+                    "type": "string",
+                    "const": "unknown"
+                  }
+                ]
+              },
+              "status_reason": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "queued": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "background_shells": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "monitor_shells": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "taken_over": {
+                "type": "boolean"
+              },
+              "side_of": {
+                "type": "string"
+              },
+              "workdir": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Configured initial work directory; not the current chdir directory."
+              },
+              "updated": {
+                "type": "number"
+              },
+              "tags": {
+                "type": "object",
+                "patternProperties": {
+                  "^.*$": {
+                    "type": "object",
+                    "required": ["at", "by"],
+                    "properties": {
+                      "at": {
+                        "type": "number"
+                      },
+                      "by": {
+                        "type": "string"
+                      },
+                      "until": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              },
+              "operator_message_at": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "replied_at": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "context": {
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "required": ["tokens", "window"],
+                    "properties": {
+                      "tokens": {
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "window": {
+                        "anyOf": [
+                          {
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          {
+                            "type": "null"
+                          }
+                        ]
+                      },
+                      "session": {
+                        "type": "string",
+                        "description": "History identity matching /view session."
+                      }
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Last measured prompt usage committed while live; null when cold or unknown. No store is opened by status reads."
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": ["shells"],
+            "properties": {
+              "shells": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "required": ["id", "mode", "command", "elapsed_seconds"],
+                  "properties": {
+                    "id": {
+                      "type": "string"
+                    },
+                    "mode": {
+                      "anyOf": [
+                        {
+                          "type": "string",
+                          "const": "background"
+                        },
+                        {
+                          "type": "string",
+                          "const": "monitor"
+                        }
+                      ]
+                    },
+                    "command": {
+                      "type": "string"
+                    },
+                    "elapsed_seconds": {
+                      "type": "number",
+                      "minimum": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "POST /api/v1/agents/{id}/compact": {
+      "response": {
+        "type": "object",
+        "required": ["id", "action", "queued"],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "action": {
+            "type": "string",
+            "const": "compact"
+          },
+          "queued": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "GET /api/v1/agents/{id}/messages": {
+      "query": {
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          },
+          "before": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "full": {
+            "type": "boolean"
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["messages", "prev", "next"],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["cursor", "at", "kind"],
+              "properties": {
+                "cursor": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "at": {
+                  "anyOf": [
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "kind": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "user"
+                    },
+                    {
+                      "type": "string",
+                      "const": "assistant"
+                    },
+                    {
+                      "type": "string",
+                      "const": "tool_call"
+                    },
+                    {
+                      "type": "string",
+                      "const": "tool_result"
+                    }
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                },
+                "tool": {
+                  "type": "string"
+                },
+                "args": {
+                  "type": "string"
+                },
+                "truncated": {
+                  "type": "boolean"
+                }
+              }
+            }
+          },
+          "prev": {
+            "type": "integer"
+          },
+          "next": {
+            "type": "integer"
+          }
+        }
+      }
+    },
+    "POST /api/v1/agents/{id}/messages": {
+      "request": {
+        "type": "object",
+        "required": ["text"],
+        "properties": {
+          "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768
+          },
+          "interrupt": {
+            "type": "boolean"
+          },
+          "client_message_id": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9._-]{1,64}$"
+          }
+        }
+      },
+      "response": {
+        "type": "object",
+        "required": ["message_id", "status", "steer"],
+        "properties": {
+          "message_id": {
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "idle"
+              },
+              {
+                "type": "string",
+                "const": "running"
+              },
+              {
+                "type": "string",
+                "const": "stopping"
+              },
+              {
+                "type": "string",
+                "const": "interrupted"
+              },
+              {
+                "type": "string",
+                "const": "error"
+              },
+              {
+                "type": "string",
+                "const": "deleting"
+              },
+              {
+                "type": "string",
+                "const": "unknown"
+              }
+            ]
+          },
+          "steer": {
+            "type": "boolean"
+          },
+          "interrupted": {
+            "type": "boolean"
+          }
+        }
+      }
+    },
+    "GET /api/v1/agents/{id}/idle": {
+      "response": {
+        "type": "object",
+        "required": ["idle", "busy"],
+        "properties": {
+          "idle": {
+            "type": "boolean"
+          },
+          "busy": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["id", "reason"],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "reason": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "const": "running"
+                    },
+                    {
+                      "type": "string",
+                      "const": "stopping"
+                    },
+                    {
+                      "type": "string",
+                      "const": "queued"
+                    },
+                    {
+                      "type": "string",
+                      "const": "shell"
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "error": {
+    "type": "object",
+    "required": ["detail", "code"],
+    "properties": {
+      "detail": {
+        "type": "string"
+      },
+      "code": {
+        "anyOf": [
+          {
+            "type": "string",
+            "const": "not_found"
+          },
+          {
+            "type": "string",
+            "const": "invalid_request"
+          },
+          {
+            "type": "string",
+            "const": "forbidden"
+          },
+          {
+            "type": "string",
+            "const": "unauthorized"
+          },
+          {
+            "type": "string",
+            "const": "not_ready"
+          },
+          {
+            "type": "string",
+            "const": "conflict"
+          },
+          {
+            "type": "string",
+            "const": "too_large"
+          }
+        ]
+      }
+    }
+  }
+}

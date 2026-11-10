@@ -213,6 +213,7 @@ export async function installTools(
   const search = await rt.createFff({
     worker: host.searchService(rt.FffWorker),
     cwd,
+    owner: cid,
     flags: {
       "fff-frecency-db": join(path, "..", "search-frecency"),
       "fff-history-db": join(path, "..", "search-history"),

@@ -7,7 +7,7 @@ import {
   serverCompactionSource,
   serverCompactionSummary,
 } from "./server-compaction";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { Type } from "typebox";
 import {
   type Message,

@@ -2,7 +2,7 @@
 import { Type, type Static } from "typebox";
 
 export const API_MAJOR = 1;
-export const API_REVISION = 6;
+export const API_REVISION = 7;
 
 const TagSchema = Type.Object({
   at: Type.Number(),
@@ -47,6 +47,11 @@ export const AgentStatusSchema = Type.Object({
       Type.Object({
         tokens: Type.Integer({ minimum: 0 }),
         window: Type.Union([Type.Integer({ minimum: 1 }), Type.Null()]),
+        session: Type.Optional(
+          Type.String({
+            description: "History identity matching /view session.",
+          }),
+        ),
       }),
       Type.Null(),
     ],

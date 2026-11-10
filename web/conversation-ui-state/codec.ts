@@ -5,7 +5,7 @@ import {
   MAX_COMPOSER_DRAFT_CHARS,
   MAX_LOCAL_RECORD_CHARS,
   MAX_PANE_STATES,
-  MAX_PLUGIN_STATE_CHARS,
+  MAX_WINDOW_LAYOUT_CHARS,
   MAX_RETAINED_OWNERS,
   MAX_SESSION_RECORD_CHARS,
   defaultComposer,
@@ -14,6 +14,7 @@ import {
   ephemeralOwner,
   fieldKeyFor,
   jsonClone,
+  paneStateLimit,
   validBoundedString,
   validOwnerId,
   validStateKey,
@@ -91,7 +92,7 @@ export function parsePaneStates(
     const item = candidate as Record<string, unknown>;
     if (!Number.isInteger(item.version) || (item.version as number) < 1)
       continue;
-    const normalized = jsonClone(item.value);
+    const normalized = jsonClone(item.value, paneStateLimit(key));
     if (normalized === undefined) continue;
     result[key] = { version: item.version as number, value: normalized };
     accepted++;
@@ -158,7 +159,7 @@ export function clonePaneStates(
     StoredPaneState
   >;
   for (const [key, item] of Object.entries(value)) {
-    const cloned = jsonClone(item.value);
+    const cloned = jsonClone(item.value, paneStateLimit(key));
     if (cloned !== undefined)
       result[key] = { version: item.version, value: cloned };
   }
@@ -245,7 +246,7 @@ export function parsePluginField(
   ownerId: string,
   generation: string,
 ): PluginFieldRecord | null {
-  if (!raw || raw.length > MAX_PLUGIN_STATE_CHARS + 1_024) return null;
+  if (!raw || raw.length > MAX_WINDOW_LAYOUT_CHARS + 1_024) return null;
   try {
     const value = JSON.parse(raw) as Record<string, unknown>;
     const key = value.key;
@@ -262,12 +263,8 @@ export function parsePluginField(
       !Number.isFinite(value.touched)
     )
       return null;
-    const cloned = jsonClone(value.value);
-    if (
-      cloned === undefined ||
-      JSON.stringify(cloned).length > MAX_PLUGIN_STATE_CHARS
-    )
-      return null;
+    const cloned = jsonClone(value.value, paneStateLimit(key));
+    if (cloned === undefined) return null;
     return {
       owner: ownerId,
       touched: value.touched,
@@ -426,7 +423,7 @@ export function overlaySlotFields(
     for (const item of newest.values())
       value.panes[item.key] = {
         version: item.version,
-        value: jsonClone(item.value),
+        value: jsonClone(item.value, paneStateLimit(item.key)),
       };
   } catch {}
 }

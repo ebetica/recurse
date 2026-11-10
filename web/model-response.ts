@@ -44,6 +44,18 @@ export function responseModelName(
   return label && label !== id && label !== scoped ? label : id;
 }
 
+export function responseSelectorName(selector: string) {
+  const slash = selector.indexOf("/");
+  const provider = slash < 0 ? undefined : selector.slice(0, slash);
+  const id = slash < 0 ? selector : selector.slice(slash + 1);
+  return names
+    ? responseModelName(id, provider)
+    : until(
+        loadNames().then(() => responseModelName(id, provider)),
+        "…",
+      );
+}
+
 function requestRow(response: ModelResponse) {
   const row = responseRow(response, responseModelName);
   return html`<div class="model-response-row">

@@ -210,7 +210,7 @@ function renderAttachments(): void {
         open.appendChild(img);
         open.onclick = () =>
           void import("./files.js").then((m) =>
-            m.showFileInPane(owner.id, fileId),
+            m.enlargeFileImage(owner.id, fileId),
           );
         chip.appendChild(open);
       } else {

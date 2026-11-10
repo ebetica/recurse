@@ -329,6 +329,7 @@ export const tests: BrowserTest[] = [
     await page.locator("#menu-btn").tap();
     await page.locator("#sidebar.open").waitFor();
     const mark = page.locator("#brand img");
+    expect(await page.locator("#brand-name").isVisible()).toBe(false);
     expect(await mark.isVisible()).toBe(true);
     expect(await mark.getAttribute("src")).toBe("/static/brand/mark.svg");
     await page.waitForFunction(
@@ -381,11 +382,23 @@ export const tests: BrowserTest[] = [
       await page.locator("#settings-btn").waitFor({ state: "attached" });
       expect(await page.title()).toBe(customName);
       expect(await page.locator("#brand-name").textContent()).toBe(customName);
+      expect(
+        await page.locator("#brand-name").getAttribute("hidden"),
+      ).toBeNull();
+      const manifest = await (
+        await page.request.get(base + "manifest.webmanifest")
+      ).json();
+      expect(manifest.name).toBe(customName);
       const favicon = await page
         .locator('link[rel="icon"]')
         .last()
         .getAttribute("href");
       expect(favicon).toStartWith("/app-icon?v=");
+      expect(manifest.icons.map((icon: { src: string }) => icon.src)).toEqual([
+        favicon,
+      ]);
+      for (const link of await page.locator('link[rel="icon"]').all())
+        expect(await link.getAttribute("href")).toBe(favicon);
       expect(await page.locator("#brand img").getAttribute("src")).toBe(
         favicon,
       );
@@ -410,9 +423,21 @@ export const tests: BrowserTest[] = [
       });
       for (const control of await editor.locator("input,button").all()) {
         await control.scrollIntoViewIfNeeded();
-        const box = await control.boundingBox();
-        expect(box!.height).toBeGreaterThanOrEqual(44);
-        expect(box!.width).toBeGreaterThanOrEqual(44);
+        expect(
+          await control.evaluate((element) => {
+            const box = element.getBoundingClientRect();
+            return [-21, 21].every((x) =>
+              [-21, 21].every((y) =>
+                element.contains(
+                  element.ownerDocument.elementFromPoint(
+                    box.x + box.width / 2 + x,
+                    box.y + box.height / 2 + y,
+                  ),
+                ),
+              ),
+            );
+          }),
+        ).toBe(true);
       }
       await section.locator('[name="reset-name"]').tap();
       await section.getByRole("status").filter({ hasText: "Saved." }).waitFor();
@@ -420,9 +445,7 @@ export const tests: BrowserTest[] = [
       await section.getByRole("status").filter({ hasText: "Saved." }).waitFor();
       await page.reload();
       expect(await page.title()).toBe(originalTitle);
-      expect(await page.locator("#brand-name").textContent()).toBe(
-        originalTitle,
-      );
+      expect(await page.locator("#brand-name").isVisible()).toBe(false);
       expect(
         await page.locator('link[rel="icon"]').last().getAttribute("href"),
       ).toBe(originalIcon);

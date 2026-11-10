@@ -2,7 +2,7 @@
 // or history scan. An artifact id names a tool task (its assistant input and
 // result entry) or, as `r<entry>`, a result copied without its task, whose call
 // entry the promotion recorded in CopiedCallsDoc.
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {
   ToolTask,
   type Conversation,

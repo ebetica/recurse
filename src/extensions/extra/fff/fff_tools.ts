@@ -1,7 +1,7 @@
 // Load patched Pi search in the child, without TUI or Harness imports.
 // No watches, eager content indexing, or mmaps (grep skips files >=256 KiB).
 // Scans share a slot. FffFlags set refresh (5m) and idle retention (30m) in ms.
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import type {
   ExtensionAPI,
   ExtensionContext,

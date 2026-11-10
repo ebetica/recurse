@@ -69,8 +69,9 @@ test("test_local_browser_version_is_no_store_and_cache_busted", async () => {
   expect(text).toContain("/static/app.css?v=abc123");
   expect(text).not.toContain("__VERSION__");
   expect(text).not.toContain("data-icon");
-  expect(text).toContain(`<button id="settings-btn" title="Settings">
-    ${SETTINGS_ICON}`);
+  expect(text).toContain(
+    `<span class="settings-icon" aria-hidden="true">${SETTINGS_ICON}</span>`,
+  );
   expect(text).toContain(SEND_ICON);
 
   const version = await get("/api/version");

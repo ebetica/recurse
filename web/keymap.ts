@@ -1,6 +1,8 @@
 // One typed source of truth for Recurse's desktop keyboard behavior. The pure
 // reducer owns modal/chord semantics; app.ts performs the returned DOM actions,
 // and the shortcuts pane renders the same binding metadata used for dispatch.
+import type { PaneNavigation } from "./types.js";
+import type { WindowCommand } from "./dock/commands.js";
 
 export const CHORD_TIMEOUT_MS = 1600;
 
@@ -12,6 +14,9 @@ export type KeyboardMode =
   | "finder"
   | "pane"
   | "t-prefix"
+  | "g-prefix"
+  | "w-prefix"
+  | "resize"
   | "delete-pending"
   | "interrupt-pending";
 
@@ -35,13 +40,15 @@ export type KeyCommand =
   | "arm-delete"
   | "delete"
   | "rename"
-  | "toggle-pane"
-  | "focus-pane"
+  | "open-pane-finder"
+  | `pane-${1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9}`
+  | "scroll-pane-top"
+  | "scroll-pane-bottom"
+  | `window-${WindowCommand}`
   | "focus-thread"
   | "focus-agents"
   | "find-pull-request"
-  | "pane-next"
-  | "pane-previous"
+  | `pane-${Exclude<PaneNavigation, "top" | "bottom">}`
   | "pane-fullscreen"
   | "interrupt"
   | "commit-rename"
@@ -78,6 +85,7 @@ export type KeyTarget =
   | "dialog"
   | "editor"
   | "control"
+  | "window-control"
   | "finder"
   | "pane";
 
@@ -159,19 +167,124 @@ export const NORMAL_BINDINGS: readonly Binding[] = [
   },
   {
     keys: ["o"],
-    command: "toggle-pane",
-    description: "open / close pane",
+    command: "open-pane-finder",
+    description: "open a pane",
   },
   {
-    keys: ["p"],
-    command: "focus-pane",
-    description: "focus pane (open if closed)",
+    keys: ["z"],
+    command: "window-fullscreen",
+    description: "toggle window fullscreen",
   },
   {
     keys: ["P"],
     command: "find-pull-request",
     description: "find pull request in Changes",
   },
+];
+
+const PANE_BINDINGS: readonly Binding[] = [
+  { keys: ["j"], command: "pane-next", description: "next item / scroll down" },
+  {
+    keys: ["k"],
+    command: "pane-previous",
+    description: "previous item / scroll up",
+  },
+  { keys: ["d"], command: "pane-half-down", description: "half page down" },
+  { keys: ["u"], command: "pane-half-up", description: "half page up" },
+  {
+    keys: ["l", "Enter"],
+    command: "pane-open",
+    description: "open / expand item",
+  },
+  { keys: ["h"], command: "pane-back", description: "back / collapse item" },
+  {
+    keys: ["["],
+    command: "pane-previous-section",
+    description: "previous file / section",
+  },
+  {
+    keys: ["]"],
+    command: "pane-next-section",
+    description: "next file / section",
+  },
+  { keys: ["/"], command: "pane-filter", description: "filter list" },
+  { keys: ["y"], command: "pane-copy", description: "copy item path / link" },
+];
+
+export const G_BINDINGS: readonly Binding[] = [
+  ...Array.from(
+    { length: 9 },
+    (_, index): Binding => ({
+      keys: [String(index + 1)],
+      command: `pane-${(index + 1) as 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9}`,
+      description: `open pane ${index + 1}`,
+    }),
+  ),
+  {
+    keys: ["h"],
+    command: "window-focus-left",
+    description: "left window / previous tab",
+  },
+  { keys: ["j"], command: "window-focus-down", description: "window below" },
+  { keys: ["k"], command: "window-focus-up", description: "window above" },
+  {
+    keys: ["l"],
+    command: "window-focus-right",
+    description: "right window / next tab",
+  },
+  { keys: ["p"], command: "window-previous", description: "previous window" },
+];
+
+export const WINDOW_BINDINGS: readonly Binding[] = [
+  { keys: ["h", "H"], command: "window-move-left", description: "move left" },
+  { keys: ["j", "J"], command: "window-move-down", description: "move below" },
+  { keys: ["k", "K"], command: "window-move-up", description: "move above" },
+  { keys: ["l", "L"], command: "window-move-right", description: "move right" },
+  {
+    keys: ["v"],
+    command: "window-open-right",
+    description: "next window to the right",
+  },
+  {
+    keys: ["s"],
+    command: "window-open-below",
+    description: "next window below",
+  },
+  {
+    keys: ["t"],
+    command: "window-merge",
+    description: "join sibling windows as tabs",
+  },
+  {
+    keys: ["e"],
+    command: "window-split",
+    description: "split tabs / change split direction",
+  },
+  {
+    keys: ["o"],
+    command: "window-only",
+    description: "only this window / restore",
+  },
+  {
+    keys: ["f"],
+    command: "window-fullscreen",
+    description: "toggle fullscreen",
+  },
+  { keys: ["q"], command: "window-close", description: "close window / tab" },
+  { keys: ["Q"], command: "window-close-all", description: "close all panes" },
+  { keys: ["r"], command: "window-resize", description: "resize windows" },
+  {
+    keys: ["="],
+    command: "window-equalize",
+    description: "equal window sizes",
+  },
+];
+
+const RESIZE_BINDINGS: readonly Binding[] = [
+  { keys: ["h"], command: "window-resize-left", description: "narrower" },
+  { keys: ["l"], command: "window-resize-right", description: "wider" },
+  { keys: ["k"], command: "window-resize-up", description: "shorter" },
+  { keys: ["j"], command: "window-resize-down", description: "taller" },
 ];
 
 export const PREFIX_BINDINGS: readonly Binding[] = [
@@ -187,7 +300,7 @@ export interface ShortcutItem {
 }
 
 export interface ShortcutGroup {
-  id: "normal" | "insert" | "prefix" | "pane";
+  id: "normal" | "insert" | "prefix" | "pane" | "window" | "resize";
   title: string;
   items: readonly ShortcutItem[];
 }
@@ -204,6 +317,8 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
         description,
       })),
       { keys: ["t", "…"], description: "agent actions" },
+      { keys: ["g", "1–9"], description: "open pane by rail position" },
+      { keys: ["w", "…"], description: "window layout" },
       {
         keys: ["d", "d"],
         command: "delete",
@@ -242,18 +357,24 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     id: "pane",
     title: "Open pane",
     items: [
-      { keys: ["j"], command: "pane-next", description: "next pane" },
-      { keys: ["k"], command: "pane-previous", description: "previous pane" },
+      ...PANE_BINDINGS,
       {
         keys: ["z"],
         command: "pane-fullscreen",
         description: "toggle fullscreen",
       },
-      { keys: ["o"], command: "toggle-pane", description: "open / close pane" },
+      { keys: ["o"], command: "open-pane-finder", description: "open a pane" },
+      { keys: ["i"], command: "compose", description: "write a message" },
+      { keys: ["g", "1–9"], description: "open pane by rail position" },
       {
-        keys: ["p"],
-        command: "focus-thread",
-        description: "focus message thread",
+        keys: ["g", "g"],
+        command: "scroll-pane-top",
+        description: "top of pane",
+      },
+      {
+        keys: ["G"],
+        command: "scroll-pane-bottom",
+        description: "bottom of pane",
       },
       {
         keys: ["Escape"],
@@ -261,7 +382,7 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
         description: "focus agents list (leave pane open)",
       },
       {
-        keys: ["h"],
+        keys: ["q"],
         command: "close-pane",
         description: "close pane / back to agents",
       },
@@ -270,6 +391,32 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
         command: "toggle-agents",
         description: "show / hide agents",
       },
+    ],
+  },
+  {
+    id: "window",
+    title: "Windows",
+    items: [
+      ...G_BINDINGS.filter(({ command }) => command.startsWith("window-")).map(
+        ({ keys, command, description }) => ({
+          keys: ["g", keys[0]],
+          command,
+          description,
+        }),
+      ),
+      ...WINDOW_BINDINGS.map(({ keys, command, description }) => ({
+        keys: ["w", keys[0]],
+        command,
+        description,
+      })),
+    ],
+  },
+  {
+    id: "resize",
+    title: "Resize",
+    items: [
+      ...RESIZE_BINDINGS,
+      { keys: ["Escape"], description: "finish resizing" },
     ],
   },
 ];
@@ -302,7 +449,12 @@ function prefixBinding(key: string): Binding | undefined {
 }
 
 function pending(
-  mode: "t-prefix" | "delete-pending" | "interrupt-pending",
+  mode:
+    | "t-prefix"
+    | "g-prefix"
+    | "w-prefix"
+    | "delete-pending"
+    | "interrupt-pending",
   now: number,
   anchorId: string,
 ): KeymapState {
@@ -320,6 +472,8 @@ function expired(state: KeymapState, context: KeyContext): boolean {
 function chordPending(state: KeymapState): boolean {
   return (
     state.mode === "t-prefix" ||
+    state.mode === "g-prefix" ||
+    state.mode === "w-prefix" ||
     state.mode === "delete-pending" ||
     state.mode === "interrupt-pending"
   );
@@ -352,6 +506,24 @@ export function reduceKeymap(
       false,
     );
 
+  const windowTarget =
+    context.target === "pane" ||
+    context.target === "chrome" ||
+    context.target === "window-control";
+  if (state.mode === "resize" && windowTarget) {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+      return result(state, null, false);
+    if (event.key === "Escape" || event.key === "Enter")
+      return action(
+        "window-cancel",
+        context.target === "pane" ? "pane" : "normal",
+      );
+    const binding = RESIZE_BINDINGS.find((item) =>
+      item.keys.includes(event.key),
+    );
+    return result(state, binding?.command || null, true);
+  }
+
   if (
     context.commentAvailable &&
     !chordPending(state) &&
@@ -362,24 +534,80 @@ export function reduceKeymap(
   )
     return event.repeat ? result(state, null, true) : action("comment");
 
+  if (
+    windowTarget &&
+    !event.ctrlKey &&
+    !event.metaKey &&
+    !event.altKey &&
+    !context.textSelected
+  ) {
+    const windowMode = context.target === "pane" ? "pane" : "normal";
+    if (state.mode === "w-prefix") {
+      if (event.key === "Shift") return result(state, null, false);
+      if (event.key === "Escape" || event.repeat)
+        return result(initialKeymapState(windowMode), null, true);
+      const binding = WINDOW_BINDINGS.find((item) =>
+        item.keys.includes(event.key),
+      );
+      return binding
+        ? action(
+            binding.command,
+            binding.command === "window-resize" ? "resize" : windowMode,
+          )
+        : action("invalid-chord");
+    }
+    if (event.key === "w" && !chordPending(state))
+      return result(
+        event.repeat
+          ? state
+          : pending("w-prefix", context.now, context.selectedId),
+        null,
+        true,
+      );
+    if (state.mode === "g-prefix") {
+      if (event.key === "Shift") return result(state, null, false);
+      if (event.key === "Escape" || event.repeat)
+        return result(initialKeymapState(windowMode), null, true);
+      if (event.key === "g" && context.target === "pane")
+        return action("scroll-pane-top", "pane");
+      const binding = G_BINDINGS.find((item) => item.keys.includes(event.key));
+      return binding
+        ? action(binding.command, windowMode)
+        : action("invalid-chord", windowMode);
+    }
+    if (event.key === "g" && !chordPending(state))
+      return result(
+        event.repeat
+          ? state
+          : pending("g-prefix", context.now, context.selectedId),
+        null,
+        true,
+      );
+    if (context.target === "window-control") {
+      const binding = normalBinding(event.key);
+      if (binding?.command === "window-fullscreen")
+        return event.repeat
+          ? result(initialKeymapState(windowMode), null, true)
+          : action(binding.command, windowMode);
+    }
+  }
+
   if (context.target === "pane") {
     const paneState = initialKeymapState("pane");
     if (event.ctrlKey || event.metaKey || event.altKey)
       return result(paneState, null, false);
-    // Invariant: o toggles visibility from either focus context. p moves focus
-    // between thread and pane without changing an open pane's layout; Escape
-    // returns to agents leaving the pane open. h closes the pane; H toggles
-    // the agent bar.
+    // Invariant: Pane keys never arm destructive agent chords.
     if (event.key === "Escape") return action("focus-agents");
     if (event.key === "P")
       return event.repeat
         ? result(paneState, null, true)
         : action("find-pull-request");
-    if (event.key === "p" || event.key === "o")
+    if (event.key === "o")
       return event.repeat
         ? result(paneState, null, true)
-        : action(event.key === "p" ? "focus-thread" : "toggle-pane");
-    if (event.key === "h")
+        : action("open-pane-finder");
+    if (event.key === "i") return action("compose", "insert");
+    if (event.key === "q")
       return event.repeat
         ? result(paneState, null, true)
         : action("close-pane");
@@ -387,11 +615,15 @@ export function reduceKeymap(
       return event.repeat
         ? result(paneState, null, true)
         : result(paneState, "toggle-agents", true);
-    // Invariant: j/k switch between the available right-side panes. Arrows are
-    // deliberately left native so the mouse/trackpad/arrow keys still scroll
-    // pane content.
-    if (event.key === "j") return result(paneState, "pane-next", true);
-    if (event.key === "k") return result(paneState, "pane-previous", true);
+    const binding = PANE_BINDINGS.find((item) => item.keys.includes(event.key));
+    if (binding)
+      return result(
+        paneState,
+        event.repeat && !["j", "k", "d", "u", "[", "]"].includes(event.key)
+          ? null
+          : binding.command,
+        true,
+      );
     if (event.key === "z")
       return event.repeat
         ? result(paneState, null, true)
@@ -399,7 +631,7 @@ export function reduceKeymap(
     if (event.key === "G")
       return event.repeat
         ? result(paneState, null, true)
-        : action("scroll-bottom");
+        : action("scroll-pane-bottom", "pane");
     return result(paneState, null, false);
   }
 
@@ -409,7 +641,7 @@ export function reduceKeymap(
     if (event.key === "Escape") return action("cancel-local");
     if (context.target === "rename" && event.key === "Enter")
       return action("commit-rename");
-    if (context.target === "control")
+    if (context.target === "control" || context.target === "window-control")
       return result(initialKeymapState(), null, false);
     return result(
       initialKeymapState(context.target === "rename" ? "rename" : "dialog"),
@@ -519,10 +751,7 @@ export function reduceKeymap(
   }
   const binding = normalBinding(event.key);
   if (!binding) return result(state, null, false);
-  if (
-    ["toggle-pane", "focus-pane"].includes(binding.command) &&
-    !context.paneAvailable
-  )
+  if (binding.command === "open-pane-finder" && !context.paneAvailable)
     return result(state, null, true);
   if (
     event.repeat &&
@@ -547,7 +776,13 @@ export function keymapModeLabel(state: KeymapState): string {
     case "dialog":
       return "Dialog";
     case "finder":
-      return "Find agent";
+      return "Finder";
+    case "g-prefix":
+      return "g …";
+    case "w-prefix":
+      return "w …";
+    case "resize":
+      return "Resize";
     case "pane":
       return "Pane";
     case "t-prefix":

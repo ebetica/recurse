@@ -251,6 +251,7 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
     expect(faviconUrl).toBe("/static/brand/favicon.svg");
     const favicon = await fetch(
       `http://127.0.0.1:${running.port}${faviconUrl}`,
+      { headers: { "accept-encoding": "identity" } },
     );
     expect(favicon.status).toBe(200);
     expect(favicon.headers.get("content-type")).toBe("image/svg+xml");
@@ -274,12 +275,23 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
       expect(byDate.status).toBe(status);
       await byDate.arrayBuffer();
     }
-    for (const name of ["favicon-32.png", "apple-touch-icon.png"]) {
+    for (const [name, size] of [
+      ["favicon-32.png", 32],
+      ["favicon-dark-32.png", 32],
+      ["apple-touch-icon.png", 180],
+      ["app-icon-192.png", 192],
+      ["app-icon-512.png", 512],
+      ["app-icon-maskable-192.png", 192],
+      ["app-icon-maskable-512.png", 512],
+    ] as const) {
       const image = await fetch(
         `http://127.0.0.1:${running.port}/static/brand/${name}`,
       );
       expect(image.status).toBe(200);
       expect(image.headers.get("content-type")).toBe("image/png");
+      const bytes = Buffer.from(await image.arrayBuffer());
+      expect(bytes.readUInt32BE(16)).toBe(size);
+      expect(bytes.readUInt32BE(20)).toBe(size);
     }
   } finally {
     await running.close();

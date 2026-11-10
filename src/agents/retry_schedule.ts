@@ -1,6 +1,7 @@
 // Keyed synchronous exponential backoff resets when identities change.
 // Deferred reaps retain pending work; startup seeds reaps/spawns from storage.
 // Async seed steps have explicit abort points, preserving save/drop order.
+// Deferred status keeps earlier context but replaces the previous failure note.
 import { Cancelled, checkAbort } from "../utils/tasks";
 import {
   ERROR,
@@ -274,7 +275,6 @@ export class DeferredReaps {
     for (const cid of doomed) {
       const conv = conversations.load(cid);
       if (conv === null) continue;
-      const priorStatus = conv.status;
       const priorReason = conv.status_reason;
       conv.status = "interrupted";
       const parkNote = pySlice(
@@ -282,13 +282,13 @@ export class DeferredReaps {
         200,
       );
       if (typeof priorReason === "string" && priorReason) {
-        const kept = pySlice(priorReason, 250).replaceAll("\n", " ");
+        // Invariant: A retry replaces its earlier park note, so the status
+        // names the latest failure.
+        const at = priorReason.indexOf("Reap deferred (");
         const joined =
-          priorStatus !== "interrupted"
-            ? `${kept} | ${parkNote}`
-            : priorReason.includes("Reap deferred (")
-              ? priorReason
-              : `${kept} | ${parkNote}`;
+          at >= 0
+            ? `${pySlice(priorReason.slice(0, at), 250).replaceAll("\n", " ")}${parkNote}`
+            : `${pySlice(priorReason, 250).replaceAll("\n", " ")} | ${parkNote}`;
         conv.status_reason = pySlice(joined, 500);
       } else conv.status_reason = pySlice(parkNote, 500);
       if (!truthy(conv.reap_deferred)) conv.reap_retry_attempt = 0;

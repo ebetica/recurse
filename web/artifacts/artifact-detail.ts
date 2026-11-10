@@ -109,7 +109,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
   const info = selectedInfo(pane);
   if (rs.contentInfo && pendingFor(currentCommentKey(pane))) return;
   if (!info || !rs.agentId) {
-    cancelSelectionComment();
+    cancelSelectionComment(pane);
     rs.imageAbort?.abort();
     rs.imageAbort = null;
     const documentBody = pane.querySelector<HTMLElement>(".report-doc")!;

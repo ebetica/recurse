@@ -3,10 +3,16 @@
 // their payload; the framework only validates declaration metadata, invokes the
 // hooks, and persists the serialized value in the declared retention tier.
 import type { ConversationUiStateStore } from "../conversation-ui-state/store.js";
+import { WINDOW_LAYOUT_STATE_KEY } from "../conversation-ui-state/schema.js";
 import type { PaneContext, PaneViewStateDef } from "../types.js";
 
 const STATE_KEY_RE = /^[A-Za-z0-9._-]{1,80}$/;
-const RESERVED_STATE_KEYS = new Set(["__proto__", "prototype", "constructor"]);
+const RESERVED_STATE_KEYS = new Set([
+  "__proto__",
+  "prototype",
+  "constructor",
+  WINDOW_LAYOUT_STATE_KEY,
+]);
 
 export function validPaneViewStateDef(
   value: PaneViewStateDef | undefined,

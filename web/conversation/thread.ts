@@ -1,6 +1,6 @@
 // Owns thread assembly, paint state, change keys and saved reading viewports.
 // Chrome/fetch invoke paint/renderConv but never mutate presentation state.
-// Repaints hold the reader through live-reply replacement and height clamps.
+// Repaints and hidden layout clamps preserve the reader's row or bottom.
 // Phone thread drags blur the field; scrolling/composer gestures do not.
 import { commentOutbox } from "../artifacts/comment-outbox.js";
 import { outboxBubbles } from "../composer/outbox.js";
@@ -147,6 +147,12 @@ msgsEl.addEventListener("click", async (e) => {
 let vEyeActive = false;
 const vEyeOpened = new Set<string>();
 
+let disclosureHold: {
+  conversation: string;
+  anchor: ScrollAnchorRow;
+  correct: () => void;
+} | null = null;
+
 // Anchors repaints on surviving keyed boundary rows or the clicked control.
 // Folding above the viewport must never move the reader's screen position.
 export function anchoredPaint(
@@ -155,15 +161,20 @@ export function anchoredPaint(
 ): void {
   releaseBottomFollow();
   const rows = [...msgsEl.querySelectorAll<HTMLElement>(":scope > *")];
-  withScrollAnchor(
+  const correct = withScrollAnchor(
     scrollEl,
     rows,
     () => {
       paint(conv);
-      if (anchor) cancelThreadBottom();
+      if (anchor) {
+        viewportHold = null;
+        cancelThreadBottom();
+      }
     },
     anchor,
   );
+  if (anchor && correct)
+    disclosureHold = { conversation: conv.id, anchor, correct };
 }
 
 export function toggleLatestTurnEye(): void {
@@ -254,6 +265,7 @@ type SendPin = {
 // Follows the reply's bottom only until the operator's send reaches the top.
 let sendPin: SendPin | null = null;
 export function releaseBottomFollow(): void {
+  disclosureHold = null;
   bottomFollowConversation = null;
   viewportHold = null;
   if (sendPin) sendPin.held = false;
@@ -261,6 +273,7 @@ export function releaseBottomFollow(): void {
 }
 /** Keeps repaints following a jump instead of holding it mid-scroll. */
 export function followLatestReply(): void {
+  disclosureHold = null;
   viewportHold = null;
   if (sendPin) sendPin.held = false;
   bottomFollowConversation = toolDetailConversation;
@@ -285,6 +298,7 @@ function sendsAfter(row: HTMLElement | null): [HTMLElement[], HTMLElement[]] {
  * operator message after the last stored row at send time, until a queued send.
  */
 export function pinOperatorSend(conversation: string): void {
+  disclosureHold = null;
   bottomFollowConversation = null;
   viewportHold = null;
   cancelThreadBottom();
@@ -306,6 +320,7 @@ export function pinOperatorSend(conversation: string): void {
  */
 export function holdQueuedSend(conversation: string): void {
   if (conversation !== toolDetailConversation) return;
+  disclosureHold = null;
   const pin = sendPin;
   // Invariant: A queued send freezes the current view, even before the first
   // send reaches the top or its stored row arrives.
@@ -515,11 +530,18 @@ for (const event of ["touchend", "touchcancel"])
     passive: true,
   });
 
-for (const event of ["pointerdown", "touchmove", "wheel", "keydown"])
+for (const event of [
+  "pointerdown",
+  "touchmove",
+  "wheel",
+  "keydown",
+  "recurse:reader-scroll",
+])
   scrollEl.addEventListener(event, releaseBottomFollow, { passive: true });
 scrollEl.addEventListener(
   "scroll",
   () => {
+    if (!scrollEl.clientHeight) return;
     // Invariant: Scroll events report the current offset, so one queued by the
     // previous thread reads the held offset and keeps the hold.
     if (
@@ -545,6 +567,18 @@ if (typeof ResizeObserver !== "undefined") {
   const bottomFollowResize = new ResizeObserver(() => {
     applySendPin();
     if (pinHeld()) return;
+    if (disclosureHold) {
+      // Invariant: Delayed window layout cannot move a pressed control; reader
+      // gestures, sends and conversation changes release its screen anchor.
+      if (
+        disclosureHold.conversation === state.selectedId &&
+        disclosureHold.anchor.isConnected
+      ) {
+        if (scrollEl.clientHeight) disclosureHold.correct();
+        return;
+      }
+      disclosureHold = null;
+    }
     const id = bottomFollowConversation ?? viewportHold?.conversation ?? null;
     if (id === null || id !== state.selectedId || toolDetailConversation !== id)
       return;
@@ -701,6 +735,7 @@ export function paint(conv: Conversation): void {
   const replacingConversation =
     previousConversation === null || previousConversation !== conv.id;
   if (replacingConversation) {
+    disclosureHold = null;
     if (previousConversation !== null) saveViewport(previousConversation);
     const saved = savedViewports.get(conv.id);
     viewportHold = saved
@@ -734,6 +769,7 @@ export function paint(conv: Conversation): void {
     scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <
     BOTTOM_FOLLOW_THRESHOLD_PX;
   if (
+    !disclosureHold &&
     !viewportHold &&
     !pinHeld() &&
     !nearBottom &&
@@ -747,6 +783,7 @@ export function paint(conv: Conversation): void {
       viewportHold = { ...saved, conversation: conv.id, revealed: true };
   }
   const followBottom =
+    !disclosureHold &&
     !viewportHold &&
     !pinHeld() &&
     shouldFollowConversationBottom(
@@ -848,6 +885,7 @@ export function resetVEye(): void {
 // Take and clear the tool-detail tracking for renderEmptyAgentList/renderDraft
 // in chrome.ts: closing a conversation also closes its detail view.
 export function takeToolDetailConversation(): string | null {
+  disclosureHold = null;
   const current = toolDetailConversation;
   if (current) saveViewport(current);
   toolDetailConversation = null;

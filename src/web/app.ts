@@ -5,6 +5,8 @@
 
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
+import { FffWorker } from "../extensions/extra/fff/fff_worker";
+import { registerExplorerRoutes } from "./explorer";
 
 import { buildInstance, type Instance } from "../agents/instance";
 import type { TranscriptQuery } from "../agents/durable/transcript";
@@ -596,8 +598,8 @@ export async function buildApp(options: AppOptions): Promise<App> {
         instance.workdirGit.resolveDiffCwd(stored, persisted, signal),
       worktreeDiff: (cwd, base, source, signal) =>
         instance.workdirGit.worktreeDiff(cwd, base, source, signal),
-      diffFile: (cwd, path, base, contents) =>
-        instance.workdirGit.diffFile(cwd, path, base, contents),
+      diffFile: (cwd, path, base, contents, snapshot) =>
+        instance.workdirGit.diffFile(cwd, path, base, contents, snapshot),
       pullRequestDiff: (url, path, queue) =>
         instance.workdirGit.pullRequestDiff(url, path, queue),
       diffCandidates: (cwd) => instance.workdirGit.diffCandidates(cwd),
@@ -626,6 +628,14 @@ export async function buildApp(options: AppOptions): Promise<App> {
     transcript,
   });
   registerFileRoutes(router, filesDeps);
+  const explorer = registerExplorerRoutes(router, {
+    cwd: filesDeps.imageCwd,
+    dataDir: paths.DATA_DIR,
+    privateRoots: [credentialRoots.state, credentialDir],
+    signal: instance.shutdownController.signal,
+    search: (cid, cwd, query, signal) =>
+      durable.searchService(FffWorker).fileNames(cid, cwd, query, signal),
+  });
 
   const loopLag = new LoopLag({
     logger: logger("loop_lag", sink),
@@ -780,14 +790,20 @@ export async function buildApp(options: AppOptions): Promise<App> {
           // Invariant: Requests served during the drain may queue agent-store
           // writes: the store is disposed only once the drain ends or hits its
           // bound.
-          await instance.shutdown(drained).finally(() => config.close());
+          await explorer
+            .close()
+            .finally(() =>
+              instance.shutdown(drained).finally(() => config.close()),
+            );
           await sink.file?.close().catch(() => undefined);
         },
       });
     } catch (error) {
       // Invariant: The watcher is already running: stop it before failing (port
       // in use).
-      await instance.shutdown().finally(() => config.close());
+      await explorer
+        .close()
+        .finally(() => instance.shutdown().finally(() => config.close()));
       throw error;
     }
     loopLag.start();

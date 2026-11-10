@@ -2,6 +2,17 @@
 
 [loop_lag.ts](loop_lag.ts) measures delayed timer samples without native CPU or
 memory reads. Stall details are assembled only when a warning is emitted.
+[loop_lag.worker.ts](loop_lag.worker.ts) samples an independent timer through
+shared atomic snapshots, at a cadence of at least 50 ms to limit idle work.
+`observer_late_ms` reports its maximum timer lateness
+over the main sample window, including a tick still overdue when main resumes.
+Both timers late suggests a shared machine/container pause; only main late
+suggests main-thread blocking. This distinguishes observations, not root causes:
+a Worker can also be delayed independently. The field is absent before observer
+readiness, on a concurrent snapshot write, or after observer failure. Readiness
+requires a new main window after the observer starts, excluding partial startup
+coverage. The Worker
+is unref'd, starts without waiting, emits no logs, and stops with LoopLag.
 
 [slow_span.ts](slow_span.ts) records bounded synchronous wall spans and open-phase
 intervals. `spans` describes the three longest completed synchronous sections

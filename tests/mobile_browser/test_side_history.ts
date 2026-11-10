@@ -52,7 +52,7 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await page.close();
   },
-  // Regression: #2817 parked side frames retain their cache without background reads
+  // Regression: #3205 parked side frames retain history without pane reads from late tree responses
   async function test_parked_side_history(browser, base) {
     const { agent } = await postFixture(base, "seed-side-history");
     const page = await browser.newPage({
@@ -149,11 +149,30 @@ export const tests: BrowserTest[] = [
       if (holdCatchup && route.request().method() === "GET") held.push(route);
       else void route.continue();
     });
+    let releaseWakeTree!: () => void;
+    const wakeTreeHeld = new Promise<void>((resolve) => {
+      releaseWakeTree = resolve;
+    });
+    let sawWakeTree!: () => void;
+    const wakeTreeRequested = new Promise<void>((resolve) => {
+      sawWakeTree = resolve;
+    });
+    let holdWakeTree = false;
+    await page.route(`${base}api/tree`, async (route) => {
+      if (holdWakeTree && route.request().frame() !== page.mainFrame()) {
+        holdWakeTree = false;
+        const response = await route.fetch();
+        sawWakeTree();
+        await wakeTreeHeld;
+        await route.fulfill({ response });
+      } else await route.fallback();
+    });
     for (let cycle = 0; cycle < 2; cycle++) {
       await page.locator("#input").fill("Keep the side conversation closed");
       await parentTicks(4);
       expect(reads).toEqual([]);
       holdCatchup = true;
+      holdWakeTree = cycle === 1;
       const reconnect = page.waitForRequest(
         (request) =>
           request.frame() !== page.mainFrame() &&
@@ -187,21 +206,23 @@ export const tests: BrowserTest[] = [
           .waitFor({ state: "attached" });
       } else {
         await side.getByText("Arrived while parked", { exact: true }).waitFor();
+        await wakeTreeRequested;
       }
       await page
-        .locator('.pane-col[data-pane="side"]')
-        .getByRole("button", { name: /^Close / })
+        .getByRole("button", { name: "Close Side conversations", exact: true })
         .click();
       await page
         .locator("#side-frame-parking iframe.side-frame")
         .waitFor({ state: "attached" });
       reads.length = 0;
+      if (cycle === 1) releaseWakeTree();
       if (cycle === 0) {
         const delivered = await page.request.post(
           `${base}api/conversations/${id}/deliver`,
           { data: { content: "Arrived while parked" } },
         );
         expect(delivered.ok()).toBe(true);
+        await postFixture(base, `newer-pr-link?agent=${id}`);
       }
     }
     await parentTicks(4);

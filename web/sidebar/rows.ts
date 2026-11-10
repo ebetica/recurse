@@ -12,6 +12,7 @@ export type Tags = Record<string, Tag>;
 
 export interface SidebarRow extends Agent {
   busy: boolean;
+  unread: boolean;
   children: number;
   remote: boolean;
   model: string | null;
@@ -55,6 +56,7 @@ export interface RowSource {
   updated: number;
   operator_message_at?: number | null;
   replied_at?: number | null;
+  unread?: boolean;
   tags?: unknown;
 }
 
@@ -84,6 +86,7 @@ export function sidebarRow(
     id: node.id,
     parent: node.parent ?? null,
     busy,
+    unread: node.unread === true,
     children: node.children,
     remote: node.id.includes("/"),
     model: node.model ?? null,

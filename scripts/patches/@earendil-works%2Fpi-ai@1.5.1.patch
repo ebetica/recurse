@@ -1,8 +1,8 @@
 diff --git a/dist/api/anthropic-messages.js b/dist/api/anthropic-messages.js
-index de2b2d8c209f5576c18b020de297d4ef5fad5960..555c3e0a8e53bc1234d41b7376d9b4df4f728319 100644
+index 0a1b565..ddba58f 100644
 --- a/dist/api/anthropic-messages.js
 +++ b/dist/api/anthropic-messages.js
-@@ -1040,7 +1040,13 @@ convertToolDefinitions) {
+@@ -1243,7 +1243,13 @@ convertToolDefinitions) {
      // update placed before a user message in the transcript lands after it on the wire.
      const pendingSystemMessages = [];
      const flushPendingSystemMessages = () => {
@@ -18,7 +18,7 @@ index de2b2d8c209f5576c18b020de297d4ef5fad5960..555c3e0a8e53bc1234d41b7376d9b4df
      };
      for (let i = 0; i < transformedMessages.length; i++) {
 diff --git a/dist/api/transform-messages.js b/dist/api/transform-messages.js
-index 6a364cbc634759b52af34044e207c6f1cdb29186..9569e7c897b03d3f3a367ecebb9ba4dd37e7c312 100644
+index 6a364cb..9569e7c 100644
 --- a/dist/api/transform-messages.js
 +++ b/dist/api/transform-messages.js
 @@ -87,7 +87,37 @@ export function transformMessages(messages, model, normalizeToolCallId) {
@@ -61,10 +61,10 @@ index 6a364cbc634759b52af34044e207c6f1cdb29186..9569e7c897b03d3f3a367ecebb9ba4dd
                      // Thinking from another model is dropped. Signatures and encrypted reasoning are
                      // only valid for the model that produced them, and sending readable thinking as
 diff --git a/dist/types.d.ts b/dist/types.d.ts
-index 2d650ea3ece9ed470dc6c60538409e2b84f06f32..ae6e4f9c0629ff89c4bdaded780bc12f549eebb0 100644
+index b410a7b..bfd3667 100644
 --- a/dist/types.d.ts
 +++ b/dist/types.d.ts
-@@ -311,7 +311,7 @@ export interface Usage {
+@@ -318,7 +318,7 @@ export interface Usage {
          totalFromProvider?: boolean;
      };
  }

@@ -1,8 +1,8 @@
 diff --git a/dist/codemode/codemode.d.ts b/dist/codemode/codemode.d.ts
-index 429bfd1e491008edca6b9ff146ab25a50baa1d9e..e3b0cb21eba2ad893e44762b47dac61a5dcfe0ba 100644
+index 18b1278..7c1fd4a 100644
 --- a/dist/codemode/codemode.d.ts
 +++ b/dist/codemode/codemode.d.ts
-@@ -44,7 +44,7 @@ import { type CodemodeNamespace } from "./describe.ts";
+@@ -45,7 +45,7 @@ import { type CodemodeNamespace } from "./describe.ts";
   * Version of everything in this module that turns stored results into what a script sees: result mapping, globals,
   * start data. Bump it when that changes, so a call started before an upgrade is not replayed by different code.
   */
@@ -12,10 +12,10 @@ index 429bfd1e491008edca6b9ff146ab25a50baa1d9e..e3b0cb21eba2ad893e44762b47dac61a
  /** One tool as the script sees it: `tools.<jsName>`. */
  /**
 diff --git a/dist/codemode/codemode.js b/dist/codemode/codemode.js
-index 9ef1da0d2b59fd84ee03aae503c308cf73f6d641..38dd11c6aca9a88f40eac02cfc2e7ed63dfb8ce1 100644
+index aa51bd5..d6a929f 100644
 --- a/dist/codemode/codemode.js
 +++ b/dist/codemode/codemode.js
-@@ -51,7 +51,7 @@ import { DEFAULT_MAX_OUTPUT_TOKENS, formatResult } from "./output.js";
+@@ -15,7 +15,7 @@ import { DEFAULT_MAX_OUTPUT_TOKENS, formatResult } from "./output.js";
   * Version of everything in this module that turns stored results into what a script sees: result mapping, globals,
   * start data. Bump it when that changes, so a call started before an upgrade is not replayed by different code.
   */
@@ -24,7 +24,7 @@ index 9ef1da0d2b59fd84ee03aae503c308cf73f6d641..38dd11c6aca9a88f40eac02cfc2e7ed6
  export const CODEMODE_TOOL_NAME = "codemode";
  export const CodemodeRunDoc = defineDoc({
      kind: "pi.codemode.run",
-@@ -129,7 +129,10 @@ export function createCodemodeExtension(options) {
+@@ -93,7 +93,10 @@ export function createCodemodeExtension(options) {
   * schema-less tool's output, else its error diagnostics.
   */
  function outcomeOf(name, structured, result) {
@@ -37,7 +37,7 @@ index 9ef1da0d2b59fd84ee03aae503c308cf73f6d641..38dd11c6aca9a88f40eac02cfc2e7ed6
          return { ok: true, value };
      const message = structured ? "" : value;
 diff --git a/dist/harness/generation.js b/dist/harness/generation.js
-index ac42dfe741b20726ab8eb3d8139b1296d664210d..bf34cf270ec52f10f409fff37a9f05b6db83759f 100644
+index 27e60bb..0b6ad2f 100644
 --- a/dist/harness/generation.js
 +++ b/dist/harness/generation.js
 @@ -119,6 +119,8 @@ export const GenerationTask = defineTask({
@@ -168,7 +168,7 @@ index ac42dfe741b20726ab8eb3d8139b1296d664210d..bf34cf270ec52f10f409fff37a9f05b6
  async function classify(runtime, request, message, context) {
      // An abort mark or close: the abort invocation or the reopened run handles the committed state.
 diff --git a/dist/harness/submissions.js b/dist/harness/submissions.js
-index 6e882a8c252dda942b8b45e5b1837cf2fee28341..a3af234b06a520ac49b57005832808ee4048fb27 100644
+index 512b247..1288e29 100644
 --- a/dist/harness/submissions.js
 +++ b/dist/harness/submissions.js
 @@ -229,10 +229,14 @@ export async function admitSubmission(tx, conversationId, draft, now, queueModes
@@ -188,10 +188,10 @@ index 6e882a8c252dda942b8b45e5b1837cf2fee28341..a3af234b06a520ac49b57005832808ee
          if (boundary === undefined)
              return { id, status: "queued" };
 diff --git a/dist/harness/types.d.ts b/dist/harness/types.d.ts
-index eb64e474162b158a43563e6c68d8ffea8c18b74a..517e95a4fb91871492bc8f4fed1536e4ac50b022 100644
+index 7f4a0ba..3ef3a78 100644
 --- a/dist/harness/types.d.ts
 +++ b/dist/harness/types.d.ts
-@@ -31,7 +31,8 @@ export type SubmissionDraft = {
+@@ -33,7 +33,8 @@ export type SubmissionDraft = {
  } & ({
      readonly type: "input";
      readonly content: UserInput;
@@ -202,10 +202,10 @@ index eb64e474162b158a43563e6c68d8ffea8c18b74a..517e95a4fb91871492bc8f4fed1536e4
       * `reject`: an idle conversation (no run) rejects the input with `ConversationIdle` and writes nothing, so the input
       * never starts a run of its own. With `whenBusy: "steer"` it steers the current run or is refused; a run that
 diff --git a/dist/storage/sqlite/storage.d.ts b/dist/storage/sqlite/storage.d.ts
-index bdf2b1f550f601fc12f33cf9ab3835772f89e7a7..ad4575c0c892a031636344055fe530f71b17f207 100644
+index 22a6246..57048c3 100644
 --- a/dist/storage/sqlite/storage.d.ts
 +++ b/dist/storage/sqlite/storage.d.ts
-@@ -8,6 +8,8 @@ export type SqliteStorageOptions = {
+@@ -9,6 +9,8 @@ export type SqliteStorageOptions = {
       * SQLite's reserved `sqlite_` prefix. Existing data is not migrated when this changes.
       */
      readonly prefix?: string;
@@ -215,19 +215,19 @@ index bdf2b1f550f601fc12f33cf9ab3835772f89e7a7..ad4575c0c892a031636344055fe530f7
  /** Portable SQLite implementation of the Pico storage contract. */
  export declare class SqliteStorage implements Storage {
 diff --git a/dist/storage/sqlite/storage.js b/dist/storage/sqlite/storage.js
-index 890f1428f8855e05f18007ab3ca70218a7a32ef8..8ace074d8abfa0f1be4baf012290f54166f6d1e7 100644
+index 6d3a6eb..ac0c57c 100644
 --- a/dist/storage/sqlite/storage.js
 +++ b/dist/storage/sqlite/storage.js
-@@ -2,7 +2,7 @@ import { apply } from "@earendil-works/chord/delta";
- import { StorageRequestError } from "../../errors.js";
+@@ -3,7 +3,7 @@ import { StorageRequestError } from "../../errors.js";
  import { idFromNumber, seqFromNumber } from "../../ids.js";
  import { nextCursor, scanStart } from "../scan.js";
+ import { CommitState, claimOf, PendingWrites, prepareDocumentActions } from "./commit.js";
 -import { applySqliteMigrationsForSchema } from "./migrations.js";
 +import { applySqliteMigrationsForSchema, CURRENT_SQLITE_SCHEMA_VERSION } from "./migrations.js";
+ import { addressParts, encodeIndexedString, isCurrentOnly, parseJson, scopeColumns } from "./rows.js";
  import { createSqliteSchema } from "./schema.js";
- const parseJson = (value) => JSON.parse(value);
- const encodeJson = (value) => JSON.stringify(value);
-@@ -110,7 +110,15 @@ export class SqliteStorage {
+ const cursorId = (cursor) => {
+@@ -69,7 +69,15 @@ export class SqliteStorage {
      static async open(db, options = {}) {
          try {
              const schema = createSqliteSchema(options.prefix);

@@ -1,7 +1,7 @@
 // Draft effort applies on creation; existing choices wait for the next turn.
 // Running turns keep launched models; each backend owns its effort ladder.
 // Unreachable choices explain why, without duplicate controls.
-// Context reuses cached tree usage; older servers use selected-view reads.
+// Context reuses tree usage for loaded history; pending Clear stays blank.
 import {
   backendFor,
   conversationId,
@@ -20,7 +20,11 @@ import {
 } from "./context-viewer.js";
 import { effortStepForKey } from "./keymap.js";
 import { ContextFallbackGate } from "./context/fallback.js";
-import { rowThreads, rowThreadContextKey } from "./row-thread-state.js";
+import {
+  rowThreads,
+  rowThreadContextKey,
+  rowThreadClearPending,
+} from "./row-thread-state.js";
 import type { Conversation, PendingModel } from "./types.js";
 
 export const EFFORT_LEVELS = [1, 2, 3, 4, 5] as const;
@@ -385,12 +389,22 @@ function paintSlider(disabled: boolean): void {
 }
 
 function showContextTokens(c: Conversation | null): void {
+  if (c?.backend === "durable" && rowThreadClearPending(c.id)) {
+    contextFallbackGate.reset();
+    contextFallbackKey = null;
+    showConversationContext(c, null, null);
+    return;
+  }
   if (c?.backend === "durable") {
+    const thread = rowThreads.get(c.id);
     const cached = (
       state.nodes[c.id] ?? state.sides.find((node) => node.id === c.id)
     )?.agent?.context;
     if (
       cached &&
+      (!thread ||
+        (typeof cached.session === "string" &&
+          cached.session === thread.sessionKey)) &&
       Number.isSafeInteger(cached.tokens) &&
       cached.tokens >= 0 &&
       (cached.window === null ||

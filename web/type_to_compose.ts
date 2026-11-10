@@ -14,6 +14,7 @@ export interface TypeToComposeKey {
 export interface TypeToComposeContext {
   desktop: boolean;
   composerFocused: boolean;
+  paneFocused: boolean;
   composerAvailable: boolean;
   textEditorFocused: boolean;
   textSelected: boolean;
@@ -37,6 +38,7 @@ export function shouldTypeToCompose(
   return (
     context.desktop &&
     !context.composerFocused &&
+    !context.paneFocused &&
     context.composerAvailable &&
     !context.textEditorFocused &&
     !context.textSelected &&

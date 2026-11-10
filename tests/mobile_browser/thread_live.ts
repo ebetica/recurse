@@ -1076,7 +1076,7 @@ export const liveTests: BrowserTest[] = [
       await context.close();
     }
   },
-  // Regression: #3065 wait for full streamed paragraphs before measuring scroll preservation. (also #2976 short replies add no space; long replies stop at the send.)
+  // Regression: #3229 wait for settled scrolling and full streamed paragraphs before measuring preservation (also #3065; #2976 short replies add no space; long replies stop at the send).
   async function test_send_pins_message_and_live_bar_stays_visible(
     browser,
     base,
@@ -1249,6 +1249,7 @@ export const liveTests: BrowserTest[] = [
             scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 2
           );
         });
+        await waitForLayout(page);
         const latest = await geometry();
         expect(latest.queued.top).toBeGreaterThanOrEqual(latest.scroll.top);
         expect(latest.queued.bottom).toBeLessThanOrEqual(latest.scroll.bottom);

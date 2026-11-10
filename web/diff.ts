@@ -15,7 +15,13 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { repeat } from "lit/directives/repeat.js";
 import { ref } from "lit/directives/ref.js";
 import { safeMarkdown } from "./thread-render.js";
-import { fetchPaneData, openPane, registerPane, syncPanes } from "./panes.js";
+import {
+  fetchPaneData,
+  focusPaneControl,
+  openPane,
+  registerPane,
+  syncPanes,
+} from "./panes.js";
 import { renderPowerbarControls } from "./panes/powerbar.js";
 
 import { state } from "./state.js";
@@ -25,6 +31,7 @@ import type { PaneContext } from "./types.js";
 import {
   acknowledgeComments,
   baseErrorText,
+  baseName,
   buildFileRows,
   diffContextMarker,
   filterBaseCandidates,
@@ -55,6 +62,11 @@ import type {
 } from "./diff/render.js";
 import type { DiffFile as DiffFileType } from "@git-diff-view/core";
 import { gapBar } from "./diff/expand.js";
+import {
+  changesFilter,
+  filterChanges,
+  navigateChanges,
+} from "./diff/navigation.js";
 
 type Core = typeof import("@git-diff-view/core");
 let coreMod: Promise<Core> | null = null;
@@ -97,6 +109,13 @@ interface DiffSummary {
   base?: string | null;
   baseSha?: string | null;
   baseSource?: string | null;
+  defaultBase?: string | null;
+  selectedWork?: {
+    ref: string;
+    headSha: string;
+    stop: string | null;
+    commits: number;
+  } | null;
   headSha?: string | null;
   branch?: string | null;
   cwd?: string | null;
@@ -218,7 +237,15 @@ const LOCAL = "\nlocal";
 const ownerOf = (key: string) => key.split("\n")[0]!;
 const isLocal = (key: string) => key.endsWith(LOCAL);
 function fileQuery(key: string, separator: string): string {
-  return isLocal(key) ? separator + "base=HEAD" : prQuery(key, separator);
+  if (isLocal(key)) return separator + "base=HEAD";
+  const summary = entry(key).summary;
+  return summary?.selectedWork && summary.baseSha
+    ? separator +
+        "snapshot=" +
+        summary.baseSha +
+        ".." +
+        summary.selectedWork.headSha
+    : prQuery(key, separator);
 }
 
 function targetFor(summary: DiffSummary): DiffTarget {
@@ -226,11 +253,13 @@ function targetFor(summary: DiffSummary): DiffTarget {
     summary.target ?? {
       kind: "worktree",
       id: "worktree",
-      branch: summary.branch || null,
-      baseBranch: summary.base || null,
+      branch: summary.selectedWork?.ref || summary.branch || null,
+      baseBranch: summary.selectedWork
+        ? summary.selectedWork.stop || summary.baseSha || null
+        : summary.base || null,
       baseSha: summary.baseSha || null,
       headSha: summary.headSha || null,
-      includesUncommitted: true,
+      includesUncommitted: !summary.selectedWork,
     }
   );
 }
@@ -275,9 +304,10 @@ function maybeFetch(
       }
       const forceViews = forceViewRefresh.has(id);
       if (forceViews) forceViewRefresh.delete(id);
-      if (e.summary && (forceViews || e.summary.version !== s.version))
-        refreshFileViews(id, s, forceViews);
+      const refreshViews =
+        e.summary && (forceViews || e.summary.version !== s.version);
       e.summary = s;
+      if (refreshViews) refreshFileViews(id, s, forceViews);
       e.available = !!s.available || e.prs.length > 0;
       e.error = s.available
         ? null
@@ -414,7 +444,7 @@ function loadContents(
     "/diff/files?path=" +
     encodeURIComponent(path) +
     "&contents=1" +
-    (isLocal(agentId) ? "&base=HEAD" : "");
+    fileQuery(agentId, "&");
   const done = () => {
     if (st.contentsStatus === "unavailable") {
       fileViews.get(agentId)?.get(path)?.showContentsUnavailable();
@@ -481,7 +511,7 @@ function scheduleFetch(id: string, invalidate: boolean): void {
 }
 
 let lastAvailableId: string | null = null;
-function available(ctx: PaneContext): boolean {
+function available(ctx: PaneContext): boolean | undefined {
   const id = ctx.agentId;
   // Invariant: Selecting an agent buys one fresh snapshot, even when this
   // browser viewed it before. Repeated syncs for the same agent stay
@@ -490,7 +520,7 @@ function available(ctx: PaneContext): boolean {
   lastAvailableId = id;
   scheduleFetch(id, selected);
   const e = cache.get(id);
-  return e ? e.available : false;
+  return e?.available || (e?.invalidated || e?.inflight ? undefined : false);
 }
 
 window.addEventListener(UI_REFRESH_EVENT, (event: Event) => {
@@ -562,7 +592,7 @@ export function openPullRequestFinder(): void {
   ed.input.value = "";
   ed.dirty = true;
   refilterFinder(id);
-  ed.input.focus();
+  focusPaneControl(PANE_ID, ed.input);
 }
 
 // Until the reader picks a target, Changes shows the newest pull request
@@ -665,7 +695,7 @@ function renderFinder(agentId: string): void {
         ? "Pull requests"
         : c.kind === "worktree"
           ? "Change target"
-          : "Compare working directory against";
+          : "Show the changes of";
     if (section !== previousSection) {
       const heading = el("li", "menu-label diff-base-section", section);
       heading.setAttribute("role", "presentation");
@@ -685,8 +715,7 @@ function renderFinder(agentId: string): void {
     item.setAttribute("role", "option");
     item.id = "diff-base-opt-" + agentId + "-" + i;
     item.setAttribute("aria-selected", i === ed.active ? "true" : "false");
-    const kindLabel = c.kind === "worktree" || c.kind === "pr" ? "" : c.kind;
-    const kind = el("span", "diff-base-kind", kindLabel);
+    const kind = el("span", "diff-base-kind", c.value ? c.kind : "");
     const label = el("span", "diff-base-label-text", c.label);
     label.title = c.label;
     if (c.kind !== "pr") item.append(kind);
@@ -724,10 +753,20 @@ function refilterFinder(agentId: string): void {
         (pr.agent ? " · " + (pr.agent.title || pr.agent.id) : ""),
     })),
   ];
+  const s = e.summary;
+  const bases = [...(ed.candidates || [])];
+  if (!e.selectedPr && s?.baseSource?.startsWith("override:"))
+    bases.unshift({
+      kind: "default",
+      value: "",
+      label: s.defaultBase
+        ? "Changes since " + baseName(s.defaultBase) + " (default)"
+        : "Changes on this branch (default)",
+    });
   const query = ed.dirty ? ed.input.value : "";
   ed.filtered = groupPrCandidates([
     ...filterBaseCandidates(targets, query).slice(0, 5),
-    ...filterBaseCandidates(ed.candidates || [], query).slice(0, 5),
+    ...filterBaseCandidates(bases, query).slice(0, 5),
   ]);
   // Invariant: Nothing highlighted until the arrow keys move: Enter applies the
   // typed text verbatim, so an exact ref the finder merely contains still wins.
@@ -744,27 +783,12 @@ function loadBaseCandidates(agentId: string): void {
   ed.loadingCandidates = true;
   void backendFor(agentId)
     .api("/api/conversations/" + agentId + "/diff/candidates")
-    .then(async (r) => {
-      let lists: BaseCandidateLists | null = null;
-      try {
-        if (r.ok) lists = (await r.json()) as BaseCandidateLists;
-      } catch {
-        lists = null;
-      }
-      const cur = baseEditors.get(agentId);
-      if (!cur) return;
-      cur.candidates = flattenBaseCandidates(lists);
-      if (cur.open) refilterFinder(agentId);
-    })
-    .catch(() => {
-      const cur = baseEditors.get(agentId);
-      if (!cur) return;
-      cur.candidates = [];
-      if (cur.open) refilterFinder(agentId);
-    })
-    .finally(() => {
-      const cur = baseEditors.get(agentId);
-      if (cur) cur.loadingCandidates = false;
+    .then(async (r) => (r.ok ? ((await r.json()) as BaseCandidateLists) : null))
+    .catch(() => null)
+    .then((lists) => {
+      ed.candidates = flattenBaseCandidates(lists);
+      ed.loadingCandidates = false;
+      if (ed.open) refilterFinder(agentId);
     });
 }
 
@@ -781,7 +805,7 @@ function openBaseEditor(agentId: string): void {
   loadBaseCandidates(agentId);
   loadPullRequests(agentId);
   refilterFinder(agentId);
-  ed.input.focus();
+  focusPaneControl(PANE_ID, ed.input);
   ed.input.select();
 }
 
@@ -797,38 +821,61 @@ function closeBaseEditor(agentId: string): void {
   ed.labelBtn.focus();
 }
 
+// What the worktree diff compares with, in words: "Changes since main".
+function comparisonText(s: DiffSummary): string {
+  if (s.selectedWork) {
+    const { ref, stop } = s.selectedWork;
+    return stop
+      ? baseName(ref) + " since " + baseName(stop)
+      : "Changes in " + baseName(ref);
+  }
+  if (s.base === "HEAD") return "Uncommitted changes";
+  return s.base ? "Changes since " + baseName(s.base) : "Changes";
+}
+
 // Sync the collapsed label after each shell render. The form internals are
 // never touched here, so an open editor keeps its draft, error, and focus.
 function refreshBaseEditor(agentId: string, s: DiffSummary): void {
   const ed = baseEditors.get(agentId);
   if (!ed || ed.open) return;
   const e = entry(agentId);
-  const baseLabel = s.base || "auto";
-  ed.root.style.flex = e.selectedPr ? "1" : "";
-  ed.labelText.textContent = e.selectedPr
+  const pr = e.selectedPr;
+  ed.root.style.flex = pr ? "1" : "";
+  ed.labelText.textContent = pr
     ? "PR #" +
-      e.selectedPr.number +
-      (e.selectedPr.title ? " · " + e.selectedPr.title : "") +
-      (e.selectedPr.baseRefName ? " · vs " + e.selectedPr.baseRefName : "")
-    : "vs " +
-      baseLabel +
+      pr.number +
+      (pr.title ? " · " + pr.title : "") +
+      (pr.baseRefName ? " · into " + pr.baseRefName : "")
+    : comparisonText(s) +
       (e.prs.length
         ? " · " + e.prs.length + (e.prs.length === 1 ? " PR" : " PRs")
         : "");
   ed.labelBtn.setAttribute(
     "aria-label",
-    e.selectedPr
-      ? "Change diff target: " + ed.labelText.textContent
-      : "Change diff base: " + baseLabel,
+    ed.labelText.textContent + " — choose what to compare",
   );
-  ed.labelBtn.title = e.selectedPr
-    ? ed.labelText.textContent + " — choose a change target"
-    : s.base
-      ? "Comparing against " +
-        s.base +
-        (s.baseSource ? " (" + s.baseSource + ")" : "") +
-        " — click to change"
-      : "Auto-detected base — click to set one";
+  ed.labelBtn.title = pr
+    ? "Choose what to compare"
+    : s.selectedWork
+      ? s.selectedWork.stop
+        ? "Commits after " +
+          baseName(s.selectedWork.stop) +
+          " up to " +
+          baseName(s.selectedWork.ref) +
+          " (" +
+          s.selectedWork.commits +
+          (s.selectedWork.commits === 1 ? " commit)." : " commits).")
+        : "The changes made by commit " +
+          s.selectedWork.headSha.slice(0, 7) +
+          "."
+      : s.base === "HEAD" || !s.base || !s.baseSha
+        ? "Includes uncommitted changes."
+        : "Compared with commit " +
+          s.baseSha.slice(0, 7) +
+          (s.baseSha.startsWith(s.base.toLowerCase())
+            ? ""
+            : ", where this branch meets " + baseName(s.base)) +
+          ". Includes uncommitted changes.";
 }
 
 // Enter/Apply previews the typed ref via ?base=, then persists it via PATCH.
@@ -857,6 +904,9 @@ async function applyBase(agentId: string): Promise<void> {
         showBaseError(ed, await baseErrorText(preview, value));
         return;
       }
+      const { baseSource } = (await preview.json()) as DiffSummary;
+      if (baseSource && baseSource !== "override:" + value)
+        return showBaseError(ed, `No branch, tag or commit named "${value}".`);
     }
     const r = await backendFor(agentId).api(
       "/api/conversations/" + agentId + "/diff/base",
@@ -884,20 +934,17 @@ async function applyBase(agentId: string): Promise<void> {
       "Couldn't reach the server. The current base is unchanged.",
     );
   } finally {
-    const cur = baseEditors.get(agentId);
-    if (cur) {
-      cur.busy = false;
-      cur.applyBtn.disabled = false;
-      cur.applyBtn.textContent = "Apply";
-      renderFinder(agentId);
-    }
+    ed.busy = false;
+    ed.applyBtn.disabled = false;
+    ed.applyBtn.textContent = "Apply";
+    renderFinder(agentId);
     followNewestPr(agentId);
   }
 }
 
 function baseEditorFor(agentId: string): BaseEditor {
-  let ed = baseEditors.get(agentId);
-  if (ed) return ed;
+  const existing = baseEditors.get(agentId);
+  if (existing) return existing;
   const root = el("div", "diff-base-edit");
   const labelBtn = el("button", "diff-base diff-base-btn");
   labelBtn.type = "button";
@@ -910,13 +957,13 @@ function baseEditorFor(agentId: string): BaseEditor {
   const input = el("input", "diff-base-input text-field sm");
   input.type = "text";
   input.setAttribute("role", "combobox");
-  input.setAttribute("aria-label", "Base ref to compare against");
+  input.setAttribute("aria-label", "Show the changes of");
   input.setAttribute("aria-autocomplete", "list");
   input.setAttribute("aria-expanded", "false");
   input.setAttribute("aria-controls", "diff-base-finder-" + agentId);
   input.setAttribute("autocomplete", "off");
   input.setAttribute("spellcheck", "false");
-  input.placeholder = "Find PR, branch, tag, or commit\u2026";
+  input.placeholder = "Branch, tag, commit or pull request";
   const applyBtn = el("button", "btn sm primary diff-base-apply", "Apply");
   applyBtn.type = "button";
   const cancelBtn = el("button", "btn sm diff-base-cancel", "Cancel");
@@ -931,7 +978,7 @@ function baseEditorFor(agentId: string): BaseEditor {
   finder.style.display = "none";
   form.append(row, finder, error);
   root.append(labelBtn, form);
-  const created: BaseEditor = {
+  const ed: BaseEditor = {
     root,
     labelBtn,
     labelText,
@@ -948,45 +995,39 @@ function baseEditorFor(agentId: string): BaseEditor {
     active: -1,
     dirty: false,
   };
-  baseEditors.set(agentId, created);
-  ed = created;
+  baseEditors.set(agentId, ed);
+  const applyOrPick = () => {
+    const pick = ed.active >= 0 ? ed.filtered[ed.active] : null;
+    if (pick) chooseCandidate(agentId, pick);
+    else void applyBase(agentId);
+  };
   input.oninput = () => {
-    const cur = baseEditors.get(agentId);
-    if (cur) cur.dirty = true;
+    ed.dirty = true;
     refilterFinder(agentId);
   };
   input.onkeydown = (ev: KeyboardEvent) => {
-    const cur = baseEditors.get(agentId);
-    if (!cur) return;
     if (ev.key === "ArrowDown" || ev.key === "ArrowUp") {
-      if (!cur.filtered.length) return;
+      if (!ed.filtered.length) return;
       ev.preventDefault();
-      cur.active = moveFinderIndex(
-        cur.active,
+      ed.active = moveFinderIndex(
+        ed.active,
         ev.key === "ArrowDown" ? 1 : -1,
-        cur.filtered.length,
+        ed.filtered.length,
       );
       renderFinder(agentId);
     } else if (ev.key === "Enter") {
       ev.preventDefault();
-      const pick = cur.active >= 0 ? cur.filtered[cur.active] : null;
-      if (pick) chooseCandidate(agentId, pick);
-      else void applyBase(agentId);
+      applyOrPick();
     } else if (ev.key === "Escape") {
       ev.preventDefault();
       // Invariant: A busy editor stays open: closing now would strand the
       // in-flight result as a silent no-op on a hidden form.
-      if (!cur.busy) closeBaseEditor(agentId);
+      if (!ed.busy) closeBaseEditor(agentId);
     }
   };
-  applyBtn.onclick = () => {
-    const cur = baseEditors.get(agentId);
-    const pick = cur && cur.active >= 0 ? cur.filtered[cur.active] : null;
-    if (pick) chooseCandidate(agentId, pick);
-    else void applyBase(agentId);
-  };
+  applyBtn.onclick = applyOrPick;
   cancelBtn.onclick = () => {
-    if (!baseEditors.get(agentId)?.busy) closeBaseEditor(agentId);
+    if (!ed.busy) closeBaseEditor(agentId);
   };
   return ed;
 }
@@ -1798,7 +1839,7 @@ function shellTemplate(
   const e = entry(agentId);
   const local = e.selectedPr && e.local?.available ? e.local : null;
   return html` <div class="diff-list" tabindex="-1">
-      ${prSummaryTemplate(agentId)}
+      ${changesFilter()} ${prSummaryTemplate(agentId)}
       ${error
         ? html`<div
             class=${error === newerContent ? "diff-expand-note" : "diff-error"}
@@ -1833,14 +1874,21 @@ function shellTemplate(
         s,
         e.selectedPr ? "Pull request files" : "Changed files",
       )}
-      ${!s.available && !error
+      ${!s.available && !error && s.reason !== "clean"
         ? html`<div class="diff-empty" role="status">
             Working directory diff unavailable. Choose a pull request above.
           </div>`
         : nothing}
-      ${s.available && !changed.length && !untracked.length
+      ${s.reason === "clean" ||
+      (s.available && !changed.length && !untracked.length)
         ? html`<div class="diff-empty" aria-live="polite">
-            No changes to show.
+            ${e.selectedPr || !s.base
+              ? "No changes to show."
+              : s.selectedWork
+                ? "No changes in " + baseName(s.selectedWork.ref) + "."
+                : s.base === "HEAD"
+                  ? "No uncommitted changes."
+                  : "No changes since " + baseName(s.base) + "."}
           </div>`
         : nothing}
     </div>
@@ -1895,6 +1943,7 @@ function renderShell(el0: DiffEl, agentId: string): void {
       </details>`,
   );
   render(shellTemplate(agentId, s, e.error), el0);
+  filterChanges(el0);
   if (document.activeElement === el0) focusDiffList(el0);
   refreshBaseEditor(agentId, s);
 }
@@ -1953,7 +2002,22 @@ registerPane({
   id: PANE_ID,
   title: "Changes",
   icon: CHANGES_ICON,
+  finder: {
+    kind: "changes",
+    items() {
+      const id = state.selectedId;
+      return (cache.get(id)?.prs ?? []).map((pr) => ({
+        key: pr.url,
+        name: `#${pr.number} ${pr.title}`,
+        open() {
+          if (entry(id).selectedPr?.url !== pr.url) switchDiffTarget(id, pr);
+          openPane(PANE_ID, { userInitiated: true });
+        },
+      }));
+    },
+  },
   available,
+  navigate: navigateChanges,
   cache: {
     version: 1,
     key: (ctx) => ctx.agentId,

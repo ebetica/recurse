@@ -57,6 +57,9 @@ checkpoint on close.
 History for an unopened idle conversation uses a page-scoped, read-only Pi
 storage and document reader, without creating tools, loading the agent
 environment or recovering tasks. A ready Harness serves live history as before.
+A conversation already marked for deletion returns an unavailable history window
+without opening storage; focused event reads return 503 until its record is gone.
+Shutdown still refuses reads with the server-stopping response.
 Missing stores, unfinished runs, queued input, pending clears and older schemas
 use the normal open; sends still open and
 recover the Harness before admitting work. File collections resolve without
@@ -99,9 +102,19 @@ opening it does not replay all earlier cursor updates. Generation and delivery
 position are unchanged. An existing delta chain is discarded on its next advance;
 there is no per-open migration or historical scan.
 
+[reply_times.ts](reply_times.ts) keeps at most 500 reply finish times and writes a
+full checkpoint for each change, rather than retaining every earlier delta.
+The first access to an existing chain still replays it. The next reply replaces
+that chain through Pi's normal checkpoint transaction, so later opens read the
+latest base without replaying earlier updates.
+
 ## Prompts and context
 
 Prompt resources and Recurse sections form the model's system context.
+[Skill discovery](../../coding_backend/skills.ts) supplies Pi's default and
+Agent Skills locations to both autocomplete and each fresh request, including
+subagents. Names, full descriptions and file paths are advertised; skill bodies
+are read on demand. Resource reads do not reuse the tree's skill-context cache.
 Tool instructions resolve asynchronously before the detached snapshot is rendered.
 Changes are applied at request boundaries, and
 [request_capture.ts](request_capture.ts) records the exact request for the
@@ -121,17 +134,24 @@ codemode section, without schemas, including deferred tools the model may call
 `mcp_servers`. Discovery is unchanged. Message provenance is separate from user text
 ([../runtime/prompt_stamp.ts](../runtime/prompt_stamp.ts)).
 [models.ts](models.ts) and [model_selection.ts](model_selection.ts) resolve
-models; Settings owns credentials. Pi's credential store defers its first read
+models; Settings owns credentials. Pi supplies the model catalog. Fable 5.2
+retains only a model-scoped Claude CLI identity override required by Anthropic
+subscriptions with Pi 1.5.1. Anthropic message threads are disabled so each
+captured request and cache replay is self-contained, with no server-held
+conversation dependency. Pi's credential store defers its first read
 until an asynchronous auth operation. Credential and stored-catalog revision
 checks, locked reads and writes use asynchronous filesystem calls, preserving
 Pi's cross-process locking and external Settings-update visibility. The
 [cache-warming extension](../../extensions/extra/cache-warm/README.md) replays
 the last captured main-model request only while live work remains. Replay
-usage is persisted without changing model context.
-`follow.ts` keeps the latest committed assistant usage in its live row for API
-status, clearing it on compaction or close. Status uses the UI's shared occupancy
-projection without opening storage; cold or reopened-but-unsampled agents report
-unknown usage.
+usage is persisted without changing model context. Durable does not construct
+Pi's AgentSession cache warmer, so Pi's idle-warming default does not apply.
+`follow.ts` keeps the latest committed assistant usage and its storage-session
+identity in its live row for API status, clearing it on compaction or close.
+The identity matches `/view` across projection rebuilds and changes on Clear;
+clients must not reuse usage from another session. Status uses the UI's shared
+occupancy projection without opening storage; cold or reopened-but-unsampled
+agents report unknown usage.
 
 Compaction summarizes older context without deleting stored history. Signed-in
 ChatGPT (Codex) models always use encrypted server compaction. Model/account
@@ -161,7 +181,10 @@ tracks phases for [stall diagnostics](../../observability/README.md).
 `event_loop_stall` reports `phases=cid:phase:812ms` for phases overlapping its
 sample window, including phases that just finished. These are wall intervals,
 including awaits and admission waits, not CPU causes. Successful and failed
-opens release their live phase scope in `finally`.
+opens release their live phase scope in `finally`. `observer_late_ms` measures an
+independent timer in the same window: both timers late suggests a shared pause;
+only main late suggests main-thread blocking. The field is omitted when the
+observer is unavailable; neither observation identifies a root cause.
 
 ## Rules for changes
 

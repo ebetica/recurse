@@ -3,6 +3,7 @@ import { EventEmitter, once } from "node:events";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
 import type { Page, Route } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   closeWithRoutes,
@@ -13,6 +14,7 @@ import {
   runBrowserTests,
   type BrowserTest,
   startNewAgent,
+  waitForLayout,
 } from "./common";
 
 async function waitValue(
@@ -129,7 +131,7 @@ async function routeLinkTree(
 }
 
 export const tests: BrowserTest[] = [
-  // Feature: #2745 /btw opens a read-only side conversation in the Side pane's single embedded frame
+  // Regression: #3198 #3239 Side reader keys follow their desktop pane without stealing editor focus
   async function test_side_conversation_pane(browser, base) {
     const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
     const agent = "side-parent";
@@ -148,6 +150,16 @@ export const tests: BrowserTest[] = [
       `${base}__browser-test/seed-model-selection-error`,
       { data: { agent, model: "fauxordinary/faux-1" } },
     );
+    const drafts = Array.from(
+      { length: 50 },
+      (_, n) => `Draft ${String(n).padStart(2, "0")}`,
+    );
+    const {
+      ids: [, releaseNotes],
+    } = await postFixture(base, "seed-named-artifacts", {
+      agent,
+      titles: ["Quarterly chart", "Release notes", ...drafts],
+    });
     await page.goto(`${base}#agent=${agent}`);
     const input = page.locator("#input:enabled");
     await input.fill(
@@ -163,6 +175,41 @@ export const tests: BrowserTest[] = [
     await page
       .getByRole("button", { name: /^View activity token usage:/ })
       .waitFor();
+    await input.fill("/renam");
+    await page.getByRole("option", { name: /^\/rename / }).click();
+    expect(await input.inputValue()).toBe("/rename ");
+    await input.press("Enter");
+    await page
+      .locator("#send-status", { hasText: "Usage: /rename <title>" })
+      .waitFor();
+    await input.fill("/rename  Parent renamed ");
+    await input.press("Enter");
+    await page.locator("#conv-title", { hasText: "Parent renamed" }).waitFor();
+    await page
+      .locator(`#agent-list .agent[data-id="${agent}"] .title`, {
+        hasText: "Parent renamed",
+      })
+      .waitFor();
+    expect(await input.inputValue()).toBe("");
+    const renamed = (await (
+      await page.request.get(`${base}api/tree`)
+    ).json()) as {
+      id: string;
+      title: string;
+    }[];
+    expect(renamed.find((row) => row.id === agent)?.title).toBe(
+      "Parent renamed",
+    );
+    expect(
+      await page.locator(".msg.user", { hasText: "/rename" }).count(),
+    ).toBe(0);
+    if (shots) {
+      await mkdir(shots, { recursive: true });
+      await page.screenshot({ path: `${shots}/rename-1280.png` });
+      await page.setViewportSize({ width: 412, height: 915 });
+      await page.screenshot({ path: `${shots}/rename-412.png` });
+      await page.setViewportSize({ width: 1280, height: 800 });
+    }
     await input.fill("/btw Reply only Side answer");
     await input.press("Enter");
     const pane = page.locator('.pane-col[data-pane="side"]');
@@ -187,6 +234,138 @@ export const tests: BrowserTest[] = [
       .locator("#scroll")
       .evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
     if (shots) await page.screenshot({ path: `${shots}/side-pane-1280.png` });
+
+    const focusSide = () => parentReply.click();
+    const windowBox = async (id: string) =>
+      (await page
+        .locator(`#dock .dv-tab[data-dock-panel="${id}"]`)
+        .locator("xpath=ancestor::div[contains(@class, 'dv-groupview')]")
+        .boundingBox())!;
+    const sideWindow = () => windowBox("side");
+    const windowKeys = async (prefix: string, key: string) => {
+      await page.keyboard.press(prefix);
+      await page.keyboard.press(key);
+      await waitForLayout(page);
+    };
+    const reopenSide = async () => {
+      await page.locator('.rail-btn[data-pane="side"]').click();
+      await pane.waitFor();
+      await parentReply.waitFor();
+      await focusSide();
+    };
+    await pane.locator(".pane-body").focus();
+    await page.keyboard.press("z");
+    expect(await pane.getAttribute("class")).toContain("fullscreen");
+    await focusSide();
+    await page.keyboard.press("z");
+    expect(await pane.getAttribute("class")).not.toContain("fullscreen");
+    await windowKeys("w", "f");
+    expect(await pane.getAttribute("role")).toBe("region");
+    expect(await pane.getAttribute("aria-modal")).toBeNull();
+    await focusSide();
+    await windowKeys("w", "f");
+    expect(await pane.getAttribute("class")).not.toContain("fullscreen");
+    await focusSide();
+    await windowKeys("g", "h");
+    expect(
+      await page
+        .locator("#scroll")
+        .evaluate((node) => node === node.ownerDocument.activeElement),
+    ).toBeTrue();
+    await windowKeys("g", "p");
+    await focusSide();
+    await windowKeys("w", "e");
+    await focusSide();
+    await windowKeys("w", "Shift+K");
+    expect((await sideWindow()).y).toBeLessThan((await windowBox("chat")).y);
+    await focusSide();
+    await windowKeys("w", "Shift+J");
+    expect((await sideWindow()).y).toBeGreaterThan((await windowBox("chat")).y);
+    await focusSide();
+    await windowKeys("w", "e");
+    await focusSide();
+    await windowKeys("w", "Shift+H");
+    expect((await sideWindow()).x).toBeLessThan((await windowBox("chat")).x);
+    await focusSide();
+    await windowKeys("w", "Shift+L");
+    expect((await sideWindow()).x).toBeGreaterThan((await windowBox("chat")).x);
+    await focusSide();
+    await windowKeys("w", "r");
+    const wide = (await sideWindow()).width;
+    await page.keyboard.press("h");
+    await waitForLayout(page);
+    expect((await sideWindow()).width).toBeLessThan(wide);
+    await page.keyboard.press("Escape");
+    await focusSide();
+    await page.keyboard.press("o");
+    await page.locator("[data-pane-finder] input").waitFor();
+    await page.keyboard.press("Escape");
+    await focusSide();
+    await windowKeys("g", "g");
+    expect(
+      await side.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBe(0);
+    await page.keyboard.press("j");
+    const down = await side
+      .locator("#scroll")
+      .evaluate((node) => node.scrollTop);
+    expect(down).toBeGreaterThan(0);
+    await page.keyboard.press("k");
+    expect(
+      await side.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBeLessThan(down);
+    await page.keyboard.press("Shift+G");
+    expect(
+      await side.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBeGreaterThan(down);
+    await focusSide();
+    await page.keyboard.press("z");
+    expect(await pane.getAttribute("class")).toContain("fullscreen");
+    await focusSide();
+    await page.keyboard.press("i");
+    expect(await pane.getAttribute("class")).not.toContain("fullscreen");
+    expect(
+      await input.evaluate((node) => node === node.ownerDocument.activeElement),
+    ).toBeTrue();
+    await input.click();
+    await page.keyboard.type("Parent draft from Side keys");
+    expect(await input.inputValue()).toBe("Parent draft from Side keys");
+    await input.fill("");
+    const sideDraft = "z q wq wQ gh gp we wH wJ wK wL o j k gg G i";
+    await focusSide();
+    await page.keyboard.press("z");
+    await side.locator("#input").click();
+    await page.keyboard.type(sideDraft);
+    expect(await side.locator("#input").inputValue()).toBe(sideDraft);
+    expect(await pane.getAttribute("class")).toContain("fullscreen");
+    await side.locator("button:visible:enabled").first().focus();
+    await page.keyboard.press("z");
+    expect(await pane.getAttribute("class")).not.toContain("fullscreen");
+    await focusSide();
+    await page.keyboard.press("i");
+    expect(await pane.isVisible()).toBeTrue();
+    expect(await side.locator("#input").inputValue()).toBe(sideDraft);
+    expect(
+      await input.evaluate((node) => node === node.ownerDocument.activeElement),
+    ).toBeTrue();
+    await focusSide();
+    await page.keyboard.press("q");
+    await pane.waitFor({ state: "detached" });
+    await reopenSide();
+    expect(await side.locator("#input").inputValue()).toBe(sideDraft);
+    await windowKeys("w", "q");
+    await pane.waitFor({ state: "detached" });
+    await reopenSide();
+    await windowKeys("w", "Shift+Q");
+    expect(await page.locator(".pane-col").count()).toBe(0);
+    expect(
+      await page
+        .locator('#dock .dock-panel[data-dock-panel="chat"]')
+        .isVisible(),
+    ).toBeTrue();
+    await reopenSide();
+    expect(await side.locator("#input").inputValue()).toBe(sideDraft);
+    await side.locator("#input").fill("");
 
     await side.locator("#input").click();
     for (const key of ["Escape", "Escape", "j", "d", "d"])
@@ -229,7 +408,164 @@ export const tests: BrowserTest[] = [
       title: string;
     }[];
     expect(tree.find((row) => row.id === secondId)?.title).toBe("Renamed side");
-    await pane.locator("#side-picker").selectOption(first);
+    await second.locator("#input").fill("Keep this side draft");
+    await pane.locator(".pane-body").focus();
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    expect(
+      await second.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBe(0);
+    await page.setViewportSize({ width: 1280, height: 801 });
+    await second.locator("#scroll").evaluate(
+      (node) =>
+        new Promise<void>((resolve) => {
+          const browser = globalThis as any;
+          const observer = new browser.ResizeObserver(() => {
+            observer.disconnect();
+            browser.requestAnimationFrame(() => resolve());
+          });
+          observer.observe(node);
+        }),
+    );
+    expect(
+      await second.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBe(0);
+    await page.keyboard.press("j");
+    expect(
+      await second.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBeGreaterThan(0);
+    await page.keyboard.press("d");
+    expect(await frames.getAttribute("data-side")).toBe(secondId);
+    await page.keyboard.press("Shift+G");
+    const bottom = await second
+      .locator("#scroll")
+      .evaluate((node) => node.scrollTop);
+    await page.keyboard.press("u");
+    expect(
+      await second.locator("#scroll").evaluate((node) => node.scrollTop),
+    ).toBeLessThan(bottom);
+    await page.keyboard.press("h");
+    await pane.locator(".side-filter").waitFor();
+    expect(await frames.isVisible()).toBeFalse();
+    expect(await frames.count()).toBe(1);
+    const ids = await pane
+      .locator(".side-list-item")
+      .evaluateAll((nodes) =>
+        nodes.map((node) => node.getAttribute("data-side")),
+      );
+    const cursor = pane.locator(".pane-item-cursor");
+    expect(await cursor.getAttribute("data-side")).toBe(secondId);
+    await page.keyboard.press("Shift+G");
+    expect(await cursor.getAttribute("data-side")).toBe(ids.at(-1));
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    expect(await cursor.getAttribute("data-side")).toBe(ids[0]);
+    await page.keyboard.press("j");
+    expect(await cursor.getAttribute("data-side")).toBe(ids[1]);
+    await page.keyboard.press("k");
+    expect(await cursor.getAttribute("data-side")).toBe(ids[0]);
+    await page.keyboard.press("/");
+    const filter = pane.getByRole("searchbox", {
+      name: "Filter side conversations",
+    });
+    await filter.fill("RENAMED");
+    expect(await pane.locator(".side-list-item").count()).toBe(1);
+    await filter.press("j");
+    await pane
+      .getByText("No side conversations match.", { exact: true })
+      .waitFor();
+    await filter.fill("RENAMED");
+    await filter.press("Enter");
+    await frames.waitFor({ state: "visible" });
+    expect(await second.locator("#input").inputValue()).toBe(
+      "Keep this side draft",
+    );
+    expect(boots).toHaveLength(1);
+    const options = await pane
+      .locator("#side-picker option")
+      .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("value")));
+    const towardFirst = options.indexOf(secondId!) === 0 ? "]" : "[";
+    await page.keyboard.press(towardFirst);
+    await page.locator(`iframe.side-frame[data-side="${first}"]`).waitFor();
+    await side
+      .locator(".msg.assistant .content", { hasText: /^\s*Side answer\s*$/ })
+      .waitFor();
+    await page.keyboard.press(towardFirst === "]" ? "[" : "]");
+    await page.locator(`iframe.side-frame[data-side="${secondId}"]`).waitFor();
+    await second
+      .locator(".msg.assistant .content", { hasText: "Second side answer" })
+      .waitFor();
+    await pane.getByRole("button", { name: "All side conversations" }).click();
+    await page
+      .context()
+      .grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.keyboard.press("y");
+    await pane.getByText("Link copied.", { exact: true }).waitFor();
+    const copied = await page.evaluate(() =>
+      (globalThis as any).navigator.clipboard.readText(),
+    );
+    expect(new URL(copied).hash).toBe(`#agent=${secondId}`);
+    expect(new URL(copied).searchParams.has("embed")).toBeFalse();
+    if (shots) await page.screenshot({ path: `${shots}/side-keys-1280.png` });
+    await page.context().clearPermissions();
+    await page.context().grantPermissions([]);
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      browser.__sideCopied = false;
+      browser.document.addEventListener(
+        "copy",
+        () =>
+          browser.requestAnimationFrame(() => {
+            browser.__sideCopied = true;
+          }),
+        { once: true },
+      );
+    });
+    expect(
+      await page.evaluate(
+        async () =>
+          (
+            await (globalThis as any).navigator.permissions.query({
+              name: "clipboard-write",
+            })
+          ).state,
+      ),
+    ).toBe("denied");
+    await page.keyboard.press("y");
+    await page.waitForFunction(() => (globalThis as any).__sideCopied);
+    expect(
+      await cursor.evaluate(
+        (node) => node === node.ownerDocument.activeElement,
+      ),
+    ).toBeTrue();
+    await page.keyboard.press("l");
+    await frames.waitFor({ state: "visible" });
+    expect(await second.locator("#input").inputValue()).toBe(
+      "Keep this side draft",
+    );
+    await second.locator("#input").fill("");
+    expect(
+      (
+        await page.request.post(`${base}api/conversations/${first}/rename`, {
+          data: { title: "Pricing questions" },
+        })
+      ).ok(),
+    ).toBe(true);
+    await pane
+      .locator(`#side-picker option[value="${first}"]`, {
+        hasText: "Pricing questions",
+      })
+      .waitFor({ state: "attached" });
+    const finderQuery = page.locator("#pane-finder-query");
+    const finderOptions = page.locator("#pane-finder .pane-option");
+    await pane.locator(".pane-body").focus();
+    await page.keyboard.press("o");
+    await finderQuery.fill("pricing");
+    expect(await finderOptions.first().textContent()).toBe(
+      "sidechat/Pricing questions",
+    );
+    if (shots) await page.screenshot({ path: `${shots}/finder-side-1280.png` });
+    await page.keyboard.press("Enter");
     await page.locator(`iframe.side-frame[data-side="${first}"]`).waitFor();
     expect(await frames.count()).toBe(1);
     let releaseDelete!: () => void;
@@ -268,7 +604,9 @@ export const tests: BrowserTest[] = [
       releaseDelete();
     }
     await pane.locator(".side-delete:enabled").waitFor();
-    await pane.getByRole("button", { name: /^Close / }).click();
+    await page
+      .getByRole("button", { name: "Close Side conversations", exact: true })
+      .click();
     await pane.waitFor({ state: "detached" });
     expect(
       await page.locator("#side-frame-parking iframe.side-frame").count(),
@@ -288,6 +626,29 @@ export const tests: BrowserTest[] = [
       .locator(".msg.assistant .content", { hasText: "Second side answer" })
       .waitFor();
     expect(boots).toHaveLength(1);
+    await pane.locator(".pane-body").focus();
+    await page.keyboard.press("o");
+    await finderQuery.fill("artifact/");
+    expect(await finderOptions.count()).toBe(50);
+    expect(await finderOptions.locator(".agent-option-relation").count()).toBe(
+      0,
+    );
+    if (shots)
+      await page.screenshot({ path: `${shots}/finder-artifact-1280.png` });
+    for (const title of [...drafts, "Quarterly chart", "Release notes"]) {
+      await finderQuery.fill(`artifact/${title}`);
+      expect(await finderOptions.allTextContents()).toEqual([
+        `artifact/${title}`,
+      ]);
+    }
+    await finderQuery.fill("artifact/rel");
+    await page.keyboard.press("Enter");
+    await page
+      .locator(".report-doc", { hasText: "Release notes body." })
+      .waitFor();
+    expect(await page.locator("#artifact-picker").inputValue()).toBe(
+      releaseNotes,
+    );
     expect(errors).toEqual([]);
     await page.close();
 
@@ -304,6 +665,8 @@ export const tests: BrowserTest[] = [
       .locator(".msg.assistant .content", { hasText: "Second side answer" })
       .waitFor();
     expect(await phoneSide.locator("#input").isVisible()).toBeTrue();
+    expect(await phone.locator(".side-list").isVisible()).toBeFalse();
+    expect(await phone.locator(".side-browse-btn").isVisible()).toBeFalse();
     expect(await phoneSide.locator("#menu-btn").isVisible()).toBeFalse();
     expect(await phoneSide.locator("#pane-fab").isVisible()).toBeFalse();
     await phoneSide
@@ -368,6 +731,14 @@ export const tests: BrowserTest[] = [
       const page = await context.newPage();
       const errors = captureErrors(page);
       const cid = rootAgentId();
+      const registry = (await (
+        await page.request.get(`${base}api/conversations/${cid}/skills`)
+      ).json()) as { context: string };
+      const skillContext = registry.context;
+      const heldSkills = Promise.withResolvers<Route>();
+      await page.route(`${base}api/conversations/${cid}/skills`, (route) =>
+        heldSkills.resolve(route),
+      );
       await page.route(base + "api/tree", (route) =>
         route.fulfill({
           json: [
@@ -376,6 +747,7 @@ export const tests: BrowserTest[] = [
               parent: null,
               title: "Coordinator",
               kind: null,
+              skill_context: skillContext,
               status: "idle",
               updated: 2,
               children: 0,
@@ -390,6 +762,35 @@ export const tests: BrowserTest[] = [
       await gotoRoot(page, base);
       await page.locator(".agent").first().waitFor();
       const composer = page.locator("#input");
+      await composer.fill("/");
+      const skillsRequest = await heldSkills.promise;
+      const skillMenu = page.locator("#skill-menu");
+      await browserExpect(skillMenu).not.toContainText(/Loading|Searching/);
+      await composer.press("ArrowDown");
+      const selectedCommand = skillMenu
+        .getByRole("option")
+        .filter({ hasText: "/clear" });
+      await browserExpect(selectedCommand).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await composer.fill("/c");
+      await browserExpect(selectedCommand).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
+      await browserExpect(skillMenu).not.toContainText(/Loading|Searching/);
+      await skillsRequest.fulfill({
+        json: {
+          context: skillContext,
+          skills: [{ name: "compact-notes", description: "Compact notes" }],
+        },
+      });
+      await skillMenu.locator(".skill-option:not(.action)").waitFor();
+      await browserExpect(selectedCommand).toHaveAttribute(
+        "aria-selected",
+        "true",
+      );
       await composer.fill("/compact");
       const compact = page.locator("#skill-menu .skill-option.action", {
         hasText: "/compact",
@@ -520,9 +921,18 @@ export const tests: BrowserTest[] = [
       const page = await context.newPage();
       const errors = captureErrors(page);
       const queries: string[] = [];
+      const held = new Map<
+        string,
+        ReturnType<typeof Promise.withResolvers<Route>>
+      >();
       await page.route(`${base}api/agent-archive?*`, (route) => {
         const q = new URL(route.request().url()).searchParams.get("q") ?? "";
         queries.push(q);
+        const pending = held.get(q);
+        if (pending) {
+          pending.resolve(route);
+          return;
+        }
         const agents = rows.filter((row) =>
           q ? row.title.toLowerCase().includes(q) : true,
         );
@@ -578,7 +988,63 @@ export const tests: BrowserTest[] = [
         (await page.evaluate("document.activeElement?.id")) ===
           "agent-finder-query",
       ).toBe(true);
+      await query.press("ArrowDown");
+      const selected = options.nth(1);
+      await browserExpect(selected).toHaveAttribute("aria-selected", "true");
+      for (const text of ["leaf", "release"])
+        held.set(text, Promise.withResolvers<Route>());
       await query.fill("leaf");
+      const older = await held.get("leaf")!.promise;
+      await browserExpect(options).toHaveCount(2);
+      await browserExpect(selected).toHaveAttribute("aria-selected", "true");
+      await browserExpect(page.locator("#agent-finder-status")).not.toHaveText(
+        /Searching|Loading/,
+      );
+      await older.fulfill({ json: { agents: [rows[1]], next_offset: null } });
+      await browserExpect(options).toHaveCount(1);
+      await browserExpect(options.first()).toContainText("Leaf reviewer");
+      await query.fill("release");
+      const stale = await held.get("release")!.promise;
+      await browserExpect(options.first()).toContainText("Leaf reviewer");
+      if (process.env.LAZY_SEARCH_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: join(
+            process.env.LAZY_SEARCH_SCREENSHOT_DIR,
+            `archive-${name}.png`,
+          ),
+        });
+      held.delete("leaf");
+      await query.fill("leaf");
+      await page.waitForResponse(
+        (response) => new URL(response.url()).searchParams.get("q") === "leaf",
+      );
+      const finished = page.waitForEvent("requestfinished", {
+        predicate: (request) => request === stale.request(),
+      });
+      await stale.fulfill({ json: { agents: [rows[0]], next_offset: null } });
+      await finished;
+      await browserExpect(options.first()).toContainText("Leaf reviewer");
+      await query.fill("absent");
+      await browserExpect(options).toHaveCount(0);
+      await browserExpect(page.locator("#agent-finder-status")).toHaveText(
+        "No matching archived agents",
+      );
+      held.set("leaf", Promise.withResolvers<Route>());
+      await query.fill("leaf");
+      const afterEmpty = await held.get("leaf")!.promise;
+      if (process.env.LAZY_SEARCH_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: join(
+            process.env.LAZY_SEARCH_SCREENSHOT_DIR,
+            `archive-empty-${name}.png`,
+          ),
+        });
+      await browserExpect(page.locator("#agent-finder-status")).not.toHaveText(
+        /Searching|Loading/,
+      );
+      await afterEmpty.fulfill({
+        json: { agents: [rows[1]], next_offset: null },
+      });
       await waitValue(
         page,
         () => options.count(),

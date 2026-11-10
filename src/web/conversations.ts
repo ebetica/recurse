@@ -113,6 +113,7 @@ export interface ConversationsRoutesDeps {
   readonly store: {
     load(cid: string, options?: { withPending?: boolean }): Rec | null;
     metadataSnapshot(cid: string): Rec | null;
+    markViewed(cid: string): Promise<void>;
     /** Copies of the live descendant conversations, parents first. */
     subtree(cid: string): Rec[];
     save(conv: Rec): Promise<unknown>;
@@ -223,7 +224,7 @@ export interface ConversationsRoutesDeps {
     recordSpawnIntent(item: unknown): Promise<void>;
     requestReparent(
       cid: string,
-      parent: string,
+      parent: string | null,
       options: { by: string | null },
     ): Promise<Rec>;
     requestStop(
@@ -304,6 +305,7 @@ export interface ConversationsRoutesDeps {
       path: string,
       base: string | null,
       includeContents: boolean,
+      snapshot?: string | null,
     ): Promise<unknown>;
     pullRequestDiff(
       url: string,
@@ -1074,8 +1076,8 @@ export function registerConversationRoutes(
     const body = await dictBody(ex);
     if (!pyTruthy(store.load(cid))) throw new HttpError(404);
     const parent = body.parent;
-    if (typeof parent !== "string" || !parent)
-      throw new HttpError(422, "parent must be an agent id");
+    if (parent !== null && (typeof parent !== "string" || !parent))
+      throw new HttpError(422, "parent must be an agent id or null");
     const result = await deps.tree.requestReparent(cid, parent, {
       by: agentHeader(ex),
     });
@@ -1128,8 +1130,14 @@ export function registerConversationRoutes(
       const durable = deps.durable;
       return conversationEvents(
         header(ex, "last-event-id"),
-        (cursor) =>
-          deps.reads.readViewEvents(cid, cursor, ex.query.text_deltas === true),
+        async (cursor) => {
+          if (ex.query.viewing === true) await store.markViewed(cid);
+          return deps.reads.readViewEvents(
+            cid,
+            cursor,
+            ex.query.text_deltas === true,
+          );
+        },
         durable?.owns(conv) && durable.subscribeView
           ? (wake) => {
               const unsubscribe = durable.subscribeView!(cid, wake);
@@ -1488,6 +1496,7 @@ export function registerConversationRoutes(
             path,
             base ?? stored,
             ex.query.contents === true,
+            queryStr(ex, "snapshot"),
           ),
         );
       } catch {
@@ -1500,6 +1509,7 @@ export function registerConversationRoutes(
         pr: { type: "str" },
         base: { type: "str" },
         contents: { type: "bool", default: false },
+        snapshot: { type: "str" },
       },
       longRunning: true,
     },

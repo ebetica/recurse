@@ -19,7 +19,7 @@ import {
 import { delimiter, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
-export const PI_VERSION = "1.5.0";
+export const PI_VERSION = "1.5.1";
 export const STAMP_NAME = ".build-stamp.json";
 /** Checkout-relative files each build publishes; sizes catch patched drift. */
 export const ARTIFACT_PATHS = [

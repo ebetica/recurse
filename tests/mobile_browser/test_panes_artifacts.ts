@@ -18,13 +18,13 @@ import {
   visibleAndUncovered,
   type BrowserTest,
 } from "./common";
-import { writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import * as artifacts from "../../src/artifacts";
 import { artifactReopen } from "./artifact_reopen";
 
 export const tests: BrowserTest[] = [
-  // Feature: #2918 a reloaded Artifact retains its selection and revalidates cached content.
+  // Regression: #3200 staging a selection comment cannot override a later viewer focus change.
   async function test_artifact_reload_selection_and_content(
     browser,
     base,
@@ -53,6 +53,7 @@ export const tests: BrowserTest[] = [
         viewport: { width: phone ? 390 : 1280, height: 800 },
         isMobile: phone,
         hasTouch: phone,
+        permissions: ["clipboard-read", "clipboard-write"],
       });
       const page = await browserContext.newPage();
       const errors = captureErrors(page);
@@ -152,7 +153,7 @@ export const tests: BrowserTest[] = [
       }
       await writeFile(
         join(String(second.repo_path), "index.md"),
-        "# Second updated",
+        "# Second updated\n\n" + "Artifact paragraph.\n\n".repeat(100),
       );
       const updated = await artifacts.publish(
         context,
@@ -172,6 +173,209 @@ export const tests: BrowserTest[] = [
           )
         ).status(),
       ).toBe(200);
+      const pane = page.locator('.pane-col[data-pane="report"]');
+      if (!phone) {
+        await pane
+          .getByRole("button", { name: "Version history", exact: true })
+          .click();
+        await pane.getByRole("menuitemradio").nth(1).waitFor();
+        await page.keyboard.press("Escape");
+        await pane.locator(".report-doc").focus();
+        await page.keyboard.press("[");
+        await page
+          .getByRole("heading", { name: "Second initial", exact: true })
+          .waitFor();
+        await page.keyboard.press("]");
+        await page
+          .getByRole("heading", { name: "Second updated", exact: true })
+          .waitFor();
+        await pane.locator(".report-doc").focus();
+        const body = pane.locator(".pane-body");
+        for (const key of ["j", "d"]) {
+          await page.keyboard.press(key);
+          await page.waitForFunction(
+            () =>
+              (globalThis as any).document.querySelector(
+                '.pane-body[data-pane="report"]',
+              ).scrollTop > 0,
+          );
+          expect(await page.locator("#artifact-picker").inputValue()).toBe(
+            String(second.id),
+          );
+          const down = await body.evaluate((element) => element.scrollTop);
+          await page.keyboard.press(key === "j" ? "k" : "u");
+          await page.waitForFunction(
+            (down) =>
+              (globalThis as any).document.querySelector(
+                '.pane-body[data-pane="report"]',
+              ).scrollTop < down,
+            down,
+          );
+        }
+        await dispatchArtifactSelection(page, "mouse", "Second updated");
+        await page
+          .locator(".report-comment-popover:not([hidden]) textarea")
+          .fill("Keep this note");
+        expect(
+          await page
+            .locator(".report-comment-popover-submit")
+            .evaluate((button: any) => {
+              button.click();
+              const viewer = button.ownerDocument.querySelector(
+                '.pane-col[data-pane="report"] .report-doc',
+              )!;
+              viewer.focus();
+              return new Promise<boolean>((resolve) =>
+                (globalThis as any).requestAnimationFrame(() =>
+                  resolve(button.ownerDocument.activeElement === viewer),
+                ),
+              );
+            }),
+        ).toBe(true);
+        page.once("dialog", (dialog) => void dialog.dismiss());
+        await page.keyboard.press("h");
+        expect(await pane.locator(".artifact-list").count()).toBe(0);
+        expect(await pane.locator(".report-comment").count()).toBe(1);
+        page.once("dialog", (dialog) => void dialog.accept());
+        await page.keyboard.press("h");
+        await pane.locator(".artifact-list").waitFor();
+        expect(await pane.locator(".report-doc").isVisible()).toBe(false);
+        expect(await pane.locator(".report-comment").count()).toBe(0);
+        const cursor = pane.locator(".pane-item-cursor");
+        await page.keyboard.press("j");
+        expect(await cursor.getAttribute("aria-label")).toBe("First");
+        await page.keyboard.press("k");
+        expect(await cursor.getAttribute("aria-label")).toBe("Second");
+        await page.keyboard.press("Shift+G");
+        expect(await cursor.getAttribute("aria-label")).toBe("First");
+        await page.keyboard.press("g");
+        await page.keyboard.press("g");
+        expect(await cursor.getAttribute("aria-label")).toBe("Second");
+        await page.keyboard.press("j");
+        await page.keyboard.press("y");
+        await pane.getByText("Link copied.", { exact: true }).waitFor();
+        const copied = await page.evaluate(() =>
+          (globalThis as any).navigator.clipboard.readText(),
+        );
+        await page.keyboard.press("l");
+        await page
+          .getByRole("heading", { name: "First initial", exact: true })
+          .waitFor();
+        const download = pane.locator(".artifact-download");
+        expect(copied).toBe(
+          new URL((await download.getAttribute("href"))!, base).href,
+        );
+        await page.keyboard.press("/");
+        const filter = pane.getByRole("searchbox", {
+          name: "Filter artifacts",
+        });
+        await filter.fill("SECOND");
+        expect(await pane.locator(".artifact-list-item").count()).toBe(1);
+        await page.keyboard.type("j");
+        expect(await filter.inputValue()).toBe("SECONDj");
+        await pane
+          .getByText("No matching artifacts.", { exact: true })
+          .waitFor();
+        await page.keyboard.press("Backspace");
+        await body.focus();
+        await page.keyboard.press("j");
+        await page.keyboard.press("Enter");
+        await page
+          .getByRole("heading", { name: "Second updated", exact: true })
+          .waitFor();
+        await page.keyboard.press("y");
+        await pane.getByText("Link copied.", { exact: true }).waitFor();
+        expect(
+          await page.evaluate(() =>
+            (globalThis as any).navigator.clipboard.readText(),
+          ),
+        ).toBe(new URL((await download.getAttribute("href"))!, base).href);
+        await page.keyboard.press("/");
+        expect(await filter.inputValue()).toBe("SECOND");
+        const pointer = await browserContext.newCDPSession(page);
+        const changePointer = async (enabled: boolean) => {
+          await page.evaluate(() => {
+            const browser = globalThis as any;
+            browser.__pointerChanged = new Promise<void>((resolve) => {
+              browser
+                .matchMedia("(pointer: coarse)")
+                .addEventListener(
+                  "change",
+                  () => browser.requestAnimationFrame(() => resolve()),
+                  { once: true },
+                );
+            });
+          });
+          await pointer.send("Emulation.setTouchEmulationEnabled", { enabled });
+          await page.evaluate(() => (globalThis as any).__pointerChanged);
+        };
+        await changePointer(true);
+        await page.locator("#artifact-picker").waitFor();
+        expect(await pane.locator(".artifact-list").count()).toBe(0);
+        await changePointer(false);
+        await filter.waitFor();
+        expect(await filter.inputValue()).toBe("SECOND");
+        expect(await pane.locator(".artifact-list-item").count()).toBe(1);
+        for (const staged of [true, false]) {
+          await changePointer(true);
+          await dispatchArtifactSelection(page, "touch", "Second updated");
+          const draft = page.locator(".report-comment-popover:not([hidden])");
+          await draft
+            .locator("textarea")
+            .fill(staged ? "Touch note" : "Touch draft");
+          if (staged)
+            await draft.locator(".report-comment-popover-submit").click();
+          await changePointer(false);
+          expect(await pane.locator(".artifact-list").count()).toBe(0);
+          expect(await pane.locator(".report-doc").isVisible()).toBeTrue();
+          if (staged) {
+            expect(
+              await pane.locator(".report-comment").isVisible(),
+            ).toBeTrue();
+            expect(
+              await pane.locator(".report-sendbar-send").isVisible(),
+            ).toBeTrue();
+            await pane.locator(".report-doc").focus();
+            page.once("dialog", (dialog) => void dialog.dismiss());
+            await page.keyboard.press("h");
+            expect(await pane.locator(".report-comment").count()).toBe(1);
+            page.once("dialog", (dialog) => void dialog.accept());
+          } else {
+            expect(await draft.isVisible()).toBeTrue();
+            expect(await draft.locator("textarea").inputValue()).toBe(
+              "Touch draft",
+            );
+            await draft.locator(".report-comment-popover-cancel").click();
+          }
+          await body.focus();
+          await page.keyboard.press("h");
+          await pane.locator(".artifact-list").waitFor();
+        }
+        await pointer.detach();
+        await body.focus();
+        await page.keyboard.press("j");
+      } else {
+        expect(await pane.locator(".artifact-list").count()).toBe(0);
+        expect(
+          await pane.locator(".artifact-browse-btn").isVisible(),
+        ).toBeFalse();
+      }
+      const shots = process.env.RECURSE_SCREENSHOT_DIR;
+      if (shots) {
+        await mkdir(shots, { recursive: true });
+        await page.screenshot({
+          path: `${shots}/${phone ? 390 : 1280}-artifacts-navigation.png`,
+        });
+      }
+      if (!phone) {
+        await page.keyboard.press("Escape");
+        await page.waitForFunction(() =>
+          (globalThis as any).document.activeElement?.matches(".agent"),
+        );
+        await pane.locator(".pane-body").focus();
+        await page.keyboard.press("q");
+        await pane.waitFor({ state: "detached" });
+      }
       if (phone) {
         await artifacts.deleteArtifact(
           context,
@@ -250,6 +454,12 @@ export const tests: BrowserTest[] = [
       );
       const frame = page.frameLocator("iframe.artifact-embed-page");
       await frame.locator("#count").click();
+      await frame.getByText("clicked", { exact: true }).waitFor();
+      const pane = page.locator('.pane-col[data-pane="report"]');
+      await pane.locator(".pane-body").focus();
+      await page.keyboard.press("h");
+      await pane.locator(".artifact-list").waitFor();
+      await page.keyboard.press("Enter");
       await frame.getByText("clicked", { exact: true }).waitFor();
       const etag = (await initial).headers().etag;
       expect(etag).toBeTruthy();
@@ -751,6 +961,118 @@ export const tests: BrowserTest[] = [
     await frame.locator("body[data-ready]").waitFor();
     const pane = page.locator('.pane-col[data-pane="report"]');
     const fullscreen = pane.locator('.fs[aria-pressed="true"]');
+    const content = await (await page
+      .locator("iframe.artifact-embed-page")
+      .elementHandle())!.contentFrame();
+    await frame.locator("body").evaluate((body) => {
+      body.style.setProperty("min-height", "2400px", "important");
+    });
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector("iframe.artifact-embed-page")
+          .clientHeight >= 2400,
+    );
+    await frame.locator("#count").click();
+    await page.keyboard.press("j");
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector(
+          '.pane-col[data-pane="report"] .pane-body',
+        ).scrollTop > 0,
+    );
+    await page.keyboard.press("k");
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector(
+          '.pane-col[data-pane="report"] .pane-body',
+        ).scrollTop === 0,
+    );
+    await page.keyboard.press("d");
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector(
+          '.pane-col[data-pane="report"] .pane-body',
+        ).scrollTop > 40,
+    );
+    const down = await pane
+      .locator(".pane-body")
+      .evaluate((body) => body.scrollTop);
+    await page.keyboard.press("u");
+    await page.waitForFunction(
+      (down) =>
+        (globalThis as any).document.querySelector(
+          '.pane-col[data-pane="report"] .pane-body',
+        ).scrollTop < down,
+      down,
+    );
+    await page.keyboard.press("Shift+G");
+    await page.waitForFunction(() => {
+      const body = (globalThis as any).document.querySelector(
+        '.pane-col[data-pane="report"] .pane-body',
+      );
+      return body.scrollTop + body.clientHeight >= body.scrollHeight - 1;
+    });
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector(
+          '.pane-col[data-pane="report"] .pane-body',
+        ).scrollTop === 0,
+    );
+    await page.setViewportSize({ width: 1280, height: 600 });
+    await frame.locator("body").evaluate((body) => {
+      body.style.setProperty("min-height", "32000px", "important");
+      const win = body.ownerDocument.defaultView!;
+      win.addEventListener("message", (event: any) => {
+        if (event.data === "artifact-scroll-barrier")
+          win.parent.postMessage(event.data, "*");
+      });
+    });
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector("iframe.artifact-embed-page")
+          .clientHeight === 600,
+    );
+    await frame.locator("#count").click();
+    await pane.locator(".pane-body").evaluate((body) => {
+      body.scrollTop = 0;
+    });
+    await content!.evaluate(() => (globalThis as any).scrollTo(0, 0));
+    await page.keyboard.press("j");
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector(
+          '.pane-col[data-pane="report"] .pane-body',
+        ).scrollTop > 0,
+    );
+    await page.evaluate(
+      () =>
+        new Promise<void>((resolve) => {
+          const win = globalThis as any;
+          const frame = win.document.querySelector(
+            "iframe.artifact-embed-page",
+          );
+          const receive = (event: any) => {
+            if (
+              event.source !== frame.contentWindow ||
+              event.data !== "artifact-scroll-barrier"
+            )
+              return;
+            win.removeEventListener("message", receive);
+            resolve();
+          };
+          win.addEventListener("message", receive);
+          frame.contentWindow.postMessage("artifact-scroll-barrier", "*");
+        }),
+    );
+    expect(await content!.evaluate(() => (globalThis as any).scrollY)).toBe(0);
+    await pane.locator(".pane-body").evaluate((body) => {
+      body.scrollTop = body.scrollHeight;
+    });
+    await page.keyboard.press("j");
+    await content!.waitForFunction(() => (globalThis as any).scrollY > 0);
+    await page.setViewportSize({ width: 1280, height: 800 });
     await frame.locator("#count").click();
     await page.keyboard.press("z");
     await fullscreen.waitFor();
@@ -783,8 +1105,20 @@ export const tests: BrowserTest[] = [
     );
     expect(await fullscreen.count()).toBe(0);
     await frame.locator("#count").click();
+    await page.keyboard.press("i");
+    await page.waitForFunction(
+      () => (globalThis as any).document.activeElement?.id === "input",
+    );
+    await frame.locator("#count").click();
+    await page.keyboard.press("o");
+    await page.locator("#pane-finder-query").waitFor();
+    await page.keyboard.press("Escape");
+    await frame.locator("#count").click();
     await page.keyboard.press("z");
     await fullscreen.waitFor();
+    await frame.locator("#count").click();
+    await page.keyboard.press("q");
+    await pane.waitFor({ state: "detached" });
     await context.close();
   },
 
@@ -920,6 +1254,18 @@ export const tests: BrowserTest[] = [
       expect(await page.locator("#artifact-picker").inputValue()).toBe(app.id);
       expect(context.pages().length).toBe(1);
       expect(await page.evaluate<number>("performance.timeOrigin")).toBe(stamp);
+      if (width === 1280) {
+        const pane = page.locator('.pane-col[data-pane="report"]');
+        await pane.locator(".pane-body").focus();
+        await page.keyboard.press("h");
+        await pane.locator(".artifact-list").waitFor();
+        await link.click();
+        await pane.locator(".artifact-list").waitFor({ state: "detached" });
+        await page.locator("#artifact-picker").waitFor();
+        expect(
+          await page.locator("iframe.artifact-embed-page").isVisible(),
+        ).toBeTrue();
+      }
       if (process.env.ARTIFACT_LINK_SHOTS)
         await page.screenshot({
           path: `${process.env.ARTIFACT_LINK_SHOTS}/${width}.png`,
@@ -956,6 +1302,7 @@ export const tests: BrowserTest[] = [
     }
   },
 
+  // Regression: #3203 closed Artifact discovery must update availability without another metadata refresh.
   async function test_artifact_published_mid_session_becomes_reachable(
     browser,
     base,
@@ -968,7 +1315,51 @@ export const tests: BrowserTest[] = [
     const page = await context.newPage();
     const errors = captureErrors(page);
     let published = false;
-    await page.route(`${base}api/artifacts**`, (route) => {
+    let nonemptyHeld = false;
+    let metadataHeld = false;
+    let releaseArtifacts = () => {};
+    let releaseMetadata = () => {};
+    const artifactsReady = new Promise<void>(
+      (resolve) => (releaseArtifacts = resolve),
+    );
+    const metadataReady = new Promise<void>(
+      (resolve) => (releaseMetadata = resolve),
+    );
+    await page.exposeFunction("artifactMetadataApplied", () => {
+      if (metadataHeld) releaseArtifacts();
+    });
+    await page.addInitScript(() => {
+      const browser = globalThis as any;
+      const fetch = browser.fetch.bind(browser);
+      browser.fetch = async (...args: any[]) => {
+        const response = await fetch(...args);
+        const url = new URL(response.url);
+        if (
+          url.pathname.startsWith("/api/conversations/") &&
+          url.searchParams.get("focused") === "1"
+        ) {
+          const json = response.json.bind(response);
+          response.json = async () => {
+            const body = await json();
+            browser.requestAnimationFrame(() =>
+              browser.requestAnimationFrame(() =>
+                browser.artifactMetadataApplied(),
+              ),
+            );
+            return body;
+          };
+        }
+        return response;
+      };
+    });
+    await page.route(`${base}api/conversations/*?focused=1`, async (route) => {
+      const selected = nonemptyHeld && !metadataHeld;
+      if (selected) metadataHeld = true;
+      const response = await route.fetch();
+      if (metadataHeld && !selected) await metadataReady;
+      await route.fulfill({ response });
+    });
+    await page.route(`${base}api/artifacts**`, async (route) => {
       const url = route.request().url();
       if (url.includes("/file"))
         return route.fulfill({
@@ -985,26 +1376,37 @@ export const tests: BrowserTest[] = [
             },
           ],
         });
+      if (published) {
+        nonemptyHeld = true;
+        await page.keyboard.press("Shift");
+        await artifactsReady;
+      }
       return route.fulfill({ json: published ? [ARTIFACT] : [] });
     });
-    const emptyArtifacts = page.waitForResponse(
-      (response) => new URL(response.url()).pathname === "/api/artifacts",
-    );
-    await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
-    const entry = page.locator(
-      '#pane-menu .pane-menu-item[data-pane="report"]',
-    );
-    await (await emptyArtifacts).finished();
-    await entry.waitFor({ state: "detached" });
-    expect(await entry.count()).toBe(0);
-    published = true;
-    await entry.waitFor({ state: "attached", timeout: 25_000 });
-    await page.locator("#pane-fab").click();
-    await entry.click();
-    await page.locator(".report-doc").waitFor();
-    expect(errors).toEqual([]);
-    await context.close();
+    try {
+      const emptyArtifacts = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/api/artifacts",
+      );
+      await gotoRoot(page, base);
+      await page.locator(".agent").first().waitFor();
+      const entry = page.locator(
+        '#pane-menu .pane-menu-item[data-pane="report"]',
+      );
+      await (await emptyArtifacts).finished();
+      await entry.waitFor({ state: "detached" });
+      expect(await entry.count()).toBe(0);
+      published = true;
+      await entry.waitFor({ state: "attached", timeout: 25_000 });
+      await page.locator("#pane-fab").click();
+      await entry.click();
+      await page.locator(".report-doc").waitFor();
+      expect(errors).toEqual([]);
+    } finally {
+      releaseArtifacts();
+      releaseMetadata();
+      await page.unrouteAll({ behavior: "wait" });
+      await context.close();
+    }
   },
   async function test_artifact_comment_preserves_reader_scroll(browser, base) {
     const context = await browser.newContext({
@@ -1113,9 +1515,10 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Regression: #3247 refresh must not reopen a submitted pane over comment retry controls.
   async function test_artifact_comment_pointer_flow(browser, base) {
     const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
+      viewport: { width: 1280, height: 844 },
       isMobile: true,
       hasTouch: true,
     });
@@ -1136,14 +1539,41 @@ export const tests: BrowserTest[] = [
     );
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
-    await page.locator("#pane-fab").click();
-    await page.locator('.pane-menu-item[data-pane="report"]').click();
+    await page
+      .locator('#dock .dv-tab[data-dock-panel="report"] button')
+      .click();
+    await page
+      .locator('.pane-col[data-pane="report"]')
+      .waitFor({ state: "detached" });
+    await page.locator('.rail-btn[data-pane="tips"]').click();
+    await page.locator('.rail-btn[data-pane="report"]').click();
     await page.locator('.pane-col[data-pane="report"] .report-doc').waitFor();
     await page.locator(".report-doc", { hasText: "Visible body" }).waitFor();
     await dispatchArtifactSelection(page, "touch");
     let popover = page.locator(".report-comment-popover:not([hidden])");
     await popover.waitFor();
     await popover.locator("textarea").fill("draft survives tap");
+    const caret = await popover
+      .locator("textarea")
+      .evaluate((node: any) => [node.selectionStart, node.selectionEnd]);
+    await page.setViewportSize({ width: 390, height: 844 });
+    expect(await page.locator(".pane-col").count()).toBe(1);
+    expect(
+      await page.locator(".pane-col.mobile-active").getAttribute("data-pane"),
+    ).toBe("report");
+    expect(await popover.locator("textarea").inputValue()).toBe(
+      "draft survives tap",
+    );
+    expect(
+      await popover
+        .locator("textarea")
+        .evaluate((node: any) => node.ownerDocument.activeElement === node),
+    ).toBeTrue();
+    expect(
+      await popover
+        .locator("textarea")
+        .evaluate((node: any) => [node.selectionStart, node.selectionEnd]),
+    ).toEqual(caret);
     await dispatchArtifactTap(page, "touch");
     expect(await popover.isVisible()).toBeTrue();
     expect(await popover.locator("textarea").inputValue()).toBe(
@@ -1204,6 +1634,14 @@ export const tests: BrowserTest[] = [
       .fill("Discard this note");
     await page.locator(".report-comment-popover-submit").click();
     await page.locator(".report-sendbar-send").click();
+    const refreshed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "GET" &&
+        new URL(response.url()).pathname ===
+          `/api/conversations/${rootAgentId()}`,
+    );
+    await page.evaluate("window.dispatchEvent(new Event('focus'))");
+    await (await refreshed).finished();
     const discarded = page.locator("[data-comment-send]");
     page.once("dialog", (dialog) => void dialog.accept());
     await discarded.getByRole("button", { name: "Discard" }).click();

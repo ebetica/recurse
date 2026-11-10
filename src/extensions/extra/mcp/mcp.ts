@@ -9,6 +9,8 @@ import {
   McpError,
   McpAbortError,
   toLlmContent,
+  createMcpToolName,
+  mcpNamespace,
 } from "@earendil-works/pi-mcp";
 import type { ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -20,11 +22,7 @@ import {
 } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/runtime.js";
 import { FileAuthStorageBackend } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import type { McpServerEntry } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/config.js";
-import {
-  createMcpToolDefinition,
-  createMcpToolName,
-} from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/tools.js";
-import { mcpNamespace } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
+import { createMcpToolDefinition } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/tools.js";
 import {
   getConfigValueEnvVarNames,
   isCommandConfigValue,

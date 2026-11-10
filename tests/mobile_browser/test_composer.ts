@@ -141,7 +141,9 @@ async function runTokenlessStopLookupRace(
         phase.heldPoll.push(route);
         return;
       }
-      return route.fulfill({ json: runningState });
+      return route.fulfill({
+        json: phase.name === "c-held" ? replacementState : runningState,
+      });
     }
     if (phase.name === "initial") {
       phase.name = "idle";
@@ -1122,6 +1124,7 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
+  // Regression: #3217 Keep newer reads on the replacement run.
   async function test_tokenless_stop_lookup_race(browser, base) {
     await runTokenlessStopLookupRace(browser, base, true);
   },

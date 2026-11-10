@@ -32,6 +32,9 @@
   .btn, .btn.sm { min-height: 44px; }
 }
 
+.pane-item-cursor { background: var(--panel-2); }
+.pane-item-cursor:focus { outline: none; }
+
 /* Attachment admission failures stay above the composer until retry. */
 .attachment-error { display: flex; align-items: flex-start; gap: var(--space-2); width: 100%;
   color: var(--danger); font-size: 0.78125rem; line-height: 1.4; }
@@ -156,6 +159,21 @@ button.badge:is(:hover, :focus-visible) { color: var(--text);
    untouched. */
 #panes { display: none; min-width: 0; position: relative; }
 #panes.on { display: flex; }
+@media (min-width: 701px) {
+  html:not([data-embed]) body { background: var(--shell-bg); }
+  html:not([data-embed]) :is(#sidebar, #pane-rail) { background: var(--frame-bg); }
+  html:not([data-embed]) :is(#sidebar, #main, #panes .pane-col:not(.fullscreen)) {
+    border: 0; border-radius: var(--content-radius); box-shadow: var(--content-ring); }
+  html:not([data-embed]) #sidebar { margin: var(--content-inset) 0 var(--content-inset) var(--content-inset); }
+  html:not([data-embed]) #main { height: calc(100% - 2 * var(--content-inset));
+    margin: var(--content-inset); background: var(--bg); }
+  html:not([data-embed]) #panes.on { gap: var(--content-inset);
+    margin: var(--content-inset) var(--content-inset) var(--content-inset) 0; }
+  html:not([data-embed]) .pane-col:not(.fullscreen) > .pane-head {
+    border-radius: var(--content-radius) var(--content-radius) 0 0; }
+  html:not([data-embed]) .pane-col:not(.fullscreen) > .pane-body {
+    border-radius: 0 0 var(--content-radius) var(--content-radius); }
+}
 
 /* ---------- resize grips ----------
    Thin drag handles on the inner edge of the sidebar (left region) and the
@@ -218,17 +236,33 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-col.fullscreen { position: fixed; inset: 0; z-index: calc(var(--z-drawer) + 4); border-left: 0; }
 
 /* ---------- the rail (desktop, right edge) ---------- */
+@media (min-width: 701px) {
+  body:has(#sidebar:not(.desktop-hidden)) #menu-btn { display: none; }
+}
+#agent-list-foot { flex: none; display: flex; align-items: center; gap: var(--space-1);
+  padding: var(--space-1) var(--space-3); border-top: 1px solid var(--border); }
+#agent-list-foot:not(:has(> button)) { display: none; }
+#agent-list-foot > :is(#settings-btn, #trash-btn) { width: 44px; height: 44px; min-height: 44px;
+  padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  align-items: center; justify-content: center; }
+#agent-list-foot > #trash-btn { display: none; }
+#agent-list-foot > #trash-btn.on { display: flex; }
+#agent-list-foot > #settings-btn:hover { color: var(--accent); background: var(--panel-2); }
+#agent-list-foot > #trash-btn:is(:hover, .armed) { color: var(--danger); background: var(--panel-2); }
+#agent-list-foot .settings-label { display: none; }
+#agent-list-foot > #trash-btn > span { position: absolute; width: 1px; height: 1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#agent-list-foot > #trash-btn svg { width: 16px; height: 16px; }
 #pane-rail { flex: none; display: none; flex-direction: column; gap: 0;
   padding: var(--space-4) var(--space-2); background: var(--panel); border-left: 1px solid var(--border); }
 #pane-rail.on { display: flex; }
 #pane-rail-panels { display: flex; flex-direction: column; align-items: center; gap: var(--space-2);
   border-top: 1px solid var(--border); margin-top: var(--space-2); padding-top: var(--space-3); }
-#pane-rail > :is(#trash-btn, #takeover-btn, #share-link-btn) { display: none; width: 44px; height: 44px;
+#pane-rail > :is(#takeover-btn, #share-link-btn) { display: none; width: 44px; height: 44px;
   min-height: 44px; padding: 0; margin: 0; border: 0; background: transparent; color: var(--text);
   justify-content: center; }
-#pane-rail > :is(#trash-btn, #takeover-btn).on, #pane-rail > #share-link-btn:not([hidden]) { display: flex; }
+#pane-rail > #takeover-btn.on, #pane-rail > #share-link-btn:not([hidden]) { display: flex; }
 #pane-rail > button:not(.armed):hover { background: var(--panel-2); color: var(--text); }
-#pane-rail > #trash-btn.armed { color: var(--danger); background: var(--panel-2); }
 #pane-rail > button svg { width: 16px; height: 16px; }
 #pane-rail > button > span { position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -269,6 +303,13 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tips-all-item:hover { background: var(--panel-2); }
 .tips-all-item[aria-current="true"] { color: var(--accent); }
 .tips-all-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tips-filter { box-sizing: border-box; width: 100%; margin-top: var(--space-4); }
+.tips-notice { margin: 0; color: var(--muted); }
+@media (min-width: 701px) {
+  .tips-pane:has(> .tips-all[open]) > :is(.tips-count, .tip-card, .tips-nav) { display: none; }
+  .tips-all-item[aria-current="true"] { color: var(--text); }
+  .tips-all-item.pane-item-cursor { background: var(--panel-2); outline: none; }
+}
 .tips-switch { display: flex; align-items: center; gap: var(--space-4); margin-top: auto;
   padding-top: var(--space-4); border-top: 1px solid var(--border); cursor: pointer; }
 
@@ -289,7 +330,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 #pane-fab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 #pane-fab svg { position: relative; z-index: var(--z-raised); pointer-events: none; }
 #pane-fab.on { display: inline-flex; }
-#pane-menu { display: none; position: fixed; z-index: calc(var(--z-drawer) + 2);
+#pane-menu { display: none; position: fixed; z-index: var(--z-menu);
   inset-inline-end: max(12px, env(safe-area-inset-right)); top: 48px;
   min-width: 180px; max-width: calc(100vw - 24px); }
 #pane-menu.on { display: block; }
@@ -321,6 +362,11 @@ html:dir(rtl) #pane-menu { inset-inline-end: max(12px, env(safe-area-inset-left)
 .pane-body[data-pane="side"] { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 .side-frame { flex: 1; width: 100%; min-height: 0; border: 0; background: var(--bg); }
 .side-notice { margin: var(--space-3) var(--space-4); color: var(--muted); }
+.side-list { display: none; flex-direction: column; gap: var(--space-3); min-height: 0; padding: var(--space-4); overflow: auto; }
+.pane-body.side-browsing > .side-list { display: flex; }
+.pane-body.side-browsing > .side-frame { display: none; }
+.side-list-item { text-align: start; }
+.side-list-item.pane-item-cursor { background: var(--panel-2); outline: none; }
 .pane-powerbar :is(.side-picker-box, .side-rename) { flex: 1; width: 0; min-width: 0; font-size: 0.84375rem; }
 /* The picker's chevron fills an icon button's box, so it is spaced like the
    buttons beside it. */
@@ -366,6 +412,12 @@ html[data-embed] :is(#sidebar, #topbar, #panes, #pane-rail, #pane-menu, #pane-ba
   color: var(--accent); font-weight: 600; }
 .artifact-version-restore[disabled] { opacity: .55; cursor: default; }
 .artifact-version-note.error { color: var(--danger); }
+.pane-body.artifact-browsing :is(.report-doc, .report-comments, .report-bar) { display: none; }
+.artifact-list { display: flex; flex-direction: column; gap: var(--space-3); }
+.artifact-filter { box-sizing: border-box; width: 100%; min-height: 32px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--text); font: inherit; font-size: 0.8125rem; }
+.artifact-list-item { width: 100%; min-height: 44px; padding: var(--space-3); border: 0; border-bottom: 1px solid var(--border); background: none; color: var(--text); font: inherit; text-align: start; cursor: pointer; }
+.artifact-list-item.pane-item-cursor { background: var(--panel-2); outline: none; }
+@media (pointer: coarse) { :is(.artifact-browse-btn, .side-browse-btn) { display: none; } }
 .thread-image { display: block; width: fit-content; min-width: min(100%, 120px);
   max-width: 100%; overflow: hidden;
   margin: var(--space-2) 0 0; border: 1px solid var(--border); border-radius: 10px;
@@ -514,12 +566,21 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
   /* The persistent app shell owns the top of the viewport. Keep the pane
      backdrop below it so Back and the title controls remain hit-testable. */
   #pane-backdrop.on { top: var(--mobile-shell-height); bottom: 0; }
-  #pane-menu { top: var(--mobile-shell-height);
-    max-height: calc(100dvh - var(--mobile-shell-height) - var(--space-5)); overflow-y: auto; }
+  /* Like an Android overflow menu: just under the header, near the edge,
+     scrolling inside down to the bottom safe area. */
+  #pane-menu { top: calc(var(--mobile-shell-height) + var(--space-2));
+    inset-inline-end: max(var(--space-3), env(safe-area-inset-right));
+    max-height: calc(100dvh - var(--mobile-shell-height) - var(--space-2)
+      - max(var(--space-3), env(safe-area-inset-bottom)));
+    overflow-y: auto; min-width: 200px; padding: var(--space-3) 0; border: 0;
+    border-radius: var(--content-radius); }
+  html:dir(rtl) #pane-menu { inset-inline-end: max(var(--space-3), env(safe-area-inset-left)); }
+  #pane-menu :is(.pane-menu-item, #trash-btn, #takeover-btn) { min-height: 48px;
+    padding: var(--space-3) var(--space-5); border-radius: 0; }
   /* Conversation controls, then navigation, then the panes nearest the
-     thumb, each group under a divider. */
-  #pane-menu-divider { border-top: 1px solid var(--border); margin: var(--space-2) 0; }
-  #pane-menu-panels { margin-top: var(--space-2); padding-top: 0; }
+     thumb; a gap, not a line, separates the groups. */
+  #pane-menu-divider { height: var(--space-3); }
+  #pane-menu-panels { margin: 0; padding: 0; border: 0; }
   #pane-menu-panels:empty { display: none; }
   #pane-rail { display: none !important; }
   .pane-head .fs { display: none; }
@@ -898,11 +959,12 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
    Section headers fold their rows; row and section buttons stay hidden until
    the row or header is hovered or holds focus, overlaying its right side without
    moving its content. A short fade covers text with the row's current surface;
-   the inset leaves selection outlines clear. Touch uses the hold menu. */
+   the inset leaves selection outlines clear. Touch uses the hold menu.
+   Fold targets extend above their bottom-aligned labels on phones. */
 .tree-section-header { display: flex; align-items: center; gap: var(--space-2);
   margin-top: var(--space-3); -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
-.tree-section-toggle { flex: 1; min-width: 0; display: flex; align-items: baseline;
-  gap: var(--space-2); padding: var(--space-2) var(--space-3); border: 0; border-radius: 8px;
+.tree-section-toggle { flex: 1; min-width: 0; display: flex; align-items: flex-end;
+  gap: var(--space-2); padding: var(--space-2) var(--space-3) 0; border: 0; border-radius: 8px;
   background: none; color: var(--muted); font: inherit; font-size: 0.6875rem; font-weight: 700;
   letter-spacing: .06em; text-transform: uppercase; text-align: start; cursor: pointer; }
 .tree-section-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
@@ -911,7 +973,11 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
 .tree-section-empty { padding: var(--space-1) var(--space-3) var(--space-2) calc(var(--space-3) + 1em + var(--space-2));
   color: var(--muted); font-size: 0.75rem; overflow-wrap: anywhere; }
 .fold-mark { display: inline-block; width: 1em; }
-#agent-list .agent, .tree-section-header { position: relative; }
+.agent, .tree-section-header { position: relative; }
+.agent .time { position: relative; display: inline-block; }
+.time:has(.agent-unread) .time-label { visibility: hidden; }
+.agent-unread { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent); pointer-events: none; }
 .section-actions, .row-actions { display: none; position: absolute; inset-block: 0; right: 0;
   z-index: var(--z-raised); align-items: center; gap: var(--space-1);
   padding-inline: var(--space-5) var(--space-3); border-radius: inherit;

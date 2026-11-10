@@ -1,3 +1,5 @@
+// Optional pane refresh signals belong to the outer app, never embedded views.
+import { embedded } from "./state.js";
 import type { AgentTreeStatus, TreeNode } from "./types.js";
 
 export const UI_REFRESH_EVENT = "recurse:ui-refresh";
@@ -41,6 +43,7 @@ export function treeMutationNeedsUiRefresh(
 
 // Refreshes optional UI snapshots after a real mutation.
 export function requestUiRefresh(agentId: string): void {
+  if (embedded) return;
   window.dispatchEvent(
     new CustomEvent(UI_REFRESH_EVENT, {
       detail: { agentId },
@@ -50,6 +53,7 @@ export function requestUiRefresh(agentId: string): void {
 
 /** Refresh Artifacts without implying that the worktree is quiescent. */
 export function requestArtifactsRefresh(agentId: string): void {
+  if (embedded) return;
   window.dispatchEvent(
     new CustomEvent(ARTIFACTS_REFRESH_EVENT, { detail: { agentId } }),
   );
@@ -57,6 +61,7 @@ export function requestArtifactsRefresh(agentId: string): void {
 
 /** Reread linked pull requests after the server saved new snapshots. */
 export function requestPrsRefresh(agentId: string): void {
+  if (embedded) return;
   window.dispatchEvent(
     new CustomEvent(PRS_REFRESH_EVENT, { detail: { agentId } }),
   );

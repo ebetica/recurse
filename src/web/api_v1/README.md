@@ -20,7 +20,9 @@ that agent and its descendants. `GET /api/v1/agents/<id>` includes live shells.
 Since revision 5, both reads include `context: { tokens, window } | null`.
 Tokens measure the last committed prompt usage, using the UI's occupancy
 projection; the window is null when the usage model differs from the selected
-model or its capacity is unknown. Usage is cached only from commits followed
+model or its capacity is unknown. Since revision 7, optional `context.session`
+matches the conversation's `/view` history identity; usage from another session
+must not be reused after Clear. Usage is cached only from commits followed
 by an open conversation, including while idle. Cold, reopened-but-unsampled,
 and newly compacted conversations return null. Status never opens a store or
 reads history, and reading the UI inspector does not warm this cache.

@@ -40,6 +40,8 @@ export interface Comment {
 }
 export interface ArtifactState {
   agentId: string | null;
+  browsing: boolean;
+  filter: string;
   selId: string | null;
   // Consumes lifecycle attention once this agent's async list is known.
   restoredArtifactId?: string | null;
@@ -79,6 +81,7 @@ export interface CommentDoc {
   title: string;
   version: string | null;
   noun?: "file";
+  path?: string;
 }
 export interface CommentPane extends HTMLElement {
   _rs: Pick<

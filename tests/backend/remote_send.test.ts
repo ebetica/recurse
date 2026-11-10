@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { buildApp, WebLogSink } from "../../src/web/app";
@@ -14,6 +14,17 @@ import { fauxHost, held, until } from "./fixtures/durable_host/host";
 // Regression: #2855 Remote creation names the sender and bare-id replies suggest the polling-home address. (also #3002 Remote sidebar fields and operator tag actions cross the backend proxy; #3029 Healthy sends skip readiness requests and recovery deduplicates admission; #3032 Bounded outcome waits survive reader cancellation; #3034 Headerless legacy contacts retain older compatibility.)
 test("home agents send text to connected remote agents", async () => {
   const worlds = [appWorld(), appWorld({ password: true }), appWorld()];
+  const remoteSkill = join(
+    worlds[1]!.env.HOME!,
+    ".agents",
+    "skills",
+    "remote-workflow",
+  );
+  await mkdir(remoteSkill, { recursive: true });
+  await writeFile(
+    join(remoteSkill, "SKILL.md"),
+    "---\nname: remote-workflow\ndescription: Use the receiver's workflow.\n---\nRemote instructions.\n",
+  );
   const serviceToken = crypto.randomUUID();
   worlds[1]!.env.RECURSE_SERVICE_TOKEN_FILE = join(
     worlds[1]!.root,
@@ -328,6 +339,8 @@ test("home agents send text to connected remote agents", async () => {
       /"trusted_recurse_origin"\s*:\s*"operator"/,
     );
     const prompt = JSON.stringify(await remote!.instance.durable.prompt(y));
+    expect(prompt).toContain("<name>remote-workflow</name>");
+    expect(prompt).toContain(join(remoteSkill, "SKILL.md"));
     expect(keys).toHaveLength(1);
     expect(prompt).toContain(`[recurse-from: ${x}@${homeAddress}]`);
     expect(prompt).toContain("[recurse-origin: agent]");

@@ -1,5 +1,5 @@
 // Reply finish times commit before assistant entries, keyed by request start.
-// The latest-only document retains MAX_REPLIES; older replies show no duration.
+// Each write checkpoints MAX_REPLIES; older replies have no duration.
 // Imported replies use Pi session entry timestamps as their finish times.
 import type {
   Conversation,
@@ -23,7 +23,7 @@ export const ReplyTimesDoc = defineDoc<{ finished: Record<string, number> }>({
   history: "latest",
   fork: "initial",
   initial: () => ({ finished: {} }),
-  checkpointWhen: () => false,
+  checkpointWhen: () => true,
 });
 
 // Record replies' finish times in `tx`: `replies` pairs a reply message's start

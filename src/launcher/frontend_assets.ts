@@ -35,6 +35,20 @@ export async function copyFrontendAssets(
       (await readFile(join(webDir, "panes/powerbar.css"), "utf8")) +
       (await readFile(join(webDir, "app.css"), "utf8")),
   );
+  await writeFile(
+    join(outputDir, "dockview.css"),
+    (await readFile(
+      join(
+        codeDir,
+        "node_modules",
+        "dockview",
+        "dist",
+        "styles",
+        "dockview.css",
+      ),
+      "utf8",
+    )) + (await readFile(join(webDir, "dock/style.css"), "utf8")),
+  );
   const katex = join(codeDir, "node_modules", "katex", "dist");
   await copyFile(join(katex, "katex.min.css"), join(outputDir, "katex.css"));
   await rm(join(outputDir, "fonts"), { recursive: true, force: true });
@@ -61,6 +75,10 @@ export async function copyFrontendAssets(
   await copyFile(
     join(codeDir, "node_modules", "quickjs-wasi", "quickjs.wasm"),
     join(outputDir, "quickjs.wasm"),
+  );
+  await copyFile(
+    join(codeDir, "node_modules", "notebookjs", "notebook.min.js"),
+    join(outputDir, "notebook.js"),
   );
   const pdfjs = join(codeDir, "node_modules", "pdfjs-dist");
   await rm(join(outputDir, "pdfjs"), { recursive: true, force: true });

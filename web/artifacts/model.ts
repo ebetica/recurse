@@ -307,16 +307,27 @@ export const STATIC_EMBED_CSP =
   "frame-src 'none'; child-src 'none'; object-src 'none'; worker-src 'none'; " +
   "base-uri 'none'; form-action 'none'; navigate-to 'none'";
 
-export function htmlPreviewSrcdoc(source: string): string {
+export function htmlPreviewSrcdoc(
+  source: string,
+  options?: { scripts: false; embeddedImages: true },
+): string {
+  const policy = options
+    ? STATIC_EMBED_CSP.replace(
+        "script-src 'unsafe-inline'",
+        "script-src 'none'",
+      )
+        .replace("img-src 'none'", "img-src data:")
+        .replace("; navigate-to 'none'", "")
+    : STATIC_EMBED_CSP;
   // Invariant: This CSP is the first parsed element; a document cannot weaken
   // it.
   return (
-    `<meta http-equiv="Content-Security-Policy" content="${STATIC_EMBED_CSP}">` +
+    `<meta http-equiv="Content-Security-Policy" content="${policy}">` +
     `<meta name="color-scheme" content="dark light">` +
     `<style>html,body{margin:0;max-width:100%;overflow-wrap:anywhere}` +
     `body{box-sizing:border-box;padding:8px;font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}` + // font-check: allow Artifact document text, not UI; space-check: allow no theme tokens in the iframe
     `pre,table{display:block;max-width:100%;overflow:auto}</style>` +
-    ARTIFACT_KEY_RELAY +
+    (options ? "" : ARTIFACT_KEY_RELAY) +
     source
   );
 }

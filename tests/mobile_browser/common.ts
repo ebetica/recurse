@@ -82,6 +82,15 @@ export async function waitForLayout(page: Page): Promise<void> {
           scroll.scrollTop,
           scroll.scrollHeight,
           ...Array.from(
+            document.querySelectorAll(
+              "#dock, #dock .dv-groupview, #dock .dv-render-overlay",
+            ),
+            (node: any) => {
+              const box = node.getBoundingClientRect();
+              return `${box.x},${box.y},${box.width},${box.height}`;
+            },
+          ),
+          ...Array.from(
             scroll.querySelectorAll("button, .activity-group-summary"),
             (node: any) => {
               const box = node.getBoundingClientRect();
@@ -893,11 +902,11 @@ export async function dispatchArtifactSelection(
   page: Page,
   pointerType = "mouse",
   needle = "Visible body",
+  root = page.locator(".report-doc").first(),
 ): Promise<void> {
-  await page.evaluate(
-    ({ pointerType, needle }) => {
+  await root.evaluate(
+    (root, { pointerType, needle }) => {
       const browser = globalThis as any;
-      const root = browser.document.querySelector(".report-doc");
       const walker = browser.document.createTreeWalker(
         root,
         browser.NodeFilter.SHOW_TEXT,

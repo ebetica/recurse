@@ -15,12 +15,28 @@ migration. Recurse updates may require editing a custom script.
 - `arrangement.ts` checks sections and actions.
 - `sections.ts` draws sections; `script.ts` manages the worker and saved script.
 - `actions.ts` and `hold.ts` handle tag actions and hold menus.
+- `agent-folds.ts` remembers, on this device, which agents list their
+  subagents (opened with l/Right, folded with h/Left), so the agent list keeps
+  its shape across reloads and server restarts. Storage holds at most 500
+  agent ids, discarding the oldest opens first and deleted home agents after
+  an authoritative tree read. A selected agent's fold lasts until selection
+  changes. `sections.ts` remembers section folds separately.
 
 Side conversations are excluded from both script inputs and stay in the Side
 pane. Rows require no extra record, transcript or GitHub reads. Usage is not in the
 tree snapshot and is omitted. Branch and current directory are optional and only
 included if recorded. Remote rows use qualified ids and set `remote` to true.
+Rows expose `unread: true` after a notification-eligible finish, independently of
+notification subscriptions. The shared row renderer centers an accent dot in place
+of the activity time, preserving its space and tooltip on desktop, phones and the
+active-agent dialog. Row action overlays cover the dot. Section headers have no
+unread indicator. Opening the main conversation clears it on the owning server and all
+devices over tree events; watching it finish keeps it cleared. This applies to
+custom layouts and remote rows whose backend supplies `unread`, without extra
+polling. Older remotes default to false.
 The same arrangement is shown under each backend label, with independent folds.
+Section labels sit close above their first row. On phones, fold targets extend
+upward to keep 44px tap targets without adding space below the label.
 Sections may set the optional boolean `hideWhenEmpty` to hide their header,
 actions and empty text when no checked rows remain for that backend. It defaults
 to false. Hidden sections leave no space and keep their fold preference when rows

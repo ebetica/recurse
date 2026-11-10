@@ -1,7 +1,7 @@
-// Selection comments: quotes, pointer/touch offers, and snapshot binding.
-// Cmd/Ctrl+Enter stages a draft and focuses the viewer; the next press sends
-// staged comments without opening the list. Scroll events queued before a
-// selection gesture do not cancel that gesture's comment offer.
+// Selection comments: quote offers and snapshot binding.
+// Cmd/Ctrl+Enter stages a draft and focuses the viewer; the next press sends.
+// Adding a comment focuses its rendered card before any later reader input.
+// Pre-gesture queued scrolls do not cancel the selection's comment offer.
 import { selectionCommentRange } from "../comments/selection-text.js";
 import { resizeTextarea } from "../composer/textarea.js";
 import { displayedInfo, renderBar, renderComments } from "./comment-bar.js";
@@ -216,7 +216,17 @@ popoverComment.textContent = "Comment";
 popoverActions.append(popoverCancel, popoverComment);
 popover.append(popoverLabel, popoverInput, popoverActions);
 document.body.appendChild(popover);
-export function cancelSelectionComment(): void {
+/** The viewer owning the floating selection-comment draft. */
+export function selectionCommentOwner(): HTMLElement | null {
+  if (!selectionDraft) return null;
+  return (
+    selectionDraft.source.pane ||
+    selectionDraft.root.closest<HTMLElement>(".pane-body") ||
+    commentMount.current
+  );
+}
+export function cancelSelectionComment(owner?: HTMLElement): void {
+  if (owner && selectionCommentOwner() !== owner) return;
   // Invariant: Only clear the page selection when this popover owned one:
   // selectionchange fires for every caret move anywhere, and dropping ranges
   // unconditionally wipes the caret out of whatever input the reader is typing
@@ -235,7 +245,7 @@ export function cancelSelectionComment(): void {
   selectionRoot = null;
   if (commentMount.current) renderBar(commentMount.current);
 }
-popoverCancel.addEventListener("click", cancelSelectionComment);
+popoverCancel.addEventListener("click", () => cancelSelectionComment());
 popoverInput.addEventListener("input", () => {
   if (popover.classList.contains("composer-box")) resizeTextarea(popoverInput);
 });
@@ -679,14 +689,11 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
   cancelSelectionComment();
   renderComments(commentMount.current);
   if (focusCard)
-    requestAnimationFrame(() => {
-      const card = commentMount.current?.querySelector<HTMLElement>(
-        `.report-comment[data-cid="${cid}"]`,
-      );
-      card
-        ?.querySelector<HTMLTextAreaElement>("textarea")
-        ?.focus({ preventScroll: true });
-    });
+    commentMount.current
+      ?.querySelector<HTMLTextAreaElement>(
+        `.report-comment[data-cid="${cid}"] textarea`,
+      )
+      ?.focus({ preventScroll: true });
 }
 function findQuote(doc: Element, quote: string): Range | null {
   const want = quote.replace(/\s+/g, " ").trim();

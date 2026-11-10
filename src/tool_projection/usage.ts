@@ -186,7 +186,7 @@ export function providerUsage(message: unknown): Row | null {
   const usage: Row = {};
   for (const key of USAGE_KEYS) usage[key] = rawUsage[key];
   const provider = message["provider"];
-  const model = message["model"];
+  const model = message["responseModel"] ?? message["model"];
   const selector = resolveUsageSelector(provider, model, rawUsage);
   if (selector !== null) {
     usage["selectors"] = [selector];

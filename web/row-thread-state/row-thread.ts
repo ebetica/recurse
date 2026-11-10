@@ -3,6 +3,7 @@
 // Compaction stays in-session; held rows are uncapped, served pages bounded.
 // Same-instance resets replace their range, retaining settled older history.
 import type {
+  ConversationModelUsageGroup,
   MessageEntry,
   ToolStat,
   Turn,
@@ -363,6 +364,7 @@ interface UsageAcc {
   costReported: boolean;
   partial: boolean;
   scopes: Map<string, { cost?: number; partial: boolean }>;
+  groups: Map<string, ConversationModelUsageGroup>;
   calls: number;
   replies: number;
 }
@@ -378,6 +380,7 @@ function emptyAcc(): UsageAcc {
     costReported: false,
     partial: false,
     scopes: new Map(),
+    groups: new Map(),
     calls: 0,
     replies: 0,
   };
@@ -385,6 +388,27 @@ function emptyAcc(): UsageAcc {
 
 function validCount(value: unknown): value is number {
   return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function addUsageGroup(
+  groups: UsageAcc["groups"],
+  selector: string,
+  usage: TurnUsage,
+  calls: number,
+): void {
+  const group = groups.get(selector) ?? {
+    selector,
+    input: 0,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    calls: 0,
+    costPartial: true,
+  };
+  for (const field of ["input", "output", "cacheRead", "cacheWrite"] as const)
+    group[field] += usage[field];
+  group.calls += calls;
+  groups.set(selector, group);
 }
 
 function addRowUsage(
@@ -408,6 +432,8 @@ function addRowUsage(
   acc.cacheWrite += cacheWrite;
   acc.calls += 1;
   const report = usage as TurnUsage;
+  if (report.selectorPartial === false && report.selectors?.length === 1)
+    addUsageGroup(acc.groups, report.selectors[0]!, report, 1);
   const cost = report.cost;
   const validCost =
     typeof cost === "number" && Number.isFinite(cost) && cost >= 0;
@@ -438,6 +464,19 @@ function summedUsage(acc: UsageAcc, partial: boolean): TurnUsageTotal | null {
     }
     costPartial ||= scope.partial || scope.cost === undefined;
   }
+  const groups = [...acc.groups.values()].map((group) => ({ ...group }));
+  if (
+    groups.length === 1 &&
+    groups[0]!.calls === acc.calls &&
+    (["input", "output", "cacheRead", "cacheWrite"] as const).every(
+      (field) => groups[0]![field] === acc[field],
+    )
+  ) {
+    Object.assign(
+      groups[0]!,
+      costReported ? { cost, costPartial } : { costPartial: true },
+    );
+  }
   return {
     input: acc.input,
     output: acc.output,
@@ -445,6 +484,7 @@ function summedUsage(acc: UsageAcc, partial: boolean): TurnUsageTotal | null {
     cacheWrite: acc.cacheWrite,
     calls: acc.calls,
     replies: acc.replies,
+    model_groups: groups,
     partial: partial || acc.partial || acc.calls < acc.replies,
     ...(costReported ? { cost } : null),
     costPartial,
@@ -562,6 +602,11 @@ function mergeAcc(finalized: UsageAcc, pending: UsageAcc): UsageAcc {
     if (scopes.has(id)) partial = true;
     else scopes.set(id, entry);
   }
+  const groups = new Map(
+    [...finalized.groups].map(([key, value]) => [key, { ...value }]),
+  );
+  for (const group of pending.groups.values())
+    addUsageGroup(groups, group.selector, group, group.calls);
   return {
     input: finalized.input + pending.input,
     output: finalized.output + pending.output,
@@ -575,6 +620,7 @@ function mergeAcc(finalized: UsageAcc, pending: UsageAcc): UsageAcc {
       finalized.calls < finalized.replies ||
       pending.calls < pending.replies,
     scopes,
+    groups,
     calls: finalized.calls + pending.calls,
     replies: finalized.replies + pending.replies,
   };
@@ -591,6 +637,8 @@ function applyRunTotal(build: TurnBuild, total: RunTotal): void {
   // Invariant: A marker-only run still made at least one provider call, which
   // also keeps the meter rendering for estimate-free turns.
   if (pend.calls === 0) fin.calls += 1;
+  for (const group of pend.groups.values())
+    addUsageGroup(fin.groups, group.selector, group, group.calls);
   Object.assign(pend, emptyAcc());
   fin.input += total.input;
   fin.output += total.output;
@@ -805,6 +853,9 @@ export function rowsToTurns(
                   cacheRead: total.cacheRead,
                   cacheWrite: total.cacheWrite,
                   cost: total.total,
+                  ...(total.model
+                    ? { selectors: [total.model], selectorPartial: false }
+                    : {}),
                 },
                 false,
               );

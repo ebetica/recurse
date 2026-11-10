@@ -62,6 +62,10 @@ it to settle. Waiting spaces polls five seconds apart and stops at the timeout;
 early timer wakeups do not trigger extra requests. Remote status and idle need
 API v1 revision 3 or later.
 
+`move <id> --to <parent-id>` moves a local agent and its subtree under another
+agent. `move <id> --top-level` removes its parent instead. Exactly one destination
+is required; both forms preserve the agent’s worktree.
+
 `compact <cid|id@label>`
 
 ## Remote agents

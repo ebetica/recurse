@@ -13,6 +13,12 @@
   --expanded-shadow: inset 0 0 0 1px var(--expanded-border), var(--expanded-lift);
   --menu-shadow: 0 12px 36px color-mix(in srgb, var(--shadow) 45%, transparent);
   --dialog-shadow: 0 20px 60px color-mix(in srgb, var(--shadow) 55%, transparent);
+  --shell-bg: var(--bg);
+  --frame-bg: var(--panel);
+  --pane-border: var(--border);
+  --content-inset: var(--space-3);
+  --content-radius: 14px;
+  --content-ring: 0 0 0 1px var(--pane-border);
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
   /* Stacking layers, lowest first. Inside a layer a surface that must cover

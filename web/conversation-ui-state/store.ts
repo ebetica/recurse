@@ -18,6 +18,7 @@ import {
   defaultSessionState,
   ephemeralOwner,
   jsonClone,
+  paneStateLimit,
   slotKeyFor,
   validBoundedString,
   validOwnerId,
@@ -268,7 +269,9 @@ export class ConversationUiStateStore implements UiStateStoreState {
         ? this.loadLocal(ownerId).panes
         : this.loadSession(ownerId).panes;
     const item = panes[key];
-    return item?.version === version ? jsonClone(item.value) : undefined;
+    return item?.version === version
+      ? jsonClone(item.value, paneStateLimit(key))
+      : undefined;
   }
 
   setPaneState(
@@ -292,7 +295,7 @@ export class ConversationUiStateStore implements UiStateStoreState {
       )
     )
       return false;
-    const normalized = jsonClone(value);
+    const normalized = jsonClone(value, paneStateLimit(key));
     if (normalized === undefined) return false;
     const record =
       retention === "local"

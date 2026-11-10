@@ -132,14 +132,14 @@ export interface ScrollAnchorRow {
 }
 
 // Anchors a synchronous toggle/repaint on a surviving keyed DOM node. Explicit
-// controls override bottom pinning; a rAF corrects deferred layout. Reader
-// gestures cancel that residual correction.
+// controls override bottom pinning; a rAF corrects deferred layout. Returns an
+// instant correction for the owner's later layout observations.
 export function withScrollAnchor(
   viewport: ScrollAnchorViewport,
   rows: readonly ScrollAnchorRow[],
   mutate: () => void,
   explicitAnchor: ScrollAnchorRow | null = null,
-): void {
+): (() => void) | null {
   if (
     !explicitAnchor &&
     isPinnedToBottom(
@@ -149,7 +149,7 @@ export function withScrollAnchor(
     )
   ) {
     mutate();
-    return;
+    return null;
   }
   let anchor: ScrollAnchorRow | null = null;
   let beforeTop: number | undefined;
@@ -167,7 +167,7 @@ export function withScrollAnchor(
     beforeTop = anchor ? rects[index].top : undefined;
   }
   mutate();
-  if (!anchor || beforeTop === undefined || !anchor.isConnected) return;
+  if (!anchor || beforeTop === undefined || !anchor.isConnected) return null;
   const correct = (): void => {
     if (!anchor.isConnected) return;
     viewport.scrollTop = anchoredScrollTop(
@@ -184,4 +184,5 @@ export function withScrollAnchor(
     if (viewport.scrollTop !== settledScrollTop) return;
     correct();
   });
+  return correct;
 }

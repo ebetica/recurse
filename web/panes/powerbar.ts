@@ -4,6 +4,7 @@ import { render } from "lit";
 import { CLOSE_ICON } from "../icons.js";
 
 const powerbars = new WeakMap<HTMLElement, HTMLElement>();
+const fullscreenButtons = new WeakMap<HTMLElement, HTMLButtonElement>();
 
 for (const type of ["click", "change"]) {
   document.addEventListener(
@@ -48,9 +49,11 @@ export function createPanePowerbar(
   const controls = document.createElement("div");
   controls.className = "pane-powerbar-controls";
   const fs = document.createElement("button");
-  fs.className = "fs";
+  fs.className = "fs icon-btn";
+  fs.dataset.pane = id;
   fs.type = "button";
   fs.onclick = fullscreen;
+  fullscreenButtons.set(bar, fs);
   const x = document.createElement("button");
   x.className = "x";
   x.type = "button";
@@ -82,6 +85,11 @@ document.addEventListener("pointerdown", (event) => {
 
 export function panePowerbar(body: HTMLElement): HTMLElement {
   return powerbars.get(body)!;
+}
+
+/** The retained native control can live in a window header or its pane. */
+export function paneFullscreenControl(body: HTMLElement): HTMLButtonElement {
+  return fullscreenButtons.get(panePowerbar(body))!;
 }
 
 export function renderPowerbarControls(

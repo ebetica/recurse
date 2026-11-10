@@ -130,6 +130,14 @@ export class PaneInstanceCache<T extends HTMLElement = HTMLElement> {
     this.invalidate();
   }
 
+  retains(paneId: string, ownerId?: string): boolean {
+    return [...this.entries.values()].some(
+      (entry) =>
+        entry.scope.paneId === paneId &&
+        (ownerId === undefined || entry.scope.ownerId === ownerId),
+    );
+  }
+
   get size(): number {
     return this.entries.size;
   }

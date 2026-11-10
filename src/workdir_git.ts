@@ -12,6 +12,7 @@ import { timed } from "./observability/request_timing";
 import { slowSpan } from "./observability/slow_span";
 import { prIdentity } from "./pull_request";
 import { pullRequestFiles } from "./pull_request/patch";
+import { selectedWork, type SelectedWork } from "./workdir_git_work";
 
 // Python str.isspace() code points (str.strip() and unicode \s).
 const PY_SPACE =
@@ -43,7 +44,7 @@ export function gitEnv(environ: Env): Record<string, string> {
   return env;
 }
 
-function safeGitEnv(environ: Env): Record<string, string> {
+export function safeGitEnv(environ: Env): Record<string, string> {
   const env = gitEnv(environ);
   for (const key of Object.keys(env))
     if (key.startsWith("GIT_")) delete env[key];
@@ -208,14 +209,15 @@ function diffSections(result: GitText): {
   };
 }
 
-/** Run one command with bounded kept stdout; null text when it cannot run. */
-async function runBounded(
+/** Run one command with bounded kept stdout and optional stdin bytes. */
+export async function runBounded(
   argv: string[],
   cwd: string,
   env: Record<string, string>,
   limit: number,
   timeout: number,
   signal?: AbortSignal,
+  stdin?: Uint8Array,
 ): Promise<{ out: Uint8Array; truncated: boolean; code: number } | null> {
   if (signal?.aborted) return null;
   let proc: import("bun").Subprocess<"ignore", "pipe", "ignore">;
@@ -234,7 +236,7 @@ async function runBounded(
         Bun.spawn([found, ...argv.slice(1)], {
           cwd,
           env,
-          stdin: "ignore",
+          stdin: stdin ?? "ignore",
           stdout: "pipe",
           stderr: "ignore",
         }),
@@ -374,6 +376,9 @@ export interface DiffState {
   base: string | null;
   baseSha: string | null;
   baseSource: string | null;
+  /** The base label used when no ref is typed. */
+  defaultBase: string | null;
+  selectedWork?: SelectedWork | null;
   headSha: string | null;
   branch: string | null;
   cwd: string | null;
@@ -399,6 +404,7 @@ export function unavailableDiff(
     base: null,
     baseSha: null,
     baseSource: null,
+    defaultBase: null,
     headSha: null,
     branch: null,
     cwd,
@@ -732,15 +738,50 @@ export class WorkdirGit {
     return null;
   }
 
+  private async mergeBase(
+    wt: string,
+    ref: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    const base = await this.gitText(
+      ["merge-base", "HEAD", ref],
+      wt,
+      256,
+      5.0,
+      signal,
+    );
+    return base.code === 0 && base.text && isSha(pyStrip(base.text))
+      ? pyStrip(base.text).toLowerCase()
+      : null;
+  }
+
+  /**
+   * Typed refs select committed work; HEAD selects uncommitted edits.
+   * Otherwise stop where HEAD meets the PR base, upstream or default branch.
+   */
   private async resolveDiffBase(
     wt: string,
     override: string | null,
     knownBranch?: string | null,
     signal?: AbortSignal,
-  ): Promise<[string | null, string | null, string]> {
+  ): Promise<[string | null, string | null, string, SelectedWork?]> {
     if (override) {
       const sha = await this.resolveRef(wt, override, signal);
-      if (sha !== null) return [sha, override, `override:${override}`];
+      if (sha !== null) {
+        if (override === "HEAD") return [sha, override, "override:HEAD"];
+        const selected = await selectedWork(
+          override,
+          sha,
+          await this.autoMainRef(wt, signal),
+          (args, limit) => this.gitText(args, wt, limit, 5.0, signal),
+        );
+        return [
+          selected?.base ?? null,
+          override,
+          `override:${override}`,
+          selected?.work,
+        ];
+      }
     }
     const branch =
       knownBranch === undefined ? await this.branchAt(wt, signal) : knownBranch;
@@ -750,53 +791,35 @@ export class WorkdirGit {
       if (pr?.state === "OPEN" && pr.baseRefName) {
         for (const ref of [`origin/${pr.baseRefName}`, pr.baseRefName]) {
           if ((await this.resolveRef(wt, ref, signal)) === null) continue;
-          const base = await this.gitText(
-            ["merge-base", "HEAD", ref],
-            wt,
-            256,
-            5.0,
-
-            signal,
-          );
-          if (base.code === 0 && base.text && isSha(pyStrip(base.text)))
-            return [pyStrip(base.text).toLowerCase(), ref, `pr:${pr.number}`];
+          const base = await this.mergeBase(wt, ref, signal);
+          if (base !== null) return [base, ref, `pr:${pr.number}`];
         }
       }
-      const name = await this.gitText(
-        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+      const tracked = await this.gitText(
+        [
+          "for-each-ref",
+          "--format=%(upstream)%00%(upstream:short)%00%(upstream:remoteref)",
+          `refs/heads/${branch}`,
+        ],
         wt,
-        256,
+        1024,
         5.0,
-
         signal,
       );
-      const upstream = pyStrip(name.text ?? "");
-      if (
-        name.code === 0 &&
-        name.text &&
-        upstream !== "" &&
-        upstream !== "@{u}"
-      ) {
-        const base = await this.gitText(
-          ["merge-base", "HEAD", "@{u}"],
-          wt,
-          256,
-          5.0,
-
-          signal,
-        );
-        if (base.code === 0 && base.text && isSha(pyStrip(base.text)))
-          return [
-            pyStrip(base.text).toLowerCase(),
-            upstream,
-            `upstream:${upstream}`,
-          ];
+      const [full, upstream, merge] = pyStrip(tracked.text ?? "").split("\0");
+      if (tracked.code === 0 && full && merge !== `refs/heads/${branch}`) {
+        const base = await this.mergeBase(wt, full, signal);
+        if (base !== null) return [base, upstream!, `upstream:${upstream}`];
       }
     }
     const mainRef = await this.autoMainRef(wt, signal);
     if (mainRef !== null) {
       const [ref, sha] = mainRef;
-      return [sha, ref, `auto:${ref}`];
+      return [
+        (await this.mergeBase(wt, sha, signal)) ?? sha,
+        ref,
+        `auto:${ref}`,
+      ];
     }
     const head = await this.resolveRef(wt, "HEAD", signal);
     if (head !== null) return [head, "HEAD", "head"];
@@ -1045,6 +1068,7 @@ export class WorkdirGit {
     wt: string,
     num: GitText,
     signal?: AbortSignal,
+    committed = false,
   ): Promise<[DiffFile[], number, boolean, string[]]> {
     const files: DiffFile[] = [];
     if (num.text !== null && (num.code === 0 || num.code === 1)) {
@@ -1061,6 +1085,10 @@ export class WorkdirGit {
           status: "modified",
         });
       }
+    }
+    if (committed) {
+      const more = Math.max(0, files.length - MAX_DIFF_FILES);
+      return [files.slice(0, MAX_DIFF_FILES), more, num.truncated, []];
     }
     const names = await this.gitText(
       ["ls-files", "--others", "--exclude-standard", "-z"],
@@ -1156,7 +1184,7 @@ export class WorkdirGit {
         this.branchAt(wt, signal),
         this.gitText(["rev-parse", "--verify", "HEAD"], wt, 256, 5.0, signal),
       ]);
-      const [base, label, source] = await this.resolveDiffBase(
+      const [base, label, source, work] = await this.resolveDiffBase(
         wt,
         baseOverride,
         branch,
@@ -1164,10 +1192,16 @@ export class WorkdirGit {
       );
       if (base === null || signal.aborted)
         return unavailableDiff("diff-failed", cwd, cwdSource);
+      const defaultBase = !source.startsWith("override:")
+        ? label
+        : baseOverride === "HEAD"
+          ? null
+          : (await this.resolveDiffBase(wt, null, branch, signal))[1];
       const headSha =
-        head.text && isSha(pyStrip(head.text))
+        work?.headSha ??
+        (head.text && isSha(pyStrip(head.text))
           ? pyStrip(head.text).toLowerCase()
-          : null;
+          : null);
       const { num, st, df } = diffSections(
         await this.gitText(
           [
@@ -1178,6 +1212,7 @@ export class WorkdirGit {
             "--no-renames",
             "-z",
             base,
+            ...(work ? [work.headSha] : []),
             "--",
           ],
           wt,
@@ -1197,6 +1232,7 @@ export class WorkdirGit {
         wt,
         num,
         signal,
+        Boolean(work),
       );
       if (signal.aborted) return unavailableDiff("diff-failed", cwd, cwdSource);
       const untrackedCapped = untracked.slice(0, MAX_UNTRACKED_NAMES);
@@ -1219,7 +1255,16 @@ export class WorkdirGit {
         current === null &&
         !truncated
       )
-        return unavailableDiff("clean", cwd, cwdSource);
+        return {
+          ...unavailableDiff("clean", cwd, cwdSource),
+          base: label,
+          baseSha: base,
+          baseSource: source,
+          defaultBase,
+          selectedWork: work,
+          headSha,
+          branch,
+        };
       const version = createHash("sha256")
         .update(
           [
@@ -1239,6 +1284,8 @@ export class WorkdirGit {
         base: label,
         baseSha: base,
         baseSource: source,
+        defaultBase,
+        selectedWork: work,
         headSha,
         branch,
         cwd,
@@ -1265,6 +1312,7 @@ export class WorkdirGit {
     root: string,
     rel: string,
     base: string,
+    head?: string,
   ): Promise<[string | null, string | null, boolean, boolean]> {
     const old = await this.gitText(
       ["show", `${base}:${rel}`],
@@ -1279,12 +1327,25 @@ export class WorkdirGit {
       oldOver = false;
     }
     const candidate = join(root, rel);
-    let newRaw = new Uint8Array(0);
+    let newRaw: Uint8Array = new Uint8Array(0);
     try {
-      const info = await stat(candidate);
-      if (info.isFile() && info.size > MAX_FILE_CONTENT_BYTES)
-        return [null, null, true, false];
-      if (info.isFile()) newRaw = new Uint8Array(await readFile(candidate));
+      if (head) {
+        const content = await this.gitText(
+          ["show", `${head}:${rel}`],
+          wt,
+          MAX_FILE_CONTENT_BYTES,
+          5.0,
+        );
+        if (content.truncated) return [null, null, true, false];
+        newRaw = new TextEncoder().encode(
+          content.code === 0 ? (content.text ?? "") : "",
+        );
+      } else {
+        const info = await stat(candidate);
+        if (info.isFile() && info.size > MAX_FILE_CONTENT_BYTES)
+          return [null, null, true, false];
+        if (info.isFile()) newRaw = new Uint8Array(await readFile(candidate));
+      }
     } catch {
       newRaw = new Uint8Array(0);
     }
@@ -1384,6 +1445,7 @@ export class WorkdirGit {
     path: unknown,
     baseOverride: string | null = null,
     includeContents = false,
+    snapshot: string | null = null,
   ): Promise<Record<string, unknown>> {
     if (typeof path !== "string" || !path || Array.from(path).length > 4096)
       return {
@@ -1393,8 +1455,27 @@ export class WorkdirGit {
       };
     if (path.includes("\0") || wt.includes("\0"))
       return { available: false, reason: "path-outside-repo", path };
+    const pinned = snapshot?.split("..");
+    if (pinned && (pinned.length !== 2 || !pinned.every(isSha)))
+      return { available: false, reason: "bad-snapshot", path };
+    const [base, label, source, work] = pinned
+      ? ([
+          pinned[0]!,
+          baseOverride,
+          "snapshot",
+          { headSha: pinned[1]! },
+        ] as const)
+      : await this.resolveDiffBase(
+          wt,
+          baseOverride,
+          undefined,
+          AbortSignal.timeout(DIFF_REQUEST_TIMEOUT_MS),
+        );
+    if (base === null) return { available: false, reason: "diff-failed", path };
     const root = await pyResolve(wt);
-    const full = await pyResolve(isAbsolute(path) ? path : `${root}/${path}`);
+    const full = work
+      ? resolve(root, path)
+      : await pyResolve(isAbsolute(path) ? path : `${root}/${path}`);
     let relS: string;
     if (full === root) relS = ".";
     else if (full.startsWith(root === "/" ? "/" : `${root}/`))
@@ -1409,18 +1490,13 @@ export class WorkdirGit {
       );
       const isTracked =
         tracked.code === 0 && Boolean(pyStrip(tracked.text ?? ""));
-      const [base, label, source] = await this.resolveDiffBase(
-        wt,
-        baseOverride,
-      );
-      if (base === null)
-        return { available: false, reason: "diff-failed", path: relS };
       const fullPath = relS === "." ? root : join(root, relS);
-      if (!isTracked && !(await isFile(fullPath)))
+      if (!work && !isTracked && !(await isFile(fullPath)))
         return { available: false, reason: "no-such-file", path: relS };
-      const args = isTracked
-        ? ["diff", base, "--", relS]
-        : ["diff", "--no-index", "--", "/dev/null", fullPath];
+      const args =
+        work || isTracked
+          ? ["diff", base, ...(work ? [work.headSha] : []), "--", relS]
+          : ["diff", "--no-index", "--", "/dev/null", fullPath];
       const p = await this.gitText(args, wt, MAX_FILE_PATCH_BYTES);
       if (p.text === null || (p.code !== 0 && p.code !== 1))
         return { available: false, reason: "diff-failed", path: relS };
@@ -1444,6 +1520,7 @@ export class WorkdirGit {
           root,
           relS,
           base,
+          work?.headSha,
         );
         Object.assign(out, {
           oldContent,

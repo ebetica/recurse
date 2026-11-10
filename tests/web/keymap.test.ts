@@ -87,42 +87,6 @@ describe("Normal mode", () => {
   });
 });
 
-describe("right pane focus mode", () => {
-  // Feature: #2314 pane focus and visibility use separate keys.
-  test("p focuses and o toggles only when a pane is open or available", () => {
-    for (const [key, command] of [
-      ["p", "focus-pane"],
-      ["o", "toggle-pane"],
-    ] as const) {
-      const unavailable = press(normal, key, { paneAvailable: false });
-      expect(unavailable.handled).toBe(true);
-      expect(unavailable.command).toBeNull();
-      expect(press(normal, key, { paneAvailable: true }).command).toBe(command);
-    }
-  });
-
-  // Feature: #2314 pane exits can move focus without closing the pane.
-  test("p returns to the thread, Escape to agents, o toggles, h closes, and H toggles agents", () => {
-    const pane = initialKeymapState("pane");
-    for (const [key, command] of [
-      ["p", "focus-thread"],
-      ["Escape", "focus-agents"],
-      ["o", "toggle-pane"],
-    ] as const) {
-      const exit = press(pane, key, { target: "pane" });
-      expect(exit.command).toBe(command);
-      expect(exit.state.mode).toBe("normal");
-    }
-    const toggleAgents = press(pane, "H", { target: "pane" });
-    expect(toggleAgents.command).toBe("toggle-agents");
-    expect(toggleAgents.state.mode).toBe("pane");
-    for (const key of ["p", "o", "h"])
-      expect(
-        press(pane, key, { target: "pane" }, { repeat: true }).command,
-      ).toBeNull();
-  });
-});
-
 describe("Take-over binding", () => {
   test("m toggles take-over from Normal and leaves no modal move layer", () => {
     const toggled = press(normal, "m");

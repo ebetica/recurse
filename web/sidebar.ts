@@ -1,6 +1,6 @@
 // Opening a conversation snaps its keyboard cursor; j/k only move that cursor.
 // Keyed forest rows preserve DOM/scroll; tree_projection owns reveal policy.
-// Rename/swipe gestures freeze repaint until completion.
+// Rename/swipe freeze repaint until done; accepted deletes fence older reads.
 // Rows keep title, badges and time on one line; models stay in the composer.
 import { startNewAgent } from "./composer.js";
 import { sharedTrees, reloadChangedTreeLink } from "./shared-trees.js";
@@ -97,6 +97,7 @@ import { canDrop, isValidDropTarget, reparentValidity } from "./reparent.js";
 import type { TreeNode } from "./types.js";
 import type { Action, Section } from "./sidebar/arrangement.js";
 import { SIDEBAR_CHANGE, shownTags } from "./sidebar/actions.js";
+import * as folds from "./sidebar/agent-folds.js";
 import { holdOpen, moveHold, openHold, releaseHold } from "./sidebar/hold.js";
 import {
   arrange,
@@ -199,7 +200,8 @@ function visibleTree(): TreeEntry[] {
           stableOrder(Object.values(state.nodes)),
           state.selectedId,
           {
-            collapsed: collapsedAnchor ? new Set([collapsedAnchor]) : undefined,
+            collapsed: folds.foldedAgents(),
+            expanded: folds.keptOpen,
             autoCollapseDepth: DEFAULT_FOLD_DEPTH,
           },
         ).map((e) => ({
@@ -238,7 +240,8 @@ function sectioned(): TreeEntry[] {
     ),
     state.selectedId,
     {
-      collapsed: collapsedAnchor ? new Set([collapsedAnchor]) : undefined,
+      collapsed: folds.foldedAgents(),
+      expanded: folds.keptOpen,
       autoCollapseDepth: DEFAULT_FOLD_DEPTH,
     },
   )) {
@@ -303,7 +306,6 @@ function anchorId(): string {
     : "";
 }
 
-let collapsedAnchor: string | null = null;
 function anchorHasChildren(anchor: string): boolean {
   return (
     !!anchor &&
@@ -493,9 +495,10 @@ function rowT(
           ? rowButtons(e.actions, n.id, n.title, n.id === state.cursorId)
           : nothing
       }
-      <span class="time" title="Last activity ${relTime(n.updated)}"
-        >${relTime(n.updated)}</span
-      >
+      <span class="time" title="Last activity ${relTime(n.updated)}">
+        <span class="time-label">${relTime(n.updated)}</span>
+        ${n.unread ? html`<span class="agent-unread" role="img" aria-label=${`${n.title} — finished, not yet viewed`} title="Finished, not yet viewed"></span>` : nothing}
+      </span>
     </div>
   </${tag}>`;
 }
@@ -647,7 +650,7 @@ export function selectAgent(
   // below, while draft promotion transfers both views to the newly created
   // conversation.
   state.draft = null;
-  collapsedAnchor = null;
+  folds.noteSelection(id);
   state.selectedId = id;
   state.cursorId = id;
   if (outgoing === DRAFT && preserveAttachments) promoteComposerOwner(id);
@@ -865,10 +868,10 @@ export function treeAscendOrCollapse(): void {
     state.cursorId,
     anchor,
     anchorHasChildren(anchor),
-    collapsedAnchor === anchor,
+    folds.collapsedAgent() === anchor,
   );
   if (action === "collapse") {
-    collapsedAnchor = anchor;
+    folds.foldAgent(anchor);
     renderSidebar();
     if (state.nodes[anchor])
       announceNode(state.nodes[anchor], "Collapsed subagents");
@@ -881,11 +884,15 @@ export function treeAscendOrCollapse(): void {
 export function treeExpandIfCollapsed(): boolean {
   const anchor = anchorId();
   if (
-    resolveLAction(state.cursorId, anchor, collapsedAnchor === anchor) !==
-    "expand"
+    resolveLAction(
+      state.cursorId,
+      anchor,
+      folds.collapsedAgent() === anchor,
+    ) !== "expand"
   )
     return false;
-  collapsedAnchor = null;
+  folds.unfoldAgent();
+  folds.keepSubagentsOpen(anchor);
   renderSidebar();
   if (state.nodes[anchor])
     announceNode(state.nodes[anchor], "Expanded subagents");
@@ -1168,6 +1175,7 @@ export function killAgent(dying: string | null | undefined): void {
           for (const id of removedIds) conversationUiState.remove(id);
         }
       };
+      if (r.ok) treeFor(dying)?.invalidate();
       if (r.status === 202) {
         // Invariant: Accepted async deletion stays hidden until omission/parked
         // failure. Mark confirmed before UI work so a paint error cannot undo
@@ -1386,6 +1394,59 @@ export function commitRename(): boolean {
   return true;
 }
 
+/** Apply the same ordered optimistic rename from a row or the composer. */
+export async function renameConversation(
+  id: string,
+  val: string,
+): Promise<boolean> {
+  const action = titleActions.begin(id);
+  state.pendingTitles[id] = {
+    title: val,
+    acknowledged: false,
+    waitForSettle: false,
+  };
+  if (state.nodes[id]) state.nodes[id].title = val;
+  renderSidebar();
+  try {
+    const r = await backendFor(id).jpost(`/api/conversations/${id}/rename`, {
+      title: val,
+      title_order: action.order,
+    });
+    if (!r.ok) throw new Error("rename failed");
+    // Invariant: Reconcile normalized titles only for the latest ordered edit.
+    const { title, superseded, pending } = (await r.json()) as {
+      title: string;
+      superseded?: boolean;
+      pending?: boolean;
+    };
+    if (
+      !titleActions.isCurrent(id, action) ||
+      state.pendingTitles[id]?.title !== val
+    )
+      return true;
+    if (superseded) delete state.pendingTitles[id];
+    else {
+      // Invariant: Keep acknowledged titles through causal tree reconciliation;
+      // cached conversation titles must not flash back before the next read.
+      state.pendingTitles[id] = {
+        title,
+        acknowledged: true,
+        waitForSettle: !!pending,
+      };
+    }
+    if (state.nodes[id]) state.nodes[id].title = title;
+    return true;
+  } catch {
+    if (
+      titleActions.isCurrent(id, action) &&
+      state.pendingTitles[id]?.title === val
+    )
+      delete state.pendingTitles[id];
+    poll();
+    return false;
+  }
+}
+
 export function startRename(id: string): void {
   if (renaming) return;
   const n = id && id !== DRAFT ? state.nodes[id] : null;
@@ -1415,64 +1476,7 @@ export function startRename(id: string): void {
     input.remove();
     titleSpan.style.display = "";
     const val = input.value.trim();
-    if (commit && val && val !== orig) {
-      const action = titleActions.begin(id);
-      state.pendingTitles[id] = {
-        title: val,
-        acknowledged: false,
-        waitForSettle: false,
-      };
-      if (state.nodes[id]) {
-        state.nodes[id].title = val;
-      }
-      backendFor(id)
-        .jpost(`/api/conversations/${id}/rename`, {
-          title: val,
-          title_order: action.order,
-        })
-        .then(async (r) => {
-          if (!r.ok) throw new Error("rename failed");
-          // Invariant: Reconcile to the normalized stored title, not raw input.
-          // Whitespace/length normalization can otherwise pin a stale overlay
-          // forever; a newer rename always wins.
-          const { title, superseded, pending } = (await r.json()) as {
-            title: string;
-            superseded?: boolean;
-            pending?: boolean;
-          };
-          const optimistic = state.pendingTitles[id];
-          if (!titleActions.isCurrent(id, action) || optimistic?.title !== val)
-            return;
-          if (superseded) {
-            delete state.pendingTitles[id];
-          } else if (pending) {
-            state.pendingTitles[id] = {
-              title,
-              acknowledged: true,
-              waitForSettle: true,
-            };
-          } else {
-            // Invariant: The backend applied an idle rename before replying.
-            // Keep the acknowledged overlay through the next causal tree
-            // reconciliation so the open conversation's older cached title
-            // cannot flash back.
-            state.pendingTitles[id] = {
-              title,
-              acknowledged: true,
-              waitForSettle: false,
-            };
-          }
-          if (state.nodes[id]) state.nodes[id].title = title;
-        })
-        .catch(() => {
-          if (
-            titleActions.isCurrent(id, action) &&
-            state.pendingTitles[id]?.title === val
-          )
-            delete state.pendingTitles[id];
-          poll();
-        });
-    }
+    if (commit && val && val !== orig) void renameConversation(id, val);
     renderSidebar();
   };
   finishRename = finish;

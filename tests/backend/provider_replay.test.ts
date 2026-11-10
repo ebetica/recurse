@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { durableModels } from "../../src/agents/durable/models";
 import {
   createModels,
   cleanupSessionResources,
@@ -16,7 +20,8 @@ for (const name of ["openai-codex-sse", "openai-codex-auto", "anthropic-sse"]) {
     const recording: Recording = await Bun.file(
       `${import.meta.dir}/fixtures/provider_replay/${name}.json`,
     ).json();
-    const turns = name.endsWith("auto") ? 3 : 1;
+    const anthropic = recording.model.provider === "anthropic";
+    const turns = name.endsWith("auto") ? 3 : anthropic ? 2 : 1;
     for (let turn = 1; turn < turns; turn++)
       recording.exchanges.push(structuredClone(recording.exchanges[0]!));
     const replay = replayProvider(recording, { timeScale: 0 });
@@ -44,11 +49,14 @@ for (const name of ["openai-codex-sse", "openai-codex-auto", "anthropic-sse"]) {
       recording.model.provider === "anthropic"
         ? "sk-ant-oat-recorded-test"
         : token;
+    const agentDir = mkdtempSync(join(tmpdir(), "provider-models-"));
     try {
-      const models = createModels();
-      const provider = builtinProviders().find(
-        (provider) => provider.id === recording.model.provider,
-      )!;
+      const models = anthropic ? durableModels(agentDir) : createModels();
+      const provider =
+        models.getProvider(recording.model.provider) ??
+        builtinProviders().find(
+          (provider) => provider.id === recording.model.provider,
+        )!;
       models.setProvider({
         ...provider,
         auth: {
@@ -66,14 +74,29 @@ for (const name of ["openai-codex-sse", "openai-codex-auto", "anthropic-sse"]) {
         const stream = models.stream(
           {
             ...recording.model,
-            baseUrl:
-              replay.baseUrl +
-              new URL(recording.model.baseUrl).pathname.replace(/\/$/, ""),
+            ...(anthropic
+              ? models.getModel("anthropic", recording.model.id)
+              : {}),
+            baseUrl: anthropic
+              ? recording.model.baseUrl
+              : replay.baseUrl +
+                new URL(recording.model.baseUrl).pathname.replace(/\/$/, ""),
           },
           context,
           {
             apiKey,
             sessionId,
+            ...(anthropic
+              ? {
+                  fetch: (url: string | URL | Request, init?: RequestInit) =>
+                    fetch(
+                      replay.baseUrl +
+                        new URL(String(url)).pathname +
+                        new URL(String(url)).search,
+                      init,
+                    ),
+                }
+              : {}),
             ...(recording.model.provider === "openai-codex"
               ? {
                   reasoningEffort: "low" as const,
@@ -128,8 +151,19 @@ for (const name of ["openai-codex-sse", "openai-codex-auto", "anthropic-sse"]) {
         ).toEqual(["developer", "user", "assistant", "user"]);
         expect((replay.requests[2]!.input as unknown[]).length).toBe(1);
       }
+      if (anthropic) {
+        expect(
+          replay.requests.every((request) => request.thread === undefined),
+        ).toBe(true);
+        expect(
+          (replay.requests[1]!.messages as { role: string }[]).map(
+            (message) => message.role,
+          ),
+        ).toEqual(["user", "system", "assistant", "user", "system"]);
+      }
       replay.assertComplete();
     } finally {
+      rmSync(agentDir, { recursive: true, force: true });
       cleanupSessionResources(sessionId);
       if (turns === 3 && replay.websocketConnections)
         await replay.websocketClosed;

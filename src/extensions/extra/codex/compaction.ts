@@ -3,7 +3,7 @@
 // item as a block. Unusable or rejected items fall back lazily on the next
 // request, without retrying a rejected generation.
 import { createHash } from "node:crypto";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type {
   AssistantMessage,
   Message,

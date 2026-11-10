@@ -110,6 +110,7 @@ export const tests: BrowserTest[] = [
   async function test_changes_expand_desktop(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
+      permissions: ["clipboard-read", "clipboard-write"],
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
@@ -162,6 +163,88 @@ export const tests: BrowserTest[] = [
     expect(await pane.locator(".diff-row.add").count()).toBeGreaterThanOrEqual(
       2,
     );
+    await pane.getByLabel("Changes options", { exact: true }).focus();
+    await page.keyboard.press("Enter");
+    expect(await pane.locator(".pane-powerbar-overflow[open]").count()).toBe(0);
+    await pane.locator(".diff-list").focus();
+    const cursor = pane.locator(".pane-item-cursor");
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    expect(await cursor.textContent()).toContain("src/big.txt");
+    await page.keyboard.press("h");
+    expect(
+      await big.locator(".diff-file-toggle").getAttribute("aria-expanded"),
+    ).toBe("false");
+    await page.keyboard.press("Enter");
+    expect(
+      await big.locator(".diff-file-toggle").getAttribute("aria-expanded"),
+    ).toBe("true");
+    await page.keyboard.press("j");
+    expect(await cursor.textContent()).toContain("src/small.txt");
+    await page.keyboard.press("h");
+    await page.keyboard.press("l");
+    expect(
+      await pane
+        .locator(".diff-file", { hasText: "src/small.txt" })
+        .locator(".diff-file-toggle")
+        .getAttribute("aria-expanded"),
+    ).toBe("true");
+    await page.keyboard.press("k");
+    expect(await cursor.textContent()).toContain("src/big.txt");
+    await page.keyboard.press("]");
+    expect(await cursor.textContent()).toContain("src/small.txt");
+    await page.keyboard.press("[");
+    expect(await cursor.textContent()).toContain("src/big.txt");
+    await page.keyboard.press("y");
+    await pane.getByText("Path copied.", { exact: true }).waitFor();
+    expect(
+      await page.evaluate(() =>
+        (globalThis as any).navigator.clipboard.readText(),
+      ),
+    ).toBe("src/big.txt");
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    await page.keyboard.press("d");
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelector(".diff-list").scrollTop > 0,
+    );
+    const down = await pane
+      .locator(".diff-list")
+      .evaluate((list) => list.scrollTop);
+    await page.keyboard.press("u");
+    await page.waitForFunction(
+      (down) =>
+        (globalThis as any).document.querySelector(".diff-list").scrollTop <
+        down,
+      down,
+    );
+    await page.keyboard.press("Shift+G");
+    expect(await cursor.textContent()).toContain("src/small.txt");
+    await page.keyboard.press("/");
+    const filter = pane.getByRole("searchbox", { name: "Filter files" });
+    await filter.fill("small");
+    expect(await pane.locator(".diff-file:visible").count()).toBe(1);
+    await page.keyboard.type("j");
+    expect(await filter.inputValue()).toBe("smallj");
+    await pane.getByText("No matching files.", { exact: true }).waitFor();
+    await page.keyboard.press("Backspace");
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() =>
+      (globalThis as any).document.activeElement?.matches(".agent"),
+    );
+    expect(await pane.isVisible()).toBe(true);
+    await page
+      .locator('#dock .dv-tab[data-dock-panel="diff"] .dock-tab-icon')
+      .click();
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    expect(await cursor.textContent()).toContain("src/small.txt");
+    const dir = process.env.RECURSE_SCREENSHOT_DIR;
+    if (dir) {
+      await mkdir(dir, { recursive: true });
+      await page.screenshot({ path: `${dir}/1280-changes-navigation.png` });
+    }
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -182,6 +265,14 @@ export const tests: BrowserTest[] = [
       .getByRole("button", { name: "Show the 1 line above", exact: true })
       .tap();
     await small.getByText("line 1 body").waitFor({ timeout: 15000 });
+    expect(
+      await pane.getByRole("searchbox", { name: "Filter files" }).isVisible(),
+    ).toBe(false);
+    const dir = process.env.RECURSE_SCREENSHOT_DIR;
+    if (dir) {
+      await mkdir(dir, { recursive: true });
+      await page.screenshot({ path: `${dir}/390-changes-navigation.png` });
+    }
     expect(errors).toEqual([]);
     await context.close();
   },

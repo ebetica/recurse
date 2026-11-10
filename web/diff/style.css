@@ -47,7 +47,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 }
 .diff-base-form { flex: 1 1 auto; min-width: 0; }
 .diff-base-row { display: flex; gap: var(--space-2); min-width: 0; }
-.diff-base-input { flex: 1 1 auto; min-width: 0;
+.diff-base-input { flex: 1 1 auto; min-width: 16ch;
   font-family: var(--font-mono); }
 .diff-base-apply, .diff-base-cancel { flex: none; }
 .diff-base-error { color: var(--warn); font-size: 0.78125rem; line-height: 1.35;
@@ -264,6 +264,11 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-list { flex: 1; min-height: 0; overflow: auto; padding-bottom: var(--space-5); }
 /* Keyboard entry scrolls the diff without outlining the whole view. */
 .diff-list:focus { outline: none; }
+.diff-filter-bar { margin-bottom: var(--space-3); }
+.diff-filter { width: 100%; padding: var(--space-2) var(--space-3); border: 1px solid var(--border);
+  border-radius: var(--space-2); background: var(--panel-2); color: var(--text); font: inherit; }
+.diff-navigation-status { color: var(--muted); font-size: 0.78125rem; }
+@media (pointer: coarse) { .diff-filter-bar { display: none; } }
 .diff-sendbar { display: none; flex-shrink: 0; gap: var(--space-3);
   align-items: center; margin: var(--space-3) calc(-1 * var(--space-5)) 0;
   padding: var(--space-4) var(--space-5);

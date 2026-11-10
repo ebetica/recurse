@@ -8,7 +8,8 @@
 <meta http-equiv="Content-Security-Policy" content="font-src 'self' data:; connect-src 'self' data: blob:">
 <title>__APP__</title>
 <link rel="manifest" href="/manifest.webmanifest" crossorigin="use-credentials">
-<link rel="icon" href="/static/brand/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/static/brand/favicon-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: light)">
+<link rel="icon" href="/static/brand/favicon-dark-32.png" type="image/png" sizes="32x32" media="(prefers-color-scheme: dark)">
 <link rel="icon" href="/static/brand/favicon.svg" type="image/svg+xml" sizes="any">
 <link rel="apple-touch-icon" href="/static/brand/apple-touch-icon.png" sizes="180x180">
 <style>
@@ -1220,15 +1221,19 @@
      single grouped listbox/index; navigate mode adds a dedicated query field so
      composer text is never touched. The composer sits near the viewport bottom,
      making the full-width-above placement safe on desktop and mobile. */
-  #agent-finder { display: none; position: absolute; z-index: var(--z-menu);
+  #agent-finder, #pane-finder { display: none; position: absolute; z-index: var(--z-menu);
     left: -1px; right: -1px; bottom: calc(100% + 7px); max-height: min(390px, 52vh);
     overflow: hidden; }
-  #agent-finder.on { display: flex; flex-direction: column; }
-  #agent-finder-query { flex: none; width: calc(100% - 2 * var(--space-2));
+  #agent-finder.on, #pane-finder.on { display: flex; flex-direction: column; }
+  #agent-finder-query, #pane-finder-query { flex: none; width: calc(100% - 2 * var(--space-2));
     margin: var(--space-2); }
-  #agent-menu { flex: 1; min-height: 0; overflow-y: auto; padding: 0;
+  #agent-menu, #pane-finder-menu { flex: 1; min-height: 0; overflow-y: auto; padding: 0;
     overscroll-behavior: contain; }
-  #agent-finder [hidden] { display: none; }
+  #agent-finder [hidden], #pane-finder [hidden] { display: none; }
+  #pane-finder .pane-option { flex-direction: row; align-items: center; }
+  .pane-option-icon { display: flex; flex: none; }
+  .pane-option-icon svg { width: 18px; height: 18px; }
+  .pane-option .agent-option-name { flex: 1; }
   /* Two-line rows: a name above its description or path. The skill rows also
      undo the composer's square icon-button size. */
   #skill-menu .skill-option { width: 100%; height: auto; margin: 0; border-radius: 8px;
@@ -1408,21 +1413,18 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
   #safety-row.off #safety-btn .track { background: var(--danger); }
   #safety-row.off #safety-btn .lbl { color: var(--danger); }
   #safety-row.pending #safety-btn .lbl { opacity: .8; font-style: italic; }
-  /* Keep both controls on one vertically centered row whenever their usable
-     hit targets fit. At very narrow widths the model/context pair wraps as one
-     unit, preserving DOM/tab order without overlap. */
-  #downgrade-chip { display: inline-flex; flex: none; align-items: center; gap: var(--space-1);
-  padding: var(--space-2) var(--space-1); min-height: 32px; border: 0; background: none;
-  color: var(--accent); font: inherit; font-size: 0.71875rem; cursor: pointer; white-space: nowrap; }
-#conv-controls:has(#downgrade-chip:not([hidden])) { flex-wrap: nowrap; }
-#conv-controls:has(#downgrade-chip:not([hidden])) #model-trigger { max-width: 100%; }
-#downgrade-chip[hidden] { display: none; }
+  #downgrade-chip { display: inline-flex; flex: none; align-items: center; justify-content: center;
+  width: 32px; height: 32px; padding: 0; border: 0; background: none;
+  color: var(--accent); font: inherit; cursor: pointer; }
+#conv-controls #model-trigger { max-width: 100%; }
+#downgrade-chip[hidden] { display: inline-flex; visibility: hidden; }
 #downgrade-chip.seen { color: var(--muted); }
-#downgrade-chip svg { width: 13px; height: 13px; }
+#downgrade-chip span { display: grid; place-items: center; width: 16px; height: 16px;
+  border: 1.5px solid currentColor; border-radius: 50%; font-size: 12.5px; font-weight: 700; line-height: 1; }
 #downgrade-popover { position: fixed; inset: auto; margin: 0; font-size: 0.78125rem; overflow-wrap: anywhere;
   width: min(300px, calc(100vw - 16px)); }
 #downgrade-popover p { margin: var(--space-2) 0; }
-#conv-controls { display: flex; flex-wrap: wrap; align-items: center;
+#conv-controls { display: flex; flex-wrap: nowrap; align-items: center;
     justify-content: space-between; column-gap: var(--space-3); row-gap: 0;
     max-width: 780px; margin: 0 auto var(--space-1); padding: 0 var(--space-1); }
 
@@ -1437,9 +1439,16 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
   #send-status.command-error { color: var(--error-text); }
   #send-status.error { color: var(--error-text); cursor: pointer; }
   #send-status.error:hover { text-decoration: underline; text-underline-offset: 2px; }
-  #update-status { max-width: 780px; margin: var(--space-2) auto 0; padding: 0 var(--space-2);
-    display: none; color: var(--accent); font-size: 0.71875rem; line-height: 1.4; }
-  #update-status.on { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
+  /* A waiting page update shows in Settings and as a dot on its gear. */
+  #update-status { margin-top: auto; padding: 0 var(--space-3); display: none; color: var(--accent);
+    font-size: 0.71875rem; line-height: 1.4; }
+  #update-status.on { display: flex; align-items: flex-start; gap: var(--space-2); flex-direction: column; }
+  #update-status button { min-height: 44px; }
+  #update-status.on + #settings-release { margin-top: 0; }
+  #settings-btn .settings-icon { position: relative; display: inline-flex; flex: none; }
+  body:has(#update-status.on) #settings-btn .settings-icon::after { content: ""; position: absolute; top: calc(-1 * var(--space-2));
+    right: calc(-1 * var(--space-2)); width: var(--space-3); height: var(--space-3); border-radius: 50%; background: var(--warn);
+    box-shadow: 0 0 0 2px var(--panel); }
 
   /* pending attachment thumbnails, shown above the composer before send */
   #attachments { max-width: 780px; margin: 0 auto; display: flex; flex-wrap: wrap;
@@ -1577,7 +1586,7 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
     .tree-section-toggle { align-items: center; }
     #brand #settings-btn { width: 44px; height: 44px; padding: 0; border: 0;
       justify-content: center; color: var(--text); }
-    #brand #settings-btn span, #sidebar-foot, #conv-titlebar #chip-kids { display: none; }
+    #brand #settings-btn .settings-label, #sidebar-foot, #conv-titlebar #chip-kids { display: none; }
     .phone-list #main { visibility: hidden; }
   }
   @media (pointer: coarse) {
@@ -1601,6 +1610,8 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
     .activity-group-body .turn-series-toggle { min-height: 0; }
     .pending-agent-toggle { min-width: 44px; min-height: 44px; }
     #context-indicator { min-height: 44px; }
+#downgrade-chip { width: 44px; height: 44px; }
+#conv-controls #safety-row { align-self: stretch; }
     #menu-btn { min-width: 44px; min-height: 44px; }
     #agent-list { scrollbar-width: auto; }
     #agent-list::-webkit-scrollbar { width: 14px; }
@@ -1632,10 +1643,12 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
       <div id="shortcut-groups"></div>
     </details>
   </div>
-  <button id="settings-btn" title="Settings">
-    <svg data-icon="SETTINGS_ICON"></svg>
-    <span>Settings</span>
-  </button>
+  <div id="agent-list-foot">
+    <button id="settings-btn" title="Settings" aria-label="Settings">
+      <span class="settings-icon" aria-hidden="true"><svg data-icon="SETTINGS_ICON"></svg></span>
+      <span class="settings-label">Settings</span>
+    </button>
+  </div>
 </aside>
 
 <div id="settings-overlay">
@@ -1648,6 +1661,7 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
         <select id="settings-backend" class="text-field sm" aria-label="Recurse these settings change" hidden></select>
       </header>
       <nav id="settings-nav" aria-label="Settings categories"></nav>
+      <div id="update-status" aria-live="polite"></div>
       <span id="settings-release" title="Recurse release and commit" hidden></span>
     </aside>
     <div id="settings-sections"></div>
@@ -1748,7 +1762,7 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
           <span id="safety-unavailable" role="status" hidden>Unavailable</span>
         </button>
       </div>
-      <button id="downgrade-chip" type="button" popovertarget="downgrade-popover" hidden><svg data-icon="DOWNGRADE_ICON"></svg>Downgraded</button>
+      <button id="downgrade-chip" type="button" popovertarget="downgrade-popover" aria-label="Model downgraded — details" title="Model downgraded — details" hidden><span aria-hidden="true">!</span></button>
       <div id="downgrade-popover" class="menu form" popover="auto" role="dialog" aria-label="Provider model downgrade"></div>
       <div id="model-controls">
         <button id="context-indicator" type="button" aria-haspopup="dialog"
@@ -1772,10 +1786,17 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
     </div>
     <div id="attachments"></div>
     <div id="composer-shell">
+      <div id="pane-finder" class="menu" data-pane-finder role="group" aria-label="Pane finder">
+        <label class="sr-only" for="pane-finder-query">Open a pane</label>
+        <input id="pane-finder-query" class="text-field" type="text" role="combobox" autocomplete="off" placeholder="Open a pane"
+          maxlength="96" autocapitalize="off" spellcheck="false" aria-autocomplete="list" aria-controls="pane-finder-menu" aria-expanded="false">
+        <div id="pane-finder-menu" role="listbox" aria-label="Panes"></div>
+        <div id="pane-finder-status" class="menu-note" role="status" aria-live="polite" hidden>No matching panes</div>
+      </div>
       <div id="agent-finder" class="menu" data-agent-finder role="group" aria-label="Agent finder">
         <label class="sr-only" for="agent-finder-query">Find an agent</label>
-        <input id="agent-finder-query" class="text-field" type="text" role="combobox" placeholder="Find an agent…"
-          maxlength="96" aria-autocomplete="list" aria-controls="agent-menu"
+        <input id="agent-finder-query" class="text-field" type="text" role="combobox" autocomplete="off" placeholder="Find an agent…"
+          maxlength="96" autocapitalize="off" spellcheck="false" aria-autocomplete="list" aria-controls="agent-menu"
           aria-expanded="false" hidden>
         <div id="agent-menu" role="listbox" aria-label="Agents"></div>
         <div id="agent-finder-status" class="menu-note" role="status" aria-live="polite" hidden></div>
@@ -1794,7 +1815,6 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
       </div>
     </div>
     <button id="send-status" type="button" aria-live="polite" disabled></button>
-    <div id="update-status" aria-live="polite"></div>
   </div>
 </main>
 
@@ -1804,8 +1824,8 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
 <div id="panes"></div>
 <div id="pane-rail"><div id="pane-rail-panels"></div></div>
 <div id="pane-menu" class="menu" role="menu" aria-label="Conversation actions and panels">
-  <button id="trash-btn" class="menu-item pane-menu-item" role="menuitem">
-    <span class="action-label">Delete</span>
+  <button id="trash-btn" class="menu-item pane-menu-item" role="menuitem" aria-labelledby="trash-label">
+    <span id="trash-label" class="action-label">Delete</span>
   </button>
   <button id="takeover-btn" class="menu-item pane-menu-item" role="menuitem" title="Take over" aria-label="Take over" aria-pressed="false">
     <span>Take control</span>

@@ -6,7 +6,7 @@ import type {
   EntryId,
   EntryRecord,
 } from "@earendil-works/pi-durable";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { projectionEntries, rowState } from "./durable_rows";
 
 type Rec = Record<string, unknown>;

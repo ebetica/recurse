@@ -1,23 +1,28 @@
 // Owns Artifact pane shell, selection and version controls. HTML uses an
 // offline opaque-origin sandbox without session access; other formats preview
 // only when safe. Immutable originals remain downloadable.
+// Desktop back opens a filtered list; touch retains the native picker.
 import { html, render, nothing } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
+import { repeat } from "lit/directives/repeat.js";
 import {
   ARTIFACT_DELETE_ICON,
   ARTIFACT_DOWNLOAD_ICON,
   ARTIFACT_HISTORY_ICON,
   ARTIFACTS_ICON,
+  BACK_ICON,
   REFRESH_ICON,
 } from "../icons.js";
 import { openPane, registerPane, setPaneLoading } from "../panes.js";
 import { panePowerbar, renderPowerbarControls } from "../panes/powerbar.js";
+import { paneItem } from "../panes/navigation.js";
+import { copyText } from "../tool_details.js";
 import { readAgentLink, readArtifactLink } from "../deep-link.js";
 import { artifactGeneration } from "../panes/autoopen.js";
 import { DRAFT, state } from "../state.js";
 import { registerCommentSource } from "../comments.js";
 import { artifactFileUrl, isFullVersion, versionLabel } from "./model.js";
-import type { PaneContext } from "../types.js";
+import type { PaneContext, PaneNavigation } from "../types.js";
 import {
   artifactRestoreListReady,
   parseArtifactPaneViewState,
@@ -38,7 +43,7 @@ import {
   scheduleListRefresh,
   selectedInfo,
 } from "./list-cache.js";
-import { refreshArtifact, showArtifact } from "./artifact-detail.js";
+import { refreshArtifact, setNotice, showArtifact } from "./artifact-detail.js";
 import {
   deleteSelected,
   discardCurrent,
@@ -58,16 +63,36 @@ import {
 } from "./selection-comments.js";
 
 let linkedAgent: string | null = null;
+const coarsePointer = matchMedia("(pointer: coarse)");
+coarsePointer.addEventListener("change", () => {
+  const pane = artifactMount.current;
+  if (!pane) return;
+  const rs = pane._rs;
+  if (
+    !coarsePointer.matches &&
+    (pendingFor(currentCommentKey(pane)) ||
+      rs.sending ||
+      rs.restoring ||
+      rs.deleting)
+  )
+    rs.browsing = false;
+  renderShell(pane);
+});
 
 export function openArtifactLink(hash = location.hash): void {
   const id = readArtifactLink(hash);
-  if (!id || !state.selectedId || state.draft) return;
+  if (id) openArtifact(id);
+}
+
+function openArtifact(id: string): void {
+  if (!state.selectedId || state.draft) return;
   if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
   linkedAgent = state.selectedId;
   entry(state.selectedId).invalidated = true;
   if (!openPane(ARTIFACTS_PANE_ID)) return;
   const pane = artifactMount.current;
   if (!pane) return;
+  pane._rs.browsing = false;
   pane._rs.linkedArtifactId = id;
   pane._rs.restoredArtifactId = id;
   if (pane._rs.selId !== id || !pane._rs.followCurrent) {
@@ -169,10 +194,168 @@ function applyRestoredArtifactSelection(pane: ArtifactEl): boolean {
   return true;
 }
 
+function showSelected(pane: ArtifactEl, focus: boolean): void {
+  const { agentId, selId, selectedVersion } = pane._rs;
+  const previousFocus = document.activeElement;
+  void showArtifact(pane).then(() => {
+    const rs = pane._rs;
+    if (
+      focus &&
+      artifactMount.current === pane &&
+      rs.agentId === agentId &&
+      rs.selId === selId &&
+      rs.selectedVersion === selectedVersion &&
+      !rs.browsing &&
+      (document.activeElement === previousFocus ||
+        document.activeElement === document.body)
+    )
+      pane
+        .querySelector<HTMLElement>(".report-doc")
+        ?.focus({ preventScroll: true });
+  });
+}
+
+function resetContent(pane: ArtifactEl): void {
+  const rs = pane._rs;
+  rs.imageAbort?.abort();
+  rs.imageAbort = null;
+  rs.sendSeq++;
+  rs.restoreSeq++;
+  rs.deleteSeq++;
+  rs.contentInfo = null;
+  rs.shownKey = null;
+  rs.loadingKey = null;
+  rs.failedKey = null;
+}
+
+function selectArtifact(pane: ArtifactEl, id: string, focus = false): boolean {
+  const rs = pane._rs;
+  if (rs.sending || rs.restoring || rs.deleting || !discardCurrent(pane))
+    return false;
+  rs.browsing = false;
+  rs.linkedArtifactId = undefined;
+  if (rs.selId === id && rs.followCurrent) {
+    renderShell(pane);
+    showSelected(pane, focus);
+    renderComments(pane);
+    return true;
+  }
+  resetContent(pane);
+  rs.selId = id;
+  const next = selectedInfo(pane);
+  rs.selectedVersion = next?.version || null;
+  rs.followCurrent = true;
+  rs.headVersion = next?.version || null;
+  rs.versionsId = null;
+  rs.versions = [];
+  rs.versionMenuOpen = false;
+  renderShell(pane);
+  showSelected(pane, focus);
+  return true;
+}
+
+function selectVersion(pane: ArtifactEl, version: string, focus = false): void {
+  const rs = pane._rs;
+  if (
+    version === rs.selectedVersion ||
+    rs.sending ||
+    rs.restoring ||
+    rs.deleting ||
+    !discardCurrent(pane)
+  )
+    return;
+  resetContent(pane);
+  rs.selectedVersion = version;
+  rs.followCurrent = version === selectedInfo(pane)?.version;
+  renderShell(pane);
+  showSelected(pane, focus);
+}
+
+function browseArtifacts(pane: ArtifactEl, filter = false): void {
+  const rs = pane._rs;
+  if (coarsePointer.matches || rs.sending || rs.restoring || rs.deleting)
+    return;
+  if (!rs.browsing && !discardCurrent(pane)) return;
+  rs.browsing = true;
+  rs.versionMenuOpen = false;
+  renderComments(pane);
+  renderShell(pane);
+  const current = pane.querySelector<HTMLElement>(
+    `.artifact-list-item[data-artifact-id="${CSS.escape(rs.selId || "")}"]`,
+  );
+  const field = pane.querySelector<HTMLInputElement>(".artifact-filter");
+  if (filter) field?.focus();
+  else {
+    current?.focus({ preventScroll: true });
+    if (!paneItem(pane, ".artifact-list-item", "open")) field?.focus();
+  }
+}
+
+function navigateArtifact(pane: ArtifactEl, command: PaneNavigation): boolean {
+  const rs = pane._rs;
+  if (command === "back" || command === "filter") {
+    browseArtifacts(pane, command === "filter");
+    return true;
+  }
+  const browsing = rs.browsing && !coarsePointer.matches;
+  if (
+    !browsing &&
+    (command === "previous-section" || command === "next-section")
+  ) {
+    const at = rs.versions.findIndex(
+      (item) => item.version === rs.selectedVersion,
+    );
+    const next =
+      at < 0
+        ? null
+        : rs.versions[at + (command === "previous-section" ? 1 : -1)];
+    if (next) selectVersion(pane, next.version, true);
+    return true;
+  }
+  if (command === "half-down" || command === "half-up") return false;
+  if (!browsing && command !== "copy") return false;
+  const item = browsing ? paneItem(pane, ".artifact-list-item", command) : null;
+  if (command === "open") item?.click();
+  if (command === "copy") {
+    const info = browsing
+      ? listFor(rs.agentId).find(
+          (entry) => entry.id === item?.dataset.artifactId,
+        )
+      : selectedInfo(pane);
+    if (!info || !rs.agentId || !info.entry) return true;
+    const agentId = rs.agentId;
+    const href = artifactFileUrl(
+      agentId,
+      info.id,
+      info.entry,
+      browsing ? info.version : rs.selectedVersion,
+      true,
+    );
+    const focus = document.activeElement as HTMLElement | null;
+    void copyText(new URL(href, location.href).href).then((copied) => {
+      if (artifactMount.current !== pane || rs.agentId !== agentId) return;
+      setNotice(
+        pane,
+        copied ? "Link copied." : "Could not copy. Use the download link.",
+        !copied,
+      );
+      if (focus?.isConnected && document.activeElement === document.body)
+        focus.focus({ preventScroll: true });
+    });
+    return true;
+  }
+  return browsing && command !== "top" && command !== "bottom";
+}
+
 export function renderShell(pane: ArtifactEl): void {
   const rs = pane._rs,
     cache = rs.agentId ? entry(rs.agentId) : null;
   const list = listFor(rs.agentId);
+  const browsing = rs.browsing && !coarsePointer.matches;
+  pane.classList.toggle("artifact-browsing", browsing);
+  const filtered = list.filter((item) =>
+    item.title.toLowerCase().includes(rs.filter.trim().toLowerCase()),
+  );
   const selectionReady = applyRestoredArtifactSelection(pane);
   if (
     selectionReady &&
@@ -211,57 +394,12 @@ export function renderShell(pane: ArtifactEl): void {
       : currentInfo;
   const versions = rs.versionsId === currentInfo?.id ? rs.versions : [];
   const onArtifact = (event: Event) => {
-    if (!discardCurrent(pane)) {
-      (event.target as HTMLSelectElement).value = rs.selId || "";
-      return;
-    }
-    rs.imageAbort?.abort();
-    rs.imageAbort = null;
-    rs.sendSeq++;
-    rs.restoreSeq++;
-    rs.deleteSeq++;
-    rs.sending = false;
-    rs.restoring = false;
-    rs.deleting = false;
-    rs.linkedArtifactId = undefined;
-    rs.selId = (event.target as HTMLSelectElement).value;
-    const next = selectedInfo(pane);
-    rs.selectedVersion = next?.version || null;
-    rs.followCurrent = true;
-    rs.headVersion = next?.version || null;
-    rs.contentInfo = null;
-    rs.shownKey = null;
-    rs.loadingKey = null;
-    rs.failedKey = null;
-    rs.versionsId = null;
-    rs.versions = [];
-    rs.versionMenuOpen = false;
-    renderShell(pane);
-    void showArtifact(pane);
+    const picker = event.target as HTMLSelectElement;
+    if (!selectArtifact(pane, picker.value)) picker.value = rs.selId || "";
   };
   const versionAction = (action: () => void) => {
     closeArtifactVersionMenuKeyboardLayer();
     action();
-  };
-  const applyVersion = (version: string) => {
-    if (version === rs.selectedVersion) return;
-    if (!discardCurrent(pane)) return;
-    rs.imageAbort?.abort();
-    rs.imageAbort = null;
-    rs.sendSeq++;
-    rs.restoreSeq++;
-    rs.deleteSeq++;
-    rs.sending = false;
-    rs.restoring = false;
-    rs.deleting = false;
-    rs.selectedVersion = version;
-    rs.followCurrent = rs.selectedVersion === currentInfo?.version;
-    rs.contentInfo = null;
-    rs.shownKey = null;
-    rs.loadingKey = null;
-    rs.failedKey = null;
-    renderShell(pane);
-    void showArtifact(pane);
   };
   const toggleVersionMenu = () => {
     rs.versionMenuOpen = !rs.versionMenuOpen;
@@ -333,8 +471,18 @@ export function renderShell(pane: ArtifactEl): void {
   setPaneLoading(pane, coldList || !!rs.loadingKey || rs.revalidating);
   renderPowerbarControls(
     pane,
-    html`${currentInfo
+    html`${currentInfo && !browsing
       ? html`<div class="artifact-header">
+          <button
+            class="artifact-icon-btn artifact-browse-btn"
+            type="button"
+            aria-label="All artifacts"
+            title="All artifacts"
+            ?disabled=${rs.sending || rs.restoring || rs.deleting}
+            @click=${() => browseArtifacts(pane)}
+          >
+            ${unsafeHTML(BACK_ICON)}
+          </button>
           <label class="sr-only" for="artifact-picker">Select artifact</label>
           <select
             id="artifact-picker"
@@ -438,7 +586,7 @@ export function renderShell(pane: ArtifactEl): void {
                         ? "true"
                         : "false"}
                       @click=${() =>
-                        versionAction(() => applyVersion(item.version))}
+                        versionAction(() => selectVersion(pane, item.version))}
                     >
                       ${versionLabel(item, currentInfo.version)}
                     </button>`,
@@ -460,7 +608,7 @@ export function renderShell(pane: ArtifactEl): void {
             : nothing}
         </div>`
       : nothing}`,
-    !!currentInfo,
+    !!currentInfo && !browsing,
   );
   render(
     html`<h2 id="artifact-heading" class="sr-only">
@@ -472,7 +620,47 @@ export function renderShell(pane: ArtifactEl): void {
         aria-live="polite"
       >
         ${noticeText}
-      </div>`,
+      </div>
+      ${browsing
+        ? html`<div class="artifact-list">
+            <input
+              class="artifact-filter"
+              type="search"
+              aria-label="Filter artifacts"
+              placeholder="Filter artifacts"
+              .value=${rs.filter}
+              @input=${(event: Event) => {
+                rs.filter = (event.currentTarget as HTMLInputElement).value;
+                renderShell(pane);
+              }}
+            />
+            <div role="list">
+              ${repeat(
+                filtered,
+                (item) => item.id,
+                (item) =>
+                  html`<div role="listitem">
+                    <button
+                      class="artifact-list-item"
+                      type="button"
+                      data-artifact-id=${item.id}
+                      aria-label=${item.title}
+                      @click=${() => selectArtifact(pane, item.id, true)}
+                    >
+                      ${item.title}
+                    </button>
+                  </div>`,
+              )}
+            </div>
+            ${cache?.loaded && !filtered.length
+              ? html`<p role="status">
+                  ${rs.filter.trim()
+                    ? "No matching artifacts."
+                    : "No artifacts."}
+                </p>`
+              : nothing}
+          </div>`
+        : nothing}`,
     pane.querySelector<HTMLElement>(".artifact-shell")!,
   );
 }
@@ -480,8 +668,10 @@ export function renderShell(pane: ArtifactEl): void {
 function retarget(pane: ArtifactEl, agentId: string): boolean {
   const rs = pane._rs;
   if (rs.agentId === agentId) return false;
-  cancelSelectionComment();
+  cancelSelectionComment(pane);
   rs.agentId = agentId;
+  rs.browsing = false;
+  rs.filter = "";
   rs.selId = null;
   rs.restoredArtifactId = undefined;
   rs.linkedArtifactId = undefined;
@@ -532,6 +722,19 @@ registerPane({
   id: ARTIFACTS_PANE_ID,
   title: "Artifacts",
   icon: ARTIFACTS_ICON,
+  finder: {
+    kind: "artifact",
+    items: () =>
+      state.selectedId && state.selectedId !== DRAFT
+        ? entry(state.selectedId).list.map((artifact) => ({
+            key: artifact.id,
+            name: artifact.title || artifact.filename,
+            open: () => openArtifact(artifact.id),
+          }))
+        : [],
+  },
+  navigate: (element, command) =>
+    navigateArtifact(element as ArtifactEl, command),
   available(ctx: PaneContext) {
     if (!ctx.agentId || ctx.agentId === DRAFT) return false;
     const cache = entry(ctx.agentId);
@@ -539,12 +742,16 @@ registerPane({
     // until a turn, steer, restore, or another explicit mutation invalidates
     // this agent.
     scheduleListRefresh(ctx.agentId);
-    return (
+    if (
       linkedAgent === ctx.agentId ||
       !cache.loaded ||
       !!cache.error ||
       cache.list.length > 0
-    );
+    )
+      return true;
+    return cache.invalidated || cache.fetching || cache.pending
+      ? undefined
+      : false;
   },
   autoOpenGeneration(ctx: PaneContext) {
     if (!ctx.agentId || ctx.agentId === DRAFT) return null;
@@ -560,7 +767,7 @@ registerPane({
     pane._rs.revalidationSeq++;
     pane._rs.revalidating = false;
     if (artifactMount.current === pane) {
-      cancelSelectionComment();
+      cancelSelectionComment(pane);
       artifactMount.current = null;
     }
     if (commentMount.current === pane) commentMount.current = null;
@@ -623,7 +830,7 @@ registerPane({
       pane._rs.imageAbort?.abort();
       pane._rs.imageAbort = null;
       if (artifactMount.current === pane) {
-        cancelSelectionComment();
+        cancelSelectionComment(pane);
         artifactMount.current = null;
       }
       if (commentMount.current === pane) commentMount.current = null;
@@ -659,6 +866,8 @@ registerPane({
     pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div></article><div class="report-comments"></div><div class="report-bar"></div>`;
     pane._rs = {
       agentId: null,
+      browsing: false,
+      filter: "",
       selId: null,
       selectedVersion: null,
       shownKey: null,

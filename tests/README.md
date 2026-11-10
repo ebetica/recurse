@@ -13,6 +13,10 @@ on the built app, or data recorded from real runs. Read the
 | `tests/mobile_browser/` | Chromium against the built app, in named groups                                 | `bun tests/mobile_browser/index.ts GROUP...`                     |
 | `tests/live/`           | Real-provider checks and fixture recorders, run by hand                         | see each file's header                                           |
 
+The Artifact reopen check polls the tree API for deletion before reusing its
+source conversation. Its asynchronous API condition runs in Playwright's
+assertion poll, not the synchronous page-function wait.
+
 The Linux-only `notifications` browser group uses full Chromium with a persistent
 profile, an isolated X display and a private desktop notification session.
 Install `xvfb`, `dbus` and `dunst` alongside Chromium's dependencies; CI installs
@@ -20,6 +24,14 @@ these packages before the browser stage. It activates
 real desktop notifications with `dunstctl`, so Chromium dispatches trusted
 service-worker click events, including permission to focus or open windows.
 Synthetic `NotificationEvent` dispatches do not grant that permission.
+
+Browser geometry baselines use mounted desktop Chat and settled layout.
+Navigation and loaded rows do not imply the lazy desktop windows have mounted.
+Header alignment samples belong to that same mounted layout.
+Scroll-to-latest measurements also wait for smooth scrolling to settle before
+sampling a viewport-preservation baseline. After pressing a disclosure, scripted
+scroll positioning first performs a reader gesture: layout corrections retain the
+pressed control's screen position until wheel, touch, pointer or keyboard input.
 
 `tests/checks/` holds the documentation, comment, test-policy and web style
 checks run by `tests/check.sh`. `browser_import_check.ts` bundles the browser

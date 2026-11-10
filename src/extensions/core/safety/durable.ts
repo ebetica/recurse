@@ -3,7 +3,7 @@
 // identity/trusted policy/roots, never mutable tool env. Outcomes/denials
 // survive restart; hook throws fail closed.
 
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import type { Models, Usage } from "@earendil-works/pi-ai";
 import type { completeSimple } from "@earendil-works/pi-ai/compat";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";

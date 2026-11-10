@@ -109,7 +109,7 @@ export async function renderContent(
   info: ArtifactInfo,
   content: string | null,
 ): Promise<boolean> {
-  cancelSelectionComment();
+  cancelSelectionComment(pane);
   pane._rs.imageAbort?.abort();
   const controller = new AbortController();
   pane._rs.imageAbort = controller;

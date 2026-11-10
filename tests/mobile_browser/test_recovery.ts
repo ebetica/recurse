@@ -7,6 +7,7 @@ import {
   conversationRead,
   gotoRoot,
   mockConversation,
+  openSettingsPanel,
   rootAgentId,
   runBrowserTests,
   themeColors,
@@ -460,6 +461,7 @@ async function test_connection_monitor_precedes_authoritative_read(
   await context.close();
 }
 
+// Feature: #3167 deferred page updates are visible and retryable in Settings.
 async function test_deferred_generation_recovery_keeps_chat_usable(
   browser: any,
   base: string,
@@ -535,7 +537,22 @@ async function test_deferred_generation_recovery_keeps_chat_usable(
         : r.continue(),
     );
     await gotoRoot(page, base);
-    await page.locator("#update-status.on button").waitFor();
+    await page
+      .locator("#update-status.on button")
+      .waitFor({ state: "attached" });
+    expect(
+      await page.locator("#settings-btn .settings-icon").evaluate((el: any) => {
+        const browser = globalThis as any;
+        return browser.getComputedStyle(el, "::after").content;
+      }),
+    ).toBe('""');
+    expect(await page.locator("#settings-btn").getAttribute("title")).toBe(
+      "Settings — page update ready",
+    );
+    expect(await page.locator("#settings-btn").getAttribute("aria-label")).toBe(
+      "Settings — page update ready",
+    );
+    expect(await page.locator("#main #update-status").count()).toBe(0);
     expect(counts.tree).toBeGreaterThanOrEqual(2);
     expect(counts.conversation).toBeGreaterThanOrEqual(1);
     await page.locator(".agent").first().waitFor();
@@ -555,9 +572,56 @@ async function test_deferred_generation_recovery_keeps_chat_usable(
     await page.evaluate(
       "for(let i=0;i<20;i++){dispatchEvent(new Event('focus'));dispatchEvent(new PageTransitionEvent('pageshow'))}",
     );
+    await openSettingsPanel(page);
+    await visibleAndUncovered(page, ".settings-side #update-status button");
+    const marker = await page
+      .locator("#settings-btn .settings-icon")
+      .evaluate((el: any) => {
+        const browser = globalThis as any;
+        const box = el.getBoundingClientRect();
+        const gear = el.querySelector("svg").getBoundingClientRect();
+        const dot = browser.getComputedStyle(el, "::after");
+        return {
+          x: box.right - parseFloat(dot.right) - parseFloat(dot.width) / 2,
+          y: box.top + parseFloat(dot.top) + parseFloat(dot.height) / 2,
+          gearRight: gear.right,
+          gearTop: gear.top,
+        };
+      });
+    expect(marker.x).toBeCloseTo(marker.gearRight);
+    expect(marker.y).toBeCloseTo(marker.gearTop);
+    expect(await page.locator("#settings-btn").getAttribute("aria-label")).toBe(
+      "Settings — page update ready",
+    );
+    const retryCornerHits = await page
+      .locator("#update-status button")
+      .evaluate((el: any) => {
+        const browser = globalThis as any;
+        const box = el.getBoundingClientRect();
+        const targetSize = 44;
+        const inset = 1;
+        const centerX = box.left + box.width / 2;
+        const centerY = box.top + box.height / 2;
+        return [
+          centerX - targetSize / 2 + inset,
+          centerX + targetSize / 2 - inset,
+        ].flatMap((x) =>
+          [
+            centerY - targetSize / 2 + inset,
+            centerY + targetSize / 2 - inset,
+          ].map((y) => el.contains(browser.document.elementFromPoint(x, y))),
+        );
+      });
+    expect(retryCornerHits).toEqual([true, true, true, true]);
     await page.locator("#update-status button").click();
     await page.waitForFunction(
       "document.querySelector('#update-status.on')?.textContent?.includes('send or clear unsent work first')",
+    );
+    await page.locator("#settings-close").click();
+    if (mobile) await page.locator(".agent").first().click();
+    await page.locator("#input").waitFor();
+    expect(await page.locator("#settings-btn").getAttribute("aria-label")).toBe(
+      "Settings — page update ready",
     );
     expect(counts.root).toBe(1);
     await page.locator("#input").fill("");
@@ -570,14 +634,22 @@ async function test_deferred_generation_recovery_keeps_chat_usable(
     await page.waitForFunction(
       "!document.querySelector('#send-status')?.classList.contains('show')",
     );
+    await openSettingsPanel(page);
     await page.locator("#update-status button").click();
     await page.waitForURL(`${base}?_recurse_generation=browser-e2e-current**`);
     await page.locator(".agent").first().waitFor();
     await page.waitForFunction("location.search === ''");
+    if (mobile) await page.locator(".agent").first().click();
     await visibleAndUncovered(page, "#messages");
     await visibleAndUncovered(page, "#input");
     expect(counts.root).toBe(2);
     expect(await page.locator("#update-status").isVisible()).toBeFalse();
+    expect(await page.locator("#settings-btn").getAttribute("title")).toBe(
+      "Settings",
+    );
+    expect(await page.locator("#settings-btn").getAttribute("aria-label")).toBe(
+      "Settings",
+    );
     expect(errors).toEqual([]);
     await context.close();
   }
@@ -718,6 +790,7 @@ async function test_focused_conversation_outranks_background_reads(
   await context.close();
 }
 
+// Regression: #3216 let startup reads settle before holding later polls.
 async function test_background_warming_waits_for_the_focused_read(
   browser: any,
   base: string,
@@ -744,9 +817,11 @@ async function test_background_warming_waits_for_the_focused_read(
     `(()=>{window.__order=[];const real=window.fetch.bind(window);window.fetch=(input,init)=>{const u=new URL(typeof input==="string"?input:input.url,location.href),p=u.pathname+(u.search||"");if(p.startsWith('/api'))window.__order.push(p);return real(input,init)}})()`,
   );
   await mockConversation(page, base, "main", () => thread);
+  let holdFocusedReads = true;
   const held: any[] = [];
   const heldEvents = new EventEmitter();
   await page.route(conversationRead(base, "main"), (r: any) => {
+    if (!holdFocusedReads) return r.fulfill({ json: thread });
     held.push(r);
     heldEvents.emit("held");
   });
@@ -818,14 +893,16 @@ async function test_background_warming_waits_for_the_focused_read(
   expect(await warm()).toEqual([]);
   if (!held.length)
     await once(heldEvents, "held", { signal: AbortSignal.timeout(15_000) });
+  holdFocusedReads = false;
   await release();
-  const focusedPollHeld = held.length
-    ? Promise.resolve()
-    : once(heldEvents, "held", { signal: AbortSignal.timeout(15_000) });
   await page.locator("#messages").filter({ hasText: "Reply 2" }).waitFor();
   await page.waitForFunction(
     "window.__order.some(p=>/^\\/api\\/conversations\\/kid\\d$/.test(p))",
   );
+  holdFocusedReads = true;
+  const focusedPollHeld = held.length
+    ? Promise.resolve()
+    : once(heldEvents, "held", { signal: AbortSignal.timeout(15_000) });
   await focusedPollHeld;
   expect(held.length).toBeGreaterThan(0);
   neighbours = 2;
@@ -838,6 +915,7 @@ async function test_background_warming_waits_for_the_focused_read(
   await page.locator('.agent[data-id="kid1"]').waitFor();
   await (await updatedTree).finished();
   expect(await warm()).toEqual([]);
+  holdFocusedReads = false;
   await release();
   await page.waitForFunction(
     "window.__order.some(p=>p === '/api/conversations/kid1')",

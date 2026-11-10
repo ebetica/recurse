@@ -352,9 +352,8 @@ export class TreeLifecycle {
       }
       locksFd = await openPinnedDirectory(lockDirName, dataFd);
       lockFd = await openPinnedLockFile(LOCK_NAME, locksFd);
-      const remaining = deadline - this.now();
-      if (remaining <= 0)
-        throw new TreeLifecycleBusy("tree lifecycle admission timed out");
+      // Invariant: Expired setup allows one lock attempt, not contention waits.
+      const remaining = Math.max(0, deadline - this.now());
       unlock = await flockExclusive(dataFd.fd, dataDir, {
         timeoutMs: nonblocking ? 0 : remaining * 1000,
         log: ({ waitMs, outcome }) => {

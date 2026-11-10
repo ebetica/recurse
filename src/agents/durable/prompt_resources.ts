@@ -12,7 +12,10 @@ import { open, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { homedir } from "node:os";
-import { RECURSE_SETTINGS_SKILL } from "../../coding_backend/skills";
+import {
+  RECURSE_SETTINGS_SKILL,
+  skillPathsForWorkdir,
+} from "../../coding_backend/skills";
 import { slowSpan } from "../../observability/slow_span";
 
 export interface PromptResources {
@@ -24,6 +27,7 @@ export type PromptResourcesRequest = {
   cwd: string;
   agentDir: string;
   skillPaths: string[];
+  home?: string;
 };
 
 async function expandContextImports(
@@ -93,6 +97,7 @@ export async function loadPromptResources(
   cwd: string,
   agentDir: string,
   skillPaths: string[],
+  home?: string,
 ): Promise<PromptResources> {
   return {
     contextFiles: await expandContextImports(
@@ -102,7 +107,11 @@ export async function loadPromptResources(
     skills: loadSkills({
       cwd,
       agentDir,
-      skillPaths: [RECURSE_SETTINGS_SKILL, ...skillPaths],
+      skillPaths: [
+        RECURSE_SETTINGS_SKILL,
+        ...(await skillPathsForWorkdir(cwd, home)),
+        ...skillPaths,
+      ],
       includeDefaults: true,
     }).skills,
   };
@@ -163,6 +172,7 @@ export class PromptResourcesWorker {
     cwd: string,
     agentDir: string,
     skillPaths: string[],
+    home?: string,
   ): Promise<PromptResources> {
     if (!this.closed)
       try {
@@ -172,6 +182,7 @@ export class PromptResourcesWorker {
           cwd,
           agentDir,
           skillPaths,
+          home,
         } satisfies PromptResourcesRequest);
         thread.waiting.push(waiter);
         return await waiter.promise;
@@ -181,7 +192,7 @@ export class PromptResourcesWorker {
             error instanceof Error ? error : new Error(String(error)),
           );
       }
-    return loadPromptResources(cwd, agentDir, skillPaths);
+    return loadPromptResources(cwd, agentDir, skillPaths, home);
   }
 
   async close(): Promise<void> {

@@ -41,7 +41,7 @@ export interface SessionFile {
   image_url?: string;
   size: number;
   media_type: string;
-  preview?: "image" | "text" | "audio" | "video" | "pdf" | "none";
+  preview?: "image" | "text" | "audio" | "video" | "pdf" | "document" | "none";
   unavailable?: "copied" | "missing";
   /** Upload or publication time in epoch seconds. */
   created_at?: number;

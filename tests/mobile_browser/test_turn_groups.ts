@@ -334,7 +334,7 @@ export const turnGroupTests: BrowserTest[] = [
       await page.close();
     }
   },
-  // Regression: #2513 hanging block controls must stay inside the viewport when toggled.
+  // Regression: #2513 footer controls hold their screen position through expansion and delayed window layout.
   async function test_block_footer_expands_all_and_scopes_usage(browser, base) {
     for (const mobile of [false, true]) {
       const page = await browser.newPage({
@@ -343,6 +343,14 @@ export const turnGroupTests: BrowserTest[] = [
           : { width: 1280, height: 900 },
         hasTouch: mobile,
       });
+      let releaseDock!: () => void;
+      const dockStyle = new Promise<void>((resolve) => (releaseDock = resolve));
+      let dockRequested!: () => void;
+      const requested = new Promise<void>(
+        (resolve) => (dockRequested = resolve),
+      );
+      let dockHeld = false;
+      let dockReleased = false;
       try {
         const history = Array.from({ length: 15 }, (_, n) => [
           row(`history-input-${n}`, "user", `Earlier assignment ${n}`),
@@ -370,6 +378,11 @@ export const turnGroupTests: BrowserTest[] = [
             }),
             row("plain", "user", "Thanks."),
             row("plain-reply", "assistant", "You are welcome."),
+            ...history.map((entry) => ({
+              ...entry,
+              id: `later-${entry.id}`,
+              text: `Later ${entry.text}`,
+            })),
           ],
           chunk: [...history, ...wakeGroupRows(3)],
           short: normalGroupRows(),
@@ -387,8 +400,22 @@ export const turnGroupTests: BrowserTest[] = [
         for (const [shape, next] of Object.entries(shapes)) {
           rows = next;
           await gotoRoot(page, base);
-          await reloadConversation(page);
+          if (!mobile && !dockHeld) {
+            await page.locator("#dock #main").waitFor();
+            await page.route("**/static/dockview.css", async (route) => {
+              dockRequested();
+              await dockStyle;
+              await route.continue();
+            });
+            dockHeld = true;
+          }
+          if (!mobile && !dockReleased) {
+            await page.reload({ waitUntil: "domcontentloaded" });
+            await requested;
+          } else await reloadConversation(page);
           await page.getByText(rows.at(-1).text, { exact: true }).waitFor();
+          if (!mobile && dockReleased)
+            await page.locator("#dock #main").waitFor();
           const block = (text: string) =>
             page
               .locator("#messages > .activity-boundary")
@@ -397,6 +424,7 @@ export const turnGroupTests: BrowserTest[] = [
             (await locator.boundingBox())!.y as number;
           const press = async (locator: any) => {
             await locator.scrollIntoViewIfNeeded();
+            await waitForLayout(page);
             const before = await top(locator);
             const expanded = await locator.getAttribute("aria-expanded");
             if (mobile) await locator.tap();
@@ -407,6 +435,12 @@ export const turnGroupTests: BrowserTest[] = [
               { node: await locator.elementHandle(), expanded },
             );
             await waitForLayout(page);
+            if (!mobile && !dockReleased) {
+              dockReleased = true;
+              releaseDock();
+              await page.locator("#dock #main").waitFor();
+              await waitForLayout(page);
+            }
             if (shape !== "short")
               expect(
                 Math.abs((await top(locator)) - before),
@@ -528,10 +562,12 @@ export const turnGroupTests: BrowserTest[] = [
         ).toBe(0);
         expect(await paged.getAttribute("aria-expanded")).toBe("true");
       } finally {
+        releaseDock();
         await page.close();
       }
     }
   },
+  // Regression: #3209 activity geometry starts after desktop chat mounting.
   async function test_activity_row_reads_in_entry_order(browser, base) {
     for (const mobile of [false, true]) {
       const page = await browser.newPage({
@@ -566,6 +602,12 @@ export const turnGroupTests: BrowserTest[] = [
           const firstReply = text("First reply stays visible.");
           const finalReply = text(rows.at(-1)!.text);
           await finalReply.waitFor();
+          if (!mobile) {
+            await page
+              .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
+              .waitFor();
+            await waitForLayout(page);
+          }
           const group = page.locator(".activity-group").last();
           const summary = group.locator(":scope > .activity-group-summary");
           const toggle = summary.locator(".activity-group-toggle");
@@ -665,6 +707,7 @@ export const turnGroupTests: BrowserTest[] = [
     }
   },
 
+  // Regression: #3228 activity geometry baselines wait for mounted desktop Chat.
   async function test_groups_open_upward_with_minimized_rows_and_anchored_controls(
     browser,
     base,
@@ -710,7 +753,12 @@ export const turnGroupTests: BrowserTest[] = [
               : page.locator(".activity-group").last();
             const summary = group.locator(":scope > .activity-group-summary");
             const eye = summary.locator(".activity-group-toggle");
+            if (!mobile)
+              await page
+                .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
+                .waitFor();
             await eye.scrollIntoViewIfNeeded();
+            await waitForLayout(page);
             expect(await summary.locator(".turn-tokens").count()).toBe(0);
             const foot = group
               .locator(

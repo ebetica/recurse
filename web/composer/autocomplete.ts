@@ -1,5 +1,5 @@
-// One ARIA/key-ownership seam for every composer popup. Slash skills and @agent
-// references stay independent features, while the textarea exposes only the
+// One ARIA/key-ownership seam for slash skills, @agents and #files.
+// These stay independent features, while the textarea exposes only the
 // currently visible listbox and global/modal Escape can close the top layer.
 import { inputEl } from "../dom.js";
 

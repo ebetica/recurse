@@ -1,7 +1,7 @@
-// Registers optional panes and owns visibility, selection, bounded body caches
-// and desktop/mobile layout. Conversation actions retain their module owners.
-// Phone content/header share a scroller. Unregistered/unavailable panes hide
-// their rail; unavailable open panes close on refresh.
+// Owns pane visibility, selection, bounded caches and desktop/mobile layout.
+// Conversation actions keep their module owners. Unavailable panes hide their
+// rail and close on refresh; discovery leaves Chat usable. Embedded apps
+// never schedule discovery, including reads settling after parking.
 import { currentUiOwnerId, DRAFT, embedded, state } from "./state.js";
 import { phoneListEntry } from "./phone-nav.js";
 import {
@@ -12,27 +12,37 @@ import {
   NEW_ICON,
   MORE_ICON,
   PANE_ICON,
+  MESSAGE_ICON,
   PANE_COMPRESS_ICON,
   PANE_EXPAND_ICON,
 } from "./icons.js";
 import { installPaneChrome } from "./panes/chrome.js";
-import { createPanePowerbar, retainPanePowerbar } from "./panes/powerbar.js";
+import { recordPaneOpen } from "./panes/frecency.js";
+import { scrollPane } from "./panes/navigation.js";
+import {
+  createPanePowerbar,
+  paneFullscreenControl,
+  retainPanePowerbar,
+} from "./panes/powerbar.js";
 import { $, inputEl } from "./dom.js";
 import { pendingCommentCount } from "./comments.js";
-import { handleCommentShortcut } from "./artifacts/selection-comments.js";
+import {
+  handleCommentShortcut,
+  selectionCommentOwner,
+} from "./artifacts/selection-comments.js";
 import {
   ArtifactPaneAutoOpenPolicy,
   type ArtifactAutoOpenObservation,
 } from "./panes/autoopen.js";
 import { storedPanesWidth, ensurePanesGrip } from "./resize.js";
+import { DesktopDock } from "./dock/desktop.js";
+import type { WindowCommand } from "./dock/commands.js";
 import { guardLeaveComments } from "./comments.js";
 import { mobileSidebarOpen, restoreAgentFocus } from "./sidebar.js";
 import {
-  cyclePane,
   paneFocusIndicatorId,
   paneIsActionable,
   paneVisibilityAfterUserAction,
-  resolvePaneActivation,
 } from "./panes/focus.js";
 import { backgroundWork } from "./background-work.js";
 import { conversationUiState } from "./conversation-ui-state/store.js";
@@ -43,7 +53,8 @@ import {
   validPaneViewStateDef,
 } from "./panes/view-state.js";
 import { PaneInstanceCache, validPaneCacheDef } from "./panes/cache.js";
-import type { PaneContext, PaneDef } from "./types.js";
+import { FileTabs } from "./panes/file-tabs.js";
+import type { PaneContext, PaneDef, PaneNavigation } from "./types.js";
 export { setPaneLoading } from "./panes/loading.js";
 
 for (const [id, icon] of [
@@ -78,6 +89,13 @@ const paneOwners = new Map<string, string>();
 const paneAgents = new Map<string, string>();
 const paneViewState = new PaneViewStateLifecycle();
 const paneInstances = new PaneInstanceCache();
+const fileTabs = new FileTabs(open, (id, ownerId) =>
+  paneInstances.retains(id, ownerId),
+);
+const paneDefinitions = (): PaneDef[] => [
+  ...registry,
+  ...fileTabs.definitions(),
+];
 let paneParking: HTMLElement | null = null;
 let paneVisitAgentId: string | null = null;
 let paneVisitOwnerId: string | null = null;
@@ -95,16 +113,64 @@ const announcerEl = $("#pane-announcer");
 
 installPaneChrome(panesEl);
 panesEl.addEventListener("keydown", (event) => {
-  const pane = (event.target as Element).closest<HTMLElement>(".pane-col");
+  const pane = paneForTarget(event.target);
   if (pane) handleCommentShortcut(event, pane);
 });
 panesEl.addEventListener("comments-submitting", (event) => {
-  const pane = (event.target as Element).closest<HTMLElement>(".pane-col");
-  if (pane?.dataset.pane) closePane(pane.dataset.pane, false, true);
+  const pane = paneForTarget(event.target);
+  const id = pane?.dataset.pane;
+  // Invariant: Comments are persisted; remember the close without discarding
+  // another pane's staged draft.
+  if (id && closePane(id, true, true, true) && fileTabs.has(id))
+    desktopDock.showChat();
 });
 
 const mq = matchMedia("(max-width: 700px)");
 const isMobile = (): boolean => mq.matches;
+const desktopDock = new DesktopDock(panesEl, {
+  refresh: () => {
+    layout();
+    syncPanes();
+  },
+  known: (id, parameters) =>
+    (parameters === undefined && registry.some((pane) => pane.id === id)) ||
+    fileTabs.restore(id, parameters),
+  prepare: (ids) => fileTabs.prepare(ids),
+  restore: (ids) => {
+    const extra = [...open].filter((id) => !ids.includes(id));
+    if (extra.length && (selectionCommentOwner() || pendingCommentCount()))
+      return false;
+    for (const id of extra) closePane(id);
+    for (const id of ids) {
+      open.add(id);
+      desktopDock.opening(id, true);
+    }
+    layout();
+    return true;
+  },
+  closed: (id, restoreFocus = true) => closePane(id, true, restoreFocus),
+  element: (id) => bodies.get(id)?.closest<HTMLElement>(".pane-col") ?? null,
+  action: (id) => {
+    const body = bodies.get(id);
+    return body && !body.closest(".pane-col.fullscreen")
+      ? paneFullscreenControl(body)
+      : null;
+  },
+  focus: (id) => {
+    focusPaneContent(id);
+  },
+  fullscreen: toggleFull,
+  leaveFullscreen: () => {
+    if (fullId) {
+      fullId = null;
+      syncFull();
+    }
+  },
+  error: () => {
+    if (announcerEl)
+      announcerEl.textContent = "Windows could not load. Reload to try again.";
+  },
+});
 
 // A conversation switch restores only that conversation's explicit visibility
 // choice. A first visit starts from the product default instead of inheriting a
@@ -115,7 +181,7 @@ export function beginPaneVisit(
 ): void {
   artifactAutoOpen.beginVisit(agentId);
   filesAutoOpen.beginVisit(agentId);
-  for (const def of registry) def.visit?.(agentId);
+  for (const def of paneDefinitions()) def.visit?.(agentId);
   clearArtifactAnnouncement();
   if (artifactsAttention) {
     artifactsAttention = false;
@@ -123,10 +189,9 @@ export function beginPaneVisit(
   }
   if (paneVisitAgentId === agentId && paneVisitOwnerId === ownerId) return;
 
-  const held =
-    document.activeElement instanceof HTMLElement &&
-    !!document.activeElement.closest(".pane-col");
+  const held = !!paneForTarget(document.activeElement);
   const outgoingOwnerId = paneVisitOwnerId;
+  desktopDock.beginVisit(ownerId);
   for (const id of [...open]) closePane(id);
   if (outgoingOwnerId) conversationUiState.flush(outgoingOwnerId);
   if (held) restoreAgentFocus();
@@ -150,6 +215,7 @@ export function fetchPaneData(
   agentId: string,
   run: (signal?: AbortSignal) => Promise<unknown> | void,
 ): void {
+  if (embedded) return;
   // Invariant: Priority promotion checks owner and agent together. Unlike
   // restoration, it may read unavailable panes; a wrong priority only warms
   // cache and cannot restore the wrong owner's selection.
@@ -173,14 +239,17 @@ function noteUserPaneAction(
   preserveLastId = false,
 ): void {
   const ownerId = paneVisitOwnerId || currentUiOwnerId();
-  const prior = conversationUiState.pane(ownerId);
-  paneVisitVisibility = paneVisibilityAfterUserAction(
-    prior,
-    id,
-    opening,
-    preserveLastId,
-  );
-  conversationUiState.setPane(ownerId, paneVisitVisibility);
+  desktopDock.userAction();
+  if (!fileTabs.has(id)) {
+    const prior = conversationUiState.pane(ownerId);
+    paneVisitVisibility = paneVisibilityAfterUserAction(
+      prior,
+      id,
+      opening,
+      preserveLastId,
+    );
+    conversationUiState.setPane(ownerId, paneVisitVisibility);
+  }
   if (id === ARTIFACTS_PANE_ID && opening)
     artifactAutoOpen.noteArtifactsOpened(state.selectedId);
   else artifactAutoOpen.noteUserPaneChoice(state.selectedId);
@@ -280,6 +349,16 @@ export function registerPane(def: PaneDef): void {
   syncPanes();
 }
 
+export function openFileTab(
+  source: string,
+  key: string,
+  initial: unknown,
+  options: OpenPaneOptions = {},
+): boolean {
+  const id = fileTabs.create(source, key, initial, currentUiOwnerId());
+  return !!id && openPane(id, options);
+}
+
 function buildCtxFor(id: string): PaneContext {
   // Invariant: Selection changes before a cold conversation fetch completes.
   // Never hand an old agent's conversation to panels already being retargeted
@@ -299,7 +378,7 @@ function buildCtx(): PaneContext {
 
 function capturePaneState(id: string): void {
   const body = bodies.get(id),
-    definition = registry.find((p) => p.id === id);
+    definition = paneDefinitions().find((p) => p.id === id);
   const ownerId = paneOwners.get(id),
     agentId = paneAgents.get(id);
   if (!body || !definition || !ownerId || !agentId) return;
@@ -354,7 +433,7 @@ function forgetPaneState(id: string): void {
   const body = bodies.get(id),
     ownerId = paneOwners.get(id),
     agentId = paneAgents.get(id);
-  const definition = registry.find((p) => p.id === id);
+  const definition = paneDefinitions().find((p) => p.id === id);
   bodies.delete(id);
   paneOwners.delete(id);
   paneAgents.delete(id);
@@ -385,10 +464,19 @@ export function invalidatePaneCache(id: string, instanceKey?: string): void {
   paneInstances.invalidate(id, instanceKey);
 }
 
-function availableFor(ctx: PaneContext): PaneDef[] {
-  return registry.filter((p) => {
+function availableFor(ctx: PaneContext, discovering?: Set<string>): PaneDef[] {
+  return paneDefinitions().filter((p) => {
+    if (
+      fileTabs.has(p.id) &&
+      (!fileTabs.needed(p.id) ||
+        (!open.has(p.id) &&
+          (isMobile() || paneRenderedAgentId !== ctx.agentId)))
+    )
+      return false;
     try {
-      return p.available ? !!p.available(ctx) : true;
+      const available = p.available ? p.available(ctx) : true;
+      if (available === undefined) discovering?.add(p.id);
+      return !!available;
     } catch {
       return false;
     }
@@ -402,6 +490,7 @@ interface OpenPaneOptions {
   preserveLastId?: boolean;
   // Keyboard opens focus the body; mobile modal opens focus the heading.
   focusTarget?: "heading" | "body";
+  focusEntry?: boolean; // Desktop: new opens focus [data-pane-entry].
 }
 
 function usableFocusOrigin(
@@ -427,15 +516,30 @@ function usableFocusOrigin(
 }
 
 export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
-  if (!registry.some((p) => p.id === id)) return false;
+  if (id === "chat") {
+    if (isMobile() && !guardLeaveComments()) return false;
+    if (isMobile()) for (const paneId of [...open]) closePane(paneId, true);
+    desktopDock.showChat(true);
+    const thread = $("#scroll");
+    if (thread) {
+      thread.tabIndex = -1;
+      desktopDock.focusControl("chat", thread);
+    }
+    if (!isMobile()) recordPaneOpen(id);
+    return true;
+  }
+  if (
+    !paneDefinitions().some((p) => p.id === id) ||
+    (fileTabs.has(id) && !fileTabs.canOpen(id))
+  )
+    return false;
   const focusHeading = options.focusHeading !== false;
-  const entrySel =
-    options.focusTarget === "body" ? ".pane-body" : ".pane-title";
   const userInitiated = options.userInitiated !== false;
   // Invariant: Replacing a comment-capable pane is a leave action just like
   // closing it. Do not clear its attention/visit state until the operator
   // accepts the existing shared comment guard.
   if (
+    isMobile() &&
     userInitiated &&
     [...open].some((openId) => openId !== id) &&
     !guardLeaveComments()
@@ -453,7 +557,7 @@ export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
   }
   for (const openId of open) if (openId !== id) capturePaneState(openId);
   const active = document.activeElement;
-  focusOrigins.clear();
+  if (isMobile()) focusOrigins.clear();
   // Invariant: A keyboard menu choice is hidden immediately before openPane
   // runs. Restore to the persistent Panels button rather than that
   // now-invisible menu item.
@@ -464,31 +568,27 @@ export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
         : active
       : null;
   if (usableFocusOrigin(origin)) focusOrigins.set(id, origin);
-  // Invariant: At most one panel is open; opening another replaces it. Layout
-  // owns removal/reattachment of desktop columns and mobile grips.
-  open.clear();
+  // Invariant: Phones replace their one overlay; desktop opens a tab without
+  // discarding other windows. Automatic opens never take DOM focus.
+  desktopDock.opening(id, !focusHeading);
   if (isMobile()) {
+    open.clear();
     for (const paneId of [...bodies.keys()]) forgetPaneState(paneId);
     panesEl.innerHTML = "";
     mobileActive = id;
   }
+  const entry = options.focusEntry && !isMobile() && !open.has(id);
   open.add(id);
-  if (userInitiated) noteUserPaneAction(id, true, options.preserveLastId);
+  if (userInitiated) {
+    noteUserPaneAction(id, true, options.preserveLastId);
+    if (!isMobile() && !fileTabs.has(id)) recordPaneOpen(id);
+  }
   layout();
   syncPanes();
-  if (focusHeading)
-    requestAnimationFrame(() => {
-      const col = panesEl.querySelector<HTMLElement>(
-        `.pane-col[data-pane="${CSS.escape(id)}"]`,
-      );
-      const target = col?.querySelector<HTMLElement>(entrySel);
-      if (target?.inert && options.focusTarget === "body")
-        target.dataset.paneFocusWhenReady = "true";
-      (target?.inert
-        ? col?.querySelector<HTMLElement>(".pane-title")
-        : target
-      )?.focus({ preventScroll: true });
-    });
+  if (focusHeading) {
+    desktopDock.show(id);
+    focusPaneContent(id, options.focusTarget !== "body", entry);
+  }
   return true;
 }
 function closePane(
@@ -499,7 +599,11 @@ function closePane(
 ): boolean {
   if (
     !open.has(id) ||
-    (userInitiated && !preserveComments && !guardLeaveComments())
+    (userInitiated &&
+      !preserveComments &&
+      !(fileTabs.has(id)
+        ? fileTabs.guardClose(id, bodies.get(id))
+        : guardLeaveComments()))
   )
     return false;
   capturePaneState(id);
@@ -507,13 +611,16 @@ function closePane(
   const origin = focusOrigins.get(id);
   open.delete(id);
   forgetPaneState(id);
+  desktopDock.remove(id);
   focusOrigins.delete(id);
   if (mobileActive === id) mobileActive = null;
   if (fullId === id) fullId = null;
   layout();
   renderRail(availableFor(buildCtx()));
-  if (restoreFocus)
+  if (restoreFocus) {
+    const prior = document.activeElement;
     requestAnimationFrame(() => {
+      if (document.activeElement !== prior) return;
       const fallback = isMobile()
         ? fabEl
         : railEl.querySelector<HTMLElement>(
@@ -525,6 +632,7 @@ function closePane(
       const target = usableFocusOrigin(origin) ? origin : fallback;
       target?.focus();
     });
+  }
   return true;
 }
 /** Close pane `id` as the operator, leaving focus to the caller. */
@@ -538,9 +646,8 @@ export function paneAvailable(id: string): boolean {
 }
 
 function togglePane(id: string): void {
-  open.has(id)
-    ? closePane(id, true, true)
-    : openPane(id, { userInitiated: true });
+  if (isMobile() && open.has(id)) closePane(id, true, true);
+  else openPane(id, { userInitiated: true, focusEntry: true });
 }
 
 // ---- temporary fullscreen -------------------------------------------------
@@ -552,14 +659,17 @@ function toggleFull(id: string): void {
 }
 function syncFull(): void {
   const mobile = isMobile();
+  const chat = document.getElementById("main");
+  chat?.classList.toggle("fullscreen", fullId === "chat");
   for (const col of panesEl.querySelectorAll<HTMLElement>(".pane-col")) {
     const on = col.dataset.pane === fullId;
-    const modal = on || (mobile && col.dataset.pane === mobileActive);
+    const modal = mobile && (on || col.dataset.pane === mobileActive);
     col.classList.toggle("fullscreen", on);
     col.setAttribute("role", modal ? "dialog" : "region");
     if (modal) col.setAttribute("aria-modal", "true");
     else col.removeAttribute("aria-modal");
-    const fs = col.querySelector<HTMLElement>(".pane-head .fs");
+    const body = bodies.get(col.dataset.pane || "");
+    const fs = body ? paneFullscreenControl(body) : null;
     if (fs) {
       fs.innerHTML = on ? PANE_COMPRESS_ICON : PANE_EXPAND_ICON;
       fs.title = on ? "Exit fullscreen" : "Fullscreen";
@@ -567,6 +677,7 @@ function syncFull(): void {
       fs.setAttribute("aria-pressed", on ? "true" : "false");
     }
   }
+  desktopDock.refreshActions();
 }
 
 function focusables(root: HTMLElement): HTMLElement[] {
@@ -618,11 +729,14 @@ addEventListener("keydown", (event: KeyboardEvent) => {
     return;
   }
   const activeId = fullId || (isMobile() ? mobileActive : null);
-  const modal = activeId
-    ? panesEl.querySelector<HTMLElement>(
-        `.pane-col[data-pane="${CSS.escape(activeId)}"]`,
-      )
-    : null;
+  const modal =
+    activeId === "chat"
+      ? document.getElementById("main")
+      : activeId
+        ? panesEl.querySelector<HTMLElement>(
+            `.pane-col[data-pane="${CSS.escape(activeId)}"]`,
+          )
+        : null;
   if (event.key === "Tab" && modal) {
     const items = focusables(modal);
     if (!items.length) {
@@ -635,8 +749,8 @@ addEventListener("keydown", (event: KeyboardEvent) => {
     const index = items.indexOf(document.activeElement as HTMLElement);
     // Invariant: Heading focus is scheduled after a programmatic mobile open.
     // Pull an earlier Tab (or focus restored unexpectedly outside) into the
-    // full-screen dialog before it can reach covered chrome, then keep the
-    // focus trap.
+    // visible fullscreen pane before it can reach covered chrome, then keep
+    // focus within that pane.
     if (!modal.contains(document.activeElement)) {
       event.preventDefault();
       (event.shiftKey ? last : first).focus();
@@ -658,11 +772,8 @@ export function closePaneKeyboardLayer(): boolean {
     const id = fullId;
     fullId = null;
     syncFull();
-    panesEl
-      .querySelector<HTMLElement>(
-        `.pane-col[data-pane="${CSS.escape(id)}"] .fs`,
-      )
-      ?.focus();
+    const body = bodies.get(id);
+    if (body) paneFullscreenControl(body).focus();
     return true;
   }
   if (menuEl.classList.contains("on")) {
@@ -670,43 +781,48 @@ export function closePaneKeyboardLayer(): boolean {
     fabEl.focus();
     return true;
   }
-  const activeElement =
-    document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-  const focusedCol = activeElement?.closest<HTMLElement>(".pane-col");
-  const id = (isMobile() ? mobileActive : focusedCol?.dataset.pane) || null;
+  const id = (isMobile() ? mobileActive : focusedPaneId()) || null;
   if (!id || !open.has(id)) return false;
   const before = open.has(id);
   closePane(id, true, true, true);
   return before && !open.has(id);
 }
-// Only fullscreen/mobile/menu panes are modal; desktop columns preserve tree
-// navigation, with Pane mode/native editor keys only while focus is inside.
+// Only phone overlays and menus are modal. Desktop fullscreen is a layout;
+// Pane mode/native editor keys depend on focus, not the layout's size.
 export function paneKeyboardLayerOpen(): boolean {
-  return (
-    !!fullId || menuEl.classList.contains("on") || (isMobile() && open.size > 0)
-  );
+  return menuEl.classList.contains("on") || (isMobile() && open.size > 0);
+}
+
+export const hasFullscreenPane = () => !!fullId;
+
+/** Resolve the pane owning content or a native window control. */
+export function paneForTarget(target: EventTarget | null): HTMLElement | null {
+  if (!(target instanceof Element)) return null;
+  const column = target.closest<HTMLElement>(".pane-col");
+  if (column) return column;
+  const id =
+    target.closest<HTMLElement>("[data-dock-panel]")?.dataset.dockPanel;
+  return id
+    ? (bodies.get(id)?.closest<HTMLElement>(".pane-col") ?? null)
+    : null;
+}
+
+function focusedPaneId(): string | undefined {
+  return paneForTarget(document.activeElement)?.dataset.pane;
 }
 
 function activePaneId(fallback = false): string | null {
   if (fullId && open.has(fullId)) return fullId;
-  const active =
-    document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-  const focused = active?.closest<HTMLElement>(".pane-col")?.dataset.pane;
+  const focused = focusedPaneId();
   if (focused && open.has(focused)) return focused;
   if (mobileActive && open.has(mobileActive)) return mobileActive;
   return fallback ? [...open][0] || null : null;
 }
 
-// Pane keyboard actions are available when a pane is open or can be opened.
+// Chat is always offered outside embedded views, including a new draft.
 export function paneActionable(): boolean {
-  // Invariant: Runs on every keydown; short-circuit on an open pane before the
-  // availableFor() scan, whose predicates are side-effectful (TTL-guarded)
-  // fetches.
   return (
+    !embedded ||
     open.size > 0 ||
     paneIsActionable(
       [...open],
@@ -715,36 +831,73 @@ export function paneActionable(): boolean {
   );
 }
 
-// The `o` key toggles pane visibility from either the conversation or pane
-// focus context. Opening moves focus into the labelled, scrollable pane body;
-// closing moves it to the agent tree so focus never remains on removed content.
-export function togglePaneFromKeyboard(): boolean {
-  const availableIds = availableFor(buildCtx()).map((p) => p.id);
-  const preferredId =
-    paneVisitVisibility.kind === "default"
-      ? undefined
-      : paneVisitVisibility.lastId;
-  const decision = resolvePaneActivation([...open], availableIds, preferredId);
-  if (!decision) return false;
-  if (decision.kind === "open")
-    return openPane(decision.id, {
-      userInitiated: true,
-      focusHeading: true,
-      focusTarget: "body",
-      preserveLastId: !!preferredId && preferredId !== decision.id,
-    });
-  return closeFocusedPaneFromKeyboard(decision.id);
+/** Offered panes in rail order; the finder can also offer Chat. */
+export function offeredPanes({ includeChat = false } = {}) {
+  const panes = availableFor(buildCtx())
+    .filter((pane) => !fileTabs.has(pane.id))
+    .map((pane) => ({
+      id: pane.id,
+      title: pane.title || pane.id,
+      icon: pane.icon || PANE_ICON,
+      open: open.has(pane.id),
+      finder: pane.finder,
+    }));
+  return includeChat
+    ? [
+        ...panes,
+        {
+          id: "chat",
+          title: "Chat",
+          icon: MESSAGE_ICON,
+          open: isMobile() ? !mobileActive : desktopDock.chatOpen(),
+          finder: undefined,
+        },
+      ]
+    : panes;
 }
 
-// Focus an open pane without reopening it or changing fullscreen/visibility.
-export function focusPaneFromKeyboard(): boolean {
-  const id = activePaneId(true);
-  if (!id) return togglePaneFromKeyboard();
-  const body = panesEl.querySelector<HTMLElement>(
-    `.pane-col[data-pane="${CSS.escape(id)}"] .pane-body`,
+/** Open the offered pane at a one-based rail position. */
+export function openPaneByIndex(index: number): boolean {
+  const pane = offeredPanes()[index - 1];
+  return !!pane && openPane(pane.id, { focusTarget: "body" });
+}
+
+/** Handle focused-pane items, falling back to content scrolling. */
+export function navigateFocusedPane(command: PaneNavigation): void {
+  const id = activePaneId();
+  const body = id ? bodies.get(id) : null;
+  if (
+    !body ||
+    paneDefinitions()
+      .find((pane) => pane.id === id)
+      ?.navigate?.(body, command)
+  )
+    return;
+  scrollPane(body, command);
+}
+
+/** Scroll or move the item cursor to an edge of the focused pane. */
+export function scrollFocusedPane(edge: "top" | "bottom"): void {
+  navigateFocusedPane(edge);
+}
+
+function focusPaneContent(id: string, heading = false, entry = false): boolean {
+  const column = panesEl.querySelector<HTMLElement>(
+    `.pane-col[data-pane="${CSS.escape(id)}"]`,
   );
-  body?.focus({ preventScroll: true });
-  return document.activeElement === body;
+  const body = column?.querySelector<HTMLElement>(".pane-body");
+  const input = entry && body?.querySelector<HTMLElement>("[data-pane-entry]");
+  const title = column?.querySelector<HTMLElement>(".pane-title");
+  const target = input || (heading || body?.inert ? title : body);
+  if (!target) return false;
+  if (body?.inert && !heading) body.dataset.paneFocusWhenReady = "true";
+  desktopDock.focusControl(id, target);
+  return true;
+}
+
+/** Reveal a pane and focus its native control once its window is visible. */
+export function focusPaneControl(id: string, target: HTMLElement): void {
+  desktopDock.focusControl(id, target);
 }
 
 export function closeFocusedPaneFromKeyboard(
@@ -762,30 +915,15 @@ export function closeFocusedPaneFromKeyboard(
 // Tracks pane focus rings through focusin, clearing them on tree/composer
 // focus.
 function syncPaneFocusIndicator(): void {
-  const active =
-    document.activeElement instanceof HTMLElement
-      ? document.activeElement
-      : null;
-  const columnId =
-    active?.closest<HTMLElement>(".pane-col")?.dataset.pane ?? null;
-  const focusedId = paneFocusIndicatorId(columnId, [...open]);
+  const focusedId = paneFocusIndicatorId(focusedPaneId() ?? null, [...open]);
   for (const col of panesEl.querySelectorAll<HTMLElement>(".pane-col"))
     col.classList.toggle("kb-focused", col.dataset.pane === focusedId);
 }
 document.addEventListener("focusin", syncPaneFocusIndicator);
 
-// Pane mode j/k: switch to the next/previous pane available for this agent and
-// focus it (its content stays scrollable via the mouse/trackpad/native arrows).
-export function switchPane(delta: -1 | 1): boolean {
-  const availableIds = availableFor(buildCtx()).map((p) => p.id);
-  const current = activePaneId(true);
-  const nextId = cyclePane(availableIds, current, delta);
-  if (!nextId || nextId === current) return false;
-  return openPane(nextId, {
-    userInitiated: true,
-    focusHeading: true,
-    focusTarget: "body",
-  });
+/** Run desktop window commands without loading the dock on phones. */
+export function runWindowCommand(command: WindowCommand): boolean {
+  return desktopDock.command(command);
 }
 
 export function toggleFocusedPaneFullscreen(): boolean {
@@ -799,11 +937,11 @@ export function toggleFocusedPaneFullscreen(): boolean {
 function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
   const existing = bodies.get(id);
   if (existing) return existing;
-  const p = registry.find((x) => x.id === id);
+  const p = paneDefinitions().find((x) => x.id === id);
   if (!p) return undefined;
   const ownerId = paneVisitOwnerId || currentUiOwnerId();
   const col = document.createElement("div");
-  col.className = "pane-col";
+  col.className = fileTabs.has(id) ? "pane-col file-tab" : "pane-col";
   col.dataset.pane = id;
   const head = createPanePowerbar(
     id,
@@ -855,8 +993,15 @@ function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
 
 function layout(): void {
   const ctx = buildCtx();
+  if (isMobile() || embedded) {
+    if (fullId === "chat") {
+      fullId = null;
+      syncFull();
+    }
+    desktopDock.sync(false, []);
+  }
   ensurePanesGrip();
-  if (fullId && !open.has(fullId)) fullId = null;
+  if (fullId && fullId !== "chat" && !open.has(fullId)) fullId = null;
   for (const col of panesEl.querySelectorAll<HTMLElement>(".pane-col")) {
     const pid = col.dataset.pane;
     if (!pid || !open.has(pid)) {
@@ -864,16 +1009,31 @@ function layout(): void {
       col.remove();
     }
   }
-  for (const p of registry) if (open.has(p.id)) ensureColumn(p.id, ctx);
+  for (const p of paneDefinitions())
+    if (open.has(p.id)) ensureColumn(p.id, ctx);
 
   const mobile = isMobile();
-  panesEl.classList.toggle("on", open.size > 0);
-  const w = mobile ? null : storedPanesWidth();
+  const docked =
+    !mobile &&
+    !embedded &&
+    desktopDock.sync(
+      true,
+      paneDefinitions()
+        .filter((pane) => open.has(pane.id))
+        .map((pane) => ({
+          id: pane.id,
+          title: pane.title || pane.id,
+          icon: pane.icon || PANE_ICON,
+          file: fileTabs.descriptor(pane.id),
+        })),
+    );
+  panesEl.classList.toggle("on", docked || open.size > 0);
+  const w = mobile || docked ? null : storedPanesWidth();
   if (w != null) {
     panesEl.style.flex = "none";
     panesEl.style.width = w + "px";
   } else {
-    panesEl.style.flex = mobile ? "" : String(open.size);
+    panesEl.style.flex = mobile ? "" : docked ? "1" : String(open.size);
     panesEl.style.width = "";
   }
 
@@ -930,6 +1090,7 @@ function paneAttention(pane: PaneDef): boolean {
 }
 
 function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
+  avail = avail.filter((pane) => !fileTabs.has(pane.id));
   const mobile = isMobile();
   // Invariant: Reparent shared controls, retaining their owners and handlers.
   const actions = [
@@ -937,13 +1098,16 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     $("#takeover-btn")!,
     $("#share-link-btn")!,
   ];
-  // Spec: Phone menu order: Delete, Take control, divider, Share.
-  const actionHost = mobile ? menuEl : railEl;
-  if (actions[0].parentElement !== actionHost) {
+  // Spec: Phones keep Delete in More; desktop places it beside Settings.
+  const foot = $("#agent-list-foot")!;
+  if (actions[0].parentElement !== (mobile ? menuEl : foot)) {
     if (mobile) {
       $("#pane-menu-divider")!.before(actions[0], actions[1]);
       $("#pane-menu-divider")!.after(actions[2]);
-    } else railEl.prepend(...actions);
+    } else {
+      foot.append(actions[0]);
+      railEl.prepend(actions[1], actions[2]);
+    }
     for (const action of actions) {
       if (mobile) action.setAttribute("role", "menuitem");
       else action.removeAttribute("role");
@@ -981,7 +1145,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
 
   const railPanels = $("#pane-rail-panels")!;
   railPanels.innerHTML = "";
-  for (const p of avail) {
+  for (const [index, p] of avail.entries()) {
     const b = document.createElement("button");
     const attention = attentive.includes(p);
     b.className =
@@ -993,7 +1157,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     const baseLabel = p.title || p.id;
     const counted = badge ? `${baseLabel} (${badge})` : baseLabel;
     const label = attention ? `${counted} available` : counted;
-    b.title = label;
+    b.title = index < 9 ? `${baseLabel} (g${index + 1})` : label;
     b.setAttribute("aria-label", label);
     b.setAttribute("aria-expanded", open.has(p.id) ? "true" : "false");
     b.innerHTML = p.icon || `<span>${(p.title || "?").slice(0, 1)}</span>`;
@@ -1027,7 +1191,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     const text = document.createElement("span");
     text.textContent = label;
     b.appendChild(text);
-    b.onclick = () => openPane(p.id);
+    b.onclick = () => openPane(p.id, { focusEntry: true });
     panelItems.appendChild(b);
   }
 }
@@ -1049,6 +1213,7 @@ menuEl.addEventListener(
 
 function openMenu(focusFirst = false): void {
   menuEl.classList.add("on");
+  menuEl.scrollTop = 0;
   backdropEl.classList.add("on");
   fabEl.setAttribute("aria-expanded", "true");
   if (focusFirst) requestAnimationFrame(() => focusables(menuEl)[0]?.focus());
@@ -1152,8 +1317,34 @@ backdropEl.onclick = () => {
 mq.addEventListener("change", () => {
   closeMenu();
   railHash = "";
+  if (isMobile()) {
+    desktopDock.sync(false, []);
+    const commentPane =
+      selectionCommentOwner()?.closest<HTMLElement>(".pane-col")?.dataset.pane;
+    mobileActive =
+      commentPane && open.has(commentPane) ? commentPane : activePaneId(true);
+    for (const id of [...open]) if (id !== mobileActive) closePane(id);
+  }
   layout();
   syncPanes();
+  const editingComment =
+    document.activeElement instanceof Element &&
+    !!document.activeElement.closest(".report-comment-popover");
+  if (
+    isMobile() &&
+    mobileActive &&
+    !panesEl.contains(document.activeElement) &&
+    !editingComment
+  ) {
+    const id = mobileActive;
+    requestAnimationFrame(() =>
+      panesEl
+        .querySelector<HTMLElement>(
+          `.pane-col[data-pane="${CSS.escape(id)}"] .pane-title`,
+        )
+        ?.focus({ preventScroll: true }),
+    );
+  }
 });
 addEventListener("panes-relayout", () => layout());
 
@@ -1185,18 +1376,20 @@ function restorePanePreference(availableIds: ReadonlySet<string>): boolean {
 
 function syncPanesNow(): void {
   const ctx = buildCtx();
-  const avail = availableFor(ctx);
+  const rendered =
+    paneVisitAgentId === ctx.agentId &&
+    paneRenderedAgentId === ctx.agentId &&
+    paneVisitOwnerId === currentUiOwnerId();
+  if (!isMobile() && rendered) desktopDock.prepareLayout();
+  const discovering = new Set<string>();
+  const avail = availableFor(ctx, discovering);
   const availIds = new Set(avail.map((p) => p.id));
   for (const id of [...open])
     if (!availIds.has(id)) {
       // Invariant: If the pane being auto-closed currently holds keyboard
       // focus, hand focus back to the canonical tree/menu target so a Pane-mode
       // user is never dropped onto <body>.
-      const held =
-        document.activeElement instanceof HTMLElement &&
-        !!document.activeElement.closest(
-          `.pane-col[data-pane="${CSS.escape(id)}"]`,
-        );
+      const held = paneForTarget(document.activeElement)?.dataset.pane === id;
       closePane(id);
       if (held) restoreAgentFocus();
     }
@@ -1205,7 +1398,9 @@ function syncPanesNow(): void {
   // Artifact discovery. openPane() re-enters sync with the pane present, so
   // return after a successful restore rather than refreshing the same body
   // twice.
-  if (restorePanePreference(availIds)) return;
+  const ownLayout =
+    !isMobile() && rendered && desktopDock.restoreLayout(availIds, discovering);
+  if (!ownLayout && restorePanePreference(availIds)) return;
 
   const artifacts = registry.find((p) => p.id === ARTIFACTS_PANE_ID);
   let generation: string | null | undefined;
@@ -1218,7 +1413,8 @@ function syncPanesNow(): void {
     agentId: ctx.agentId,
     generation,
     artifactsPaneOpen: open.has(ARTIFACTS_PANE_ID),
-    otherPaneOpen: [...open].some((id) => id !== ARTIFACTS_PANE_ID),
+    otherPaneOpen:
+      isMobile() && [...open].some((id) => id !== ARTIFACTS_PANE_ID),
     ...artifactAutoOpenGuards(),
   });
   if (artifactsAttention !== autoDecision.badged) {
@@ -1248,7 +1444,7 @@ function syncPanesNow(): void {
     agentId: ctx.agentId,
     generation: fileGeneration,
     artifactsPaneOpen: open.has(FILES_PANE_ID),
-    otherPaneOpen: [...open].some((id) => id !== FILES_PANE_ID),
+    otherPaneOpen: isMobile() && [...open].some((id) => id !== FILES_PANE_ID),
     ...artifactAutoOpenGuards(),
   });
   if (filesDecision.open && files && availIds.has(FILES_PANE_ID)) {
@@ -1260,7 +1456,7 @@ function syncPanesNow(): void {
 
   renderRail(avail);
   for (const id of open) {
-    const p = registry.find((x) => x.id === id);
+    const p = paneDefinitions().find((x) => x.id === id);
     const body = bodies.get(id);
     if (p && body && p.refresh) {
       try {
@@ -1294,8 +1490,10 @@ export function syncPanes(): void {
 }
 
 addEventListener("pagehide", () => {
+  desktopDock.saveLayout();
   for (const id of open) capturePaneState(id);
   conversationUiState.flush();
 });
 
 beginPaneVisit(state.selectedId);
+if (!embedded && !isMobile()) layout();

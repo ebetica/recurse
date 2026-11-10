@@ -182,7 +182,7 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
-  // Regression: #2480 a spawned child cannot steal the displayed parent's cursor. (also #2397 a pending delete cannot retarget keys to another agent.; #2397 deletion keeps selection on the nearest sibling.)
+  // Regression: #3223 accepted deletion cannot revive a removed sibling from an older tree read. (also #2480 spawned children preserve their displayed parent's cursor; #2397 pending deletion preserves key ownership and nearest-sibling selection.)
   async function test_delete_selects_next_sibling_without_retargeting_pending_keys(
     browser,
     base,
@@ -454,6 +454,89 @@ export const tests: BrowserTest[] = [
       }
       await context.close();
     }
+  },
+  // Feature: #3162 agent folds survive reloads and forget deleted home agents.
+  async function test_agent_folds_survive_reload(browser, base) {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+    });
+    const create = async (title: string, parent: string | null) => {
+      const response = await page.request.post(`${base}api/conversations`, {
+        data: { parent },
+      });
+      const id = (await response.json()).id as string;
+      await page.request.post(`${base}api/conversations/${id}/rename`, {
+        data: { title },
+      });
+      return id;
+    };
+    const opened = await create("Saved open parent", null);
+    const openedChild = await create("Saved open child", opened);
+    const folded = await create("Saved folded parent", null);
+    const foldedChild = await create("Saved folded child", folded);
+    const row = (id: string) => page.locator(`.agent[data-id="${id}"]`);
+    const current = (id: string) =>
+      page.locator(`.agent[data-id="${id}"][aria-current="page"]`);
+    const press = async (id: string, key: string) => {
+      await row(id).click();
+      await current(id).waitFor();
+      await row(id).focus();
+      await page.keyboard.press(key);
+    };
+    const saved = () =>
+      page.evaluate(() => {
+        const browser = globalThis as any;
+        return JSON.parse(
+          browser.localStorage.getItem("recurse.sidebarAgentFolds") || "{}",
+        );
+      });
+    await page.goto(`${base}#agent=${opened}`);
+    await current(opened).waitFor();
+    await press(opened, "l");
+    await press(folded, "l");
+    await press(folded, "h");
+    await row(foldedChild).waitFor({ state: "detached" });
+    expect(await row(openedChild).isVisible()).toBe(true);
+    await page.reload();
+    await current(folded).waitFor();
+    await row(openedChild).waitFor();
+    expect(await row(opened).getAttribute("aria-expanded")).toBe("true");
+    expect(await row(folded).getAttribute("aria-expanded")).toBe("false");
+    expect(await row(foldedChild).count()).toBe(0);
+    expect(await saved()).toEqual({ open: [opened], collapsed: folded });
+    expect(
+      (await page.request.delete(`${base}api/conversations/${opened}`)).ok(),
+    ).toBe(true);
+    await row(opened).waitFor({ state: "detached" });
+    await page.waitForFunction((id) => {
+      const browser = globalThis as any;
+      return !browser.localStorage
+        .getItem("recurse.sidebarAgentFolds")
+        .includes(id);
+    }, opened);
+    expect(await saved()).toEqual({ open: [], collapsed: folded });
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      browser.localStorage.setItem(
+        "recurse.sidebarAgentFolds",
+        JSON.stringify({
+          open: [
+            null,
+            "bad/backend/id",
+            ...Array.from({ length: 501 }, (_, i) => `remote/saved-${i}`),
+          ],
+          collapsed: "bad/backend/id",
+        }),
+      );
+    });
+    await page.reload();
+    await current(folded).waitFor();
+    const bounded = await saved();
+    expect(bounded.open.length).toBe(500);
+    expect(bounded.open[0]).toBe("remote/saved-1");
+    expect(bounded.open.at(-1)).toBe("remote/saved-500");
+    expect(bounded.collapsed).toBeNull();
+    await page.close();
   },
 ];
 if (import.meta.main) {

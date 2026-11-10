@@ -30,7 +30,11 @@ detached snapshots rather than live owners. Sidebar rows reuse the API v1
 Agent projection and cached PR, model and effort metadata without record reads.
 The tree projection notifies visible browsers when admitted tags change. Tag
 mutations publish that in-memory change before awaiting their durable flush;
-HTTP success still means the flush completed.
+HTTP success still means the flush completed. The same projection pushes unread
+finish changes. Notification eligibility owns the decision; a qualifying run key
+and unread flag persist with conversation metadata, independently of push devices.
+Visible main-conversation streams acknowledge the finish across devices; replaying
+the same report never restores an acknowledged dot.
 
 A send is queued for persistence and handed to Pi without waiting for storage.
 After a restart, uncertain dispatch requires an operator decision to retry or
@@ -42,9 +46,16 @@ delivery. See [runtime/agent_node.ts](runtime/agent_node.ts) and
 
 Stop, clear and compact have distinct ordering boundaries. Deletion fences
 admission first, then background teardown quiets the agent, retires its files
-and removes its state. A failure stays visible for retry. Startup gates actions
+and removes its state. A failure stays visible for retry. Failed history
+archiving logs a native error code and shows it in the latest deletion status;
+exception messages, custom error names and filesystem paths are not exposed.
+Each retry replaces the previous deferral note without dropping its earlier
+status context. Startup gates actions
 until the collection is ready; maintenance is separate from request handling.
 Shutdown closes admission and waits for owned tasks and process cleanup.
+Slow lease-file preparation does not refuse an uncontended lifecycle lock:
+[admission](mutation_guard.ts) still tries once after its deadline, without
+waiting for another holder past that deadline.
 Reaped-history publication uses asynchronous hard links and renames, never copying
 live stores. Publications serialize per conversation and day, recovering only that
 conversation's temporary record; unrelated residue expires with its partition.
@@ -69,6 +80,9 @@ Revival moves closed storage before publishing its conversation record. A
 failed creation rolls storage back only before publication; a published
 destination stays intact for readers and a later retry.
 
+Tree moves preserve the agent’s subtree and worktree. A null destination parent
+makes the agent top-level; missing parents, cycles and moves involving side
+conversations are rejected.
 Tree memory scope follows the current root; moving or reviving an agent can
 change it. Agent state, Durable transcripts and retained history have separate
 owners and lifetimes.

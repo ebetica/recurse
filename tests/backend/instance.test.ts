@@ -378,6 +378,108 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
   expect(JSON.stringify(capture.request)).toContain("describeTool");
 });
 
+// Regression: #3164 Pi's Agent Skills locations were omitted from provider requests.
+test("Agent Skills locations load for roots and children and refresh between requests", async () => {
+  const { root, env } = await world();
+  const repo = join(root, "target");
+  const nested = join(repo, "src", "nested");
+  mkdirSync(nested, { recursive: true });
+  const git = Bun.spawn(["git", "init", repo], {
+    stdout: "ignore",
+    stderr: "pipe",
+  });
+  expect(await git.exited).toBe(0);
+  const locations = [
+    [join(root, ".agents", "skills"), "outside-repo"],
+    [join(env.HOME!, ".agents", "skills"), "user-agents"],
+    [join(repo, ".agents", "skills"), "repo-agents"],
+    [join(repo, "src", ".agents", "skills"), "ancestor-agents"],
+    [join(nested, ".agents", "skills"), "cwd-agents"],
+    [join(nested, ".pi", "skills"), "cwd-pi"],
+    [join(root, "settings", "pi-agent", "skills"), "user-pi"],
+    [join(repo, ".claude", "skills"), "claude-only"],
+  ];
+  const put = (
+    dir: string,
+    name: string,
+    description = `Use ${name} for its workflow.`,
+  ) => {
+    mkdirSync(join(dir, name), { recursive: true });
+    writeFileSync(
+      join(dir, name, "SKILL.md"),
+      `---\nname: ${name}\ndescription: ${description}\n---\nFull instructions for ${name}.\n`,
+    );
+  };
+  for (const [dir, name] of locations) put(dir!, name!);
+  put(join(env.HOME!, ".claude", "skills"), "user-claude-only");
+  const description = `Use repository workflows. ${"Preserve the entire routing description. ".repeat(20)}End of description.`;
+  put(join(repo, ".agents", "skills"), "repo-agents", description);
+  seedPiModelList(join(root, "data", "config"));
+  const instance = await build(env);
+  const faux = fauxProvider({ tokensPerSecond: 20_000 });
+  const models = createModels();
+  models.setProvider(faux.provider);
+  depsOf(instance.durable).models = models;
+  depsOf(instance.durable).settings = () => ["faux/faux-1", "off"];
+  await ready(instance);
+  const cid = String(
+    (await instance.create.create({ title: "Skill root", workdir: nested })).id,
+  );
+  const child = String(
+    (
+      await instance.create.create({
+        title: "Skill child",
+        parent: cid,
+        workdir: nested,
+      })
+    ).id,
+  );
+  for (const [index, id] of [cid, child, cid].entries()) {
+    if (index === 2) {
+      put(join(repo, ".agents", "skills"), "added-later");
+      put(
+        join(repo, ".agents", "skills"),
+        "repo-agents",
+        "Updated routing description.",
+      );
+    }
+    faux.setResponses([
+      fauxAssistantMessage("Skills captured."),
+      ...(id === child ? [fauxAssistantMessage("Child report received.")] : []),
+    ]);
+    const opened = await instance.durable.open(id);
+    await instance.delivery.deliver(id, "Check available workflows", {
+      origin: "operator",
+      messageId: `skills-${index}`,
+    });
+    await opened.conversation.waitForIdle(BACKGROUND_CONTEXT);
+    await durableUntil(
+      () =>
+        faux.getPendingResponseCount() === 0 &&
+        instance.durable.runningCount() === 0,
+    );
+    const captured = await instance.durable.prompt(id);
+    const system = JSON.stringify(captured.system_messages);
+    for (const [dir, name] of locations.slice(1, -1)) {
+      expect(system).toContain(`<name>${name}</name>`);
+      expect(system).toContain(join(dir!, name!, "SKILL.md"));
+      expect(system).not.toContain(`Full instructions for ${name}.`);
+    }
+    expect(system).not.toContain("outside-repo");
+    expect(system).not.toContain("claude-only");
+    expect(system).toContain("<name>recurse-settings</name>");
+    if (index === 2) {
+      expect(system).toContain("<name>added-later</name>");
+      expect(system).toContain("Updated routing description.");
+    } else {
+      expect(system).toContain(description);
+    }
+    const listed = (await instance.agentTools.skillsFor(id))![0];
+    for (const [, name] of locations.slice(1, -1))
+      expect(listed).toContainEqual(expect.objectContaining({ name }));
+  }
+});
+
 // Regression: #2852 publications persist; #2951 unreadable lookups recover.
 test("native publications remain in Files after scratch removal and restart", async () => {
   const { root, env } = await world();

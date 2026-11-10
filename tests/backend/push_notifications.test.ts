@@ -201,6 +201,24 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     await json(`/api/conversations/${cid}/rename`, { title });
     return cid;
   };
+  const unread = async (cid: string) =>
+    ((await (await api("/api/tree")).json()) as Rec[]).find(
+      (row) => row.id === cid,
+    )?.unread;
+  const acknowledge = async (cid: string) => {
+    const abort = new AbortController();
+    const response = await fetch(
+      `${running.url}/api/conversations/${cid}/events?viewing=true`,
+      { signal: abort.signal },
+    );
+    expect(response.status).toBe(200);
+    const reader = response.body!.getReader();
+    await reader.read();
+    abort.abort();
+    await reader.cancel().catch(() => {});
+    await until(() => !app.instance.notifications.hasViewer(cid));
+    expect(await unread(cid)).toBe(false);
+  };
   const say = async (cid: string, word: string) => {
     const before = reported(cid);
     expect(
@@ -267,7 +285,21 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     expect((await stat(file)).mode & 0o777).toBe(0o600);
 
     const top = await agent("Top agent");
-    await say(top, "alpha");
+    const treeAbort = new AbortController();
+    const treeEvents = await fetch(`${running.url}/api/tree/events`, {
+      signal: treeAbort.signal,
+    });
+    const treeReader = treeEvents.body!.getReader();
+    await treeReader.read();
+    try {
+      await say(top, "alpha");
+      const frame = new TextDecoder().decode((await treeReader.read()).value);
+      expect(frame).toContain('event: changed\ndata: [""]');
+      expect(await unread(top)).toBe(true);
+    } finally {
+      treeAbort.abort();
+      await treeReader.cancel().catch(() => {});
+    }
     await until(() => pushes.length === 1);
     const [first] = pushes;
     expect(first!.path).toBe("/device");
@@ -300,6 +332,9 @@ test("finished notices wait for shells and descendants; top-level and taken-over
       { cid: child, title: "Child agent", body: "Done: gamma" },
     ]);
 
+    expect(await unread(top)).toBe(true);
+    expect(await unread(child)).toBe(true);
+    await acknowledge(child);
     const grandchild = await agent("Grandchild", child);
     await json(`/api/conversations/${grandchild}/deliver`, {
       content: "say slowly",
@@ -310,6 +345,7 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     await json(`/api/conversations/${child}/deliver`, { content: "say eta" });
     await until(() => logged("durable_report_held", child));
     expect(pushes.length).toBe(3);
+    expect(await unread(child)).toBe(false);
     open();
     await until(() => pushes.length === 4);
     expect(notices().at(-1)).toEqual({
@@ -320,12 +356,14 @@ test("finished notices wait for shells and descendants; top-level and taken-over
 
     await app.instance.durable.setSafetyReviewOff(top, true);
     for (const mode of ["shell", "monitor"]) {
+      await acknowledge(top);
       const before = pushes.length;
       const beforeReports = reported(top);
       await say(top, mode);
       await until(() => app.instance.durable.reportHolds.settled(top));
       expect(app.instance.durable.shells(top).active_count).toBe(1);
       expect(pushes.length).toBe(before);
+      expect(await unread(top)).toBe(false);
       await writeFile(join(root, "finish-shell"), "");
       await until(() => reported(top) >= beforeReports + 2);
       await until(() => pushes.length === before + 1);
@@ -341,6 +379,7 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     ).toEqual({ subscribed: false });
     await say(top, "delta");
     expect(pushes.length).toBe(6);
+    expect(await unread(top)).toBe(true);
 
     await json("/api/settings/notifications/devices", {
       subscription: device("/gone"),
@@ -384,7 +423,9 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     try {
       const closeFirst = await view(top);
       const closeSecond = await view(top);
+      expect(await unread(top)).toBe(false);
       await say(top, "viewed");
+      expect(await unread(top)).toBe(false);
       await until(
         () => !app.instance.tasks.names().includes(`agent-notification:${top}`),
       );

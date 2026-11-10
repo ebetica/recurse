@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import type { Browser, Page } from "playwright";
 import captured from "../backend/fixtures/pull_request_diff.json";
 import {
   captureErrors,
@@ -8,6 +9,162 @@ import {
   runBrowserTests,
   type BrowserTest,
 } from "./common";
+
+async function openChanges(page: Page, base: string, cid: string) {
+  await page.goto(`${base}#agent=${cid}`, { waitUntil: "domcontentloaded" });
+  if (page.viewportSize()!.width < 600) {
+    await page.locator("#pane-fab").tap();
+    await page.locator('.pane-menu-item[data-pane="diff"]').tap();
+  } else await page.locator('.rail-btn[data-pane="diff"]').click();
+  return page.locator('.pane-col[data-pane="diff"]');
+}
+
+async function shoot(page: Page, name: string) {
+  const dir = process.env.RECURSE_SCREENSHOT_DIR;
+  if (!dir) return;
+  await mkdir(dir, { recursive: true });
+  await page.screenshot({ path: join(dir, `${name}.png`) });
+}
+
+// Feature: #3183 Changes says what it compares and switches bases by name.
+async function test_changes_base(browser: Browser, base: string) {
+  const { cid, branch, start } = await postFixture(base, "seed-changes-base");
+  const short = String(branch).slice(0, 7);
+  const page = await browser.newPage({
+    viewport: { width: 1280, height: 844 },
+  });
+  const errors = captureErrors(page);
+  const pane = await openChanges(page, base, cid);
+  const label = pane.locator(".diff-base-btn");
+  const since = (name: string) =>
+    label.filter({ hasText: `Changes since ${name}` }).waitFor();
+  const added = (text: string) =>
+    pane.locator(".diff-row.add", { hasText: text });
+  await since("main");
+  await added("branch line").waitFor();
+  expect(await pane.locator(".diff-path").allTextContents()).toEqual(["a.txt"]);
+  const defaultTip = await label.getAttribute("title");
+  expect(defaultTip).toContain(String(start).slice(0, 7));
+  await shoot(page, "changes-since-main-desktop");
+  await label.click();
+  const input = pane.getByRole("combobox", { name: "Show the changes of" });
+  const [inputBox, applyBox, cancelBox] = await Promise.all(
+    [
+      input,
+      pane.locator(".diff-base-apply"),
+      pane.locator(".diff-base-cancel"),
+    ].map((control) => control.boundingBox()),
+  );
+  expect(inputBox!.width).toBeGreaterThan(applyBox!.width + cancelBox!.width);
+  await input.fill("no-such-branch");
+  await input.press("Enter");
+  await pane
+    .locator(".diff-base-error", {
+      hasText: 'No branch, tag or commit named "no-such-branch".',
+    })
+    .waitFor();
+  await input.fill(String(branch));
+  const selectedPatch = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname.endsWith("/diff/files") &&
+      !url.searchParams.has("contents") &&
+      url.searchParams.has("snapshot")
+    );
+  });
+  const selectedContents = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname.endsWith("/diff/files") &&
+      url.searchParams.get("contents") === "1" &&
+      url.searchParams.has("snapshot")
+    );
+  });
+  await input.press("Enter");
+  expect(
+    new URL((await selectedPatch).url()).searchParams.get("snapshot"),
+  ).toBe(`${start}..${branch}`);
+  const contentsResponse = await selectedContents;
+  expect(new URL(contentsResponse.url()).searchParams.get("snapshot")).toBe(
+    `${start}..${branch}`,
+  );
+  const contents = await contentsResponse.json();
+  expect(contents.newContent).toContain("branch line");
+  expect(contents.newContent).not.toContain("uncommitted line");
+  await label.filter({ hasText: `${short} since main` }).waitFor();
+  await added("branch line").waitFor();
+  await added("uncommitted line").waitFor({ state: "detached" });
+  await shoot(page, "changes-since-commit-desktop");
+  const commitTip = await label.getAttribute("title");
+  expect(commitTip).toBe(`Commits after main up to ${short} (1 commit).`);
+  expect(commitTip).not.toBe(defaultTip);
+  await label.click();
+  expect(await pane.getByRole("option").first().textContent()).toBe(
+    "Changes since main (default)",
+  );
+  expect(await pane.locator(".diff-base-section").allTextContents()).toEqual([
+    "Show the changes of",
+    "Change target",
+  ]);
+  await shoot(page, "changes-since-commit-finder-desktop");
+  const defaultPatch = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return (
+      url.pathname.endsWith("/diff/files") &&
+      !url.searchParams.has("contents") &&
+      !url.searchParams.has("snapshot")
+    );
+  });
+  await pane
+    .getByRole("option", { name: "Changes since main (default)" })
+    .click();
+  await since("main");
+  expect((await (await defaultPatch).json()).patch).toContain(
+    "+uncommitted line",
+  );
+  await added("uncommitted line").waitFor();
+  await label.click();
+  await input.fill("HEAD");
+  await input.press("Enter");
+  await label.filter({ hasText: "Uncommitted changes" }).waitFor();
+  await added("branch line").waitFor({ state: "detached" });
+  await label.click();
+  await pane
+    .getByRole("option", { name: "Changes on this branch (default)" })
+    .click();
+  await since("main");
+  await added("branch line").waitFor();
+  const phone = await browser.newPage({
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  });
+  const phonePane = await openChanges(phone, base, cid);
+  await phonePane
+    .locator(".diff-base-btn", { hasText: "Changes since main" })
+    .waitFor();
+  await phonePane.locator(".diff-row.add").first().waitFor();
+  await phonePane.locator(".diff-base-btn").click();
+  const phoneInput = phonePane.getByRole("combobox", {
+    name: "Show the changes of",
+  });
+  await phoneInput.fill(String(branch));
+  await phoneInput.press("Enter");
+  await phonePane
+    .locator(".diff-base-btn", { hasText: `${short} since main` })
+    .waitFor();
+  await phonePane
+    .locator(".diff-row.add", { hasText: "branch line" })
+    .waitFor();
+  await shoot(phone, "changes-in-commit-phone");
+  await phonePane.locator(".diff-base-btn").click();
+  await phonePane
+    .getByRole("option", { name: "Changes since main (default)" })
+    .click();
+  expect(errors).toEqual([]);
+  await phone.close();
+  await page.close();
+}
 
 export const tests: BrowserTest[] = [false, true].map(
   (mobile) =>
@@ -141,6 +298,7 @@ export const tests: BrowserTest[] = [false, true].map(
       expect(await description.locator("h2").first().textContent()).toBe(
         "Summary",
       );
+      await description.locator("code").first().waitFor({ state: "attached" });
       expect(await description.locator("code").count()).toBeGreaterThan(0);
       const measurement = await page.waitForFunction(
         (id) => {
@@ -213,7 +371,7 @@ export const tests: BrowserTest[] = [false, true].map(
       await title.scrollIntoViewIfNeeded();
       expect(await more.getAttribute("aria-expanded")).toBe("false");
       expect(await pane.locator(".diff-base-btn").textContent()).toContain(
-        "vs main",
+        "into main",
       );
       for (const mode of ["Unified", "Split"]) {
         await pane.getByLabel("Changes options", { exact: true }).click();
@@ -285,7 +443,7 @@ export const tests: BrowserTest[] = [false, true].map(
       expect(delivered[0]).toContain(captured.pr.url);
       await pane.locator(".diff-base-btn").click();
       await pane.getByRole("option", { name: /Working directory/ }).click();
-      await pane.locator(".diff-base-btn", { hasText: "vs auto" }).waitFor();
+      await pane.locator(".diff-base-btn", { hasText: "Changes" }).waitFor();
       expect(await pane.locator(".diff-pr").count()).toBe(0);
       expect(await pane.locator(".diff-file").count()).toBe(0);
       expect(await pane.locator(".diff-pr-summary").count()).toBe(0);
@@ -293,8 +451,18 @@ export const tests: BrowserTest[] = [false, true].map(
         .split("\n")
         .find((line) => line.startsWith("- "))!
         .slice(2);
-      await pane.locator(".diff-base-btn").click();
-      await pane.getByRole("option", { name: /#2069/ }).click();
+      if (mobile) {
+        await pane.locator(".diff-base-btn").click();
+        await pane.getByRole("option", { name: /#2069/ }).click();
+      } else {
+        await pane.locator(".pane-body").focus();
+        await page.keyboard.press("o");
+        await page.locator("#pane-finder-query").fill("changes/2069");
+        expect(
+          await page.locator("#pane-finder .pane-option").first().textContent(),
+        ).toBe(`changes/#2069 ${captured.pr.title}`);
+        await page.keyboard.press("Enter");
+      }
       await page.waitForFunction(
         (expected) =>
           (globalThis as any).document
@@ -310,8 +478,21 @@ export const tests: BrowserTest[] = [false, true].map(
         ),
       ).toBe("none");
       await shot("description-short");
+      if (!mobile) {
+        await pane.locator(".pane-body").focus();
+        await page.keyboard.press("o");
+        await page.locator("#pane-finder-query").fill("file/notes");
+        expect(
+          await page.locator("#pane-finder .pane-option").first().textContent(),
+        ).toBe("file/browser-notes.txt");
+        await page.keyboard.press("Enter");
+        await page
+          .locator(".dv-tab", { hasText: "browser-notes.txt" })
+          .waitFor();
+      }
       expect(errors).toEqual([]);
       await context.close();
     },
 );
+tests.push(test_changes_base);
 if (import.meta.main) await runBrowserTests([["pr-diff", tests]]);

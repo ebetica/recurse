@@ -39,6 +39,8 @@ export function resolveLAction(
 
 export interface ForestProjectionOptions {
   collapsed?: ReadonlySet<string>;
+  /** Agents explicitly opened by the operator, even after selection moves. */
+  expanded?: ReadonlySet<string>;
   /** The first visual depth whose descendants fold by default. */
   autoCollapseDepth?: number;
   maxDepth?: number;
@@ -96,7 +98,8 @@ export function projectAgentForest(
     const autoCollapsed =
       hasChildren &&
       depth >= autoCollapseDepth &&
-      !selectedLineage.has(node.id);
+      !selectedLineage.has(node.id) &&
+      !options.expanded?.has(node.id);
     const collapsed =
       hasChildren &&
       (manuallyCollapsed.has(node.id) || autoCollapsed || capped);

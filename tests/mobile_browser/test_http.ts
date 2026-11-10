@@ -1,4 +1,8 @@
 import { expect } from "bun:test";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { retire } from "../../src/utils/trash";
 import { chromium, type Page } from "playwright";
 import {
   captureErrors,
@@ -54,6 +58,7 @@ export const tests: BrowserTest[] = [
     let page: Page | undefined;
     let errors: string[] = [];
     let releaseUpload = () => {};
+    let fileRoot: string | undefined;
     try {
       browser = await chromium.launch({
         headless: true,
@@ -97,6 +102,43 @@ export const tests: BrowserTest[] = [
         ),
       ).toBeTrue();
       await page.locator(".agent").first().waitFor();
+
+      fileRoot = await mkdtemp(join(tmpdir(), "browser-http-file-"));
+      const fileText = "# File preview over HTTP\n";
+      await writeFile(join(fileRoot, "http-file.md"), fileText);
+      const fileFixture = await page.evaluate(async (workdir) => {
+        const response = await fetch(
+          "/__browser-test/seed-model-selection-error",
+          {
+            method: "POST",
+            body: JSON.stringify({
+              agent: "http-explorer",
+              model: "fauxordinary/faux-1",
+              workdir,
+            }),
+          },
+        );
+        if (!response.ok) throw new Error(`seed HTTP file: ${response.status}`);
+        return (await response.json()) as { agent: string };
+      }, fileRoot);
+      await page.goto(`${base}#agent=${fileFixture.agent}`);
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page
+        .locator(`.agent.selected[data-id="${fileFixture.agent}"]`)
+        .waitFor();
+      await page
+        .locator("#conv-freshness:not(.on)")
+        .waitFor({ state: "attached" });
+      await page.locator('.rail-btn[data-pane="explorer"]').click();
+      await page.locator('.explorer-row[data-path="http-file.md"]').click();
+      const file = page.locator(".pane-col.file-tab .explorer-source", {
+        hasText: fileText.trim(),
+      });
+      await file.waitFor();
+      expect(await file.textContent()).toBe(fileText);
+      expect(
+        await page.locator(".dv-tab", { hasText: "http-file.md" }).count(),
+      ).toBe(1);
 
       const composer = await seedImage(page);
       await openConversation(page, base, composer.demo);
@@ -253,6 +295,9 @@ export const tests: BrowserTest[] = [
                     browser.document.querySelector("#conv-title")?.textContent,
                   messagesClass:
                     browser.document.querySelector("#messages")?.className,
+                  explorerNotice:
+                    browser.document.querySelector(".explorer-status")
+                      ?.textContent,
                   selectedRows: Array.from(
                     browser.document.querySelectorAll(".agent.selected"),
                     (row: any) => ({
@@ -273,6 +318,7 @@ export const tests: BrowserTest[] = [
       releaseUpload();
       await browser?.close();
       await stopServer(server);
+      if (fileRoot) retire(fileRoot, join(tmpdir(), ".trash"));
     }
   },
 ];

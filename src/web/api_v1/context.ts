@@ -14,5 +14,11 @@ export function agentContext(
   const usage = contextOccupancy(sample, config.chatSettings(model)[0], config);
   return usage.tokens === null
     ? null
-    : { tokens: usage.tokens, window: usage.window };
+    : {
+        tokens: usage.tokens,
+        window: usage.window,
+        ...(typeof sample.session === "string"
+          ? { session: sample.session }
+          : {}),
+      };
 }

@@ -66,7 +66,14 @@ new child and rebuilds indexes lazily. Host shutdown drains searches and stops
 the registered process group. The child exits when its parent IPC disconnects.
 
 The [native-tool adapter](extra/fff/pi_tool_adapter.ts) shortens search help;
-pi-fff's parameter validators and search execution stay unchanged.
+pi-fff's parameter validators and search execution stay unchanged. Explorer
+borrows the same conversation-owned connection and calls `find` with its
+current cwd and a 50-result limit. The package patch includes structured paths
+in find metadata, avoiding parsing formatted tool text. The HTTP boundary
+admits the root and returns the filename page unchanged; the browser highlights
+its matched characters. File-opening checks do not filter filename results.
+No separate index, cache, timeout or idle policy is added for Explorer. A caller
+without an existing conversation connection opens and closes a normal bundle.
 
 ## On-demand MCP tools
 

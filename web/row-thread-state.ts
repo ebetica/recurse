@@ -44,6 +44,11 @@ export function rowThreadContextKey(id: string): string {
 const rowThreadCleared = new Map<string, ClearedMarker>();
 const MAX_ROW_THREADS = 100;
 
+/** A confirmed Clear is still waiting for a fresh-session view. */
+export function rowThreadClearPending(id: string): boolean {
+  return rowThreadCleared.has(id);
+}
+
 // True when the page carries nothing newer than a confirmed Clear: the drop
 // already emptied this thread, so applying the page would resurrect history.
 // Resolve rule lives in row-thread.clearedPageStale (unit-tested there).

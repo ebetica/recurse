@@ -60,6 +60,8 @@ export const DURABLE_METADATA_KEYS: ReadonlySet<string> = new Set([
   "operator_message_at",
   "replied_at",
   "replied_run",
+  "finished_run",
+  "unread",
   "tags",
   "tmp_key",
   "external_key",
@@ -1162,6 +1164,26 @@ export class ConversationStore {
     if (!(await this.agentStore.flush(cid)))
       throw new Error("reply stamp flush failed");
   }
+  /** Record a qualifying finish once, even if its report is replayed. */
+  async finishUnread(cid: string, key: string, unread: boolean): Promise<void> {
+    const current = this.projection.get(cid);
+    if (!current) return;
+    if (
+      current.finished_run !== key &&
+      !this.patch(cid, { finished_run: key, unread })
+    )
+      return;
+    if (!(await this.agentStore.flush(cid)))
+      throw new Error("finished state flush failed");
+  }
+  /** Opening a visible main conversation acknowledges its latest finish. */
+  async markViewed(cid: string): Promise<void> {
+    const current = this.projection.get(cid);
+    if (!current || typeof current.finished_run !== "string") return;
+    if (current.unread === true && !this.patch(cid, { unread: false })) return;
+    if (!(await this.agentStore.flush(cid)))
+      throw new Error("viewed state flush failed");
+  }
   /**
    * Apply one tag change for `by` to each of `cids`; returns the ids not
    * found. A TagRefused for any conversation changes none of them.
@@ -1251,10 +1273,16 @@ export class ConversationStore {
             }
           }
         }
-        // Invariant: Only updatePrs, stampReply and changeTags own existing
-        // fields; creation may supply initial tags. Stale snapshots never erase
-        // values admitted while they were running.
-        for (const key of ["prs", "replied_at", "replied_run", "tags"])
+        // Invariant: Dedicated metadata writers own these fields; creation
+        // may supply initial tags. Stale snapshots never erase admitted values.
+        for (const key of [
+          "prs",
+          "replied_at",
+          "replied_run",
+          "finished_run",
+          "unread",
+          "tags",
+        ])
           if (current && key in current)
             record[key] = structuredClone(current[key]);
           else if (current || key !== "tags") delete record[key];

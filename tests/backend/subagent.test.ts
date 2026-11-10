@@ -6,9 +6,15 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
+import {
+  privateEnv,
+  startPrivateServer,
+  stopPrivateServer,
+} from "../dev/private_server";
 
 interface Case {
   name: string;
@@ -299,6 +305,132 @@ async function runOne(spec: Case): Promise<{
     rmSync(root, { recursive: true, force: true });
   }
 }
+
+// Feature: #3172 CLI and HTTP moves preserve the subtree and worktree when returning an agent to top level.
+test("subagent move returns a live agent to top level", async () => {
+  const root = await mkdtemp(join(tmpdir(), "subagent-move-"));
+  const data = join(root, "data");
+  const probe = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response(),
+  });
+  const port = probe.port!;
+  await probe.stop(true);
+  if (!port || port === 8000)
+    throw new Error("An explicit free test port is required");
+  const env = privateEnv(root, data, {
+    RECURSE_AGENT_ID: "",
+    PORT: String(port),
+  });
+  await mkdir(join(root, "repo"), { recursive: true });
+  await mkdir(data, { recursive: true });
+  let owned: { pid: number; exited: Promise<number> } | undefined;
+  try {
+    const server = await startPrivateServer({
+      env,
+      logFile: join(root, "server.log"),
+      port,
+      owned: (pid, exited) => {
+        owned = { pid, exited };
+      },
+      signal: new AbortController().signal,
+    });
+    const { token } = JSON.parse(
+      await readFile(join(data, "server.json"), "utf8"),
+    );
+    const headers = {
+      cookie: server.cookie,
+      "x-loopback-token": token,
+      "x-recurse-bundled-tool": "subagent",
+      "content-type": "application/json",
+    };
+    const post = (path: string, body: unknown) =>
+      fetch(`${server.base}${path}`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(body),
+      });
+    const create = async (parent: string | null = null) => {
+      const response = await post("/api/conversations", { parent });
+      expect(response.status).toBe(200);
+      return ((await response.json()) as { id: string }).id;
+    };
+    const agent = async (id: string) => {
+      const response = await fetch(`${server.base}/api/v1/agents/${id}`, {
+        headers,
+      });
+      expect(response.status).toBe(200);
+      return (await response.json()) as {
+        parent: string | null;
+        workdir: string;
+      };
+    };
+    const run = (...args: string[]) =>
+      captureFixture(["bun", tool, ...args], { env });
+    const first = await create();
+    const second = await create();
+    const child = await create(first);
+    const grandchild = await create(child);
+    const workdir = (await agent(child)).workdir;
+    expect(workdir).toBe(join(root, "repo"));
+    for (const args of [
+      ["move", child],
+      ["move", child, "--to", second, "--top-level"],
+    ]) {
+      const result = await run(...args);
+      expect(result.exitCode).toBe(2);
+      expect(result.stderr.toString()).toContain(
+        "choose exactly one of --to or --top-level",
+      );
+      expect((await agent(child)).parent).toBe(first);
+    }
+    const moved = await run("move", child, "--to", second);
+    expect(moved.exitCode, moved.stderr.toString()).toBe(0);
+    expect((await agent(child)).parent).toBe(second);
+    expect(
+      (
+        await post(`/api/conversations/${second}/reparent`, {
+          parent: grandchild,
+        })
+      ).status,
+    ).toBe(409);
+    for (const body of [{}, { parent: "" }, { parent: 42 }])
+      expect(
+        (await post(`/api/conversations/${child}/reparent`, body)).status,
+      ).toBe(422);
+    const detached = await run("move", child, "--top-level");
+    expect(detached.exitCode, detached.stderr.toString()).toBe(0);
+    expect(detached.stdout.toString()).toContain("will become top-level");
+    expect(await agent(child)).toMatchObject({ parent: null, workdir });
+    expect((await agent(grandchild)).parent).toBe(child);
+    const repeated = await run("move", child, "--top-level");
+    expect(repeated.exitCode, repeated.stderr.toString()).toBe(0);
+    expect(repeated.stdout.toString()).toContain("already top-level");
+    const reattached = await post(`/api/conversations/${child}/reparent`, {
+      parent: first,
+    });
+    expect(reattached.status).toBe(200);
+    const response = await post(`/api/conversations/${child}/reparent`, {
+      parent: null,
+    });
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      ok: true,
+      from: first,
+      to: null,
+      moved: true,
+    });
+    expect(await agent(child)).toMatchObject({ parent: null, workdir });
+  } catch (error) {
+    throw new Error(await readFile(join(root, "server.log"), "utf8"), {
+      cause: error,
+    });
+  } finally {
+    if (owned) await stopPrivateServer(owned.pid, owned.exited);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 function createArgs(...options: string[]): string[] {
   return ["create", "--title", "Kid", ...options, "task"];

@@ -206,7 +206,7 @@ export interface BaseCandidateLists {
 export interface BaseCandidate {
   // The exact string sent as ?base=/PATCH base (a commit's short sha).
   value: string;
-  kind: "branch" | "commit" | "tag" | "pr" | "worktree";
+  kind: "branch" | "commit" | "tag" | "pr" | "worktree" | "default";
   // What the finder row shows; for commits the full "<sha> <subject>" line.
   label: string;
   repo?: string;
@@ -223,13 +223,23 @@ export function groupPrCandidates(
     groups.get(repo)!.push(candidate);
   }
   return [
+    ...candidates.filter((c) => c.kind === "default"),
+    ...candidates.filter(
+      (c) => c.kind !== "pr" && c.kind !== "worktree" && c.kind !== "default",
+    ),
     ...candidates.filter((c) => c.kind === "worktree"),
     ...[...groups.values()].flat(),
-    ...candidates.filter((c) => c.kind !== "pr" && c.kind !== "worktree"),
   ];
 }
 
 export const MAX_FINDER_RESULTS = 10;
+
+/** A base as the pane names it: "main" for origin/main, 7-digit commits. */
+export function baseName(ref: string): string {
+  return /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/i.test(ref)
+    ? ref.slice(0, 7)
+    : ref.replace(/^origin\//, "");
+}
 
 export function flattenBaseCandidates(
   lists: BaseCandidateLists | null | undefined,
@@ -274,10 +284,8 @@ export async function baseErrorText(
   } catch {
     detail = "";
   }
-  const what = value ? `"${value}"` : "an empty base";
-  if (r.status === 422)
-    return `${what} isn't a usable base ref${detail ? ": " + detail : "."}`;
-  return `Couldn't change the base${detail ? ": " + detail : " (HTTP " + r.status + ")."}`;
+  if (r.status === 422) return `"${value}" isn't a branch, tag or commit.`;
+  return `Couldn't change the comparison${detail ? ": " + detail : " (HTTP " + r.status + ")."}`;
 }
 
 // Filter-as-you-type over labels. An empty query returns the head of the

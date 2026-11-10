@@ -18,6 +18,8 @@ export const SESSION_REPAIR_KEY =
 export const MAX_COMPOSER_DRAFT_CHARS = 100_000;
 // Plugin payloads plus metadata must fit the smaller local tier.
 export const MAX_PLUGIN_STATE_CHARS = 3000;
+export const WINDOW_LAYOUT_STATE_KEY = "window-layout";
+export const MAX_WINDOW_LAYOUT_CHARS = 32_000;
 export const MAX_LOCAL_RECORD_CHARS = 64_000;
 export const MAX_SESSION_RECORD_CHARS = 256_000;
 export const MAX_PANE_STATES = 16;
@@ -112,11 +114,19 @@ export function validStateKey(value: string): boolean {
   );
 }
 
-export function jsonClone(value: unknown): unknown | undefined {
+export function paneStateLimit(key: string): number {
+  return key === WINDOW_LAYOUT_STATE_KEY
+    ? MAX_WINDOW_LAYOUT_CHARS
+    : MAX_PLUGIN_STATE_CHARS;
+}
+
+export function jsonClone(
+  value: unknown,
+  limit = MAX_PLUGIN_STATE_CHARS,
+): unknown | undefined {
   try {
     const serialized = JSON.stringify(value);
-    if (serialized === undefined || serialized.length > MAX_PLUGIN_STATE_CHARS)
-      return undefined;
+    if (serialized === undefined || serialized.length > limit) return undefined;
     return JSON.parse(serialized) as unknown;
   } catch {
     return undefined;

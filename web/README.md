@@ -1,89 +1,75 @@
 # Browser app
 
-The browser app is strict TypeScript. The build bundles [app.ts](app.ts) and,
-separately, [sidebar-worker.ts](sidebar-worker.ts), the worker that runs
-sidebar scripts;
-[index.html](index.html) loads the page shell and built assets. The server owns
-durable conversation state; the browser holds view state and unsent drafts.
-[conversation/poll.ts](conversation/poll.ts) reads the tree and the open
-conversation and subscribes to its live updates.
+[app.ts](app.ts) and [sidebar-worker.ts](sidebar-worker.ts) are separate
+TypeScript bundles loaded by [index.html](index.html). The server owns durable
+conversations; the browser owns view state and unsent drafts.
+[conversation/poll.ts](conversation/poll.ts) reads and subscribes to live state.
 
 **Source files:**
 
-- [conversation/](conversation/) and [thread-render.ts](thread-render.ts)
-  render conversations; [composer.ts](composer.ts), [composer/](composer/)
-  and [attachments.ts](attachments.ts) send input and uploads.
-  [conversation/draft-tags.ts](conversation/draft-tags.ts) shows the optional
-  tag control on top-level drafts, sharing the sidebar picker and tag defaults.
-- [sidebar.ts](sidebar.ts), [deep-link.ts](deep-link.ts) and
-  [agent-finder.ts](agent-finder.ts) navigate the agent tree.
-  [sidebar/](sidebar/) groups local and remote top-level rows into sections with row and
-  section actions, using the instance's sidebar script
-  ([sidebar/script.ts](sidebar/script.ts)) or the built-in
-  [sidebar/default_sidebar.js](sidebar/default_sidebar.js) (Inbox, Active and
-  Archive).
-- [panes.ts](panes.ts), [artifacts/](artifacts/), [files.ts](files.ts) and
-  [diff.ts](diff.ts) provide side panels. [side-pane.ts](side-pane.ts) displays
-  read-only side conversations. [tips/](tips/README.md) shows a tip after each
-  hour of use.
-- [models.ts](models.ts), [settings.ts](settings.ts) and [settings/](settings/)
-  configure the app; [keymap.ts](keymap.ts) handles keyboard controls.
-- [api.ts](api.ts), [backends/](backends/) and [connection.ts](connection.ts)
-  handle requests and connection state. [prompt.ts](prompt.ts) shows captured
-  model requests.
+- [conversation/](conversation/), [thread-render.ts](thread-render.ts),
+  [composer/](composer/) and [attachments.ts](attachments.ts): rendering,
+  input and uploads. [conversation/draft-tags.ts](conversation/draft-tags.ts)
+  shares the sidebar's tag picker and defaults.
+- [sidebar/](sidebar/), [sidebar.ts](sidebar.ts), [deep-link.ts](deep-link.ts)
+  and [agent-finder.ts](agent-finder.ts): tree navigation. Sections use the
+  instance's [script](sidebar/script.ts) or the [default](sidebar/default_sidebar.js)
+  Inbox, Active and Archive sections.
+- [dock/](dock/README.md), [panes.ts](panes.ts), [artifacts/](artifacts/), [files.ts](files.ts),
+  [explorer.ts](explorer.ts), [diff.ts](diff.ts) and [side-pane.ts](side-pane.ts):
+  panels and read-only side conversations. [tips/](tips/README.md) shows hourly tips.
+- [models.ts](models.ts), [settings/](settings/) and [keymap.ts](keymap.ts):
+  settings and keys. [pane-finder.ts](pane-finder.ts) fuzzy-searches offered panes.
+- [api.ts](api.ts), [backends/](backends/) and [connection.ts](connection.ts):
+  requests and connections. [prompt.ts](prompt.ts) shows captured model requests.
 
 ## Views and connections
 
-Conversation rendering uses server projections and pages older history as
-needed. Live polls retain loaded history; a reset of the same resident view and
-session replaces its served range while retaining settled rows before it. Navigation preserves the reader's position without letting work from
-one conversation move another. Pending reads from a departed conversation never
-replace a new draft or the newly selected conversation. Loading the open conversation is the critical
-path; background work and caching must not delay it. Navigation cancels departed
-background work before registering the new conversation's pane probes, including
-warming its parked Side frame.
-Foreground operator sends enter through
-[conversation/operator-send.ts](conversation/operator-send.ts), which applies
-the open thread's scroll policy before enqueueing or delivering. Composer jobs
-and persisted comment attempts reuse its transport without scrolling on retries
-or restoration. Stops use a separate typed transport without message content.
-`tests/checks/operator_send_check.ts` rejects direct delivery elsewhere and
-restricts transport calls and foreground outbox enqueueing to their owners.
-A send to an idle agent, including image and Artifact comments, follows the
-reply's bottom until the start of the sent message reaches the viewport top,
-then holds there until the reader scrolls or
-jumps. Short replies add no empty space or scrolling. Once the reader scrolls
-away, repaints hold their visible row even when a new live reply temporarily
-shortens the thread; a layout clamp never resumes bottom following. An explicit
-jump to latest resumes following, including when a repaint lands during its
-smooth scroll. The running
-turn's live panel sits above the composer, outside the thread
-([conversation/thread.ts](conversation/thread.ts)). It retains the current turn's
-latest thinking title and expandable text while tools or the next model call
-run, including after reload. A newer thinking block replaces it, even when the
-provider supplies only encrypted or redacted thinking. The header says Thinking
-only while the thought is live, then Waiting with its last readable title.
-Expanded prose omits a repeated title and bold Markdown delimiters.
-Server-compacted history shows a plain marker instead of a summary disclosure;
-its earlier messages and jump-to-first-kept-message link remain available.
-Prompt-cache refresh usage adds to the turn’s cost and token totals without
-counting another assistant reply; it never replaces the turn’s existing usage.
-The context footer reuses committed usage already included in tree snapshots.
-Cold or older backends retain the selected-conversation usage read; the detailed
-breakdown still loads when opened.
+Conversation views page server projections. Live polls retain loaded history;
+resetting the resident view/session replaces its served range but keeps earlier
+settled rows. Navigation preserves reading position and fences departed reads
+from the new conversation or draft. Deletes cancel reads. Loading the open
+conversation takes priority over background work and caching. Departed work is canceled before registering
+new pane probes or warming the parked Side frame.
+The composer's `/rename <title>` shares the sidebar's ordered optimistic rename
+for local and remote conversations, without sending a message. Bare `/rename`
+shows usage; command-menu selection inserts the title prefix.
+[composer/file-finder.ts](composer/file-finder.ts) completes `#filename` with
+quoted paths. Async finders keep rows until newer responses arrive.
 
-Visible main conversation streams report `viewing=true` so the server skips
-agent-finished pushes while the operator is reading that conversation. Hidden
-tabs and the phone agent list close their stream; embedded side conversations
-never report a viewer. Received pushes always show a notification, avoiding
-browsers' generic background-update notices. Notification clicks focus a top-level
-root app page and send it the conversation selection, preferring one already
-showing that conversation. Other same-origin documents and embedded views are
-not app windows. If no app page can be focused, the worker opens an absolute
-same-origin root URL with the conversation fragment and explicitly focuses the
-returned client. The normal authenticated boot path restores that conversation
-without an opener. Existing app clients are found even before the worker controls
-them; other browser profiles and discarded tabs may have no live client to reuse.
+[conversation/operator-send.ts](conversation/operator-send.ts) applies the open
+thread's scroll policy before foreground enqueue/delivery. Composer jobs and
+persisted comments reuse its transport without scrolling on retry/restoration.
+Stops have a separate typed transport without message content.
+`tests/checks/operator_send_check.ts` confines delivery and foreground enqueueing
+to their owners. Sends to idle agents, including image/Artifact comments, follow
+the reply bottom until the sent message reaches the viewport top, then hold until
+reader movement. Short replies add no blank space or scrolling. After a reader
+scrolls away, repaints hold the visible row even if a live reply shortens the
+thread; layout clamps never resume following. Disclosure controls stay fixed
+through delayed layout until reader movement. Hidden scrolls retain position
+and following until visible. Jump to latest resumes following through repaints.
+The live panel above the composer, outside the thread
+([conversation/thread.ts](conversation/thread.ts)), retains the turn's latest
+thinking title and expandable text through tools, model calls and reloads. Newer
+thinking replaces it, even if encrypted/redacted. Its header says Thinking only
+while live, then Waiting with the last readable title. Expanded prose omits the
+repeated title and bold delimiters. Compacted history uses a plain marker;
+earlier messages and the jump-to-first-kept link remain available.
+Prompt-cache refresh adds cost/tokens to the turn, not another reply.
+The context footer stays blank while Clear rotates history. Tree usage must
+match loaded history, or it reads selected usage. Details load on opening.
+Usage names the served model; a downgraded latest reply shows a ! button.
+
+Visible main streams report `viewing=true` to suppress agent-finished pushes.
+Hidden tabs and the phone list close streams; embedded Side views never report
+a viewer or discover panes, even when a tree read finishes after parking.
+Every received push shows a notification. Clicking focuses a root app page and
+selects the conversation, preferring a page already showing it; other same-origin
+documents and embedded views are not app windows. Without a focusable app page,
+the worker opens and focuses an absolute same-origin root URL with the conversation
+fragment. Authenticated boot restores it without an opener. Clients are discoverable
+before worker control; other profiles or discarded tabs may have none to reuse.
 
 Backend-bound requests use the same UI for home and remote conversations.
 Remote health is isolated from home health, and the remote's key policy remains
@@ -100,7 +86,8 @@ Artifact and image comments persist for background sending and retry; crop
 storage preserves the original pixels. Comment send controls stay outside native
 text selections, including when they appear after a paragraph is selected.
 Scroll events queued before a selection gesture do not cancel its comment offer.
-The send bar updates when a selection draft opens or closes, without waiting for
+Adding a selection comment focuses its card immediately, without overriding a
+later reader focus change. The send bar updates when a selection draft opens or closes, without waiting for
 a pane refresh. Cmd/Ctrl+Enter in a comment popover stages the draft without
 opening the comment list and returns focus to the viewer; the next shortcut
 submits the staged batch. Submitting comments closes the pane; reopening preserves the
@@ -108,29 +95,67 @@ reading position on desktop and phones without reloading unchanged documents. Se
 [artifacts/comment-outbox.ts](artifacts/comment-outbox.ts) and
 [artifacts/crop-store.ts](artifacts/crop-store.ts).
 [image-preview/README.md](image-preview/README.md) describes preview gestures.
-Thread images show a compact filename footer with the full label in its tooltip.
-Published image frames reserve space while loading so off-screen images stay lazy,
-then follow the image's proportions within their size caps;
-operator uploads and allowed Markdown images use the same footer style.
-Inline captions read the admitted filename with a cached metadata-only request;
-Markdown descriptions remain image alt text, never the filename source.
+Thread images keep compact filename footers, full-name tooltips and reserved space
+for lazy loading. Diagrams stage outside the flex row.
+Inline captions read the filename from cached metadata, never Markdown alt text.
 Artifact raster previews live in the Artifacts pane, not inline in the thread.
-Files keeps failed deletions visible through background list refreshes; Retry
-retries the deletion rather than reloading the list.
+Closed Artifact list reads update availability on completion for the visible conversation.
+[Files](files/README.md) opens desktop file tabs beside Chat; phones keep in-place previews.
 
-On phones, the agent list is the full-screen root, with New agent and Settings
-in its header. Opening an agent adds one conversation above the list; switching
-agents replaces that entry. Browser Back and the title-bar arrow return to the
-list, including after a direct link or reload. Back at the list is left to the
-browser. New agent and More stay in the conversation title bar; pane counts
-appear in the More menu, and Artifacts attention appears on More. The composer
-uses the full width. Direct Artifact links open above the conversation. Opening
-Files from an image closes the viewer's history step before opening the pane.
-Starting a draft from a phone pane removes that pane's history step once;
-replaying the resulting draft entry preserves the draft and its text.
-Desktop, tablet and embedded navigation are unchanged. A vertical touch drag
-on the phone thread closes the keyboard without changing the draft or caret;
-composer gestures, mouse scrolling and automatic thread movement keep focus.
+Phones use the full-screen agent list as root, with New agent and Settings.
+Opening adds one conversation history entry; switching replaces it. Back/title
+arrow return to the list, including after direct links/reloads; root Back belongs
+to the browser. Headers keep New agent/More. More opens at Delete above the fade,
+with counts and Artifacts attention. The composer is full width. Artifact links
+open above the conversation; Files from an image closes the viewer's history step.
+Pane drafts consume its history step once; replay preserves text. Tablet/embedded
+navigation is unchanged. Vertical thread touch drags dismiss the keyboard without
+changing draft/caret; composer, mouse and automatic movement retain focus.
+
+Desktop Settings is a gear beside Delete; the icon rail is on the right.
+Shift+H toggles the list. No Dialog badge.
+
+## Changes
+
+By default Changes shows the folder's changes, uncommitted edits included. A
+typed branch, tag or commit shows that committed work: a merged commit's own
+change, or unmerged work since main or the nearest ancestor branch. HEAD means
+uncommitted changes; pull requests keep their GitHub diff.
+
+## Working-folder Explorer
+
+[explorer.ts](explorer.ts) adds Explorer to the desktop rail and phone menu;
+[explorer.css](explorer.css) uses shared tokens and button classes. Opening or
+refreshing follows the agent's latest folder unless staged comments retain the
+loaded file snapshot. Folders load one page; Show more pages and collapsing drops
+children. About 1,000 rows are retained; replacement notices offer Refresh folder.
+There is no recursive download or probe of closed files. Desktop files open in
+tabs beside Chat; Explorer keeps its tree and search. Reopening selects the same
+folder/path's existing tab. [panes/file-tabs.ts](panes/file-tabs.ts) bounds tabs and
+definitions; descriptors use the existing window-layout store. Restoration reads
+named tabs after the conversation paints. Unavailable files are skipped for the
+visit without changing the saved layout. Phones keep in-place previews.
+
+Read-only UTF-8 previews offer Download and chunked Load more, capped at 256K
+characters; remaining or non-text content is download-only. Credential files,
+symlinks and special files are marked unavailable and cannot be opened.
+HTML Preview uses the [offline viewer](document-preview.ts).
+
+Selecting text stages the same quote-and-line comments as Files and Artifacts.
+Comments include the opened file's absolute path and go through the shared
+submission outbox. Loading more text preserves existing marks and line offsets.
+File tabs show the path and Download; their Files button stays on phones only.
+On desktop, `h` focuses Explorer without discarding a file tab's notes;
+closing its tab uses the shared discard guard. Phones ask before replacing an
+annotated preview. Escape preserves the annotated body in the bounded pane cache.
+Reopening resolves the current working folder but reuses that body and its notes.
+Conversation changes use the shared unsent-comment guard.
+
+Filename search debounces and aborts superseded reads through the agent's fff
+service, preserving names/order, including unavailable entries. Matches are
+highlighted; field arrows choose, Enter opens and Escape clears. Leaving aborts
+reads. Desktop vim keys (j/k, gg/G, l/h, /, y, [ ]) move, open, search, copy paths
+and step through loaded files; phones keep native controls.
 
 ## HTTP and browser capabilities
 
@@ -169,15 +194,24 @@ awaits, and server idempotency handles crash recovery.
 
 ## Settings
 
-Settings keeps its category sidebar on desktop and a category list on phones.
-Rows show current values or switches in rounded groups. Editors, provider
-sign-in actions, usage and model pickers stay inline on desktop. On phones,
-rows open the same controls in labelled modal sheets; Escape and Done return
-to the row. Resizing preserves edits without leaving a sheet open on desktop.
-Nested model pickers preserve unsaved effort-level edits until the ladder is
-saved. Safe preferences such as themes save on change; credentials, passwords
-and model policy retain their explicit confirmation actions. The prompt-cache
-warming switch saves directly from the Models overview.
+Settings uses a desktop category sidebar and phone category list, with rounded
+value/switch rows. Editors, provider sign-in, usage and model pickers stay inline
+on desktop; phones use labelled sheets with Escape/Done returning to the row.
+Resizing preserves edits and closes desktop sheets. Nested model pickers retain
+unsaved effort edits until the ladder is saved. Safe preferences autosave;
+credentials, passwords and model policy require confirmation. Prompt-cache
+warming saves directly in Models. Unsent work blocking an update marks the gear
+with an upper-right dot and accessible label. Its message and Retry action sit
+below categories, not the composer, with a 44px phone target.
+
+## Document previews
+
+[document-preview.ts](document-preview.ts) lazily mounts Files views.
+[Its worker](document-preview.worker.ts) loads Mammoth, SheetJS, pptxtojson,
+notebookjs and inert LinkeDOM. Conversion is capped, cancellable and worker-only.
+Signature-based ZIP bounds and DOMPurify protect an opaque CSP frame:
+raster data images only; no scripts, network, links, embeds, CSS or same-origin
+access. Failures retain Download.
 
 ## Styles and assets
 
@@ -186,8 +220,10 @@ inline icons. Sidebar action overlays fade into the current row surface, sharing
 its background token and leaving selection outlines visible. Installed Android
 apps use fullscreen display; mobile chrome and Settings keep controls clear of
 display cutouts using safe-area insets.
-[brand/](brand/) contains the default brand assets;
-[../src/branding.ts](../src/branding.ts) owns instance branding.
+[brand/](brand/) holds the default ouroboros mark; its SVGs and PNG icons come
+from one outline traced from [logo.png](brand/logo.png).
+[../src/branding.ts](../src/branding.ts) owns instance branding: a custom icon
+replaces the mark, favicons and manifest icons.
 
 ## Rules for changes
 

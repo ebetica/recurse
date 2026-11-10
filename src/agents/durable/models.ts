@@ -1,7 +1,7 @@
-// Built-ins use only Settings-owned auth.json, never ambient credentials.
-// Custom providers use their own key or env_key, never tool environments.
-// Anthropic OAuth uses Recurse's refresh. Patched lazy credentials and
-// asynchronous catalog reads keep disk I/O off the event loop.
+// Built-ins use Settings auth only; custom providers use their own key/env_key.
+// Anthropic OAuth uses Recurse refresh; auth/catalog I/O is lazy and async.
+// Full Anthropic requests keep captures and cache replays self-contained.
+// Fable 5.2 OAuth requires a newer Claude CLI identity than Pi 1.5.1 sends.
 import {
   type ApiKeyAuth,
   type AuthContext,
@@ -34,7 +34,7 @@ export const STORED_CREDENTIALS_ONLY: AuthContext = {
   fileExists: async () => false,
 };
 
-/** The Anthropic provider with Recurse's token refresh. */
+/** Recurse token refresh and independently inspectable Anthropic requests. */
 function withRecurseAnthropicRefresh(provider: Provider): Provider {
   const oauth = provider.auth.oauth;
   if (provider.id !== "anthropic" || oauth === undefined) return provider;
@@ -59,6 +59,27 @@ function withRecurseAnthropicRefresh(provider: Provider): Provider {
   return new Proxy(provider, {
     get(target, key) {
       if (key === "auth") return auth;
+      if (key === "getModels" || key === "getAllModels")
+        return () =>
+          (key === "getAllModels"
+            ? (target.getAllModels?.() ?? target.getModels())
+            : target.getModels()
+          ).map((model) =>
+            model.type !== undefined && model.type !== "chat"
+              ? model
+              : {
+                  ...model,
+                  compat: { ...model.compat, supportsMessageThreads: false },
+                  ...(model.id === "claude-fable-5-2"
+                    ? {
+                        headers: {
+                          ...model.headers,
+                          "user-agent": "claude-cli/2.1.290",
+                        },
+                      }
+                    : {}),
+                },
+          );
       const value = Reflect.get(target, key, target);
       return typeof value === "function" ? value.bind(target) : value;
     },

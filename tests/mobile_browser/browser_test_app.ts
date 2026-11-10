@@ -28,13 +28,14 @@ import {
   addUpload,
   registerFile,
 } from "../../src/agents/runtime/attachments/publish";
+import { blobName } from "../../src/agents/runtime/attachments/store";
 import * as artifacts from "../../src/artifacts";
 import { CHECKOUT_ROOT } from "../../src/build_dir";
 import { buildApp } from "../../src/web/app";
 import { jsonResponse, type Handler } from "../../src/web/router";
 import { publishLoopbackToken } from "../../src/web/request_auth";
 
-import { replayResponse } from "../backend/fixtures/model_response/replay";
+import { seedModelResponse } from "./model_response_fixture";
 import { entries as contextEntries } from "../backend/fixtures/durable_context_usage/entries";
 import { promptTokens } from "../../src/agents/runtime/context_usage";
 import titleRecording from "../backend/fixtures/conversation_title/recording.json";
@@ -55,6 +56,16 @@ const PNG_1X1 = Uint8Array.from(
 );
 
 type ImageBytes = Uint8Array<ArrayBuffer>;
+async function git(cwd: string, ...args: string[]): Promise<string> {
+  const child = Bun.spawn(
+    ["git", "-c", "user.name=Fixture", "-c", "user.email=f@x.invalid", ...args],
+    { cwd, stdout: "pipe", stderr: "ignore" },
+  );
+  const out = await new Response(child.stdout).text();
+  await child.exited;
+  return out.trim();
+}
+
 const imageBytes = (value: Uint8Array): ImageBytes =>
   value as unknown as ImageBytes;
 
@@ -172,7 +183,7 @@ export function piAssistant(
   id: string,
   text: string,
   parent: string | null,
-  stop = "stop",
+  stop: AssistantMessage["stopReason"] = "stop",
   ts = 101,
 ): Json {
   return {
@@ -180,11 +191,7 @@ export function piAssistant(
     id,
     parentId: parent,
     timestamp: ts,
-    message: {
-      role: "assistant",
-      content: [{ type: "text", text }],
-      stopReason: stop,
-    },
+    message: fauxAssistantMessage(text, { stopReason: stop, timestamp: ts }),
   };
 }
 
@@ -562,6 +569,7 @@ async function publishTurn(
 async function publishDraftsTurn(
   cid: string,
   files: Record<string, string | Uint8Array>,
+  reply = "Both drafts are published.",
 ): Promise<void> {
   const workdir = await mkdtemp(join(tmpdir(), "published-drafts-"));
   for (const [name, body] of Object.entries(files))
@@ -575,7 +583,7 @@ async function publishDraftsTurn(
       ],
       { stopReason: "toolUse" },
     ),
-    fauxAssistantMessage("Both drafts are published."),
+    fauxAssistantMessage(reply),
   ]);
   await submitDurable(cid, "Publish the drafts.");
 }
@@ -772,6 +780,27 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     const { script, by } = (await request.json()) as Record<string, string>;
     return { sections: await instance.sidebarScript.set(script!, by!) };
   },
+  "seed-named-artifacts": async (request) => {
+    const { agent, titles } = (await request.json()) as {
+      agent: string;
+      titles: string[];
+    };
+    const context = {
+      artifactsDir: instance.config.paths.ARTIFACTS_DIR,
+      trashDir: instance.config.paths.TRASH_DIR,
+    };
+    const ids: string[] = [];
+    for (const title of titles) {
+      const item = await artifacts.create(context, { owner: agent, title });
+      await Bun.write(
+        join(String(item.repo_path), "index.md"),
+        `# ${title}\n\n${title} body.\n`,
+      );
+      await artifacts.publish(context, agent, String(item.id));
+      ids.push(String(item.id));
+    }
+    return { ids };
+  },
   "seed-pane-reading": async () => {
     const context = {
       artifactsDir: instance.config.paths.ARTIFACTS_DIR,
@@ -864,15 +893,8 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
   "seed-pr-references": async () => {
     const cwd = await mkdtemp(join(tmpdir(), "pr-references-"));
     const plain = await mkdtemp(join(tmpdir(), "pr-plain-"));
-    await Bun.spawn(["git", "init"], {
-      cwd,
-      stdout: "ignore",
-      stderr: "ignore",
-    }).exited;
-    await Bun.spawn(
-      ["git", "remote", "add", "origin", "https://github.com/Owner/Repo"],
-      { cwd },
-    ).exited;
+    await git(cwd, "init");
+    await git(cwd, "remote", "add", "origin", "https://github.com/Owner/Repo");
     for (const cid of ["pr-checkout", "pr-plain"]) {
       await create(cid, cid, rootAgentId());
       const conv = load(cid)!;
@@ -891,6 +913,42 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
       );
     }
     return { checkout: "pr-checkout", plain: "pr-plain" };
+  },
+  "seed-changes-base": async () => {
+    const cwd = await mkdtemp(join(tmpdir(), "changes-base-"));
+    await git(cwd, "init", "-q", "-b", "main");
+    await writeFile(join(cwd, "a.txt"), "base\n");
+    await git(cwd, "add", "-A");
+    await git(cwd, "commit", "-qm", "base");
+    await git(cwd, "checkout", "-qb", "feature");
+    await writeFile(join(cwd, "a.txt"), "base\nbranch line\n");
+    await git(cwd, "commit", "-qam", "branch");
+    await git(cwd, "checkout", "-q", "main");
+    await writeFile(join(cwd, "later.txt"), "landed on main later\n");
+    await git(cwd, "add", "-A");
+    await git(cwd, "commit", "-qm", "later");
+    await git(cwd, "update-ref", "refs/remotes/origin/main", "main");
+    await git(cwd, "checkout", "-q", "feature");
+    await writeFile(
+      join(cwd, "a.txt"),
+      "base\nbranch line\nuncommitted line\n",
+    );
+    const cid = "changes-base";
+    if (!load(cid)) await create(cid, cid, rootAgentId());
+    const conv = load(cid)!;
+    conv.workdir = cwd;
+    await seedPiSession(conv, [
+      piUser(`${cid}-user`, "Show the branch's changes", null),
+    ]);
+    await writeFile(
+      instance.agentTemp.workdirFile(String(conv.tmp_key)),
+      JSON.stringify({ version: 1, cwd }),
+    );
+    return {
+      cid,
+      branch: await git(cwd, "rev-parse", "HEAD"),
+      start: await git(cwd, "rev-parse", "main~1"),
+    };
   },
   "seed-pr-links": async () => {
     const bin = await mkdtemp(join(tmpdir(), "pr-links-bin-"));
@@ -940,17 +998,12 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
       for (const args of [
         ["init", "-q", "-b", "main"],
         ["remote", "add", "origin", "https://github.com/Owner/Repo"],
-        [
-          "-c",
-          "user.name=Fixture",
-          "-c",
-          "user.email=f@example.invalid",
-        ].concat(["commit", "-q", "--allow-empty", "-m", "base"]),
+        ["commit", "-q", "--allow-empty", "-m", "base"],
         ["update-ref", "refs/remotes/origin/feature", "HEAD"],
         checkout,
         ["branch", "-q", "--set-upstream-to", "origin/feature"],
       ])
-        await Bun.spawn(["git", ...args], { cwd, stdout: "ignore" }).exited;
+        await git(cwd, ...args);
       durableModel.set(cid, "fauxfast/faux-1");
       await instance.create.create({
         cid,
@@ -966,7 +1019,7 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
       if (cid === "pr-branch") {
         notes = join(cwd, "notes.txt");
         await writeFile(notes, "uncommitted note\n");
-        await Bun.spawn(["git", "add", "notes.txt"], { cwd }).exited;
+        await git(cwd, "add", "notes.txt");
       }
     }
     const branchCalls = (await readFile(calls, "utf8")).trim().split("\n");
@@ -1013,9 +1066,10 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     await save({ ...load("pr-child")!, title: "Child renamed" });
     return {};
   },
-  "newer-pr-link": async () => {
-    await conversations.updatePrs("pr-child", (prs) => [
-      ...(prs as Json[]),
+  "newer-pr-link": async (request) => {
+    const cid = new URL(request.url).searchParams.get("agent") || "pr-child";
+    await conversations.updatePrs(cid, (prs) => [
+      ...((prs ?? []) as Json[]),
       {
         repo: "owner/repo",
         number: 10,
@@ -1106,7 +1160,14 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         `\n![Absolute path](${imagePath})\n\n![Unpublished relative path](./path-image.svg)\n`,
       directory,
     );
-    publishedFixture = { demo: cid, id };
+    const collection = await agentTemp.ensureUploadsDir(
+      String(load(cid)!.tmp_key),
+    );
+    publishedFixture = {
+      demo: cid,
+      id,
+      payload: join(collection, blobName(id)),
+    };
     return publishedFixture;
   },
   "seed-published-media": async () => {
@@ -1143,7 +1204,11 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
         "notes.txt",
       );
       await publishTurn(cid, "summary.md", "# Summary\n");
-      await publishTurn(cid, "report.md", "# Updated report\n");
+      await publishTurn(
+        cid,
+        "report.md",
+        "# Updated report\n\n" + "Report paragraph.\n\n".repeat(100),
+      );
     }
     return { demo: cid };
   },
@@ -1196,6 +1261,39 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
       },
     ]);
     await submitDurable(cid, "Publish the quadrant image.");
+    return { demo: cid };
+  },
+  "seed-document-previews": async () => {
+    const cid = `document-previews-${hex(4)}`;
+    await createDurable(cid, "Document previews", "fauxfast/faux-1");
+    const files: Record<string, Uint8Array> = {};
+    const names = [
+      "preview.docx",
+      "preview.xlsx",
+      "preview.xls",
+      "preview.ods",
+      "preview.csv",
+      "preview.tsv",
+      "preview.pptx",
+      "preview.ipynb",
+      "limits.xlsx",
+      "limits.pptx",
+      "limits.ipynb",
+      "expanded.docx",
+    ];
+    for (const name of names)
+      files[name] = new Uint8Array(
+        await readFile(
+          join(CHECKOUT_ROOT, "tests/mobile_browser/fixtures", name),
+        ),
+      );
+    files["oversized.docx"] = new Uint8Array(8 * 1024 * 1024 + 1);
+    files["expanded.csv"] = files["expanded.docx"]!;
+    await publishDraftsTurn(
+      cid,
+      files,
+      "Documents published.\n\n```python\nprint('Notebook output')\n```",
+    );
     return { demo: cid };
   },
   "seed-posted-pdf": async (request) => {
@@ -1865,26 +1963,8 @@ const routes: Record<string, (request: Request) => Promise<Json>> = {
     await createDurable(cid, "Safety reviewer availability", `${cid}/faux-1`);
     return { agent: cid };
   },
-  "seed-model-response": async (request) => {
-    const body = (await request.json()) as {
-      agent?: string;
-      downgrade: boolean;
-    };
-    const cid = body.agent ?? `model-response-${hex(4)}`;
-    if (!body.agent)
-      await createDurable(cid, "Recorded model response", "fauxfast/faux-1");
-    const { conversation } = await instance.durable.open(cid);
-    const message = await replayResponse(body.downgrade);
-    const entry = await conversation.commit(
-      (tx) =>
-        tx.appendEntry(conversation.id, {
-          kind: "pi.assistant",
-          model: [message],
-        }),
-      BACKGROUND_CONTEXT,
-    );
-    return { agent: cid, entryId: entry.id };
-  },
+  "seed-model-response": (request) =>
+    seedModelResponse(request, instance.durable, durableModels, createDurable),
   "server-log": async () => {
     console.log("browser server stdout probe");
     console.error("browser server stderr probe");

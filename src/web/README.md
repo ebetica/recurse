@@ -92,6 +92,55 @@ including cookie rotation and removal.
 CSRF matching, password validation, throttling and authorization are unchanged.
 Plain HTTP does not encrypt passwords or sessions; use HTTPS on untrusted networks.
 
+## Working-folder Explorer
+
+[explorer.ts](explorer.ts) serves operator-only `/api/conversations/{cid}/tree`
+reads. It uses the same persisted Durable cwd as local image reads and the
+agent's `find` tool; relative paths cannot ascend above that folder. Agent
+markers, loopback tokens, service principals and connected-backend keys cannot
+use these routes. Remote conversations do not expose an Explorer control.
+
+**Source files:** [explorer_io.ts](explorer_io.ts) owns Worker admission and
+shutdown; [explorer.worker.ts](explorer.worker.ts) owns directory cursors,
+previews and streamed downloads; [explorer_paths.worker.ts](explorer_paths.worker.ts)
+owns pinned-descriptor path validation and credential refusals.
+
+Directory expansion reads one lazy page of 48 entries plus one lookahead, and
+stats only that page. Pages sort folders first within the page, not across the
+whole directory. There is no recursive listing or expensive total count. Git
+ignore checks see only those 48 paths, with bounded output and a one-second
+subprocess limit. Cursors are tied to conversation, cwd and relative folder;
+they are single-use and expire after a minute. At most 32 cursors/downloads and
+32 pending Worker calls exist. Shutdown drains active calls and closes all
+descriptors before terminating the Worker.
+
+Text previews send at most 16 KiB at a time (about four seconds at 32 kbit/s,
+before compression), rather than the fork's 1 MiB. Continuations verify the
+file identity and preserve UTF-8 character boundaries. Preview metadata includes
+the request's actual working-folder root so comments name the opened file even
+when the cwd changed after the tree listing. Binary files offer a
+download instead of sending their content to the browser automatically.
+Downloads are explicit, capped at 512 MiB, served in 64 KiB reads and support
+HTTP ranges. Their handles stay owned by the response until completion or
+cancellation, without expiring during a slow transfer. All responses are private/no-store; raw files are sandboxed
+attachments, never active same-origin content.
+
+Every descendant is checked with no-follow metadata and matched to the opened
+inode, including directory components. Symlinks, FIFOs and other special files
+are refused. Credential names, SSH files, known credential configs, Recurse
+state and the separate Settings/Pi roots are refused. Marker-backed managed
+worktrees beneath the data directory are the only state exception; Settings/Pi
+roots never receive that exception. Checks use the opened root's real location
+and resolved private roots, including aliases.
+
+Filename search runs the existing agent `find` tool in the shared fff child,
+borrowing the conversation's connection without opening an index ahead of a
+search. Its waiting/indexing policy is unchanged. After admitting the current
+root, it returns the finder's 50-result page unchanged, without opening the
+candidates or truncating their names. Credential and symlink checks apply when
+opening a file. No independent indexer, watcher, refresh policy or search cache
+is added. Superseded requests are cancelled.
+
 ## Message search
 
 [message_search.ts](message_search.ts) registers bundled-tool search and bounded

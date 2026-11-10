@@ -1,5 +1,6 @@
 // Browser connection-health wiring: one deduplicated /api/version probe serves
 // the generation watcher, Retry button, lifecycle wakeups, and outage recovery.
+// Deferred page updates appear in Settings and mark its button until cleared.
 import { homeBackend } from "./backends/backend.js";
 import { embeddedFrameHidden } from "./state.js";
 import { apiJson, connectionHealth } from "./api.js";
@@ -50,10 +51,13 @@ export function startConnectionMonitoring(
   let updateTarget: string | null = null;
   let generationEnabled = false;
 
+  const settingsButton = document.querySelector<HTMLElement>("#settings-btn");
   const clearUpdateStatus = () => {
     if (!updateStatus) return;
     updateStatus.textContent = "";
     updateStatus.classList.remove("on");
+    settingsButton?.setAttribute("title", "Settings");
+    settingsButton?.setAttribute("aria-label", "Settings");
   };
 
   const showUpdateStatus = (message: string, target: string) => {
@@ -68,6 +72,8 @@ export function startConnectionMonitoring(
     button.addEventListener("click", () => attemptUpdate(target, false));
     updateStatus.append(text, button);
     updateStatus.classList.add("on");
+    settingsButton?.setAttribute("title", "Settings — page update ready");
+    settingsButton?.setAttribute("aria-label", "Settings — page update ready");
   };
 
   function attemptUpdate(target: string, automatic: boolean): void {

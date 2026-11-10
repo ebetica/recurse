@@ -100,7 +100,7 @@ options:
   -h, --help   show this help message and exit
   --timeout S  give up after S seconds (1-86400)
 `,
-  move: `usage: subagent.py move [-h] --to new-parent-cid cid
+  move: `usage: subagent.py move [-h] (--to new-parent-cid | --top-level) cid
 
 positional arguments:
   cid                  the subagent to move
@@ -108,6 +108,7 @@ positional arguments:
 options:
   -h, --help           show this help message and exit
   --to new-parent-cid  the new parent agent's id
+  --top-level          make the agent top-level, with no parent
 `,
   tag: `usage: subagent.py tag [-h] [--add tags] [--remove tags] cid
 
@@ -164,7 +165,7 @@ const USAGE: Record<string, string> = {
     "usage: subagent search <query> [target] [--tree | --all] [--deleted] [--role user|assistant|agent|tool|tool-result] [--limit N]",
   tail: "usage: subagent.py tail [-h] cid",
   wait: "usage: subagent.py wait [-h] [--timeout S] cid [cid ...]",
-  move: "usage: subagent.py move [-h] --to new-parent-cid cid",
+  move: "usage: subagent.py move [-h] (--to new-parent-cid | --top-level) cid",
   tag: "usage: subagent.py tag [-h] [--add tags] [--remove tags] cid",
   rm: "usage: subagent.py rm [-h] cid [cid ...]",
   revive:
@@ -313,6 +314,7 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
       break;
     case "move":
       takesValue.add("--to");
+      switches.add("--top-level");
       break;
     case "tag":
       takesValue.add("--add");
@@ -395,7 +397,7 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
     idle: { min: 0, max: 1 },
     tail: { min: 1, max: 1 },
     wait: { min: 1, max: Infinity },
-    move: { min: 1, max: 1, required: ["--to"] },
+    move: { min: 1, max: 1 },
     tag: { min: 1, max: 1 },
     rm: { min: 1, max: Infinity },
     revive: {
@@ -439,6 +441,8 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
       `unrecognized arguments: ${positional.slice(rule.max).join(" ")}`,
     );
   }
+  if (command === "move" && options.has("--to") === options.has("--top-level"))
+    parserFailure(command, "choose exactly one of --to or --top-level");
   if (command === "create") {
     for (const flag of ["--worktree-source", "--commit"]) {
       if (options.has(flag) && !options.has("--worktree"))

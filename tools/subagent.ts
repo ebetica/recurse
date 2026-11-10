@@ -26,7 +26,7 @@
  *     Runs until complete or the limit; interrupt to cancel. --deleted is slow
  *     across all deleted agents; prefer a target.
  * compact <id|id@label>
- * move <id> --to <parent-id>
+ * move <id> (--to <parent-id> | --top-level)
  * tag <id> [--add a,b] [--remove a,b]
  * rm <id|id@label> ...
  *     Deletes each agent and its subtree; one id at a time is safest.
@@ -636,24 +636,30 @@ function descendantIds(
 
 async function cmdMove(parsed: Parsed, stdout: string): Promise<string> {
   const cid = parsed.positional[0]!;
-  const newParent = parsed.options.get("--to") as string;
+  const newParent = parsed.options.has("--top-level")
+    ? null
+    : (parsed.options.get("--to") as string);
   if (newParent === cid)
     throw new CliFailure("Cannot move an agent under itself.\n");
   const convs = await loadAllConvs();
   if (!convs.has(cid)) throw new CliFailure(`No such agent '${cid}'.\n`);
-  if (!convs.has(newParent))
+  if (newParent !== null && !convs.has(newParent))
     throw new CliFailure(`No such target agent '${newParent}'.\n`);
-  if (descendantIds(convs, cid).has(newParent)) {
+  if (newParent !== null && descendantIds(convs, cid).has(newParent)) {
     throw new CliFailure(
       `Cannot move '${cid}' under its own descendant '${newParent}' (would create a cycle).\n`,
     );
   }
-  if (convs.get(cid)!.parent === newParent)
-    return `${stdout}Agent ${cid} is already a child of ${newParent}; nothing to do.\n`;
+  if ((convs.get(cid)!.parent ?? null) === newParent)
+    return newParent === null
+      ? `${stdout}Agent ${cid} is already top-level; nothing to do.\n`
+      : `${stdout}Agent ${cid} is already a child of ${newParent}; nothing to do.\n`;
   await api("POST", `/api/conversations/${cid}/reparent`, {
     parent: newParent,
   });
-  return `${stdout}Move requested: agent ${cid} (and its subtree) will be re-parented under ${newParent}; its worktree is unchanged.\n`;
+  return newParent === null
+    ? `${stdout}Move requested: agent ${cid} (and its subtree) will become top-level; its worktree is unchanged.\n`
+    : `${stdout}Move requested: agent ${cid} (and its subtree) will be re-parented under ${newParent}; its worktree is unchanged.\n`;
 }
 
 async function cmdTag(parsed: Parsed, stdout: string): Promise<string> {

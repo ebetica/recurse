@@ -12,6 +12,7 @@ export interface FffOptions {
   worker: FffWorker;
   cwd: string;
   flags: FffFlags;
+  owner?: string;
 }
 
 export async function createFff(options: FffOptions) {
@@ -19,6 +20,7 @@ export async function createFff(options: FffOptions) {
     options.worker,
     options.cwd,
     options.flags,
+    options.owner,
   );
   return { ...bundle, extensions: [bundle.extension] };
 }
@@ -27,8 +29,9 @@ export async function createFffExtension(
   worker: FffWorker,
   cwd: string,
   flags: FffFlags = {},
+  owner?: string,
 ) {
-  const bundle = await worker.open(cwd, flags);
+  const bundle = await worker.open(cwd, flags, owner);
   return {
     ...bundle,
     extension: defineExtension({

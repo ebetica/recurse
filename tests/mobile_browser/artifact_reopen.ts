@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import { writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Page } from "playwright";
@@ -34,6 +35,22 @@ async function observeRevision(page: Page, owner: string): Promise<void> {
   }, owner);
 }
 
+async function waitForSourceDeletion(page: Page, base: string): Promise<void> {
+  await browserExpect
+    .poll(
+      async () => {
+        const response = await page.request.get(`${base}api/tree`);
+        const tree = await response.json();
+        return tree.some(
+          (node: { id: string }) => node.id === "artifact-link-source",
+        );
+      },
+      { timeout: 30_000 },
+    )
+    .toBe(false);
+}
+
+// Regression: #3201 await source deletion before reseeding its Pi session.
 export const artifactReopen: BrowserTest = async (browser, base, data) => {
   const owner = rootAgentId();
   const context = {
@@ -215,13 +232,7 @@ export const artifactReopen: BrowserTest = async (browser, base, data) => {
           )
         ).status(),
       ).toBe(202);
-      await page.waitForFunction(async () => {
-        const response = await (globalThis as any).fetch("/api/tree");
-        const tree = await response.json();
-        return !tree.some(
-          (node: { id: string }) => node.id === "artifact-link-source",
-        );
-      });
+      await waitForSourceDeletion(page, base);
       await browserContext.close();
     }
     const current = await artifacts.get(context, owner, String(item.id));
@@ -302,13 +313,7 @@ export const artifactReopen: BrowserTest = async (browser, base, data) => {
           )
         ).status(),
       ).toBe(202);
-      await page.waitForFunction(async () => {
-        const response = await (globalThis as any).fetch("/api/tree");
-        const tree = await response.json();
-        return !tree.some(
-          (node: { id: string }) => node.id === "artifact-link-source",
-        );
-      });
+      await waitForSourceDeletion(page, base);
     } finally {
       await page.close();
       const current = await artifacts.get(context, owner, String(item.id));

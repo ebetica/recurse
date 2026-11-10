@@ -220,9 +220,9 @@ export class ScriptedWorld {
       ? null
       : { title, superseded: false, pending: false };
   }
-  async reparent(cid: string, parent: string, by: string | null) {
+  async reparent(cid: string, parent: string | null, by: string | null) {
     this.log("request_reparent", cid, parent, by);
-    if (parent === cid || !this.convs.has(parent))
+    if (parent === cid || (parent !== null && !this.convs.has(parent)))
       return { ok: false, error: "cannot move an agent under itself" };
     const old = this.convs.get(cid)!.parent ?? null;
     return { ok: true, from: old, to: parent, moved: true };
@@ -325,6 +325,10 @@ export async function buildConversationsApp(
     store: {
       load: (cid) => world.load(cid),
       metadataSnapshot: (cid) => world.load(cid),
+      async markViewed(cid) {
+        const conv = world.load(cid);
+        if (conv?.unread) await world.save({ ...conv, unread: false });
+      },
       subtree: () => [],
       save: (conv) => world.save(conv),
       effectiveWorkdir(conv) {

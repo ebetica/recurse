@@ -12,7 +12,7 @@ import {
   procIds,
   procText,
 } from "../../../utils/process_table.ts";
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import {} from "@earendil-works/pi-ai";
 import {
   type ConversationId,

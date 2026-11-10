@@ -4,7 +4,7 @@
 // usage without duplicating visible replies; tools remain inline.
 import { backendFor } from "./backends/backend.js";
 import { html, render, nothing, type TemplateResult } from "lit";
-import { responseDetails } from "./model-response.js";
+import { responseDetails, responseSelectorName } from "./model-response.js";
 import { $ } from "./dom.js";
 import { copyText, toolDetailStore } from "./tool_details.js";
 import { requestKeyboardMode } from "./modal-mode.js";
@@ -134,7 +134,12 @@ function usageHeader(
       : nothing}
     <p class="turn-usage-selector">
       ${options.selectorLabel} ·
-      ${selectors.length ? selectors.join(", ") : "unavailable"}
+      ${selectors.length
+        ? selectors.map(
+            (selector, index) =>
+              html`${index ? ", " : ""}${responseSelectorName(selector)}`,
+          )
+        : "unavailable"}
       ${options.selectorPartial ? " (incomplete)" : ""}
     </p>
     ${data.promptTokens

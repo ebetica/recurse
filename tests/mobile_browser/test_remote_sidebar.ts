@@ -3,6 +3,7 @@ import { mkdtemp, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { retire } from "../../src/utils/trash";
+import { installDependencies } from "../../src/local_dependencies";
 import { expect as browserExpect } from "playwright/test";
 import {
   LOGIN,
@@ -792,6 +793,23 @@ export const tests: BrowserTest[] = [
         "Remote attachment arrived",
       );
       await page.locator(`.agent[data-id="Laptop/${writable.id}"]`).click();
+      await page.locator("#input").fill("/rename Composer remote");
+      await page.locator("#input").press("Enter");
+      await browserExpect(
+        section.locator(`.agent[data-id="Laptop/${writable.id}"] .title`),
+      ).toHaveText("Composer remote");
+      await browserExpect
+        .poll(async () => {
+          const rows = await (
+            await remoteContext.request.get(`${remote.base}api/tree`)
+          ).json();
+          return rows.find((node: { id: string }) => node.id === writable.id)
+            ?.title;
+        })
+        .toBe("Composer remote");
+      expect(
+        await page.locator(".msg.user", { hasText: "/rename" }).count(),
+      ).toBe(0);
       await page.keyboard.press("Escape");
       await page.keyboard.press("r");
       await page.locator(".rename-input").fill("Renamed remote");
@@ -1082,10 +1100,7 @@ export const tests: BrowserTest[] = [
       });
       expect(await archive.exited).toBe(0);
       expect(await extract.exited).toBe(0);
-      await symlink(
-        join(ROOT, "node_modules"),
-        join(legacySource, "node_modules"),
-      );
+      await installDependencies(legacySource);
       await symlink(join(ROOT, "web/dist"), join(legacySource, "web/dist"));
       legacy = await startServer({ sourceRoot: legacySource, auth: true });
       expect(

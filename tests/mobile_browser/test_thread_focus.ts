@@ -87,10 +87,20 @@ export const tests: BrowserTest[] = [
         await page
           .getByRole("button", { name: "Open in Files", exact: true })
           .click();
-        await page
-          .locator('.pane-col[data-pane="files"] .files-detail')
-          .waitFor();
-        await page.getByRole("button", { name: "Close Files" }).click();
+        const pane = page.locator(
+          width === 412
+            ? '.pane-col[data-pane="files"]'
+            : ".pane-col.file-tab:visible",
+        );
+        await pane.locator(".files-detail").waitFor();
+        if (width === 412)
+          await page.getByRole("button", { name: "Close Files" }).click();
+        else {
+          const id = await pane.getAttribute("data-pane");
+          const tab = page.locator(`.dv-tab[data-dock-panel="${id}"]`);
+          await tab.hover();
+          await tab.getByRole("button", { name: /^Close / }).click();
+        }
         await page.locator("#scroll").focus();
         if (shots)
           await page.screenshot({ path: `${shots}/thread-focus-${width}.png` });

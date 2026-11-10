@@ -1,7 +1,10 @@
 // Tips pane: one tip at a time from list.ts, with Previous/Next and All tips.
 // After each hour a Recurse tab is visible it shows the attention dot, if a
 // tip is unseen and the switch is on. State lives in this browser's storage.
+// Desktop list keys leave the shown tip unchanged until opening a row.
 import { html, nothing, render } from "lit";
+import { repeat } from "lit/directives/repeat.js";
+import { live } from "lit/directives/live.js";
 import { openAgentFinderNavigate } from "../agent-finder/ui.js";
 import { parseConversationId } from "../backends/backend.js";
 import { startNewAgent } from "../composer.js";
@@ -16,8 +19,10 @@ import {
   syncPanes,
 } from "../panes.js";
 import { sharedTrees } from "../shared-trees.js";
+import { paneItem } from "../panes/navigation.js";
+import { copyText } from "../tool_details.js";
 import { DRAFT, embedded, state as appState } from "../state.js";
-import type { PaneContext } from "../types.js";
+import type { PaneContext, PaneNavigation } from "../types.js";
 import { TIPS, type Tip, type TipControl } from "./list.js";
 
 const PANE_ID = "tips";
@@ -48,6 +53,17 @@ const CONTROL_LABELS: Record<TipControl, string> = {
 
 const phone = matchMedia("(max-width: 700px)");
 let openBody: HTMLElement | null = null;
+let filter = "";
+let notice = "";
+phone.addEventListener("change", () => {
+  if (!openBody) return;
+  for (const item of openBody.querySelectorAll(".tips-all-item")) {
+    item.classList.remove("pane-item-cursor");
+    item.removeAttribute("aria-current");
+    item.removeAttribute("tabindex");
+  }
+  paint(openBody);
+});
 
 function load(): Saved {
   try {
@@ -128,11 +144,18 @@ window.addEventListener("storage", (event) => {
 });
 
 function show(id: string): void {
+  const all = openBody?.querySelector<HTMLDetailsElement>(".tips-all");
+  const leaveList = !phone.matches && !!all?.open;
   update((next) => {
     next.current = id;
     if (!next.seen.includes(id)) next.seen.push(id);
   }, false);
-  if (openBody) paint(openBody);
+  notice = "";
+  if (leaveList) all!.open = false;
+  if (openBody) {
+    paint(openBody);
+    if (leaveList) openBody.querySelector<HTMLElement>(".tip-card")?.focus();
+  }
 }
 
 function step(delta: 1 | -1): void {
@@ -217,6 +240,68 @@ function controlAvailable(control: TipControl): boolean {
   return true;
 }
 
+function navigate(body: HTMLElement, command: PaneNavigation): boolean {
+  if (phone.matches) return false;
+  const all = body.querySelector<HTMLDetailsElement>(".tips-all")!;
+  if (command === "back" || command === "filter") {
+    notice = "";
+    paint(body);
+    all.open = true;
+    [...body.querySelectorAll<HTMLElement>(".tips-all-item")]
+      .find((item) => item.dataset.tip === saved.current)
+      ?.focus({ preventScroll: true });
+    paneItem(body, ".tips-all-item", "open");
+    if (command === "filter")
+      body.querySelector<HTMLInputElement>(".tips-filter")?.focus();
+    return true;
+  }
+  if (command === "copy") {
+    const tips = deviceTips();
+    const id = all.open
+      ? paneItem(body, ".tips-all-item", "open")?.dataset.tip
+      : saved.current;
+    const tip = tips.find((each) => each.id === id);
+    const focus = document.activeElement;
+    if (tip)
+      void copyText(`${tip.title}\n\n${tip.text}`).then((ok) => {
+        if (openBody !== body) return;
+        notice = ok ? "Tip copied." : "Could not copy tip.";
+        paint(body);
+        if (
+          focus instanceof HTMLElement &&
+          focus.isConnected &&
+          document.activeElement === document.body
+        )
+          focus.focus({ preventScroll: true });
+      });
+    return true;
+  }
+  if (
+    all.open &&
+    [
+      "next",
+      "previous",
+      "top",
+      "bottom",
+      "next-section",
+      "previous-section",
+      "open",
+    ].includes(command)
+  ) {
+    const item = paneItem(body, ".tips-all-item", command);
+    if (command === "open") item?.click();
+    return true;
+  }
+  if (
+    !all.open &&
+    (command === "next-section" || command === "previous-section")
+  ) {
+    step(command === "next-section" ? 1 : -1);
+    return true;
+  }
+  return false;
+}
+
 function paint(body: HTMLElement): void {
   const tips = deviceTips();
   const index = Math.max(
@@ -224,14 +309,19 @@ function paint(body: HTMLElement): void {
     tips.findIndex((tip) => tip.id === saved.current),
   );
   const tip = tips[index];
-  const areas = [...new Set(tips.map((each) => each.area))];
+  const matches = phone.matches
+    ? tips
+    : tips.filter((each) =>
+        each.title.toLowerCase().includes(filter.trim().toLowerCase()),
+      );
+  const areas = [...new Set(matches.map((each) => each.area))];
   const askable = tip.ask && (tip.ask.where === "this" || sharedTrees === null);
   const control =
     tip.control && controlAvailable(tip.control) ? tip.control : null;
   render(
     html`<div class="tips-pane">
       <p class="tips-count">${index + 1} of ${tips.length}</p>
-      <article class="tip-card" aria-live="polite">
+      <article class="tip-card" aria-live="polite" tabindex="-1">
         <p class="tip-area">${tip.area}</p>
         <h3 class="tip-title">${tip.title}</h3>
         <p class="tip-text">${tip.text}</p>
@@ -261,23 +351,51 @@ function paint(body: HTMLElement): void {
       </div>
       <details class="tips-all">
         <summary>All tips</summary>
-        ${areas.map(
+        ${phone.matches
+          ? nothing
+          : html`<input
+              class="text-field tips-filter"
+              type="search"
+              aria-label="Filter tips"
+              placeholder="Filter tips"
+              .value=${filter}
+              @input=${(event: Event) => {
+                filter = (event.target as HTMLInputElement).value;
+                paint(body);
+              }}
+              @keydown=${(event: KeyboardEvent) => {
+                if (event.key === "Enter" && !event.isComposing) {
+                  event.preventDefault();
+                  paneItem(body, ".tips-all-item", "open")?.click();
+                }
+              }}
+            />`}
+        ${repeat(
+          areas,
+          (area) => area,
           (area) =>
             html`<p class="tips-all-area">${area}</p>
-              ${tips
-                .filter((each) => each.area === area)
-                .map(
-                  (each) =>
-                    html`<button
-                      class="tips-all-item"
-                      aria-current=${each === tip ? "true" : "false"}
-                      @click=${() => show(each.id)}
-                    >
-                      ${each.title}
-                    </button>`,
-                )}`,
+              ${repeat(
+                matches.filter((each) => each.area === area),
+                (each) => each.id,
+                (each) =>
+                  html`<button
+                    class="tips-all-item"
+                    data-tip=${each.id}
+                    aria-current=${phone.matches
+                      ? live(each === tip ? "true" : "false")
+                      : nothing}
+                    @click=${() => show(each.id)}
+                  >
+                    ${each.title}
+                  </button>`,
+              )} `,
         )}
+        ${matches.length ? nothing : html`<p role="status">No tips match.</p>`}
       </details>
+      ${notice
+        ? html`<p class="tips-notice" role="status">${notice}</p>`
+        : nothing}
       <label class="tips-switch">
         <input
           type="checkbox"
@@ -303,6 +421,7 @@ registerPane({
   icon: TIPS_ICON,
   available: (ctx: PaneContext) => !!ctx.node,
   attention: () => !!saved.due,
+  navigate,
   render(body: HTMLElement) {
     // Spec: Opening after the dot moves to the next unseen tip; otherwise the
     // current tip stays, so a pane restored on navigation does not move on.

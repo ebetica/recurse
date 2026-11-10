@@ -2,6 +2,7 @@ import { expect } from "bun:test";
 import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import { ROOT } from "./common";
+import { assertSectionSpacing } from "./sidebar_section_spacing";
 import type { BrowserContext, Locator, Page, Request } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
@@ -468,12 +469,13 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await context.close();
   },
-  // Regression: #3140 scroll section headers into view before mobile touch input. (also Regression #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
+  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
   async function test_sidebar_sections(browser, base) {
     let context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
     });
     const ids = await seedSections(context, base);
+    await assertSectionSpacing(browser, context, base, ids);
     const page = await context.newPage();
     const errors = captureErrors(page);
     await gotoRoot(page, base);

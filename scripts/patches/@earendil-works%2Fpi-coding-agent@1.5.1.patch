@@ -1,5 +1,5 @@
 diff --git a/dist/core/auth-storage.d.ts b/dist/core/auth-storage.d.ts
-index 6fffeba35..a65f17a87 100644
+index 6fffeba..a65f17a 100644
 --- a/dist/core/auth-storage.d.ts
 +++ b/dist/core/auth-storage.d.ts
 @@ -47,6 +47,8 @@ export declare class AuthStorage implements CredentialStore {
@@ -12,7 +12,7 @@ index 6fffeba35..a65f17a87 100644
      static inMemory(data?: AuthStorageData): AuthStorage;
      private parseStorageData;
 diff --git a/dist/core/auth-storage.js b/dist/core/auth-storage.js
-index 021c37901..f6b12c00c 100644
+index 597523b..980563f 100644
 --- a/dist/core/auth-storage.js
 +++ b/dist/core/auth-storage.js
 @@ -3,12 +3,13 @@
@@ -30,7 +30,7 @@ index 021c37901..f6b12c00c 100644
  import { stripBom } from "../utils/text.js";
  import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.js";
  // On Windows, a just-removed lock directory can stay "delete pending" while another process
-@@ -122,8 +123,10 @@ export class FileAuthStorageBackend {
+@@ -123,8 +124,10 @@ export class FileAuthStorageBackend {
      }
      async withLockAsync(fn, options) {
          options?.signal?.throwIfAborted();
@@ -43,7 +43,7 @@ index 021c37901..f6b12c00c 100644
          let release;
          let lockCompromised = false;
          let lockCompromisedError;
-@@ -139,12 +142,15 @@ export class FileAuthStorageBackend {
+@@ -140,12 +143,15 @@ export class FileAuthStorageBackend {
              });
              throwIfCompromised();
              options?.signal?.throwIfAborted();
@@ -61,7 +61,7 @@ index 021c37901..f6b12c00c 100644
              }
              throwIfCompromised();
              return result;
-@@ -271,7 +277,7 @@ export class AuthStorage {
+@@ -272,7 +278,7 @@ export class AuthStorage {
      storage;
      authPath;
      readState;
@@ -70,7 +70,7 @@ index 021c37901..f6b12c00c 100644
          this.storage = storage;
          this.authPath = authPath;
          this.readState =
-@@ -279,6 +285,7 @@ export class AuthStorage {
+@@ -280,6 +286,7 @@ export class AuthStorage {
          if (authPath && !sharedAuthFileReadState) {
              sharedAuthFileReadState = { authPath, readState: this.readState };
          }
@@ -78,7 +78,7 @@ index 021c37901..f6b12c00c 100644
          if (authPath) {
              const revision = getFileRevision(authPath);
              if (revision !== undefined && revision === this.readState.revision)
-@@ -290,6 +297,10 @@ export class AuthStorage {
+@@ -291,6 +298,10 @@ export class AuthStorage {
          const normalizedAuthPath = normalizePath(authPath);
          return new AuthStorage(new FileAuthStorageBackend(normalizedAuthPath), normalizedAuthPath);
      }
@@ -89,7 +89,7 @@ index 021c37901..f6b12c00c 100644
      static fromStorage(storage) {
          return new AuthStorage(storage);
      }
-@@ -329,7 +340,7 @@ export class AuthStorage {
+@@ -330,7 +341,7 @@ export class AuthStorage {
      async reloadFromStorageAsync(options) {
          return this.storage.withLockAsync(async (content) => {
              const currentData = this.parseStorageData(content);
@@ -98,7 +98,7 @@ index 021c37901..f6b12c00c 100644
              this.updateReadState(currentData, revision);
              return { result: currentData };
          }, options);
-@@ -340,7 +351,7 @@ export class AuthStorage {
+@@ -341,7 +352,7 @@ export class AuthStorage {
              const reload = this.reloadFromStorageAsync(options);
              return options?.signal ? reload : reload.catch(() => this.readState.data);
          }
@@ -107,7 +107,7 @@ index 021c37901..f6b12c00c 100644
          if (revision !== undefined && revision === this.readState.revision)
              return this.readState.data;
          if (!this.readState.reload) {
-@@ -390,7 +401,7 @@ export class AuthStorage {
+@@ -391,7 +402,7 @@ export class AuthStorage {
              const next = await fn(currentData[provider]);
              if (next === undefined) {
                  latestData = currentData;
@@ -117,7 +117,7 @@ index 021c37901..f6b12c00c 100644
              }
              const merged = { ...currentData, [provider]: next };
 diff --git a/dist/core/models-store.js b/dist/core/models-store.js
-index 9cc01b8fd..68d5f032b 100644
+index 9cc01b8..68d5f03 100644
 --- a/dist/core/models-store.js
 +++ b/dist/core/models-store.js
 @@ -1,7 +1,7 @@
@@ -146,7 +146,7 @@ index 9cc01b8fd..68d5f032b 100644
              return readState.data;
          if (!readState.reload) {
 diff --git a/dist/utils/paths.d.ts b/dist/utils/paths.d.ts
-index 18c37d39d..5181552d4 100644
+index 18c37d3..5181552 100644
 --- a/dist/utils/paths.d.ts
 +++ b/dist/utils/paths.d.ts
 @@ -34,6 +34,7 @@ export declare function pathsEqual(left: string, right: string): boolean;
@@ -158,7 +158,7 @@ index 18c37d39d..5181552d4 100644
  /**
   * Returns true if the value is NOT a package source (npm:, git:, etc.),
 diff --git a/dist/utils/paths.js b/dist/utils/paths.js
-index 068df510e..6b9ab387c 100644
+index 068df51..6b9ab38 100644
 --- a/dist/utils/paths.js
 +++ b/dist/utils/paths.js
 @@ -1,4 +1,5 @@

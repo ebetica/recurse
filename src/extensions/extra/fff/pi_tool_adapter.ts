@@ -2,7 +2,7 @@
 // text; Durable appends only new suffixes and serializes details commits before
 // return. Host closes each owned finder after Harness tools join. Model-facing
 // search help is shortened here without changing the source validators.
-import type { JsonValue } from "@earendil-works/chord";
+import type { JsonValue } from "@earendil-works/chord/json";
 import type { TObject } from "typebox";
 import type {
   ExtensionToolContext,

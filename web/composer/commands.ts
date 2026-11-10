@@ -24,6 +24,10 @@ export const COMPOSER_COMMANDS: ComposerCommand[] = [
       "Ask a read-only side conversation that starts from here · Action",
   },
   {
+    name: "rename",
+    description: "Rename this conversation · Action",
+  },
+  {
     name: "revive",
     description:
       "Bring back a deleted or cleared agent with its history · Action",
@@ -40,6 +44,7 @@ export const COMPOSER_COMMAND_ENDPOINT: Record<string, string> = {
   compact: "compact",
   clear: "clear",
   btw: "side",
+  rename: "rename",
 };
 
 export interface ComposerCommandMatch {
@@ -47,17 +52,18 @@ export interface ComposerCommandMatch {
   question?: string;
 }
 
-// Compact/Clear stay bare actions. /btw owns its trailing question, which
-// starts a side conversation instead of entering this one.
+/** Match bare actions and the text owned by /btw and /rename. */
 export function matchComposerCommand(
   text: string,
 ): ComposerCommandMatch | null {
   const trimmed = text.trim();
   if (!trimmed.startsWith("/")) return null;
   const body = trimmed.slice(1);
-  if (body === "btw") return { name: "btw", question: "" };
-  if (body.startsWith("btw "))
-    return { name: "btw", question: body.slice(4).trim() };
+  for (const name of ["btw", "rename"]) {
+    if (body === name) return { name, question: "" };
+    if (body.startsWith(`${name} `))
+      return { name, question: body.slice(name.length + 1).trim() };
+  }
   return COMMAND_NAMES.has(body) ? { name: body } : null;
 }
 

@@ -1,6 +1,7 @@
 // Combines synchronous platform actions with Pi skill autocomplete. Actions
 // never enter model prompts; skills insert canonical /skill:name.
-// Real-conversation actions remain usable while registry discovery loads.
+// Real-conversation actions remain usable while registry discovery loads,
+// without pending status copy; completed rows preserve selection by identity.
 
 import { backendFor } from "./backends/backend.js";
 import { $ } from "./dom.js";
@@ -254,7 +255,7 @@ function optionRow(item: MenuItem, index: number): HTMLElement {
 
 // Render the merged menu: platform commands first (Actions group), then pi
 // skills (Skills group). `saved` marks a stale-cache skill list; `status` shows
-// a trailing note (e.g. skills still loading) beneath the visible items.
+// a completed discovery error beneath the visible items.
 function renderMenu(
   commands: ComposerCommand[],
   skills: SkillChoice[],
@@ -262,6 +263,7 @@ function renderMenu(
   status = "",
 ): void {
   skillMenuEl.setAttribute("aria-label", "Commands and skills");
+  const selected = menuItems[menuActive];
   menuItems = [
     ...commands.map((command): MenuItem => ({ kind: "command", command })),
     ...skills.map((skill): MenuItem => ({ kind: "skill", skill })),
@@ -274,7 +276,15 @@ function renderMenu(
     closeSkillAutocomplete();
     return;
   }
-  menuActive = 0;
+  menuActive = Math.max(
+    0,
+    menuItems.findIndex(
+      (item) =>
+        selected &&
+        item.kind === selected.kind &&
+        itemLabel(item) === itemLabel(selected),
+    ),
+  );
   skillMenuEl.textContent = "";
   if (commands.length) skillMenuEl.appendChild(groupLabel("Actions"));
   commands.forEach((_, i) =>
@@ -298,7 +308,7 @@ function renderMenu(
     SKILL_MENU_ID,
     closeSkillAutocomplete,
     skillAutocompleteOwnsKey,
-    "skill-option-0",
+    `skill-option-${menuActive}`,
   );
 }
 
@@ -419,8 +429,7 @@ export function refreshSkillAutocomplete(): void {
     else showStatus("Skills unavailable");
     return;
   }
-  if (commands.length) renderMenu(commands, [], false, "Loading skills…");
-  else showStatus("Loading skills…");
+  renderMenu(commands, []);
   if (current.status === "missing")
     void skillLoader.preload(source.agentId, source.context);
 }

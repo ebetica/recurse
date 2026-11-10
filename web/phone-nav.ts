@@ -51,9 +51,8 @@ function sync(): void {
   if (leavingList) menu.focus({ preventScroll: true });
   settings.classList.toggle("icon-btn", active);
   settings.classList.toggle("lg", active);
-  settings.setAttribute("aria-label", "Settings");
   if (active) listActions.append(settings);
-  else sidebar.append(settings);
+  else $("#agent-list-foot")!.prepend(settings);
   dispatchEvent(new Event("recurse:phone-view"));
 }
 function seed(): void {

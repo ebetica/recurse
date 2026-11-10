@@ -63,7 +63,8 @@ lives in `src/auth/anthropic_oauth.ts`, not an extension.
 
 ## Browser app and tests
 
-| Part                            | What it owns                                                                                                           |
-| ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| [web/](../../web/README.md)     | The browser app: `web/app.ts`, built into `web/dist/` and loaded by `web/index.html`                                   |
-| [tests/](../../tests/README.md) | Backend, extension, web, browser and live tests; suite checks in `tests/checks/` and developer scripts in `tests/dev/` |
+| Part                                  | What it owns                                                                                                           |
+| ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| [web/dock/](../../web/dock/README.md) | Desktop chat and pane windows, tabs, drag/drop and focus; lazy-loaded, absent on phones                                |
+| [web/](../../web/README.md)           | The browser app: `web/app.ts`, built into `web/dist/` and loaded by `web/index.html`                                   |
+| [tests/](../../tests/README.md)       | Backend, extension, web, browser and live tests; suite checks in `tests/checks/` and developer scripts in `tests/dev/` |

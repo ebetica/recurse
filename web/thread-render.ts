@@ -48,7 +48,7 @@ import {
   agentAttachmentLayout,
   agentAttachmentView,
 } from "./agent-attachments.js";
-import { showFileInPane } from "./files.js";
+import { enlargeFileImage, showFileInPane } from "./files.js";
 import {
   activityUsage,
   activityUsageLabel,
@@ -980,7 +980,7 @@ function assistantAttachments(
             class="agent-attachment-preview"
             type="button"
             aria-label=${view.previewLabel}
-            @click=${() => showFileInPane(cid, view.id)}
+            @click=${() => enlargeFileImage(cid, view.id)}
           >
             <img
               src=${view.previewHref}

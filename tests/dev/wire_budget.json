@@ -1,7 +1,7 @@
 {
   "cold-load": {
-    "bytes": 323731,
-    "requests": 33
+    "bytes": 485513,
+    "requests": 37
   },
   "warm-reload": {
     "bytes": 13469,
@@ -24,7 +24,7 @@
     "requests": 40
   },
   "switch": {
-    "bytes": 50395,
+    "bytes": 62420,
     "requests": 94
   },
   "idle": {

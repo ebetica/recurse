@@ -4,7 +4,7 @@
 // Async refresh serves last-good snapshots; entries get off-loop Brotli copies.
 
 import { createHash, randomBytes } from "node:crypto";
-import { readFile, realpath, stat, type FileHandle } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { basename, dirname, extname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import zlib from "node:zlib";
@@ -437,8 +437,16 @@ export async function fileResponse(
 }
 
 export interface OpenedFile {
-  /** Response owns/closes this descriptor, served in 64 KiB reads. */
-  readonly handle: FileHandle;
+  /** Response owns/closes this reader, served in 64 KiB reads. */
+  readonly handle: {
+    read(
+      buffer: Uint8Array,
+      offset: number,
+      length: number,
+      position: number,
+    ): Promise<{ bytesRead: number }>;
+    close(): Promise<void>;
+  };
   readonly size: number;
 }
 
@@ -635,7 +643,11 @@ export function registerStaticRoutes(
     const page = shell
       .replace("<html ", embed ? "<html data-embed " : "<html ")
       .replace(
-        /(href|src)="\/static\/brand\/(?:favicon-32\.png|favicon\.svg|apple-touch-icon\.png|mark\.svg)"/gu,
+        'id="brand-name"',
+        brand.custom_name ? 'id="brand-name"' : 'id="brand-name" hidden',
+      )
+      .replace(
+        /(href|src)="\/static\/brand\/(?:favicon(?:-dark)?-32\.png|favicon\.svg|apple-touch-icon\.png|mark\.svg)"/gu,
         (original, attr: string) =>
           brand.icon ? `${attr}="${brand.icon}"` : original,
       )

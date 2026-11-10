@@ -52,6 +52,8 @@ export interface TreeNode {
   tags?: Record<string, { at: number; by: string; until?: number }>;
   // When its latest turn finished (epoch seconds).
   replied_at?: number | null;
+  /** Finished with nothing waiting, and not yet viewed on any device. */
+  unread?: boolean;
   // Restart-interrupted; active parked work may resume automatically.
   restart_parked?: boolean;
   // Desired review-off state, applies next turn.
@@ -596,11 +598,32 @@ export interface PaneCacheDef {
   dispose?(el: HTMLElement, ctx: PaneContext): void;
 }
 
+export type PaneNavigation =
+  | "next"
+  | "previous"
+  | "top"
+  | "bottom"
+  | "half-down"
+  | "half-up"
+  | "open"
+  | "back"
+  | "previous-section"
+  | "next-section"
+  | "filter"
+  | "copy";
+
+export interface PaneFinderItem {
+  key: string;
+  name: string;
+  open(): void;
+}
+
 export interface PaneDef {
   id: string;
   title?: string;
   icon?: string;
-  available?(ctx: PaneContext): boolean;
+  // Undefined means discovery is pending, rather than known unavailable.
+  available?(ctx: PaneContext): boolean | undefined;
   // Content generation: undefined unknown/error, null known empty, else stable.
   autoOpenGeneration?(ctx: PaneContext): string | null | undefined;
   // Called when the reader starts a visit (a conversation, the draft, or none).
@@ -612,7 +635,11 @@ export interface PaneDef {
   attention?(): boolean;
   viewState?: PaneViewStateDef;
   cache?: PaneCacheDef;
+  /** Things this pane can show, offered in the pane finder as `kind/name`. */
+  finder?: { kind: string; items(): PaneFinderItem[] };
   render?(el: HTMLElement, ctx: PaneContext): void;
+  /** Handle item navigation; false leaves movement to the pane scroller. */
+  navigate?(el: HTMLElement, command: PaneNavigation): boolean;
   // Poll refresh detects changes to avoid rebuilding steady panes.
   refresh?(el: HTMLElement, ctx: PaneContext): void;
   /** Called just before the open body leaves the page. */

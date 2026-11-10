@@ -5,7 +5,7 @@ import { loadRecording } from "../backend/fixtures/model_response/replay";
 import { captureErrors, closeWithRoutes, type BrowserTest } from "./common";
 
 export const tests: BrowserTest[] = [
-  // Regression: #2408 a recorded pre-clear response must not end the wait.
+  // Regression: #3249 usage must name the served model. (also #2408 a recorded pre-clear response must not end the wait.)
   async function test_recorded_stream_changed_served_model_chip(browser, base) {
     const recording = await loadRecording();
     const page = await browser.newPage({
@@ -96,7 +96,27 @@ export const tests: BrowserTest[] = [
       await screenshots("before");
       const original = await seed(true, agent);
       await chip.waitFor();
-      expect(await chip.innerText()).toBe("Downgraded");
+      await browserExpect(
+        page.getByRole("button", {
+          name: "Model downgraded — details",
+          exact: true,
+        }),
+      ).toBeVisible();
+      expect(
+        await chip.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return [-21, 21].flatMap((x) =>
+            [-21, 21].map((y) =>
+              element.contains(
+                element.ownerDocument.elementFromPoint(
+                  box.x + box.width / 2 + x,
+                  box.y + box.height / 2 + y,
+                ),
+              ),
+            ),
+          );
+        }),
+      ).toEqual([true, true, true, true]);
       expect((await chip.getAttribute("class")) ?? "").not.toContain("seen");
       await screenshots("after", true);
       await chip.click();
@@ -211,6 +231,87 @@ export const tests: BrowserTest[] = [
       expect(await page.locator("#safety-btn").getAttribute("aria-label")).toBe(
         "Safety review off (Yolo mode)",
       );
+      const result = await page.request.post(
+        `${base}__browser-test/seed-model-response`,
+        {
+          data: { downgrade: true, run: true },
+        },
+      );
+      expect(result.ok()).toBeTrue();
+      const fake = (await result.json()) as { agent: string };
+      for (const view of [page, desktop])
+        await view.route(`${base}api/models**`, async (route) => {
+          const catalog = await (await route.fetch()).json();
+          await route.fulfill({
+            json: {
+              ...catalog,
+              models: [
+                ...catalog.models,
+                { id: `${fake.agent}/faux-1`, label: "Faux Model" },
+                { id: `${fake.agent}/faux-served`, label: "Served model" },
+              ],
+            },
+          });
+        });
+      await page.goto(`${base}?served-model#agent=${fake.agent}`);
+      await page.locator("#input").waitFor();
+      const controlsBefore = await page.locator("#conv-controls").boundingBox();
+      await page.locator("#input").fill("Reply with NORMAL_MODEL_OK.");
+      await page.locator("#send").click();
+      await page
+        .getByRole("button", {
+          name: "Model downgraded — details",
+          exact: true,
+        })
+        .waitFor();
+      const controlsAfter = await page.locator("#conv-controls").boundingBox();
+      expect(controlsAfter).toEqual(controlsBefore);
+      const servedExplanation =
+        "Model changed: requested Faux Model → served Served model";
+      for (const [view, appearance] of [
+        [page, "dark"],
+        [desktop, "dark"],
+        [desktop, "light"],
+      ] as const) {
+        expect(
+          (
+            await view.request.post(`${base}api/settings/theme`, {
+              data: { theme: "Tokyo Night", appearance },
+            })
+          ).ok(),
+        ).toBeTrue();
+        await view.goto(`${base}?served-model#agent=${fake.agent}`);
+        const warning = view.getByRole("button", {
+          name: "Model downgraded — details",
+          exact: true,
+        });
+        await warning.waitFor();
+        const iconShots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (iconShots)
+          await view.screenshot({
+            path: `${iconShots}/downgrade-icon-${view.viewportSize()!.width}-${appearance}.png`,
+          });
+        await warning.click();
+        await view
+          .getByRole("dialog", { name: "Provider model downgrade" })
+          .getByText(servedExplanation, { exact: true })
+          .waitFor();
+        await view.keyboard.press("Escape");
+        await view.locator(".turn-tokens.activity-usage").last().click();
+        await browserExpect(
+          view.locator("#prompt-body .turn-usage-selector"),
+        ).toHaveText("Conversation model · Served model");
+        await view.locator("#prompt-body .turn-usage-bar").waitFor();
+        expect(
+          await view.locator("#prompt-body .model-response-row").innerText(),
+        ).toContain(servedExplanation);
+        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (shots)
+          await view.screenshot({
+            path: `${shots}/downgrade-usage-${view.viewportSize()!.width}-${appearance}.png`,
+          });
+        await view.locator("#prompt-close").click();
+      }
       expect(errors).toEqual([]);
     } finally {
       await page.close();

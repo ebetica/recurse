@@ -10,6 +10,7 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3207 Artifact wheel input waits for a sized, scrollable preview
   async function test_pane_chrome(browser, base) {
     const app = await postFixture(base, "seed-artifact-app?reader=long");
     const observations: Array<{
@@ -98,6 +99,17 @@ export const tests: BrowserTest[] = [
             : pane === "diff"
               ? page.locator(".diff-list")
               : body;
+        if (pane === "report") {
+          await page.waitForFunction((selector) => {
+            const document = (globalThis as any).document;
+            const frame = document.querySelector("iframe.artifact-embed-page");
+            const scroller = document.querySelector(selector);
+            return (
+              !!frame?.style.height &&
+              scroller?.scrollHeight > scroller?.clientHeight
+            );
+          }, scrollerSelector);
+        }
         await waitForPaneTransition(page, `.pane-col[data-pane="${pane}"]`);
         await scroller.evaluate((node) => {
           node.scrollTop = 0;
@@ -125,14 +137,16 @@ export const tests: BrowserTest[] = [
           (node) => node.clientHeight,
         );
         const frame = page.locator("iframe.artifact-embed-page");
-        const point =
-          pane === "report"
-            ? (await frame.boundingBox())!
-            : (await scroller.boundingBox())!;
-        await page.mouse.move(
-          point.x + point.width / 2,
-          Math.min(700, point.y + 200),
-        );
+        const wheelTarget = pane === "report" ? frame : scroller;
+        const point = (await wheelTarget.boundingBox())!;
+        await wheelTarget.hover({
+          position: {
+            x: point.width / 2,
+            y: Math.min(700, point.y + 200) - point.y,
+          },
+        });
+        expect(await scroller.evaluate((node) => node.scrollTop)).toBe(0);
+        console.log(JSON.stringify({ width, pane, step: "wheel-ready" }));
         await page.mouse.wheel(0, 600);
         await page.waitForFunction(
           ({ selector, mobile, pane }) => {
@@ -342,6 +356,7 @@ export const tests: BrowserTest[] = [
   },
   // Regression: #3156 one phone tap keeps the Tips draft and its prompt after pane history closes.
   async function test_tips_pane_hourly_dot(browser, base) {
+    const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
     const hour = 3_600_000;
     const desktop = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -396,13 +411,16 @@ export const tests: BrowserTest[] = [
     );
     const hourly = pane.getByRole("switch", { name: "Show a tip every hour" });
     await hourly.uncheck();
-    await page.locator('#pane-rail-panels .rail-btn[data-pane="tips"]').click();
+    const closeTips = page.locator(
+      '#dock .dv-tab[data-dock-panel="tips"] button',
+    );
+    await closeTips.click();
     await pane.waitFor({ state: "detached" });
     await desktop.clock.fastForward(hour);
     expect(await rail.getAttribute("class")).not.toContain("attention");
     await rail.click();
     await hourly.check();
-    await rail.click();
+    await closeTips.click();
     await pane.waitFor({ state: "detached" });
     await desktop.clock.fastForward(hour);
     await page.locator('.rail-btn.attention[data-pane="tips"]').waitFor();
@@ -410,6 +428,156 @@ export const tests: BrowserTest[] = [
     await pane.locator(".tips-count", { hasText: "3 of 29" }).waitFor();
     expect(await pane.locator(".tip-title").textContent()).toBe(
       "Let agents flag you",
+    );
+    await page.bringToFront();
+    await pane.locator(".pane-body").focus();
+    for (const key of ["j", "k", "d", "u"]) await page.keyboard.press(key);
+    expect(await pane.locator(".tip-title").textContent()).toBe(
+      "Let agents flag you",
+    );
+    await page.keyboard.press("]");
+    await pane
+      .locator(".tip-title", { hasText: "Pin, snooze and archive" })
+      .waitFor();
+    await page.keyboard.press("[");
+    await pane
+      .locator(".tip-title", { hasText: "Let agents flag you" })
+      .waitFor();
+    const seen = await page.evaluate(
+      () =>
+        JSON.parse((globalThis as any).localStorage.getItem("recurse.tips"))
+          .seen,
+    );
+    await desktop.grantPermissions(["clipboard-read", "clipboard-write"]);
+    await page.keyboard.press("y");
+    await pane.getByText("Tip copied.", { exact: true }).waitFor();
+    expect(
+      await page.evaluate(() =>
+        (globalThis as any).navigator.clipboard.readText(),
+      ),
+    ).toBe(
+      `${await pane.locator(".tip-title").textContent()}\n\n${await pane.locator(".tip-text").textContent()}`,
+    );
+    await page.keyboard.press("h");
+    expect(await pane.locator(".tip-card").isVisible()).toBeFalse();
+    const rows = pane.locator(".tips-all-item");
+    const ids = await rows.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-tip")),
+    );
+    const cursor = pane.locator(".pane-item-cursor");
+    await page.keyboard.press("Shift+G");
+    expect(await cursor.getAttribute("data-tip")).toBe(ids.at(-1));
+    await page.keyboard.press("g");
+    await page.keyboard.press("g");
+    expect(await cursor.getAttribute("data-tip")).toBe(ids[0]);
+    await page.keyboard.press("j");
+    expect(await cursor.getAttribute("data-tip")).toBe(ids[1]);
+    await page.keyboard.press("k");
+    expect(await cursor.getAttribute("data-tip")).toBe(ids[0]);
+    await page.keyboard.press("d");
+    const down = await pane
+      .locator(".pane-body")
+      .evaluate((node) => node.scrollTop);
+    expect(down).toBeGreaterThan(0);
+    await page.keyboard.press("u");
+    expect(
+      await pane.locator(".pane-body").evaluate((node) => node.scrollTop),
+    ).toBeLessThan(down);
+    expect(
+      await page.evaluate(
+        () =>
+          JSON.parse((globalThis as any).localStorage.getItem("recurse.tips"))
+            .seen,
+      ),
+    ).toEqual(seen);
+    await page.keyboard.press("h");
+    const shownTip = await page.evaluate(
+      () =>
+        JSON.parse((globalThis as any).localStorage.getItem("recurse.tips"))
+          .current,
+    );
+    expect(
+      await pane.locator('.tips-all-item[tabindex="-1"]').count(),
+    ).toBeGreaterThan(1);
+    for (const width of [412, 1280]) {
+      await page.evaluate(() => {
+        const browser = globalThis as any;
+        browser.__tipsMediaChanged = false;
+        browser.matchMedia("(max-width: 700px)").addEventListener(
+          "change",
+          () =>
+            browser.requestAnimationFrame(() => {
+              browser.__tipsMediaChanged = true;
+            }),
+          { once: true },
+        );
+      });
+      await page.setViewportSize({ width, height: 900 });
+      await page.waitForFunction(() => (globalThis as any).__tipsMediaChanged);
+      if (width === 412) {
+        expect(await pane.locator(".tips-filter").count()).toBe(0);
+        expect(
+          await pane.locator('.tips-all-item[tabindex="-1"]').count(),
+        ).toBe(0);
+        const current = pane.locator('.tips-all-item[aria-current="true"]');
+        expect(await current.count()).toBe(1);
+        expect(await current.getAttribute("data-tip")).toBe(shownTip);
+        await rows.nth(0).focus();
+        await page.keyboard.press("Tab");
+        expect(
+          await rows
+            .nth(1)
+            .evaluate((node) => node === node.ownerDocument.activeElement),
+        ).toBeTrue();
+      }
+    }
+    await pane.locator(".pane-body").focus();
+    await page.keyboard.press("/");
+    const filter = pane.getByRole("searchbox", { name: "Filter tips" });
+    await filter.fill("workflows");
+    expect(await rows.count()).toBe(1);
+    await filter.press("j");
+    await pane.getByText("No tips match.", { exact: true }).waitFor();
+    await filter.fill("workflows");
+    await rows.focus();
+    await page.keyboard.press("j");
+    await page.keyboard.press("y");
+    await pane.getByText("Tip copied.", { exact: true }).waitFor();
+    const copied = await page.evaluate(() =>
+      (globalThis as any).navigator.clipboard.readText(),
+    );
+    if (shots) {
+      await mkdir(shots, { recursive: true });
+      await page.screenshot({ path: `${shots}/tips-keys-1280.png` });
+    }
+    await desktop.clearPermissions();
+    await desktop.grantPermissions([]);
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      browser.__tipsCopied = false;
+      browser.document.addEventListener(
+        "copy",
+        () =>
+          browser.requestAnimationFrame(() => {
+            browser.__tipsCopied = true;
+          }),
+        { once: true },
+      );
+    });
+    await page.keyboard.press("y");
+    await page.waitForFunction(() => (globalThis as any).__tipsCopied);
+    expect(
+      await cursor.evaluate(
+        (node) => node === node.ownerDocument.activeElement,
+      ),
+    ).toBeTrue();
+    await page.keyboard.press("Enter");
+    await pane
+      .locator(".tip-title", { hasText: "Teach agents your workflows" })
+      .waitFor();
+    expect(await pane.locator(".tip-card").isVisible()).toBeTrue();
+    expect(copied).toBe(
+      `${await pane.locator(".tip-title").textContent()}\n\n${await pane.locator(".tip-text").textContent()}`,
     );
     await page.locator("#input").fill("Please look into this");
     await pane.locator(".tips-all > summary").click();
@@ -446,6 +614,9 @@ export const tests: BrowserTest[] = [
     await item.tap();
     const sheet = mobile.locator('.pane-col[data-pane="tips"]');
     await sheet.locator(".tips-count", { hasText: "1 of 27" }).waitFor();
+    expect(await sheet.locator(".tips-filter").count()).toBe(0);
+    if (shots)
+      await mobile.screenshot({ path: `${shots}/tips-native-412.png` });
     expect(await fab.getAttribute("class")).not.toContain("attention");
     await sheet.getByRole("button", { name: "Ask a new agent" }).tap();
     await mobile.waitForFunction(() => {

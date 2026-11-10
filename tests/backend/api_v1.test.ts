@@ -16,7 +16,7 @@ import { apiSchema, type AgentStatus } from "../../src/web/api_v1/schema";
 import { held } from "./fixtures/durable_host/host";
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { appWorld } from "./web_app_support";
-import snapshot from "./fixtures/api_v1/revisions/6.json";
+import snapshot from "./fixtures/api_v1/revisions/7.json";
 
 // Regression: #3024 idle polling waits through early timer wakeups.
 test("v1 discovery and agent reads", async () => {
@@ -285,9 +285,16 @@ performance.now = () => start + (now() - start) / 2;
     expect(usageStatus.context).not.toBeNull();
     expect(usageStatus.context!.tokens).toBeGreaterThan(0);
     const ui = (await app.instance.reads.readContextUsage(child))!;
+    const { session, ...occupancy } = usageStatus.context!;
     expect({ tokens: ui.used_tokens, window: ui.context_window }).toEqual(
-      usageStatus.context!,
+      occupancy,
     );
+    const contextView = await app.instance.reads.readViewWindow(child, {
+      limit: 1,
+    });
+    expect(contextView.status).toBe("ready");
+    expect(typeof session).toBe("string");
+    expect(contextView.session).toBe(session);
     expect(
       JSON.parse((await result(cli("status", child, "--json"))).stdout).context,
     ).toEqual(usageStatus.context);

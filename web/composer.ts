@@ -29,6 +29,7 @@ import {
   syncHistoryToSelection,
   asHistoryCorrection,
   refreshUpBtn,
+  renameConversation,
 } from "./sidebar.js";
 import { renderDraft, renderColdOutbox } from "./conversation/chrome.js";
 import { poll, waitForInitialAuthoritativeRead } from "./conversation/poll.js";
@@ -86,6 +87,7 @@ import {
   type AuthRecovery,
 } from "./connection/send-recovery.js";
 import { closeComposerAutocomplete } from "./composer/autocomplete.js";
+import "./composer/file-finder.js";
 import {
   conversationUiState,
   newDraftUiOwnerId,
@@ -162,6 +164,18 @@ function clearComposer(ownerId = currentUiOwnerId()): void {
 // Focus Insert mode without disturbing a draft. A keyboard entry always places
 // the caret at the end, while an already-focused composer keeps its selection.
 export function focusComposerAtEnd(): boolean {
+  if (
+    !inputEl.getClientRects().length ||
+    getComputedStyle(inputEl).visibility === "hidden" ||
+    inputEl.closest(".dock-parking")
+  ) {
+    const show = new CustomEvent("recurse:show-chat", {
+      cancelable: true,
+      detail: () => focusComposerAtEnd(),
+    });
+    dispatchEvent(show);
+    if (show.defaultPrevented) return true;
+  }
   if (inputEl.disabled || inputEl.readOnly || !inputEl.isConnected)
     return false;
   const alreadyFocused = document.activeElement === inputEl;
@@ -529,24 +543,39 @@ async function runComposerCommand(
     // Invariant: This is an operator mutation, so failures participate in
     // global connection health. Never client-timeout an ambiguous committed
     // action.
-    const r = await backendFor(convId).jpost(
-      `/api/conversations/${convId}/${endpoint}`,
-      name === "btw" ? { question } : {},
-      { availability: "core", timeoutMs: 0 },
-    );
-    if (!r.ok) {
-      setComposerCommandStatus(key, convId, `/${name} failed`, "command-error");
-      return;
+    let data: { id?: string; muted?: boolean; queued?: boolean } = {};
+    if (name === "rename") {
+      if (!(await renameConversation(convId, question!))) {
+        setComposerCommandStatus(
+          key,
+          convId,
+          "/rename failed",
+          "command-error",
+        );
+        return;
+      }
+    } else {
+      const r = await backendFor(convId).jpost(
+        `/api/conversations/${convId}/${endpoint}`,
+        name === "btw" ? { question } : {},
+        { availability: "core", timeoutMs: 0 },
+      );
+      if (!r.ok) {
+        setComposerCommandStatus(
+          key,
+          convId,
+          `/${name} failed`,
+          "command-error",
+        );
+        return;
+      }
+      data = await r.json().catch(() => ({}));
+      if (shouldDropHeldThread(name, r.ok, !!data.queued))
+        dropRowThread(convId);
     }
-    const data = (await r.json().catch(() => ({}))) as {
-      id?: string;
-      muted?: boolean;
-      queued?: boolean;
-    };
     const msg = commandFeedback(name, data);
     setComposerCommandStatus(key, convId, msg);
     if (name === "btw" && data.id) showSide(convId, data.id);
-    if (shouldDropHeldThread(name, r.ok, !!data.queued)) dropRowThread(convId);
     // Invariant: Auto-dismiss only this command's note; another command or real
     // send may have taken over the shared status surface during the request.
     setTimeout(() => {
@@ -634,8 +663,8 @@ setComposerCommandRunner((name) => {
   }
   const convId = state.selectedId;
   if (!convId || convId === DRAFT) return false;
-  if (name === "btw") {
-    inputEl.value = "/btw ";
+  if (name === "btw" || name === "rename") {
+    inputEl.value = `/${name} `;
     inputEl.dispatchEvent(new Event("input", { bubbles: true }));
     inputEl.focus();
     return true;
@@ -645,6 +674,17 @@ setComposerCommandRunner((name) => {
 
 export function send(): void {
   if (pendingSavedRecovery) return;
+  const rename = matchComposerCommand(inputEl.value);
+  if (rename?.name === "rename") {
+    const convId = state.selectedId;
+    if (!convId || !composerCommandAvailable("rename", convId))
+      setSendStatus("/rename unavailable", "command-error");
+    else if (!rename.question)
+      setSendStatus("Usage: /rename <title>", "command-error");
+    else if (startComposerCommand("rename", convId, rename.question))
+      clearComposer(convId);
+    return;
+  }
   // Spec: Bare exact platform commands run actions, never model messages.
   // Trailing prose remains a message; drafts without a target use first-send
   // text.

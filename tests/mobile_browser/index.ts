@@ -2,6 +2,7 @@ import type { BrowserTest } from "./common";
 import { browserArguments, runBrowserGroups } from "./parallel";
 import { tests as remoteSidebar } from "./test_remote_sidebar";
 import { tests as sidebar } from "./test_sidebar";
+import { tests as unreadSidebar } from "./test_unread_sidebar";
 import { tests as themes } from "./test_themes";
 import { tests as layoutWait } from "./test_layout_wait";
 import { tests as changes } from "./test_changes_expand";
@@ -31,6 +32,8 @@ import { tests as conversationTitle } from "./test_conversation_title";
 import { tests as mobileLayout } from "./test_mobile_layout";
 import { tests as panesArtifacts } from "./test_panes_artifacts";
 import { tests as panesFiles } from "./test_panes_files";
+import { tests as documentPreviews } from "./test_document_previews";
+import { tests as explorer } from "./test_explorer";
 import { tests as visibleAttachments } from "./test_visible_attachments";
 import { tests as lineComments } from "./test_line_comments";
 import { tests as selectionComments } from "./test_selection_comments";
@@ -55,7 +58,7 @@ import { tests as liveTools } from "./test_live_tools";
 import { tests as artifactCheck } from "./test_artifact_check";
 
 export const groups: Array<[string, BrowserTest[]]> = [
-  ["sidebar", sidebar],
+  ["sidebar", [...sidebar, ...unreadSidebar]],
   ["remote-sidebar", remoteSidebar],
   ["themes", themes],
   ["layout-wait", layoutWait],
@@ -85,7 +88,8 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["conversation-title", conversationTitle],
   ["mobile-layout", mobileLayout],
   ["panes-artifacts", panesArtifacts],
-  ["panes-files", panesFiles],
+  ["panes-files", [...panesFiles, ...documentPreviews]],
+  ["explorer", explorer],
   ["visible-attachments", visibleAttachments],
   ["line-comments", lineComments],
   ["selection-comments", [...selectionComments, ...longSelection]],

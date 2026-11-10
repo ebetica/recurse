@@ -5,12 +5,12 @@ import {
   LOCAL_OWNER_INDEX_KEY,
   LOCAL_PANE_VISIBILITY,
   MAX_PANE_STATES,
-  MAX_PLUGIN_STATE_CHARS,
   MAX_RETAINED_OWNERS,
   SESSION_OWNER_INDEX_KEY,
   ephemeralOwner,
   fieldKeyFor,
   jsonClone,
+  paneStateLimit,
   repairKeyFor,
   slotKeyFor,
   validOwnerId,
@@ -102,7 +102,7 @@ export function writePluginFieldFor(
     version: item.version,
     value: item.value,
   });
-  if (raw.length <= MAX_PLUGIN_STATE_CHARS + 1_024)
+  if (raw.length <= paneStateLimit(key) + 1_024)
     storage.setItem(fieldKeyFor(slot, retention, available), raw);
 }
 
@@ -326,7 +326,7 @@ export function mergedLocalFor(
       );
       if (replace) delete panes[replace];
     }
-    const value = jsonClone(item.value);
+    const value = jsonClone(item.value, paneStateLimit(key));
     if (value !== undefined) panes[key] = { version: item.version, value };
   }
   return {
