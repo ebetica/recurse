@@ -29,6 +29,7 @@ export const tests: BrowserTest[] = [
     };
     let treeReads = 0;
     let remoteRequests = 0;
+    let explorerRequests = 0;
     let flaky = false;
     let versionOverride: "older" | "incompatible" | null = null;
     let directMismatch = false;
@@ -41,6 +42,8 @@ export const tests: BrowserTest[] = [
         async fetch(request) {
           remoteRequests++;
           const url = new URL(request.url);
+          if (/\/conversations\/[^/]+\/tree(?:\/|$)/.test(url.pathname))
+            explorerRequests++;
           if (revoked && request.headers.has("authorization"))
             return new Response("sign-in required", { status: 401 });
           const kind =
@@ -674,6 +677,15 @@ export const tests: BrowserTest[] = [
                 ?.state;
             })
             .toBe("connected");
+          const explorerRequestsBefore = explorerRequests;
+          const explorer = await context.request.get(
+            base + "api/backends/older/conversations/missing/tree",
+          );
+          expect(explorer.status()).toBe(409);
+          expect((await explorer.json()).detail).toBe(
+            "Update this remote to browse its files.",
+          );
+          expect(explorerRequests).toBe(explorerRequestsBefore);
           versionOverride = "incompatible";
           const admitted = await context.request.post(
             base + "api/relay/messages",

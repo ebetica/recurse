@@ -393,6 +393,37 @@ async function test_background_shells_inline_details_and_scoped(
     expect(sb!.width).toBeLessThanOrEqual(mobile ? 390 : 1280);
     expect(sb!.y).toBeGreaterThanOrEqual(tb!.y + tb!.height);
     expect(sb!.y + sb!.height).toBeLessThanOrEqual(cb!.y + 1);
+    if (mobile) {
+      await page.evaluate(() => {
+        const browser = globalThis as any;
+        const viewport = browser.visualViewport;
+        const height = Object.getOwnPropertyDescriptor(
+          browser.VisualViewport.prototype,
+          "height",
+        )!;
+        Object.defineProperty(viewport, "height", {
+          configurable: true,
+          get: () => height.get!.call(viewport) - 160,
+        });
+        viewport.dispatchEvent(new browser.Event("resize"));
+      });
+      await page.waitForFunction(() => {
+        const { document, visualViewport } = globalThis as any;
+        const box = (selector: string) =>
+          document.querySelector(selector).getBoundingClientRect();
+        const composer = box("#composer-wrap");
+        return (
+          Math.abs(
+            composer.bottom - visualViewport.offsetTop - visualViewport.height,
+          ) <= 1 && box(".shell-surface").bottom <= composer.top + 1
+        );
+      });
+      await page.evaluate(() => {
+        const browser = globalThis as any;
+        delete browser.visualViewport.height;
+        browser.visualViewport.dispatchEvent(new browser.Event("resize"));
+      });
+    }
     const close = surface.locator(".shell-surface-close");
     await close.focus();
     await (

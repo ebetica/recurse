@@ -202,6 +202,25 @@ if (topbarEl) {
   syncMobileShellHeight();
 }
 
+// Invariant: Android Chrome can cover the bottom of 100dvh (keyboard open,
+// URL bar shown) while the visual viewport reports what is visible, so phone
+// shells end at the visual viewport's bottom. Pinch zoom keeps the layout.
+function syncVisibleHeight(): void {
+  const viewport = window.visualViewport;
+  const root = document.documentElement.style;
+  const bottom =
+    viewport &&
+    Math.abs(viewport.scale - 1) < 0.01 &&
+    window.matchMedia("(max-width: 700px)").matches
+      ? viewport.offsetTop + viewport.height
+      : Infinity;
+  if (bottom >= window.innerHeight - 1) root.removeProperty("--visible-height");
+  else root.setProperty("--visible-height", `${bottom}px`);
+}
+window.visualViewport?.addEventListener("resize", syncVisibleHeight);
+window.visualViewport?.addEventListener("scroll", syncVisibleHeight);
+syncVisibleHeight();
+
 configureAgentFinderNavigation((id: string) => {
   if (!state.nodes[id]) return false;
   if (id !== state.selectedId && !guardLeaveComments()) return false;

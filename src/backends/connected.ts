@@ -604,10 +604,13 @@ export class ConnectedBackends {
       );
     this.requireCompatible(label);
     const pathname = path.split("?", 1)[0]!;
-    if (pathname === "/api/v1" || pathname.startsWith("/api/v1/")) {
+    const explorer = /^\/api\/conversations\/[^/]+\/tree(?:\/|$)/.test(
+      pathname,
+    );
+    if (explorer || pathname === "/api/v1" || pathname.startsWith("/api/v1/")) {
       if (!this.versions.has(label))
         await this.refreshVersion(row, request.signal).catch(() => {});
-      const required = 3;
+      const required = explorer ? 8 : 3;
       const version = this.versions.get(label);
       if (
         version?.remote_api !== API_MAJOR ||
@@ -615,7 +618,9 @@ export class ConnectedBackends {
       )
         throw new HttpError(
           409,
-          `remote ${label} requires API v${API_MAJOR} revision ${required} for this route; update the remote or check its version in Settings`,
+          explorer
+            ? "Update this remote to browse its files."
+            : `remote ${label} requires API v${API_MAJOR} revision ${required} for this route; update the remote or check its version in Settings`,
         );
     }
     if (agent && !row.key)

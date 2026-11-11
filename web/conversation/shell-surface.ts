@@ -407,6 +407,7 @@ document.addEventListener("keydown", shellSurfaceKeydown, true);
 scrollEl.addEventListener("scroll", repositionSurface, { passive: true });
 window.addEventListener("resize", repositionSurface);
 window.visualViewport?.addEventListener("resize", repositionSurface);
+new ResizeObserver(repositionSurface).observe(scrollEl);
 document.addEventListener("click", (event) => {
   if (!shellSurfaceAgent && !agentSurfaceAgent) return;
   const target = event.target as Element | null;

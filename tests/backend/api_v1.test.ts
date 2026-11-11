@@ -16,7 +16,7 @@ import { apiSchema, type AgentStatus } from "../../src/web/api_v1/schema";
 import { held } from "./fixtures/durable_host/host";
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { appWorld } from "./web_app_support";
-import snapshot from "./fixtures/api_v1/revisions/7.json";
+import snapshot from "./fixtures/api_v1/revisions/8.json";
 
 // Regression: #3024 idle polling waits through early timer wakeups.
 test("v1 discovery and agent reads", async () => {

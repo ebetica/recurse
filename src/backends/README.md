@@ -29,7 +29,9 @@ a different major or malformed response is incompatible. Incompatible peers
 are refused for relay admission, proxy and transcript reads; older revisions
 retain existing relay and link functionality. Proxied v1 routes require revision
 3, when backend-key access was added; an unknown or insufficient version returns
-an actionable 409 without contacting the v1 route. A failed version request retains
+an actionable 409 without contacting the v1 route. Working-folder Explorer
+reads require revision 8 and unmarked operator authority; older remotes receive
+an update message before any Explorer route is contacted. A failed version request retains
 the last known compatibility rather than hiding an incompatible verdict.
 Settings and the agent settings tool share `request` and `listForAgents` in
 `connected.ts`; native calls do not read server credentials or use loopback HTTP.

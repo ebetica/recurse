@@ -59,6 +59,10 @@ Only operators and unmarked operator backend keys may call it; agent-marked
 requests are refused. Pin, snooze and archive use the same validation and storage
 as local sidebar actions.
 
+Since revision 8, operator backend keys can read the working-folder
+[Explorer routes](../README.md#working-folder-explorer). Agent-marked requests
+remain refused. Homes require revision 8 before forwarding those reads.
+
 ## Source files
 
 - `schema.ts` defines the JSON schemas and TypeScript types.

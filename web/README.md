@@ -124,8 +124,9 @@ uncommitted changes; pull requests keep their GitHub diff.
 
 ## Working-folder Explorer
 
-[explorer.ts](explorer.ts) adds Explorer to the desktop rail and phone menu;
-[explorer.css](explorer.css) uses shared tokens and button classes. Opening or
+[explorer.ts](explorer.ts) adds rail/menu browsing locally or by proxy. Older
+remotes show update guidance. [explorer.css](explorer.css) shares tokens and
+buttons. Opening or
 refreshing follows the agent's latest folder unless staged comments retain the
 loaded file snapshot. Folders load one page; Show more pages and collapsing drops
 children. About 1,000 rows are retained; replacement notices offer Refresh folder.

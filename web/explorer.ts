@@ -5,7 +5,7 @@
 import { html, nothing, render, type TemplateResult } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { apiJson } from "./api.js";
+import { backendFor } from "./backends/backend.js";
 import { DRAFT } from "./state.js";
 import { openFileTab, openPane, registerPane, syncPanes } from "./panes.js";
 import { registerFileTabSource } from "./panes/file-tabs.js";
@@ -100,10 +100,16 @@ function endpoint(
   suffix = "",
   query: Record<string, string> = {},
 ): string {
-  return `/api/conversations/${encodeURIComponent(view.cid)}/tree${suffix}?${new URLSearchParams(query)}`;
+  return backendFor(view.cid).url(
+    `/api/conversations/${encodeURIComponent(view.cid)}/tree${suffix}?${new URLSearchParams(query)}`,
+  );
 }
-async function read<T>(url: string, signal: AbortSignal): Promise<T> {
-  const { response, data } = await apiJson<T>(url, { signal });
+async function read<T>(
+  cid: string,
+  url: string,
+  signal: AbortSignal,
+): Promise<T> {
+  const { response, data } = await backendFor(cid).apiJson<T>(url, { signal });
   if (!response.ok)
     throw new Error(
       String(
@@ -176,6 +182,7 @@ async function loadFolder(
   paint(view);
   try {
     const page = await read<ExplorerListing>(
+      view.cid,
       endpoint(view, "", {
         path: item.path,
         ...(item.cursor ? { cursor: item.cursor } : {}),
@@ -223,6 +230,7 @@ async function openFile(view: View, path: string, more = false): Promise<void> {
   paint(view);
   try {
     const preview = await read<ExplorerPreview>(
+      view.cid,
       endpoint(view, "/file", { path }),
       controller.signal,
     );
@@ -274,6 +282,7 @@ async function loadFile(view: View, path: string, more = false): Promise<void> {
       query.version = view.preview.version;
     }
     const preview = await read<ExplorerPreview>(
+      view.cid,
       endpoint(view, "/file", query),
       controller.signal,
     );
@@ -313,6 +322,7 @@ async function search(view: View, query: string): Promise<void> {
   view.search = controller;
   try {
     const found = await read<{ results: string[] }>(
+      view.cid,
       endpoint(view, "/search", { q: query }),
       controller.signal,
     );
@@ -1042,8 +1052,7 @@ registerFileTabSource("explorer", (key, id) => {
       };
     },
     available(ctx: PaneContext) {
-      if (ctx.agentId === DRAFT || ctx.agentId.includes("/") || !ctx.node)
-        return false;
+      if (ctx.agentId === DRAFT || !ctx.node) return false;
       const body = document.querySelector<HTMLElement>(
         '.pane-body[data-pane="explorer"]',
       );
@@ -1062,7 +1071,7 @@ registerFileTabSource("explorer", (key, id) => {
         };
         prepared = attempt;
         const url = `/api/conversations/${encodeURIComponent(ctx.agentId)}/tree/file?${new URLSearchParams({ path })}`;
-        void read<ExplorerPreview>(url, attempt.controller.signal)
+        void read<ExplorerPreview>(ctx.agentId, url, attempt.controller.signal)
           .then((preview) => {
             if (prepared !== attempt || attempt.controller.signal.aborted)
               return;
@@ -1099,8 +1108,7 @@ registerPane({
   id: "explorer",
   title: "Explorer",
   icon: EXPLORER_ICON,
-  available: (ctx) =>
-    ctx.agentId !== DRAFT && !ctx.agentId.includes("/") && !!ctx.node,
+  available: (ctx) => ctx.agentId !== DRAFT && !!ctx.node,
   navigate,
   cache,
   leave,

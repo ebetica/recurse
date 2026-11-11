@@ -749,6 +749,50 @@ export const tests: BrowserTest[] = [
     expect(resized.composer.bottom <= resized.visualBottom + 1).toBeTrue();
     expect(resized.pageWidth <= resized.viewport + 1).toBeTrue();
     expect(resized.hit && resized.scrollY === 0).toBeTrue();
+    await page.locator("#input").fill("visible above the keyboard");
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      const viewport = browser.visualViewport;
+      const height = Object.getOwnPropertyDescriptor(
+        browser.VisualViewport.prototype,
+        "height",
+      )!;
+      Object.defineProperty(viewport, "height", {
+        configurable: true,
+        get: () => height.get!.call(viewport) - 24,
+      });
+      viewport.dispatchEvent(new browser.Event("resize"));
+    });
+    await page.waitForFunction(
+      "Math.abs(document.querySelector('#composer-wrap').getBoundingClientRect().bottom - visualViewport.offsetTop - visualViewport.height) <= 1",
+    );
+    expect(
+      await page.evaluate(() => {
+        const browser = globalThis as any;
+        const viewport = browser.visualViewport;
+        const bottom = viewport.offsetTop + viewport.height;
+        const composer = browser.document
+          .querySelector("#composer")
+          .getBoundingClientRect();
+        const send = browser.document.querySelector("#send");
+        const button = send.getBoundingClientRect();
+        const hit = browser.document.elementFromPoint(
+          button.left + button.width / 2,
+          button.top + button.height / 2,
+        );
+        return {
+          composerVisible:
+            composer.top >= viewport.offsetTop && composer.bottom <= bottom,
+          sendHit: send.contains(hit),
+        };
+      }),
+    ).toEqual({ composerVisible: true, sendHit: true });
+    await page.evaluate(() => {
+      const browser = globalThis as any;
+      delete browser.visualViewport.height;
+      browser.visualViewport.dispatchEvent(new browser.Event("resize"));
+    });
+    await page.locator("#input").fill("");
     await page.locator("#input").fill("keyboard-sized\n".repeat(20) + "@");
     await page.locator("#agent-finder.on").waitFor();
     const finder = await page.locator("#agent-finder").boundingBox();

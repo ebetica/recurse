@@ -255,13 +255,28 @@ test("operator Explorer reads only the current folder with bounded pages and pre
           "x-recurse-bundled-tool": "subagent",
           "x-recurse-agent": "c1",
         },
-        { authorization: `Bearer ${remote.key}` },
+        {
+          authorization: `Bearer ${remote.key}`,
+          "x-recurse-agent-caller": "c1",
+        },
         { authorization: `Bearer recurse_test_${serviceToken}` },
       ] as Record<string, string>[])
         expect(
           (await get(suffix, "c1", headers)).status,
           `${suffix}: ${Object.keys(headers).join(",")}`,
         ).toBe(403);
+    }
+    for (const suffix of [
+      "",
+      "/file?path=notes.md",
+      "/raw?path=notes.md",
+      "/search?q=notes",
+    ]) {
+      const response = await get(suffix, "c1", {
+        authorization: `Bearer ${remote.key}`,
+      });
+      expect(response.status).toBe(200);
+      await response.body?.cancel();
     }
     expect((await get("", "missing")).status).toBe(404);
     const preview = await json<ExplorerPreview>("/file?path=big.txt");

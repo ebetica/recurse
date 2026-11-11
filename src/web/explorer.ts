@@ -35,7 +35,9 @@ export function registerExplorerRoutes(
   const scope = async (ex: Exchange): Promise<ExplorerScope> => {
     if (
       agentMarked(ex) ||
-      !["cookie", "local", "tailscale"].includes(String(ex.state.auth_method))
+      !["cookie", "local", "tailscale", "backend-key"].includes(
+        String(ex.state.auth_method),
+      )
     )
       throw new HttpError(403, "only the operator can browse files");
     const owner = ex.params.cid!;

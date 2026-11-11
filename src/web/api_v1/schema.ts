@@ -2,7 +2,7 @@
 import { Type, type Static } from "typebox";
 
 export const API_MAJOR = 1;
-export const API_REVISION = 7;
+export const API_REVISION = 8;
 
 const TagSchema = Type.Object({
   at: Type.Number(),

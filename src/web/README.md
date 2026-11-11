@@ -95,10 +95,13 @@ Plain HTTP does not encrypt passwords or sessions; use HTTPS on untrusted networ
 ## Working-folder Explorer
 
 [explorer.ts](explorer.ts) serves operator-only `/api/conversations/{cid}/tree`
-reads. It uses the same persisted Durable cwd as local image reads and the
+reads. It uses the same persisted Durable cwd as image reads and the
 agent's `find` tool; relative paths cannot ascend above that folder. Agent
-markers, loopback tokens, service principals and connected-backend keys cannot
-use these routes. Remote conversations do not expose an Explorer control.
+markers, loopback tokens and service principals cannot use these routes.
+Connected homes forward operator reads through the existing backend proxy;
+the remote resolves the cwd and enforces the same filesystem checks.
+API revision 8 admits unmarked backend operator keys. Older remotes show
+“Update this remote to browse its files” without attempting filesystem reads.
 
 **Source files:** [explorer_io.ts](explorer_io.ts) owns Worker admission and
 shutdown; [explorer.worker.ts](explorer.worker.ts) owns directory cursors,

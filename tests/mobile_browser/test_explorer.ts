@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { tests as remoteExplorer } from "./test_remote_explorer";
 import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { retire } from "../../src/utils/trash";
 import type { Page, Route } from "playwright";
@@ -26,6 +27,7 @@ async function openExplorer(page: Page, width: number): Promise<void> {
 }
 
 export const tests: BrowserTest[] = [
+  ...remoteExplorer,
   async function explorer_pages_previews_and_fuzzy_search(browser, base, data) {
     const temporary = await mkdtemp(join(data, "data", "browser-explorer-"));
     const root = join(
