@@ -1995,7 +1995,7 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
-  // Regression: #3307 #3363 Artifact Markdown shares link policy and opens sibling documents in-app.
+  // Regression: #3307 #3363 #3397 Artifact Markdown opens siblings in-app and reports missing or escaping paths.
   async function test_svg_artifact_asset(browser, base, data) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },

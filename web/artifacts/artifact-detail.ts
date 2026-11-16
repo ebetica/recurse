@@ -19,6 +19,7 @@ import {
 } from "./selection-comments.js";
 import { errorText, refreshList, selectedInfo } from "./list-cache.js";
 import { renderContent } from "./content-view.js";
+import { scrollDocumentFragment } from "../document-markdown.js";
 import { renderComments } from "./comment-bar.js";
 import { contentCache, type ArtifactEl } from "./artifact-state.js";
 import { reviewedVersion, type DocumentChanges } from "../document-review.js";
@@ -153,6 +154,14 @@ export async function refreshArtifact(pane: ArtifactEl): Promise<void> {
   await refreshList(rs.agentId, true);
 }
 
+function scrollLinkedSection(pane: ArtifactEl): void {
+  const section = pane._rs.linkedSection;
+  if (!section || section.artifact !== pane._rs.selId) return;
+  const body = pane.querySelector<HTMLElement>(".report-doc");
+  if (body) scrollDocumentFragment(body, section.fragment, true);
+  pane._rs.linkedSection = undefined;
+}
+
 export async function showArtifact(pane: ArtifactEl): Promise<void> {
   const rs = pane._rs;
   if (rs.restoredArtifactId !== undefined || rs.revalidating) return;
@@ -172,8 +181,11 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
   void loadVersions(pane, info);
   const revisionKey = rs.selectedVersion || `current:${info.updated_at}`;
   const key = `${rs.agentId}\n${info.id}\n${revisionKey}`;
-  if (rs.loadingKey === key || rs.shownKey === key || rs.failedKey === key)
+  if (rs.shownKey === key) {
+    scrollLinkedSection(pane);
     return;
+  }
+  if (rs.loadingKey === key || rs.failedKey === key) return;
   rs.loadingKey = key;
   const seq = ++rs.requestSeq;
   const requestedAgent = rs.agentId,
@@ -252,6 +264,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
     renderComments(pane);
     setNotice(pane, rs.justRestored ? "Published version restored" : "", false);
     rs.justRestored = false;
+    scrollLinkedSection(pane);
   } catch (err) {
     if (
       !isCurrentArtifactRequest(

@@ -8,13 +8,15 @@ import {
   fauxAssistantMessage,
   fauxToolCall,
   type FauxResponseStep,
+  type ClassifierResult,
 } from "@earendil-works/pi-ai";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { appWorld } from "./web_app_support";
 import { held, until } from "./fixtures/durable_host/host";
 
-// Regression: #3382 changing the conversation model left safety using its opening identity.
+// Regression: #3382 #3396 model changes and invalid reviewer choices preserve routing.
 test("model changes rebuild trusted safety policy and apply reviewer verdicts", async () => {
   const { root, env } = appWorld();
   env.CHAT_MODEL = "faux/vendor/model";
@@ -39,6 +41,50 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
         },
       },
       api: { stream: faux.stream, streamSimple: faux.streamSimple },
+    }),
+  );
+  const classifier = builtinProviders()
+    .flatMap((provider) => provider.getAllModels?.() ?? [])
+    .find((model) => model.type === "classifier")!;
+  const classifierId = `${classifier.provider}/${classifier.id}`;
+  let choice = "allow";
+  const decisions: unknown[] = [];
+  models.setProvider(
+    createProvider({
+      id: classifier.provider,
+      models: [classifier],
+      auth: {
+        apiKey: {
+          name: "Test",
+          resolve: async () => ({ auth: { apiKey: "test-key" } }),
+        },
+      },
+      classifiers: {
+        [classifier.api]: {
+          classify: async (model, context): Promise<ClassifierResult> => {
+            decisions.push(context);
+            return {
+              api: model.api,
+              provider: model.provider,
+              model: model.id,
+              answers:
+                choice === "error" || choice === "missing"
+                  ? {}
+                  : {
+                      safety: {
+                        type: "choice",
+                        choice,
+                        probabilities: { [choice]: 1 },
+                        confidence: 1,
+                      },
+                    },
+              usage: fauxAssistantMessage("").usage,
+              stopReason: choice === "error" ? "error" : "stop",
+              timestamp: Date.now(),
+            };
+          },
+        },
+      },
     }),
   );
   app.instance.durable.deps.models = models;
@@ -212,6 +258,151 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
         expect(warnings[0]).toContain("accepted=2000");
         expect(warnings[0]).toContain("ignored=1");
       }
+    }
+    const config = app.instance.config;
+    const choicePath = join(
+      config.paths.CONFIG_DIR,
+      "safety-review-model.json",
+    );
+    await writeFile(choicePath, JSON.stringify({ model: classifierId }));
+    await config.refreshSettings();
+    for (const label of ["allow", "credential_exposure", "error", "missing"]) {
+      choice = label;
+      const file = join(root, `decision-${label}`);
+      const main = [
+        fauxAssistantMessage(
+          fauxToolCall("bash", { command: `touch ${file}` }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("decision done"),
+      ];
+      faux.setResponses(main);
+      expect(
+        (
+          await api(`/api/conversations/${cid}/deliver`, {
+            content: `create decision-${label}`,
+          })
+        ).status,
+      ).toBe(200);
+      await until(settled);
+      expect(existsSync(file)).toBe(label !== "credential_exposure");
+      const view = JSON.stringify((await host.view(cid)).blocks);
+      if (label === "credential_exposure")
+        expect(view).toContain("credential_exposure");
+      if (label === "error" || label === "missing")
+        expect(view).toContain("allowed without review");
+      const captured = (await host.prompt(cid, true)).safety_review as {
+        method: string;
+        reply: { stopReason: string };
+        context: unknown;
+      };
+      expect(captured).toBeDefined();
+      expect(captured.reply.stopReason, JSON.stringify(captured.reply)).toBe(
+        label === "error" ? "error" : "stop",
+      );
+      expect(JSON.stringify(captured.context)).toContain(
+        "Typed-output adaptation",
+      );
+    }
+    expect(decisions).toHaveLength(4);
+    for (const request of decisions) {
+      const serialized = JSON.stringify(request);
+      expect(serialized).toContain("Typed-output adaptation");
+      expect(serialized).toContain("Trusted acting agent");
+      expect(serialized).not.toContain('"role":"assistant"');
+    }
+    const failures = logs.filter(
+      (line) =>
+        line.includes("event=safety_review_failed") &&
+        line.includes(`provider=${classifier.provider}`),
+    );
+    expect(failures).toHaveLength(2);
+    await writeFile(
+      choicePath,
+      JSON.stringify({ model: `${classifier.provider}/gone` }),
+    );
+    await config.refreshSettings();
+    const absent = join(root, "decision-unavailable");
+    faux.setResponses([
+      fauxAssistantMessage(
+        fauxToolCall("bash", { command: `touch ${absent}` }),
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("done"),
+    ]);
+    await api(`/api/conversations/${cid}/deliver`, {
+      content: "create decision-unavailable",
+    });
+    await until(settled);
+    expect(existsSync(absent)).toBe(true);
+    expect(decisions).toHaveLength(4);
+    expect(
+      logs.some(
+        (line) =>
+          line.includes("event=safety_review_failed") &&
+          line.includes("category=unsupported_reviewer_pin"),
+      ),
+    ).toBe(true);
+    const savedChoices = [
+      { text: "{not json", invalid: true },
+      { text: "[]", invalid: true },
+      { text: JSON.stringify({ model: 123 }), invalid: true },
+      { text: JSON.stringify({ model: "" }), invalid: true },
+      { text: "{}", invalid: false },
+    ];
+    for (const [index, saved] of savedChoices.entries()) {
+      await writeFile(choicePath, JSON.stringify({ model: classifierId }));
+      await config.refreshSettings();
+      await writeFile(choicePath, saved.text);
+      await config.refreshSettings();
+      const file = join(root, `decision-invalid-${index}`);
+      const main = [
+        fauxAssistantMessage(
+          fauxToolCall("bash", { command: `touch ${file}` }),
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("done"),
+      ];
+      let chatReviews = 0;
+      const step: FauxResponseStep = (request) => {
+        if (JSON.stringify(request).includes("untrusted record of a user's")) {
+          chatReviews += 1;
+          return fauxAssistantMessage("OK");
+        }
+        return main.shift() ?? fauxAssistantMessage("done");
+      };
+      faux.setResponses(Array(6).fill(step));
+      const logStart = logs.length;
+      expect(
+        (
+          await api(`/api/conversations/${cid}/deliver`, {
+            content: `create decision-invalid-${index}`,
+          })
+        ).status,
+      ).toBe(200);
+      await until(settled);
+      expect(existsSync(file)).toBe(true);
+      expect(chatReviews).toBe(saved.invalid ? 0 : 1);
+      expect(decisions).toHaveLength(4);
+      const warnings = logs
+        .slice(logStart)
+        .filter((line) => line.includes("event=safety_review_failed"));
+      expect(warnings).toHaveLength(saved.invalid ? 1 : 0);
+      if (saved.invalid) {
+        expect(warnings[0]).toContain("category=invalid_policy");
+        expect(warnings[0]).toContain("attempts=0");
+        const blocks = (await host.view(cid)).blocks as unknown[];
+        const action = blocks.findLast((block) =>
+          JSON.stringify(block).includes(`decision-invalid-${index}`),
+        );
+        expect(JSON.stringify(action)).toContain(
+          "Safety review was skipped, so this action was allowed without review.",
+        );
+      }
+      const settings = (await (
+        await fetch(`${running.url}/api/settings/safety-review-model`)
+      ).json()) as { invalid: boolean };
+      expect(settings.invalid).toBe(saved.invalid);
     }
   } finally {
     await running.close();

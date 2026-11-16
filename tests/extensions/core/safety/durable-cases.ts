@@ -617,7 +617,9 @@ test("invalid reviewer configuration allows with a warning and failure log", asy
     expect(result.notices).toHaveLength(1);
     expect(result.notices[0]).toContain("allowed without review");
     expect(result.notices[0]).toContain("Settings");
-    expect(result.notices[0]).toContain("effort level 1");
+    expect(result.notices[0]).toContain(
+      category === "invalid_policy" ? "Safety review model" : "effort level 1",
+    );
     expect(result.logs).toEqual([
       {
         event: "safety_review_failed",

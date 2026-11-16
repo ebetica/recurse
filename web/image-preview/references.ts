@@ -107,41 +107,48 @@ export function installReferenceImageViewer(
   open: (cid: string, file: SessionFile) => void,
   attachment: (cid: string, id: string) => unknown,
 ): void {
-  const desktopMouse = matchMedia("(min-width: 701px) and (pointer: fine)");
-  document.addEventListener("dblclick", (event) => {
-    const image = (event.target as Element).closest?.("img");
-    if (!desktopMouse.matches || !image || image.hidden || !image.naturalWidth)
-      return;
-    const cid = documentImageOwner(image);
-    if (!cid) return;
-    const url = new URL(image.currentSrc || image.src, location.href);
-    if (
-      url.origin === location.origin &&
-      /\/attachments\/[^/]+\/thumbnail$/.test(url.pathname)
-    )
-      url.pathname = url.pathname.replace(/\/thumbnail$/, "/preview");
-    const source = originalPathImage(url.href) || url.href;
-    const name = image.alt || url.pathname.split("/").pop() || "Image";
-    event.preventDefault();
-    open(cid, {
-      key: source,
-      image_url: source,
-      storage: "published",
-      name,
-      size: 0,
-      media_type: "application/octet-stream",
-      preview: "image",
-      references: 1,
-      sources: [],
-    });
-  });
   document.addEventListener("click", (event) => {
     const image = (event.target as Element).closest?.("img");
-    const cid = selected();
-    if (!image || !cid || image.closest("button, a")) return;
+    if (!image || image.closest("button, a")) return;
+    const owner = documentImageOwner(image);
+    const cid = owner || selected();
+    if (!cid) return;
+    const selection = image.ownerDocument.getSelection();
+    if (
+      owner &&
+      (event.defaultPrevented ||
+        image.hidden ||
+        !image.naturalWidth ||
+        (selection &&
+          !selection.isCollapsed &&
+          selection.containsNode(image, true)))
+    )
+      return;
     const path = originalPathImage(
       image.dataset.pathImage || image.getAttribute("src") || "",
     );
+    if (owner) event.preventDefault();
+    if (owner && !path) {
+      const url = new URL(image.currentSrc || image.src, location.href);
+      if (
+        url.origin === location.origin &&
+        /\/attachments\/[^/]+\/thumbnail$/.test(url.pathname)
+      )
+        url.pathname = url.pathname.replace(/\/thumbnail$/, "/preview");
+      const source = originalPathImage(url.href) || url.href;
+      open(cid, {
+        key: source,
+        image_url: source,
+        storage: "published",
+        name: image.alt || url.pathname.split("/").pop() || "Image",
+        size: 0,
+        media_type: "application/octet-stream",
+        preview: "image",
+        references: 1,
+        sources: [],
+      });
+      return;
+    }
     if (path) {
       const name =
         new URL(path, location.href).searchParams
@@ -167,8 +174,9 @@ export function installReferenceImageViewer(
       /^\/api(?:\/backends\/([^/]+))?\/conversations\/([^/]+)\/attachments\/([^/]+)\/(?:preview|thumbnail)$/.exec(
         image.getAttribute("src") || "",
       );
-    const owner = match && (match[1] ? `${match[1]}/${match[2]}` : match[2]);
-    if (image.closest("#messages") && owner === cid)
+    const attachmentOwner =
+      match && (match[1] ? `${match[1]}/${match[2]}` : match[2]);
+    if (image.closest("#messages") && attachmentOwner === cid)
       attachment(cid, match![3]!);
   });
 }

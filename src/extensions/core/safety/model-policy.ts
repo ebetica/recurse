@@ -1,4 +1,9 @@
-import type { Model } from "@earendil-works/pi-ai";
+import type {
+  ClassifierApi,
+  ClassifierModel,
+  Model,
+} from "@earendil-works/pi-ai";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const MODEL_POLICY_ENV = "RECURSE_MODEL_POLICY";
@@ -29,6 +34,8 @@ export type TrustedModelPolicy = {
   version: 1;
   active: PolicyModel;
   reviewer_pin?: PolicyModel;
+  reviewer_explicit?: boolean;
+  reviewer_revision?: number;
   reviewer: PolicyRoute;
   summary: PolicyRoute;
 };
@@ -37,6 +44,14 @@ export type TrustedModelPolicyState =
   | { status: "absent" }
   | { status: "invalid" }
   | { status: "valid"; policy: TrustedModelPolicy };
+
+const BUILTIN_DECISIONS = new Set(
+  builtinProviders().flatMap((provider) =>
+    (provider.getAllModels?.() ?? [])
+      .filter((model) => model.type === "classifier")
+      .map((model) => `${model.provider}\u0000${model.id}`),
+  ),
+);
 
 const EFFORTS = new Set<ReviewEffort>([
   "minimal",
@@ -147,7 +162,12 @@ export function loadTrustedModelPolicy(
     !active ||
     !reviewer ||
     !summary ||
-    (candidate.reviewer_pin !== undefined && !pin)
+    (candidate.reviewer_pin !== undefined && !pin) ||
+    (candidate.reviewer_explicit !== undefined &&
+      candidate.reviewer_explicit !== true) ||
+    (candidate.reviewer_revision !== undefined &&
+      (!Number.isSafeInteger(candidate.reviewer_revision) ||
+        (candidate.reviewer_revision as number) < 0))
   ) {
     return { status: "invalid" };
   }
@@ -159,6 +179,12 @@ export function loadTrustedModelPolicy(
       reviewer,
       summary,
       ...(pin ? { reviewer_pin: pin } : {}),
+      ...(candidate.reviewer_explicit === true
+        ? { reviewer_explicit: true }
+        : {}),
+      ...(typeof candidate.reviewer_revision === "number"
+        ? { reviewer_revision: candidate.reviewer_revision }
+        : {}),
     },
   };
 }
@@ -176,8 +202,10 @@ function sameModel(
   );
 }
 
+export type ReviewModel = Model<any> | ClassifierModel<ClassifierApi>;
+
 export type ReviewSelection = {
-  model: Model<any>;
+  model: ReviewModel;
   effort: ReviewEffort;
 };
 
@@ -213,17 +241,29 @@ export function pickReviewerCandidates(
   if (state.status !== "valid") return undefined;
   const policy = state.policy;
   const target = policy[purpose];
-  const candidates =
-    purpose === "reviewer"
+  const candidates = policy.reviewer_explicit
+    ? [policy.reviewer]
+    : purpose === "reviewer"
       ? [target, ...(target.candidates ?? [])]
       : [target, policy.reviewer, ...(policy.reviewer.candidates ?? [])];
   const selected: ReviewSelection[] = [];
   const seen = new Set<string>();
   for (const candidate of candidates) {
     const key = `${candidate.provider}\u0000${candidate.model}`;
-    if (!candidate.provider || seen.has(key)) continue;
+    if (
+      !candidate.provider ||
+      seen.has(key) ||
+      (policy.reviewer_explicit && !BUILTIN_DECISIONS.has(key))
+    )
+      continue;
     seen.add(key);
-    const model = ctx.modelRegistry.find(candidate.provider, candidate.model);
+    const model = policy.reviewer_explicit
+      ? ctx.modelRegistry.findOfType(
+          "classifier",
+          candidate.provider,
+          candidate.model,
+        )
+      : ctx.modelRegistry.find(candidate.provider, candidate.model);
     if (model && sameModel(model, candidate)) {
       selected.push({ model, effort: candidate.effort });
     }

@@ -62,6 +62,26 @@ export function routes(fx: Fixture): Routes {
         });
       return { id: item.id, cwd: item.repo_path, demo };
     },
+    "seed-artifact-sections": async (body) => {
+      const agent = `section-links-${hex(4)}`;
+      await create(agent, "Artifact sections");
+      const item = await artifacts.create(dirs, {
+        owner: agent,
+        title: "Section links",
+      });
+      await Bun.write(
+        join(String(item.repo_path), "index.md"),
+        body.markdown.replaceAll("$ARTIFACT", String(item.id)),
+      );
+      await artifacts.publish(dirs, agent, String(item.id));
+      script(agent).setResponses([
+        fauxAssistantMessage(
+          `[Section](#artifact=${item.id}&section=browser-control-first-1) · [Missing section](#artifact=${item.id}&section=unknown)`,
+        ),
+      ]);
+      await submitDurable(agent, "Show the second browser control section.");
+      return { agent, id: item.id };
+    },
     "seed-native-artifact-settings": async () => {
       const agent = `native-tools-${hex(4)}`;
       await create(agent, "Native tools");

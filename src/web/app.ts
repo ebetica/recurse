@@ -452,6 +452,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     instance.treeView,
     connectedBackends,
     requireActionReady,
+    web,
   );
   const searchable = () =>
     conversations

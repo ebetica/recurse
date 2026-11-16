@@ -6,10 +6,109 @@ import {
   rootAgentId,
   runBrowserTests,
   waitForLayout,
+  captureErrors,
   type BrowserTest,
 } from "./common";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3397 Artifact section links must scroll the document without changing the route.
+  async function test_artifact_section_links(browser, base) {
+    const paragraphs = Array.from(
+      { length: 35 },
+      (_, i) => `Paragraph ${i}.\n\n`,
+    ).join("");
+    const { agent, id } = await postFixture(base, "seed-artifact-sections", {
+      markdown:
+        "# Section links\n\n" +
+        "[First](#browser-control-first) · [Second](#browser-control-first-1) · [Named](#named-anchor) · [Explicit](#explicit-anchor)\n\n" +
+        paragraphs +
+        "## Browser Control: First!\n\n[Top](#section-links) · [Open second](#artifact=$ARTIFACT&section=browser-control-first-1)\n\n" +
+        paragraphs +
+        "## Browser Control: First!\n\n[Top](#section-links) · [Unknown](#artifact=$ARTIFACT&section=unknown) · [Empty](#artifact=$ARTIFACT&section=)\n\n" +
+        '<a name="named-anchor"></a>\n\n### Named destination\n\n<p id="explicit-anchor">Explicit destination</p>\n\n' +
+        paragraphs,
+    });
+    for (const width of [1280, 412]) {
+      const context = await browser.newContext({
+        viewport: { width, height: 844 },
+        isMobile: width === 412,
+        hasTouch: width === 412,
+      });
+      const page = await context.newPage();
+      const errors = captureErrors(page);
+      await page.goto(`${base}#agent=${agent}`);
+      const originalUrl = page.url();
+      const sectionLink = page
+        .locator(`a[href="#artifact=${id}&section=browser-control-first-1"]`)
+        .first();
+      await sectionLink.click();
+      const doc = page.locator('.pane-body[data-pane="report"] .report-doc');
+      const second = doc
+        .getByRole("heading", { name: "Browser Control: First!", exact: true })
+        .nth(1);
+      const inScroller = async (target: typeof second) => {
+        await browserExpect
+          .poll(() =>
+            target.evaluate((element) => {
+              let scroller = element.parentElement!;
+              while (
+                scroller.parentElement &&
+                scroller.scrollHeight <= scroller.clientHeight
+              )
+                scroller = scroller.parentElement;
+              const bounds = scroller.getBoundingClientRect();
+              const rect = element.getBoundingClientRect();
+              return (
+                rect.top >= Math.max(0, bounds.top) &&
+                rect.bottom <=
+                  Math.min((globalThis as any).innerHeight, bounds.bottom)
+              );
+            }),
+          )
+          .toBe(true);
+      };
+      await second.waitFor();
+      await inScroller(second);
+      expect(page.url()).toBe(originalUrl);
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/artifact-section-${width}.png`,
+        });
+      await doc.getByRole("link", { name: "Open second", exact: true }).click();
+      await inScroller(second);
+      const chatTop = await page
+        .locator("#scroll")
+        .evaluate((element) => element.scrollTop);
+      for (const [link, selector] of [
+        ["First", "h2 >> nth=0"],
+        ["Second", "h2 >> nth=1"],
+        ["Named", "h3"],
+        ["Explicit", "#explicit-anchor"],
+      ]) {
+        await doc
+          .getByRole("link", { name: "Top", exact: true })
+          .last()
+          .click();
+        await inScroller(doc.locator("h1"));
+        await doc.getByRole("link", { name: link, exact: true }).click();
+        await inScroller(doc.locator(selector!));
+        expect(page.url()).toBe(originalUrl);
+        expect(
+          await page
+            .locator("#scroll")
+            .evaluate((element) => element.scrollTop),
+        ).toBe(chatTop);
+      }
+      await doc.getByRole("link", { name: "Top", exact: true }).last().click();
+      for (const name of ["Unknown", "Empty"]) {
+        await doc.getByRole("link", { name, exact: true }).click();
+        await inScroller(doc.locator("h1"));
+      }
+      expect(context.pages().length).toBe(1);
+      expect(errors).toEqual([]);
+      await context.close();
+    }
+  },
   // Regression: #3319 visiting a conversation must not open its app Artifact.
   async function test_artifact_visit_requires_explicit_open(browser, base) {
     const { agent, id } = await postFixture(

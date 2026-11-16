@@ -108,11 +108,19 @@ export function openSseConnection(
   let failures = 0;
   let requestedAt = 0;
 
-  const fail = async (status: number | null): Promise<void> => {
+  const fail = async (
+    status: number | null,
+    retryAfterMs = 0,
+  ): Promise<void> => {
     if (closed) return;
     failures += 1;
     handlers.onFailure(status);
-    await sleep(Math.min(parser.retryMs * 2 ** (failures - 1), maxDelayMs));
+    await sleep(
+      Math.min(
+        Math.max(parser.retryMs * 2 ** (failures - 1), retryAfterMs),
+        maxDelayMs,
+      ),
+    );
     if (!closed) void connect();
   };
 
@@ -171,7 +179,12 @@ export function openSseConnection(
     }
     if (closed) return;
     if (!response.ok || !response.body) {
-      await fail(response.ok ? null : response.status);
+      await response.body?.cancel().catch(() => {});
+      const retryAfter = response.headers.get("retry-after") ?? "";
+      await fail(
+        response.ok ? null : response.status,
+        /^\d+$/.test(retryAfter) ? Number(retryAfter) * 1000 : 0,
+      );
       return;
     }
     const sawEvent = await pump(response.body);

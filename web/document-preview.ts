@@ -26,6 +26,8 @@ function note(text: string): HTMLElement {
 
 async function bytes(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
   const response = await fetch(url, { signal, credentials: "same-origin" });
+  if (response.status === 404)
+    throw Error("File not found. Check the link or choose another file.");
   if (!response.ok || !response.body)
     throw Error("Couldn’t download this file.");
   if (Number(response.headers.get("content-length")) > MAX_BYTES) {

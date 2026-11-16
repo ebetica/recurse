@@ -1,5 +1,6 @@
-// Native calls and indexes live in this isolated search process. Shutdown
-// drains calls and destroys finders. IPC disconnect exits with native pools.
+// Native calls and indexes live in this isolated search process. Retain at most
+// eight idle conversation bundles; busy bundles stay pinned until calls join.
+// Shutdown destroys finders. IPC disconnect exits with native pools.
 import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import {
   importFff,
@@ -38,16 +39,39 @@ const port = {
   },
 };
 process.on("disconnect", () => process.exit(0));
-const connections = new Map<
-  number,
-  Promise<Awaited<ReturnType<typeof loadFffTools>>>
->();
+type Bundle = Awaited<ReturnType<typeof loadFffTools>>;
+type Connection = {
+  cwd: string;
+  flags: FffFlags;
+  bundle: Promise<Bundle | undefined>;
+  users: number;
+};
+const connections = new Map<number, Connection>();
+const idle = new Map<number, Connection>();
+const MAX_IDLE_CONNECTIONS = 8;
 const closing = new Set<number>();
 const calls = new Map<
   number,
   { connection: number; controller: AbortController; done: Promise<void> }
 >();
 let sealed = false;
+
+/** Release least-recently-used idle indexes without closing logical tools. */
+async function retainIdle(connection: number, state: Connection) {
+  if (state.users || sealed || closing.has(connection)) return;
+  idle.delete(connection);
+  idle.set(connection, state);
+  while (idle.size > MAX_IDLE_CONNECTIONS) {
+    const [oldest, evicted] = idle.entries().next().value!;
+    idle.delete(oldest);
+    const released = evicted.bundle.then(async (bundle) => {
+      await bundle?.close();
+      return undefined;
+    });
+    evicted.bundle = released;
+    await released;
+  }
+}
 
 async function closeConnection(connection: number) {
   closing.add(connection);
@@ -56,8 +80,9 @@ async function closeConnection(connection: number) {
   );
   await Promise.allSettled(ownCalls.map((call) => call.done));
   try {
-    await (await connections.get(connection))?.close();
+    await (await connections.get(connection)?.bundle)?.close();
   } finally {
+    idle.delete(connection);
     connections.delete(connection);
     closing.delete(connection);
   }
@@ -84,7 +109,12 @@ async function request(
   }
   if (message.op === "open") {
     const opening = loadFffTools(message.cwd, message.flags);
-    connections.set(message.connection, opening);
+    connections.set(message.connection, {
+      cwd: message.cwd,
+      flags: message.flags,
+      bundle: opening,
+      users: 0,
+    });
     try {
       const bundle = await opening;
       return bundle.definitions.map(
@@ -106,24 +136,35 @@ async function request(
   }
   if (closing.has(message.connection))
     throw new Error("Search connection closed");
-  const bundle = await connections.get(message.connection);
-  if (!bundle) throw new Error("Search connection not found");
-  const tool = bundle.definitions.find((tool) => tool.name === message.name);
-  if (!tool) throw new Error(`Unknown search tool: ${message.name}`);
-  const call = calls.get(message.id)!;
-  if (call.controller.signal.aborted) throw new Error("Operation aborted");
-  const result = await tool.execute(
-    String(message.id),
-    message.args,
-    call.controller.signal,
-    (partial) =>
-      port.postMessage({
-        id: message.id,
-        update: partial,
-      } satisfies SearchReply),
-    { cwd: message.cwd } as ExtensionToolContext,
-  );
-  return result;
+  const state = connections.get(message.connection);
+  if (!state) throw new Error("Search connection not found");
+  state.users++;
+  idle.delete(message.connection);
+  try {
+    const opening = state.bundle.then(
+      (bundle) => bundle ?? loadFffTools(state.cwd, state.flags),
+    );
+    state.bundle = opening;
+    const bundle = await opening;
+    const tool = bundle.definitions.find((tool) => tool.name === message.name);
+    if (!tool) throw new Error(`Unknown search tool: ${message.name}`);
+    const call = calls.get(message.id)!;
+    if (call.controller.signal.aborted) throw new Error("Operation aborted");
+    return await tool.execute(
+      String(message.id),
+      message.args,
+      call.controller.signal,
+      (partial) =>
+        port.postMessage({
+          id: message.id,
+          update: partial,
+        } satisfies SearchReply),
+      { cwd: message.cwd } as ExtensionToolContext,
+    );
+  } finally {
+    state.users--;
+    await retainIdle(message.connection, state);
+  }
 }
 
 process.on("message", (message: SearchMessage) => {

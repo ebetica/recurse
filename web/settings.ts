@@ -19,6 +19,7 @@ import {
   buildMaximumContextSection,
   buildLadderSection,
 } from "./settings/models.js";
+import { buildSafetySection } from "./settings/safety.js";
 import { clearSkillsCache } from "./skills.js";
 import { installFocusTrap, restoreFocus } from "./focus_trap.js";
 import { buildThemeSection, cancelThemeCssPreview } from "./settings/theme.js";
@@ -112,8 +113,15 @@ function renderSettings(label: string) {
   pane.replaceChildren();
   nav.replaceChildren();
   const cats = label
-    ? (["auth", "models", "agents"] as const)
-    : (["account", "appearance", "auth", "models", "agents"] as const);
+    ? (["auth", "models", "safety", "agents"] as const)
+    : ([
+        "account",
+        "appearance",
+        "auth",
+        "models",
+        "safety",
+        "agents",
+      ] as const);
   let current: Category = cats[0];
   let mounted: Category | null = null;
   const back = () => {
@@ -370,6 +378,7 @@ settingsSection("Deleted agents' history", "account", (body) => {
   });
 });
 
+settingsSection("Safety review model", "safety", buildSafetySection);
 settingsSection("Prompt cache", "models", buildPromptCacheSection);
 settingsSection("Maximum context window", "models", buildMaximumContextSection);
 settingsSection("Effort ladder", "models", buildLadderSection);

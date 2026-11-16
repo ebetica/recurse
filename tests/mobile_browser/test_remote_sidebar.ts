@@ -938,11 +938,12 @@ export const tests: BrowserTest[] = [
         .not.toBe("running");
       await openSettingsPanel(page);
       const settingsNav = page.locator("#settings-nav button");
-      await browserExpect(settingsNav).toHaveCount(5);
+      await browserExpect(settingsNav).toHaveCount(6);
       await page.locator("#settings-backend").selectOption("Laptop");
       await browserExpect(settingsNav).toHaveText([
         "Authentication",
         "Models",
+        "Safety",
         "MCPs",
       ]);
       const loginUrl = `${base}api/backends/Laptop/pi/auth/login-url`;
@@ -1015,7 +1016,7 @@ export const tests: BrowserTest[] = [
         })
         .waitFor();
       await page.locator("#settings-backend").selectOption("");
-      await browserExpect(settingsNav).toHaveCount(5);
+      await browserExpect(settingsNav).toHaveCount(6);
       await page.locator("#settings-close").click();
       await page.goto(`${base}#agent=Laptop/${writable.id}`);
       await page.locator("#input").waitFor();

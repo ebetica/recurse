@@ -28,7 +28,11 @@ apps in a browser) · [preview.ts](preview.ts) · [theme.ts](theme.ts) ·
 
 Publishing moves the Git pointer (ref) for the published version atomically and
 records another ref for that version.
-A document's page is its `index.md`. An app is built into one self-contained
+A document's page is its `index.md`. Agents link to sections with
+`[Title](#artifact=ID&section=heading-slug)`; Markdown headings use GitHub-style
+slugs, with `-1`, `-2` for duplicates. Relative document links open version-pinned
+sibling files in the in-app viewer, optionally at a `#heading-slug`.
+An app is built into one self-contained
 page before it is published; the build runs privately, outside the workspace,
 with no lifecycle scripts and no server credentials, and its process group is
 killed on timeout. Built pages run in a sandbox with no network access. Unclaimed non-editor keys

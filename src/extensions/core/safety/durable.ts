@@ -257,6 +257,8 @@ function reviewContext(
     signal,
     modelRegistry: {
       find: (provider: string, id: string) => models.getModel(provider, id),
+      findOfType: models.getModelOfType.bind(models),
+      classify: models.classify.bind(models),
 
       getApiKeyAndHeaders: async (target: Parameters<Models["getAuth"]>[0]) => {
         try {
@@ -543,13 +545,16 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       run.actingModel,
     );
     const configurationReason =
-      configurationCategory === "invalid_policy"
-        ? "The safety reviewer configuration could not be validated. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings."
-        : configurationCategory === "unsupported_reviewer_pin"
-          ? "Your chosen safety reviewer is not a built-in model or a custom provider configured in Settings, and no trusted fallback is available. Choose a built-in model or custom provider for effort level 1 in Settings."
-          : configurationCategory === "acting_identity_mismatch"
-            ? "The safety reviewer configuration does not match this conversation's model, and no trusted fallback is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings."
-            : "No trusted safety reviewer is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings.";
+      run.modelPolicy.status === "valid" &&
+      run.modelPolicy.policy.reviewer_explicit
+        ? "Your chosen safety review model is unavailable. Choose an available Safety review model in Settings or sign in to its provider."
+        : configurationCategory === "invalid_policy"
+          ? "The safety reviewer configuration could not be validated. Choose an available Safety review model in Settings."
+          : configurationCategory === "unsupported_reviewer_pin"
+            ? "Your chosen safety reviewer is not a built-in model or a custom provider configured in Settings, and no trusted fallback is available. Choose a built-in model or custom provider for effort level 1 in Settings."
+            : configurationCategory === "acting_identity_mismatch"
+              ? "The safety reviewer configuration does not match this conversation's model, and no trusted fallback is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings."
+              : "No trusted safety reviewer is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings.";
     let verdict: SafetyVerdict;
     if (reviewers && !journalFailure) {
       verdict = await reviewWithCandidates(review, ctx, reviewers, {
@@ -561,6 +566,10 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         complete,
         inputs: {
           history,
+          historyVersion:
+            run.modelPolicy.status === "valid"
+              ? run.modelPolicy.policy.reviewer_revision
+              : undefined,
           dataDir: host.trusted().dataDir,
           statsRoot: host.trusted().statsRoot,
           processSnapshot: await ownedProcessSnapshot(host.shells()),

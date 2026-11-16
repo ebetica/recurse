@@ -162,7 +162,9 @@ export class RequestCaptures {
     options: Record<string, unknown> | undefined,
     conversationId?: string,
   ): ((reply: unknown) => void) | undefined {
-    const sessionId = options?.sessionId;
+    const sessionId =
+      options?.sessionId ??
+      (method === "classify" ? conversationId : undefined);
     if (typeof sessionId !== "string") return;
     const cid = conversationId ?? this.conversationForSession(sessionId);
     if (!cid) return;
@@ -270,7 +272,8 @@ export function captureRequests(
         options?: Record<string, unknown>,
       ) => {
         // Invariant: Unscoped completions are compaction, not turn input.
-        const completion = key === "complete" || key === "completeSimple";
+        const completion =
+          key === "complete" || key === "completeSimple" || key === "classify";
         const reply =
           !completion || conversationId !== undefined
             ? capture(() =>

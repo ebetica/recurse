@@ -152,7 +152,117 @@ export const tests: BrowserTest[] = [
       }
     }
   },
-  // Feature: #3362 #3307 #3369 Markdown retains shared images, sanitized links and visible heading jumps.
+  // Regression: #3397 a Markdown picture click must open the shared viewer without consuming a text-selection drag.
+  async function test_markdown_picture_clicks(browser, base, data) {
+    const { agent, id } = await postFixture(base, "seed-artifact-sections", {
+      markdown:
+        "# Picture navigation\n\nBefore image: select this sentence.\n\n![Artifact picture](diagram.svg)\n\nAfter image: keep the comment offer.\n\n[Notes](notes.md)\n\n![Blocked picture](https://example.com/blocked.svg)\n",
+    });
+    const store = {
+      artifactsDir: join(data, "data", "artifact_repos"),
+      trashDir: join(data, "data", "trash"),
+    };
+    const item = await artifacts.get(store, agent, id);
+    await writeFile(
+      join(String(item.repo_path), "diagram.svg"),
+      '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240"><rect width="640" height="240" fill="#8bc4ed"/><circle cx="140" cy="120" r="64" fill="#336b9a"/><text x="240" y="125" font-size="28">Artifact picture</text></svg>',
+    );
+    await writeFile(
+      join(String(item.repo_path), "notes.md"),
+      "# Picture notes\n\n![File picture](diagram.svg)\n",
+    );
+    await artifacts.publish(store, agent, id);
+    for (const width of [1280, 412]) {
+      const { context, page, errors } = await filePage(
+        browser,
+        width,
+        844,
+        width === 412,
+      );
+      const external: string[] = [];
+      page.on("request", (request) => {
+        if (request.url().startsWith("https://example.com/"))
+          external.push(request.url());
+      });
+      await page.goto(`${base}#agent=${agent}`);
+      await page.getByRole("link", { name: "Section", exact: true }).click();
+      const report = page.locator('.pane-col[data-pane="report"]');
+      const picture = report.locator(
+        'img[alt="Artifact picture"]:not([hidden])',
+      );
+      await picture.waitFor();
+      await picture.evaluate((image: any) => image.decode());
+      if (width === 1280) {
+        const text = (await report
+          .getByText("Before image: select this sentence.", { exact: true })
+          .boundingBox())!;
+        const image = (await picture.boundingBox())!;
+        await page.mouse.move(text.x + 2, text.y + text.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(
+          image.x + image.width / 2,
+          image.y + image.height / 2,
+          { steps: 12 },
+        );
+        await page.mouse.up();
+        expect(
+          await page.getByRole("dialog", { name: "Image viewer" }).count(),
+        ).toBe(0);
+        const popover = page.locator(".report-comment-popover:not([hidden])");
+        await popover
+          .locator("textarea")
+          .fill("Preserve the picture selection");
+        await popover
+          .getByRole("button", { name: "Comment", exact: true })
+          .click();
+      }
+      await picture.click();
+      const viewer = page.getByRole("dialog", { name: "Image viewer" });
+      await viewer.waitFor();
+      await viewer
+        .locator("img.files-image")
+        .evaluate((image: any) => image.decode());
+      expect(
+        await viewer.locator("img.files-image").getAttribute("src"),
+      ).toContain(`/api/artifacts/${id}/file?`);
+      await fileShot(page, `artifact-image-viewer-${width}.png`);
+      await viewer
+        .getByRole("button", { name: "Close image", exact: true })
+        .click();
+      await viewer.waitFor({ state: "detached" });
+      await page.waitForFunction(
+        () => !(globalThis as any).history.state?.imagePopout,
+      );
+      if (width === 1280) {
+        expect(
+          await report.locator(".report-comment textarea").inputValue(),
+        ).toBe("Preserve the picture selection");
+        await report.locator(".report-comment-del").click();
+      }
+      await report
+        .getByRole("button", {
+          name: "Show image from example.com",
+          exact: true,
+        })
+        .waitFor();
+      expect(external).toEqual([]);
+      await report.getByRole("link", { name: "Notes", exact: true }).click();
+      await page
+        .locator('.file-tab img[alt="File picture"]:not([hidden])')
+        .click();
+      await viewer.waitFor();
+      await viewer
+        .getByRole("button", { name: "Close image", exact: true })
+        .click();
+      await viewer.waitFor({ state: "detached" });
+      await page.waitForFunction(
+        () => !(globalThis as any).history.state?.imagePopout,
+      );
+      expect(errors).toEqual([]);
+      await context.close();
+    }
+  },
+  // Feature: #3362 #3307 #3369 #3397 Markdown retains shared images, sanitized links and visible heading jumps.
   async function test_published_file_opens_its_detail_view(
     browser,
     base,
@@ -352,11 +462,7 @@ export const tests: BrowserTest[] = [
           ) => {
             await target.scrollIntoViewIfNeeded();
             await fileShot(page, shot.replace("image-", "document-"));
-            if (!local) {
-              await target.click();
-              expect(await page.locator("dialog.image-popout").count()).toBe(0);
-            }
-            await target.dblclick();
+            await target.click();
             const viewer = page.getByRole("dialog", { name: "Image viewer" });
             const shown = viewer.locator("img.files-image");
             await shown.waitFor();
@@ -446,8 +552,13 @@ export const tests: BrowserTest[] = [
           ).toBe(0);
           expect(remote).toEqual([]);
         } else {
-          await image.dblclick();
-          expect(await page.locator("dialog.image-popout").count()).toBe(0);
+          await image.click();
+          const viewer = page.getByRole("dialog", { name: "Image viewer" });
+          await viewer.waitFor();
+          await viewer
+            .getByRole("button", { name: "Close image", exact: true })
+            .click();
+          await viewer.waitFor({ state: "detached" });
         }
         expect(errors).toEqual([]);
       } finally {

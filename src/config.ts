@@ -732,6 +732,7 @@ export class Config {
     levels: Ladder;
   } | null = null;
   private readonly settingsFiles: ConfigFiles;
+  private safetyReviewRevision = 0;
   private readonly now: () => number;
   private readonly settingsRecheckMs: number;
   private readonly warn: NonNullable<ConfigOptions["warn"]>;
@@ -751,6 +752,8 @@ export class Config {
       this.now,
       (path) => {
         if (path !== this.paths.AVAILABLE_MODELS_FILE) this.catalogCache = null;
+        if (path === join(this.paths.CONFIG_DIR, "safety-review-model.json"))
+          this.safetyReviewRevision += 1;
       },
     );
     this.displayName = resolved.displayName;
@@ -784,6 +787,7 @@ export class Config {
         this.paths.MAXIMUM_CONTEXT_WINDOW_FILE,
         join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
         join(this.paths.CONFIG_DIR, "idle-compaction.json"),
+        join(this.paths.CONFIG_DIR, "safety-review-model.json"),
       ].map((path) => this.settingsFiles.refresh(path)),
     );
   }
@@ -910,7 +914,11 @@ export class Config {
       typeof model === "string"
         ? this.modelParts(model)
         : [model.provider, model.id];
-    const pin = await this.ladderReviewer();
+    const choice = this.safetyReviewModel();
+    if (choice === undefined) return "null";
+    const pin = choice
+      ? route(...this.modelParts(choice), "low")
+      : await this.ladderReviewer();
     const selected = this.pinLadderReviewer(
       this.routePolicy(provider, modelId, modelId, provider, "high"),
       pin,
@@ -921,13 +929,15 @@ export class Config {
       effort: value.effort,
     });
     const reviewer: Dict = routeValue(selected.reviewer);
-    if (selected.reviewer_fallbacks.length)
+    if (!choice && selected.reviewer_fallbacks.length)
       reviewer.candidates = selected.reviewer_fallbacks.map(routeValue);
     return pythonJson(
       {
         version: 1,
         active: { provider, model: modelId },
         reviewer_pin: { provider: pin.provider, model: pin.model },
+        ...(choice ? { reviewer_explicit: true } : {}),
+        reviewer_revision: this.safetyReviewRevision,
         reviewer,
         summary: routeValue(selected.summary),
       },
@@ -1541,6 +1551,47 @@ export class Config {
       days: value,
     });
     return value;
+  }
+
+  /** Null selects level 1; undefined preserves an invalid saved choice. */
+  safetyReviewModel(): string | null | undefined {
+    const path = join(this.paths.CONFIG_DIR, "safety-review-model.json");
+    const data = this.settingsJson(path);
+    if (data === undefined)
+      return this.settingsFiles.text(path) === undefined ? null : undefined;
+    if (!isObject(data)) return undefined;
+    if (!Object.hasOwn(data, "model") || data.model === null) return null;
+    return typeof data.model === "string" && data.model
+      ? data.model
+      : undefined;
+  }
+
+  async safetyReviewModels(): Promise<{ id: string; label: string }[]> {
+    const { builtinProviders } =
+      await import("@earendil-works/pi-ai/providers/all");
+    const authed = this.authedModelProviders();
+    return builtinProviders()
+      .filter((provider) => authed.has(provider.id))
+      .flatMap((provider) => provider.getAllModels?.() ?? [])
+      .filter((model) => model.type === "classifier")
+      .map((model) => ({
+        id: `${model.provider}/${model.id}`,
+        label: model.name,
+      }));
+  }
+
+  async setSafetyReviewModel(value: unknown): Promise<string | null> {
+    if (
+      value !== null &&
+      (typeof value !== "string" ||
+        !(await this.safetyReviewModels()).some((model) => model.id === value))
+    )
+      throw valueError("Choose an available safety review model");
+    await this.writePrivateJson(
+      join(this.paths.CONFIG_DIR, "safety-review-model.json"),
+      { model: value },
+    );
+    return value as string | null;
   }
 
   keepPromptCacheWarm(): boolean {

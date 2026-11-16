@@ -90,8 +90,12 @@ call or an agent CLI command); that request counts as use, and polling resumes
 once it has reached the remote. One-off polls on callback notices continue.
 Listing connections does not probe a paused remote or a connection needing
 sign-in. Status, version and tag-event streams do not count as home activity.
-A visible browser's tag subscription follows only reachable, awake remotes.
-A relay sleep answer closes that remote's stream; no stream request or retry
+Visible browsers share one upstream tag subscription per requested remote label,
+following only reachable, awake remotes. The last browser disconnect aborts the
+upstream; reconnects after EOF and failures use the same bounded backoff.
+The HTTP boundary bounds tree-stream admission and lifetime (see
+[../web/README.md](../web/README.md)). A relay sleep answer closes that
+remote's stream; no stream request or retry
 runs while it is paused. Existing explicit use or an awake relay answer resumes
 the subscription. The passive stream transport never resumes polling itself. A rejected
 key marks the connection as needing sign-in and stops all automatic requests,

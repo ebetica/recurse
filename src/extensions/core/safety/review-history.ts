@@ -21,6 +21,10 @@ type History = {
 export class ReviewHistory {
   private state?: History;
 
+  clear(): void {
+    this.state = undefined;
+  }
+
   /** Select a complete prefix; never mutate it while a request is in flight. */
   prepare(
     key: string,

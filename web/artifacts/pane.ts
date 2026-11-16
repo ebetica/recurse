@@ -82,10 +82,14 @@ coarsePointer.addEventListener("change", () => {
 
 export function openArtifactLink(hash = location.hash): void {
   const id = readArtifactLink(hash);
-  if (id) openArtifact(id);
+  if (id)
+    openArtifact(
+      id,
+      new URLSearchParams(hash.replace(/^#/, "")).get("section"),
+    );
 }
 
-function openArtifact(id: string): void {
+function openArtifact(id: string, section: string | null = null): void {
   if (!state.selectedId || state.draft) return;
   if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
   linkedAgent = state.selectedId;
@@ -95,6 +99,10 @@ function openArtifact(id: string): void {
   if (!pane) return;
   pane._rs.browsing = false;
   pane._rs.linkedArtifactId = id;
+  pane._rs.linkedSection =
+    section === null
+      ? undefined
+      : { artifact: id, fragment: `#${encodeURIComponent(section)}` };
   pane._rs.restoredArtifactId = id;
   if (pane._rs.selId !== id || !pane._rs.followCurrent) {
     pane._rs.selectedVersion = null;
@@ -113,7 +121,12 @@ function openArtifact(id: string): void {
 document.addEventListener("click", (event) => {
   const link = (event.target as Element).closest<HTMLAnchorElement>("a[href]");
   const href = link?.getAttribute("href");
-  if (!href?.startsWith("#") || !readArtifactLink(href)) return;
+  if (
+    event.defaultPrevented ||
+    !href?.startsWith("#") ||
+    !readArtifactLink(href)
+  )
+    return;
   if (readAgentLink(href).present) return;
   event.preventDefault();
   openArtifactLink(href);
@@ -235,6 +248,7 @@ function selectArtifact(pane: ArtifactEl, id: string, focus = false): boolean {
     return false;
   rs.browsing = false;
   rs.linkedArtifactId = undefined;
+  rs.linkedSection = undefined;
   if (rs.selId === id && rs.followCurrent) {
     renderShell(pane);
     showSelected(pane, focus);
@@ -695,6 +709,7 @@ function retarget(pane: ArtifactEl, agentId: string): boolean {
   rs.selId = null;
   rs.restoredArtifactId = undefined;
   rs.linkedArtifactId = undefined;
+  rs.linkedSection = undefined;
   rs.selectedVersion = null;
   rs.shownKey = null;
   rs.loadingKey = null;

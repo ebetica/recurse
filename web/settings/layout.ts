@@ -141,6 +141,7 @@ export const CATEGORY_LABELS: Record<Category, string> = {
   auth: "Authentication",
   models: "Models",
   agents: "MCPs",
+  safety: "Safety",
 };
 
 const span = (className: string, html = "", text = "") => {

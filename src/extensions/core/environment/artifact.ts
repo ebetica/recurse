@@ -18,7 +18,7 @@ export function createArtifact(context: ArtifactContext, owner: string) {
           "Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. " +
           "File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. " +
           "Apps have no network/browser storage; use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). " +
-          "Commit output reports publication/app checks; fix problems and recommit. Read wide/narrow screenshots. Link [Title](#artifact=ID).",
+          "Commit output reports publication/app checks; fix problems and recommit. Read wide/narrow screenshots. Link [Title](#artifact=ID); add &section=heading-slug to open a section.",
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("create"),

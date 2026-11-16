@@ -4,6 +4,7 @@
 // Home sync uses only settings_sync's route inventory.
 
 import { THINKING_LEVELS, type Config } from "../config";
+import safetyResults from "../extensions/core/safety/decision-results.json";
 import {
   brandingFile,
   brandResponse,
@@ -508,6 +509,25 @@ export function registerSettingsRoutes(
     return json({
       days: await mutate(() =>
         config.setDeletedAgentHistoryDays(field(body, "days")),
+      ),
+    });
+  });
+
+  router.get("/api/settings/safety-review-model", async () => {
+    const model = config.safetyReviewModel();
+    return json({
+      model: model ?? null,
+      invalid: model === undefined,
+      default_model: config.effortLevels()[1]!.model,
+      models: await config.safetyReviewModels(),
+      results: safetyResults,
+    });
+  });
+  router.post("/api/settings/safety-review-model", async (ex) => {
+    const body = await jsonDictBody(ex);
+    return json({
+      model: await mutate(() =>
+        config.setSafetyReviewModel(field(body, "model")),
       ),
     });
   });

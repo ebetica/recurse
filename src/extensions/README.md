@@ -54,7 +54,12 @@ waiting for that refresh. Initial scans and refreshes share one native scan slot
 across conversations, including scans that exceed the initial wait timeout.
 Cwd changes replace the main index, 30 minutes without searches releases all
 of a conversation's indexes, and conversation shutdown closes its connection.
-Git ignores and the native finder's standard exclusions bound each scan.
+The shared child retains at most eight idle conversations' index bundles,
+evicting the least recently used; in-flight searches pin their bundles until
+they finish. Evicted tools reopen lazily with the same cwd and flags. Each
+bundle contains at most one cwd index and three external-root indexes. This
+bounds idle cache count, not the size of an individual tree or active searches.
+Git ignores and the native finder's standard exclusions constrain each scan.
 Callers can override refresh and idle intervals through
 [FffFlags](extra/fff/fff_tools.ts); defaults remain unchanged. All memory mapping
 stays disabled, and grep skips files of 256 KiB or more. A native crash rejects

@@ -19,7 +19,7 @@ drafts and view state live in the browser.
   [explorer.ts](explorer.ts), [diff.ts](diff.ts) and [side-pane.ts](side-pane.ts):
   panels and read-only side conversations. [tips/](tips/README.md) shows hourly tips.
 - [models.ts](models.ts), [settings/](settings/) and [keymap.ts](keymap.ts):
-  settings and keys. [pane-finder.ts](pane-finder.ts) fuzzy-searches offered panes.
+  settings and safety. [pane-finder.ts](pane-finder.ts) fuzzy-searches offered panes.
 - [api.ts](api.ts), [backends/](backends/) and [connection.ts](connection.ts):
   requests. [prompt.ts](prompt.ts), [prompt/banner.ts](prompt/banner.ts): prompts.
 

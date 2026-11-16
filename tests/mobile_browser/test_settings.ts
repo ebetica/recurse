@@ -18,6 +18,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readRelease, releaseLabel } from "../../src/release";
 import { generateTheme, themePalettes } from "../../src/themes";
+import safetyResults from "../../src/extensions/core/safety/decision-results.json";
 
 const LIST_OPUS = {
   id: "anthropic/claude-opus-5-5",
@@ -150,7 +151,7 @@ async function openLadder(page: Page, base: string): Promise<void> {
 }
 
 const LEVEL_ONE_HELP =
-  "Used for safety review and conversation names; choose an inexpensive model such as Luna or Haiku.";
+  "Used for conversation names and, by default, safety review; choose an inexpensive model such as Luna or Haiku.";
 
 async function openDetail(page: Page, name: RegExp): Promise<void> {
   if (page.viewportSize()!.width <= 700)
@@ -210,6 +211,169 @@ async function saveLadder(page: Page, tap = false): Promise<void> {
 }
 
 export const tests: BrowserTest[] = [
+  // Feature: #3396 the safety model choice persists through Settings reloads.
+  async function test_safety_review_model_choice(browser, _base) {
+    const server = await startServer();
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 915 },
+    });
+    const errors = captureErrors(page);
+    try {
+      await gotoRoot(page, server.base);
+      expect(
+        (
+          await page.request.post(
+            `${server.base}api/pi/openrouter-auth/api-key`,
+            {
+              data: { key: "browser-test-safety-model" },
+            },
+          )
+        ).ok(),
+      ).toBe(true);
+      const state = (await (
+        await page.request.get(`${server.base}api/settings/safety-review-model`)
+      ).json()) as {
+        models: { id: string; label: string }[];
+        results: Record<
+          string,
+          (typeof safetyResults)[keyof typeof safetyResults]
+        >;
+      };
+      expect(state.results).toEqual(safetyResults);
+      const warned = state.models.find(
+        (model) => (state.results[model.id]?.falseAllows ?? 0) > 0,
+      )!;
+      const safe = state.models.find(
+        (model) => state.results[model.id]?.falseAllows === 0,
+      )!;
+      const untested = state.models.find((model) => !state.results[model.id])!;
+      expect(warned).toBeDefined();
+      expect(safe).toBeDefined();
+      expect(untested).toBeDefined();
+      const result = state.results[warned.id]!;
+      const summary = `${result.passed}/${result.total} correct · ${(result.medianMs / 1000).toFixed(1)} s`;
+      await openSettingsPanel(page);
+      await browserExpect(
+        page.locator('#settings-nav button[data-cat="safety"]'),
+      ).toHaveCount(1);
+      await page.locator('#settings-nav button[data-cat="safety"]').click();
+      const control = page.getByLabel("Safety review model", { exact: true });
+      await browserExpect(control).toBeEnabled();
+      await browserExpect(
+        page.getByText("Safety review model", { exact: true }),
+      ).toHaveCount(1);
+      await browserExpect(control).toHaveValue("");
+      await browserExpect(control.locator("option").first()).toContainText(
+        "Same as level 1",
+      );
+      await browserExpect(
+        control.locator(`option[value="${warned.id}"]`),
+      ).toContainText(summary);
+      await control.scrollIntoViewIfNeeded();
+      expect(
+        await control.evaluate((element) => {
+          const box = element.getBoundingClientRect();
+          return [box.left + 5, box.right - 5].every((x) =>
+            [box.top + 5, box.bottom - 5].every((y) =>
+              element.contains(element.ownerDocument.elementFromPoint(x, y)),
+            ),
+          );
+        }),
+      ).toBe(true);
+      await control.selectOption(warned.id);
+      await page
+        .getByText("Saved. Applies to the next run.", { exact: true })
+        .waitFor();
+      await page
+        .getByText(
+          "This model has allowed risky actions in testing and may let risky actions through.",
+          { exact: true },
+        )
+        .waitFor();
+      await page.reload();
+      await openSettingsPanel(page);
+      await page.locator('#settings-nav button[data-cat="safety"]').click();
+      await browserExpect(control).toHaveValue(warned.id);
+      await browserExpect(control.locator("option:checked")).toHaveText(
+        `${warned.label} — ${summary}`,
+      );
+      await browserExpect(page.getByText(summary, { exact: true })).toHaveCount(
+        0,
+      );
+      expect(
+        (
+          await (
+            await page.request.get(
+              `${server.base}api/settings/safety-review-model`,
+            )
+          ).json()
+        ).model,
+      ).toBe(warned.id);
+      await control.selectOption(safe.id);
+      await page
+        .getByText("Saved. Applies to the next run.", { exact: true })
+        .waitFor();
+      await browserExpect(
+        page.getByText(
+          "This model has allowed risky actions in testing and may let risky actions through.",
+          { exact: true },
+        ),
+      ).toHaveCount(0);
+      const untestedSaved = page.waitForResponse(
+        (response) =>
+          response.url() === `${server.base}api/settings/safety-review-model` &&
+          response.request().method() === "POST" &&
+          response.request().postDataJSON().model === untested.id,
+      );
+      await control.selectOption(untested.id);
+      expect((await untestedSaved).ok()).toBe(true);
+      await browserExpect(control.locator("option:checked")).toContainText(
+        "Not tested",
+      );
+      await writeFile(
+        join(server.data, "data", "config", "safety-review-model.json"),
+        JSON.stringify({ model: "" }),
+      );
+      await browserExpect
+        .poll(
+          async () =>
+            (
+              await (
+                await page.request.get(
+                  `${server.base}api/settings/safety-review-model`,
+                )
+              ).json()
+            ).invalid,
+        )
+        .toBe(true);
+      await page.reload();
+      await openSettingsPanel(page);
+      await page.locator('#settings-nav button[data-cat="safety"]').click();
+      await page
+        .getByText(
+          "The saved safety review model is invalid. Choose a model to restore review.",
+          { exact: true },
+        )
+        .waitFor();
+      await control.selectOption("");
+      await page
+        .getByText("Saved. Applies to the next run.", { exact: true })
+        .waitFor();
+      expect(
+        (
+          await (
+            await page.request.get(
+              `${server.base}api/settings/safety-review-model`,
+            )
+          ).json()
+        ).invalid,
+      ).toBe(false);
+      expect(errors).toEqual([]);
+    } finally {
+      await page.close();
+      await stopServer(server);
+    }
+  },
   // Regression: #2904 skipped updates do not offer an update button.
   async function test_skipped_updates_hide_button(browser, base) {
     const context = await browser.newContext({
@@ -255,6 +419,7 @@ export const tests: BrowserTest[] = [
       "Appearance",
       "Authentication",
       "Models",
+      "Safety",
       "MCPs",
     ]);
     for (const button of await nav.all())
@@ -537,7 +702,7 @@ export const tests: BrowserTest[] = [
     );
     await visibleAndUncovered(page, ".update-now");
     await closeDetails(page);
-    expect(await page.locator("#settings-nav button").count()).toBe(5);
+    expect(await page.locator("#settings-nav button").count()).toBe(6);
     expect(await page.locator("#settings-modal .signout").count()).toBe(0);
     expect(
       await page

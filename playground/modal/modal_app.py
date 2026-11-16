@@ -368,7 +368,8 @@ def _stop_web(child) -> bool:
     cpu=(0.5, 16),
     memory=500,
 )
-@modal.concurrent(max_inputs=64)
+# Long-lived streams hold a slot each; exhausting the slots makes the instance unreachable.
+@modal.concurrent(max_inputs=1000)
 class Web:
     @modal.web_server(PORT, startup_timeout=300, label=f"{APP_NAME}-web")
     def web(self) -> None:

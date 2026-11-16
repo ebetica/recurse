@@ -87,10 +87,14 @@ export function mountPdf(container: HTMLElement, url: string): void {
   views.set(container, controller);
   container.dataset.pdfShown = url;
   container.replaceChildren(note("Loading PDF…"));
-  void show(container, url, controller.signal).catch(() => {
+  void show(container, url, controller.signal).catch((error: unknown) => {
     if (controller.signal.aborted) return;
     container.replaceChildren(
-      note("Couldn’t show this PDF. Download it to open it."),
+      note(
+        error instanceof DOMException && error.name === "NotFoundError"
+          ? error.message
+          : "Couldn’t show this PDF. Download it to open it.",
+      ),
     );
     controller.abort();
   });
@@ -115,6 +119,11 @@ async function show(
     pdfjs(),
     fetch(url, { signal, credentials: "same-origin" }),
   ]);
+  if (response.status === 404)
+    throw new DOMException(
+      "File not found. Check the link or choose another file.",
+      "NotFoundError",
+    );
   if (!response.ok) throw new Error(`PDF fetch failed: ${response.status}`);
   const data = new Uint8Array(await response.arrayBuffer());
   signal.throwIfAborted();

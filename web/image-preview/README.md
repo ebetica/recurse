@@ -51,12 +51,11 @@ Markdown in replies, Files and Artifacts also displays absolute, `~/` and
 relative image paths through an operator-authenticated, byte-validated route.
 Relative paths use the conversation's working directory, or the document's
 source directory when recorded; published sibling images take precedence.
-In desktop Markdown panes, double-clicking a loaded image opens the existing
-viewer with its original; existing single-click actions, links and selection
-remain unchanged. Files and
+Clicking or tapping a loaded Markdown picture opens the existing viewer with
+its original. Links around pictures keep their authored destination; selecting
+text across a picture does not open the viewer or discard comments. Files and
 Artifacts register through `../document-markdown.ts` and share the handler in
-`references.ts`. Sealed preview frames are excluded. Phones and coarse pointers
-keep their existing gestures. Local images still open on a single click or tap.
+`references.ts`. Sealed preview frames are excluded.
 Missing or non-image paths show “Image not found” with the reference.
 Web images do not load automatically: “Show image from host” loads just that
 image directly on click, without a referrer. This avoids a server-side fetch

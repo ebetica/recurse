@@ -1,13 +1,14 @@
 // Shared inert Markdown for Artifacts and Files: embeds, images, links, code,
 // Mermaid, and math. Published siblings precede local paths; web images require
-// a click. Relative links require an in-app policy. Each pane registers the
-// desktop double-click image handler.
+// a click. Relative links require an in-app policy. Each pane registers its
+// images with the shared click-to-view handler.
 import { htmlPreviewSrcdoc, URL_ATTRIBUTES } from "./artifacts/model.js";
 import { nextArtifactFrameDescriptionId } from "./artifacts/embed.js";
 import { loadDecodedArtifactImage } from "./artifacts/image-loading.js";
 import { renderMathIn, renderMathPlaceholders } from "./math.js";
 import { isMermaidLang, renderMermaidIn } from "./mermaid.js";
 import { documentMarkdownFragment } from "./util.js";
+import { readAgentLink, readArtifactLink } from "./deep-link.js";
 import { diffKeys, markDocumentChanges } from "./document-diff.js";
 import {
   externalImageButton,
@@ -289,36 +290,62 @@ function markdownFragment(
   return template.content;
 }
 
-/** Scroll only the opened document, without navigating the app fragment. */
+/** GitHub-style heading names, including collisions with earlier suffixes. */
+function documentHeadingTargets(root: HTMLElement): Map<string, HTMLElement> {
+  const targets = new Map<string, HTMLElement>();
+  for (const heading of root.querySelectorAll<HTMLElement>(
+    "h1,h2,h3,h4,h5,h6",
+  )) {
+    const base = (heading.textContent || "")
+      .toLowerCase()
+      .replace(/[^\p{L}\p{M}\p{N}_\s-]/gu, "")
+      .trim()
+      .replace(/\s/g, "-");
+    let slug = base;
+    for (let suffix = 1; targets.has(slug); suffix++)
+      slug = `${base}-${suffix}`;
+    targets.set(slug, heading);
+  }
+  return targets;
+}
+
+/** Scroll only the opened document's scroller, never the app or chat. */
 export function scrollDocumentFragment(
   root: HTMLElement,
   fragment: string,
+  fallbackToTop = false,
 ): boolean {
-  if (!fragment) return false;
-  let name: string;
+  if (!fragment && !fallbackToTop) return false;
+  let name = "";
   try {
     name = decodeURIComponent(fragment.replace(/^#/, ""));
-  } catch {
-    return false;
-  }
-  const target = [
-    ...root.querySelectorAll<HTMLElement>(
-      "[id], a[name], h1, h2, h3, h4, h5, h6",
-    ),
-  ].find(
-    (element) =>
-      element.id === name ||
-      element.getAttribute("name") === name ||
-      (/^H[1-6]$/.test(element.tagName) &&
-        (element.textContent || "")
-          .toLowerCase()
-          .replace(/[^\p{L}\p{N}_\s-]/gu, "")
-          .trim()
-          .replace(/\s/g, "-") === name),
-  );
+  } catch {}
+  const explicit = name
+    ? [...root.querySelectorAll<HTMLElement>("[id], a[name]")].find(
+        (element) =>
+          element.id === name || element.getAttribute("name") === name,
+      )
+    : undefined;
+  const target =
+    explicit ||
+    (name ? documentHeadingTargets(root).get(name) : null) ||
+    (fallbackToTop || fragment === "#" ? root : null);
   if (!target) return false;
   requestAnimationFrame(() => {
-    if (target.isConnected) target.scrollIntoView({ block: "start" });
+    if (!target.isConnected) return;
+    let scroller: HTMLElement | null = root;
+    while (
+      scroller &&
+      !/auto|scroll/.test(getComputedStyle(scroller).overflowY)
+    )
+      scroller = scroller.parentElement;
+    if (!scroller) return;
+    scroller.scrollTop += Math.floor(
+      target.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top -
+        scroller.clientTop -
+        (parseFloat(getComputedStyle(scroller).scrollPaddingTop) || 0),
+    );
   });
   return true;
 }
@@ -373,6 +400,24 @@ export function renderDocumentMarkdown(
   source: string,
   options: DocumentMarkdownOptions,
 ): void {
+  body.addEventListener(
+    "click",
+    (event) => {
+      const link = (event.target as Element).closest<HTMLAnchorElement>(
+        "a[href]",
+      );
+      const href = link?.getAttribute("href");
+      if (
+        !href?.startsWith("#") ||
+        readArtifactLink(href) ||
+        readAgentLink(href).present
+      )
+        return;
+      event.preventDefault();
+      scrollDocumentFragment(body, href);
+    },
+    { signal: options.signal },
+  );
   if (typeof options.previous === "string")
     return renderChanges(body, options.previous, source, options);
   for (const part of documentParts(source))

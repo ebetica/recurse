@@ -271,6 +271,64 @@ test.skipIf(process.platform !== "linux")(
   60000,
 );
 
+// Regression: #3401 idle conversations must not retain an unbounded number of indexes.
+test.skipIf(process.platform !== "linux")(
+  "idle index retention is bounded across conversations and evicted tools reopen",
+  () =>
+    fixture(async (root) => {
+      const service = new FffWorker();
+      const bundles: Awaited<ReturnType<FffWorker["open"]>>[] = [];
+      const roots: string[] = [];
+      const search = (index: number) =>
+        bundles[index]!.definitions.find(
+          (tool) => tool.name === "find",
+        )!.execute(
+          "retention",
+          { pattern: "*.txt" },
+          undefined,
+          undefined,
+          ctx(roots[index]!),
+        );
+      const retained = async () =>
+        (await readFile(`/proc/${threadOf(service).pid}/maps`, "utf8"))
+          .split("\n")
+          .filter((line) => line.includes(root) && line.endsWith("/data.mdb"))
+          .map((line) => line.slice(line.indexOf(root)));
+      try {
+        for (let index = 0; index < 12; index++) {
+          const cwd = path.join(root, `workspace-${index}`);
+          await mkdir(cwd);
+          await writeFile(path.join(cwd, "first.txt"), "needle\n");
+          roots.push(cwd);
+          bundles.push(await service.open(cwd, flags(root, String(index))));
+          expect((await search(index)).details).toMatchObject({
+            totalFiles: 1,
+          });
+        }
+        expect(await retained()).toHaveLength(16);
+        expect(await retained()).not.toContain(path.join(root, "f-0/data.mdb"));
+        expect(await retained()).toContain(path.join(root, "f-11/data.mdb"));
+        await writeFile(path.join(roots[0]!, "second.txt"), "needle\n");
+        expect((await search(0)).details).toMatchObject({ totalFiles: 2 });
+        expect(await retained()).toHaveLength(16);
+        expect(await retained()).toContain(path.join(root, "f-0/data.mdb"));
+        const results = await Promise.all(
+          roots.map((_, index) => search(index)),
+        );
+        expect(results.map((result) => result.details)).toEqual(
+          roots.map((_, index) =>
+            expect.objectContaining({ totalFiles: index === 0 ? 2 : 1 }),
+          ),
+        );
+        expect(await retained()).toHaveLength(16);
+        await Promise.all(bundles.map((bundle) => bundle.close()));
+        expect(await retained()).toEqual([]);
+      } finally {
+        await service.close();
+      }
+    }),
+);
+
 // Regression: #3036 repeated searches must reuse indexes instead of rescanning.
 test("main and external indexes reuse snapshots until the refresh interval", () =>
   fixture(async (root) => {

@@ -47,6 +47,7 @@ export interface ArtifactState {
   // Consumes lifecycle attention once this agent's async list is known.
   restoredArtifactId?: string | null;
   linkedArtifactId?: string;
+  linkedSection?: { artifact: string; fragment: string };
   selectedVersion: string | null;
   shownKey: string | null;
   loadingKey: string | null;

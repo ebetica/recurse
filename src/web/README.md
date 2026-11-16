@@ -25,7 +25,13 @@ close their stream and reconnect when shown. A stream with `viewing=true`
 registers a visible main conversation until disconnect, cancellation or read
 failure; any such viewer suppresses agent-finished pushes to all devices for
 that conversation. Other streams do not suppress pushes. Legacy views keep their one-shot
-event response.
+event response. `tree_events.ts` shares one upstream follower per remote label
+across browser subscriptions, aborting it after the last subscriber leaves.
+Tree streams expire after five minutes, releasing proxy connections whose browser
+disconnect never reached this server. At most 32 tree streams are admitted per
+server; excess clients receive 429 with Retry-After and retain polling fallback.
+Follower retries and resumed connections add jitter; the first end or failure per
+follower is logged without credentials or response content.
 Unavailable conversation models return an actionable 422 after authentication.
 Direct server startup probes loopback and the configured address for an existing
 listener before initializing state. This prevents wildcard and 127.0.0.1

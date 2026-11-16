@@ -31,6 +31,8 @@ that turn is live. Later settled turns remain eligible when their attachment
 metadata arrives in a subsequent frame. Phones retain
 in-place details, image dialogs and Back navigation. Markdown sibling links open
 file views with a Back step on phones; fragments scroll the opened document.
+Markdown siblings opened from Artifacts use the same reading padding as published
+Markdown files.
 Modified clicks and unsupported types retain browser navigation. Inline image enlargement
 retains its dialog on both layouts. Single-key shortcuts close image dialogs
 before acting; `i` focuses the composer. Left/Right still step images. The

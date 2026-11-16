@@ -854,6 +854,7 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
 .settings-section .localfb > .row { justify-content: flex-end; }
 .settings-section.provider .msg:empty { display: none; }
 .settings-section .field { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-4); }
+.safety-model-field select { width: 100%; min-width: 0; }
 .settings-section .item.field { flex-direction: row; margin: 0; }
 .customkeys .settings-row-label { min-width: 0; overflow-wrap: anywhere; }
 .customkeys :is(input, .field) { width: 100%; min-width: 0; box-sizing: border-box; }

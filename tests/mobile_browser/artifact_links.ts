@@ -2,7 +2,7 @@ import { expect } from "bun:test";
 import type { Browser } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import * as artifacts from "../../src/artifacts";
 import { rectanglePdf } from "./server/media";
 import {
@@ -30,14 +30,18 @@ export async function artifactLinks(
   const repo = String(artifact.repo_path);
   await writeFile(
     join(repo, "index.md"),
-    "# Project overview\n\n[Architecture](architecture.md)\n\n[Details](architecture.md#details)\n\n[Diagram](diagram.png)\n\n[PDF](review.pdf)\n\n[Archive](archive.zip)\n\n[External](https://example.com/)\n",
+    "# Project overview\n\n[Missing](missing.md)\n\n[Escape](../architecture.md)\n\n[Missing image](missing.png)\n\n[Missing PDF](missing.pdf)\n\n[Missing CSV](missing.csv)\n\n[Code](sub/code.ts)\n\n[Data](sub/data.csv)\n\n[Architecture](architecture.md)\n\n[Details](architecture.md#details)\n\n[Diagram](diagram.png)\n\n[PDF](review.pdf)\n\n[Archive](archive.zip)\n\n[External](https://example.com/)\n",
   );
   await writeFile(
     join(repo, "architecture.md"),
     "# System architecture\n\nSibling document at the selected version.\n\n[Overview](index.md)\n\n" +
       Array.from({ length: 30 }, (_, i) => `Paragraph ${i}.\n\n`).join("") +
-      "## Details\n\nVersioned details.\n",
+      "## Details\n\nVersioned details.\n\n" +
+      Array.from({ length: 30 }, (_, i) => `After details ${i}.\n\n`).join(""),
   );
+  await mkdir(join(repo, "sub"));
+  await writeFile(join(repo, "sub", "code.ts"), "export const sibling = 42;\n");
+  await writeFile(join(repo, "sub", "data.csv"), "name,value\nArtifact,42\n");
   await writeFile(join(repo, "diagram.png"), PNG_1X1);
   await writeFile(join(repo, "review.pdf"), rectanglePdf(1));
   const published = await artifacts.publish(store, owner, String(artifact.id));
@@ -70,7 +74,51 @@ export async function artifactLinks(
         .click();
     };
     await historical();
-    for (const name of ["Archive", "External"])
+    const returnToOverview = async () => {
+      if (phone) await page.goBack();
+      else {
+        const id = await page
+          .locator(".file-tab:visible")
+          .getAttribute("data-pane");
+        await page
+          .locator(`.dv-tab[data-dock-panel="${id}"] .dv-default-tab-action`)
+          .click();
+        await page.locator('.dv-tab[data-dock-panel="report"]').click();
+      }
+      await overview.waitFor();
+      if (phone) await historical();
+    };
+    for (const name of [
+      "Missing",
+      "Escape",
+      "Missing image",
+      "Missing PDF",
+      "Missing CSV",
+      "Archive",
+    ]) {
+      await page.getByRole("link", { name, exact: true }).click();
+      await browserExpect(
+        page.locator(".file-tab:visible .report-doc"),
+      ).toContainText("File not found");
+      expect(context.pages().length).toBe(1);
+      await returnToOverview();
+    }
+    for (const name of ["Code", "Data"]) {
+      await page.getByRole("link", { name, exact: true }).click();
+      const file = page.locator(".file-tab:visible");
+      if (name === "Code") {
+        await browserExpect(file.locator("pre")).toHaveText(
+          "export const sibling = 42;\n",
+        );
+        await file.locator("pre .hljs-keyword").first().waitFor();
+      } else
+        await browserExpect(
+          file.frameLocator("iframe").locator("table"),
+        ).toContainText("Artifact");
+      expect(context.pages().length).toBe(1);
+      await returnToOverview();
+    }
+    for (const name of ["External"])
       expect(
         await page
           .getByRole("link", { name, exact: true })
@@ -151,7 +199,29 @@ export async function artifactLinks(
     await page.getByRole("link", { name: "Details", exact: true }).click();
     const details = page.getByRole("heading", { name: "Details", exact: true });
     await details.waitFor();
-    await browserExpect(details).toBeInViewport();
+    await browserExpect
+      .poll(() =>
+        details.evaluate((element) => {
+          let scroller = element.parentElement!;
+          while (
+            scroller.parentElement &&
+            scroller.scrollHeight <= scroller.clientHeight
+          )
+            scroller = scroller.parentElement;
+          const bounds = scroller.getBoundingClientRect();
+          const toolbar = element
+            .closest(".file-tab")!
+            .querySelector(".files-detail-bar")!
+            .getBoundingClientRect();
+          const rect = element.getBoundingClientRect();
+          return (
+            rect.top >= Math.max(bounds.top, toolbar.bottom, 0) &&
+            rect.bottom <=
+              Math.min(bounds.bottom, (globalThis as any).innerHeight)
+          );
+        }),
+      )
+      .toBe(true);
     await dispatchArtifactSelection(
       page,
       phone ? "touch" : "mouse",

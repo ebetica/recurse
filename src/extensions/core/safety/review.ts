@@ -12,7 +12,8 @@ import type {
   UserMessage,
 } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewEffort } from "./model-policy.ts";
+import type { ReviewEffort, ReviewModel } from "./model-policy.ts";
+import { SAFETY_CRITERIA, safetyDecisionContext } from "./decision.ts";
 import { buildReviewerSystemPrompt } from "./policy.ts";
 import { slowSpan } from "../../../observability/slow_span";
 import type { ReviewHistory } from "./review-history.ts";
@@ -20,6 +21,7 @@ export type ReviewInputs = {
   dataDir?: string;
   statsRoot?: string;
   history?: ReviewHistory;
+  historyVersion?: number;
   processSnapshot: string;
   actingAgent?: { id: string; title?: string };
 };
@@ -145,7 +147,11 @@ function timeoutSignal(parent: AbortSignal | undefined): {
   };
 }
 
-function reportedAttempt(response: AssistantMessage): SafetyReviewAttempt {
+function reportedAttempt(
+  response: Pick<AssistantMessage, "provider" | "model"> & {
+    usage?: AssistantMessage["usage"];
+  },
+): SafetyReviewAttempt {
   const usage = response.usage;
   const counts = [
     usage?.input,
@@ -174,11 +180,11 @@ function reportedAttempt(response: AssistantMessage): SafetyReviewAttempt {
     provider: response.provider,
     model: response.model,
     usage: {
-      input: usage.input,
-      output: usage.output,
-      cacheRead: usage.cacheRead,
-      cacheWrite: usage.cacheWrite,
-      cost: { ...usage.cost },
+      input: usage!.input,
+      output: usage!.output,
+      cacheRead: usage!.cacheRead,
+      cacheWrite: usage!.cacheWrite,
+      cost: { ...usage!.cost },
     },
   };
 }
@@ -494,7 +500,7 @@ const REFORMAT_INSTRUCTION =
 /** Keep the reviewer's cache namespace separate from the main conversation. */
 export function safetyReviewSessionId(
   conversationId: string | undefined,
-  model: Pick<Model<any>, "provider" | "id">,
+  model: Pick<ReviewModel, "provider" | "id">,
   durableEvidence = "",
   policyVersion = "",
 ): string | undefined {
@@ -532,7 +538,7 @@ function cacheRoutedReviewer(
 
 export async function reviewAction(
   ctx: ExtensionContext,
-  model: Model<any>,
+  model: ReviewModel,
   effort: ReviewEffort,
   additionalRules: readonly string[],
   transcript: string,
@@ -547,7 +553,10 @@ export async function reviewAction(
 ): Promise<SafetyVerdict> {
   let auth: Awaited<ReturnType<typeof ctx.modelRegistry.getApiKeyAndHeaders>>;
   try {
-    auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    auth =
+      model.type === "classifier"
+        ? { ok: true, apiKey: undefined }
+        : await ctx.modelRegistry.getApiKeyAndHeaders(model);
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return failedVerdict(
@@ -558,11 +567,15 @@ export async function reviewAction(
     return failedVerdict(
       `Safety review could not authenticate the configured reviewer model: ${auth.error}`,
     );
-  if (!auth.apiKey)
+  if (model.type !== "classifier" && !auth.apiKey)
     return failedVerdict(
       "Safety review has no API key for the configured reviewer model.",
     );
 
+  if (model.type === "classifier") {
+    inputs.history?.clear();
+    inputs = { ...inputs, history: undefined };
+  }
   const policy = buildReviewerSystemPrompt(additionalRules, inputs.dataDir);
   const systemPrompt =
     buildReviewSystemPrompt(policy, model.provider, inputs.actingAgent) +
@@ -591,12 +604,16 @@ export async function reviewAction(
     effort,
     durableEvidence,
     systemPrompt,
+    inputs.historyVersion,
   ]);
   const processContext = inputs.processSnapshot;
   // Invariant: OpenRouter must opt into x-session-id affinity for the stable
   // isolated reviewer namespace; evidence appends preserve it, safety
   // boundaries rotate it.
-  const routedModel = cacheRoutedReviewer(model, safetyCacheKey);
+  const routedModel =
+    model.type === "classifier"
+      ? model
+      : cacheRoutedReviewer(model, safetyCacheKey);
   const timed = timeoutSignal(ctx.signal);
   const reviewAttempts: SafetyReviewAttempt[] = [];
   let requestInFlight = false;
@@ -652,6 +669,45 @@ export async function reviewAction(
               .map((block) => block.text)
               .join("\n");
       requestInFlight = true;
+      if (routedModel.type === "classifier") {
+        const response = await settleBeforeAbort(
+          ctx.modelRegistry.classify(
+            routedModel,
+            safetyDecisionContext({ systemPrompt, messages }),
+            {
+              signal: timed.signal,
+              maxRetries: 0,
+            },
+          ),
+          timed.signal,
+        );
+        requestInFlight = false;
+        reviewAttempts.push(
+          response.stopReason === "stop"
+            ? reportedAttempt(response)
+            : { status: "unreported" },
+        );
+        const answer = response.answers?.safety;
+        if (response.stopReason !== "stop")
+          return failedVerdict(
+            `Safety reviewer did not finish cleanly (${response.stopReason}).`,
+            reviewAttempts,
+          );
+        if (
+          answer?.type !== "choice" ||
+          !Object.hasOwn(SAFETY_CRITERIA, answer.choice)
+        )
+          return failedVerdict(
+            "Safety reviewer returned an invalid verdict or did not finish cleanly.",
+            reviewAttempts,
+          );
+        timed.signal.throwIfAborted();
+        return {
+          decision: answer.choice === "allow" ? "allow" : "deny",
+          reason: answer.choice === "allow" ? "OK" : answer.choice,
+          reviewAttempts,
+        };
+      }
       const response = await settleBeforeAbort(
         complete(
           routedModel,
@@ -664,7 +720,7 @@ export async function reviewAction(
             maxTokens: 800,
             // Spec: Omit temperature: Codex rejects it, and provider defaults
             // keep review portable.
-            reasoning: model.reasoning ? effort : undefined,
+            reasoning: routedModel.reasoning ? effort : undefined,
             cacheRetention: "short",
             // Spec: Codex uses direct full-context SSE; other providers keep
             // native transport.

@@ -1,6 +1,7 @@
 // Version-pinned Artifact sibling tabs reuse the shared Markdown, image, PDF
 // and offline document renderers. Descriptors contain identity, never URLs;
 // comments are scoped to the repository file rather than the entry document.
+// Escaping paths render an error without issuing file requests.
 import { html, render } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor, parseConversationId } from "../backends/backend.js";
@@ -47,19 +48,21 @@ function kind(path: string): string | null {
 }
 
 export function artifactRelativePath(entry: string, path: string): string {
-  const pathname = new URL(
-    path,
-    new URL(entry, "https://artifact.invalid/"),
-  ).pathname.slice(1);
+  let pathname = path.split(/[?#]/)[0]!;
   try {
-    return decodeURIComponent(pathname);
-  } catch {
-    return pathname;
+    pathname = decodeURIComponent(pathname);
+  } catch {}
+  const parts = entry.split("/").slice(0, -1);
+  for (const part of pathname.replace(/\\/g, "/").split("/")) {
+    if (part === "..") {
+      if (!parts.length) return `../${pathname}`;
+      parts.pop();
+    } else if (part && part !== ".") parts.push(part);
   }
+  return parts.join("/");
 }
 
 export function openArtifactFile(target: Target, fragment = ""): boolean {
-  if (!kind(target.path)) return false;
   const opened = openFileTab(
     "artifact",
     JSON.stringify([
@@ -99,13 +102,7 @@ registerFileTabSource("artifact", (key, id) => {
   )
     return null;
   const [agent, artifact, version, path, owner] = parts as string[];
-  if (
-    !/^[0-9a-f]{40}$/.test(version!) ||
-    !kind(path!) ||
-    path!.startsWith("/") ||
-    path!.split("/").includes("..")
-  )
-    return null;
+  if (!/^[0-9a-f]{40}$/.test(version!) || path!.startsWith("/")) return null;
   const target = {
     agent: agent!,
     artifact: artifact!,
@@ -166,6 +163,18 @@ registerFileTabSource("artifact", (key, id) => {
           path: `${artifactWorkingPath(target.owner, target.artifact)}/${target.path}`,
         },
       };
+      if (target.path.split("/").includes("..")) {
+        pane._rs.contentInfo = null;
+        render(
+          html`<div class="report-doc">
+              File not found. Choose a file inside this Artifact.
+            </div>
+            <div class="report-comments"></div>
+            <div class="report-bar"></div>`,
+          element,
+        );
+        return;
+      }
       render(
         html`<div class="files-detail">
             <div class="files-detail-bar">
@@ -194,6 +203,7 @@ registerFileTabSource("artifact", (key, id) => {
       body.textContent = "Loading…";
       void (async () => {
         const type = kind(target.path);
+        if (type === "markdown") body.classList.add("files-markdown");
         if (type === "document") {
           body.textContent = "";
           const module = await import("../document-preview.js");
@@ -225,13 +235,30 @@ registerFileTabSource("artifact", (key, id) => {
               String(image.naturalWidth / image.naturalHeight),
             );
             installImageZoom(image);
-          } else if (!signal.aborted)
+          } else if (!signal.aborted) {
+            const response = await backendFor(target.agent).api(url, {
+              signal,
+            });
+            await response.body?.cancel();
             body.textContent =
-              "Couldn’t display the image. Download it to view it.";
+              response.status === 404
+                ? "File not found. Check the link or choose another file."
+                : "Couldn’t display the image. Download it to view it.";
+          }
         } else {
           const response = await backendFor(target.agent).api(url, { signal });
           if (!response.ok)
-            throw Error("Couldn’t display this file. Download it to view it.");
+            throw Error(
+              response.status === 404
+                ? "File not found. Check the link or choose another file."
+                : "Couldn’t display this file. Download it to view it.",
+            );
+          if (!type) {
+            await response.body?.cancel();
+            body.textContent =
+              "Preview is unavailable for this file type. Download it to open it.";
+            return;
+          }
           const text = await response.text();
           if (signal.aborted) return;
           body.textContent = "";

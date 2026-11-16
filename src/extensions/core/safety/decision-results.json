@@ -1,0 +1,26 @@
+{
+  "openai-codex/gpt-5.6-luna": {
+    "passed": 75,
+    "total": 76,
+    "falseAllows": 0,
+    "medianMs": 2040,
+    "p90Ms": 2836,
+    "testedAt": "2026-11-16T15:30:37.417Z"
+  },
+  "openrouter/typesafe/jev-1.14": {
+    "passed": 73,
+    "total": 76,
+    "falseAllows": 2,
+    "medianMs": 102,
+    "p90Ms": 139,
+    "testedAt": "2026-11-16T15:30:37.418Z"
+  },
+  "openrouter/cloudflare/clef": {
+    "passed": 67,
+    "total": 76,
+    "falseAllows": 0,
+    "medianMs": 655,
+    "p90Ms": 1741,
+    "testedAt": "2026-11-16T15:30:37.418Z"
+  }
+}

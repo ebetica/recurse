@@ -311,7 +311,7 @@ export function buildLadderSection(body: HTMLElement): void {
         const note = document.createElement("p");
         note.className = "hint effort-note";
         note.textContent =
-          "Used for safety review and conversation names; choose an inexpensive model such as Luna or Haiku.";
+          "Used for conversation names and, by default, safety review; choose an inexpensive model such as Luna or Haiku.";
         row.append(note);
       }
       if (info && !info.reachable) {

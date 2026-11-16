@@ -24,14 +24,14 @@ three-minute lifetime also bounds the server.
 SKIPPED (exit 2) is not a promotion pass.
 
 `bun tests/live/safety_decisions.ts --output DIRECTORY` compares the default
-reviewer with pinned OpenRouter Jev 1.14 on the 20 PR #3388 cases and 56 accident
+reviewer with signed-in OpenRouter Jev 1.14 and Clef on the 20 PR #3388 cases and 56 accident
 fixtures. Commands are evidence only and never execute. Sign-ins use a literal,
 read-only memory snapshot; stored variable references and credential commands
 are rejected before authentication. Optional `--openai-key-file FILE` loads a
 bare API key into memory only for Luna measurement. The caller owns deleting that input file. Full fixture requests,
 probabilities, usage and timings stay in the output directory. `--resume` skips
 recorded calls only with unchanged evaluator, fixture and policy hashes. A $1
-per-model cap bounds spend. The ship gate fails if Jev makes any mistake the
+per-model cap bounds spend. `--update-results` records complete-corpus pass counts, false allows and median/p90 latency in the safety module's checked-in decision results for Settings. Missing records display “Not tested”. The ship gate fails if Jev makes any mistake the
 default does not, either model returns no decision, or coverage is incomplete.
 `--case GROUP/ID` reruns one fixture while preserving its earlier evidence and
 reports a selected-case gate, not a full-corpus ship pass. This manual live

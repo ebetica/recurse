@@ -10,12 +10,14 @@ async function streamEvents(
   subscribe: (wake: () => void) => () => void,
   signal: AbortSignal,
   coalesceMs: number,
+  maxAgeMs: number,
 ): Promise<readonly [number, ReadableStream<Uint8Array> | null]> {
   let dirty = false;
   let closed = false;
   let reading = false;
   let active = false;
   let heartbeat: ReturnType<typeof setTimeout> | undefined;
+  let expiry: ReturnType<typeof setTimeout> | undefined;
   let retryFiles: ReturnType<typeof setTimeout> | undefined;
   let retryDelay = 5000;
   let scheduled: ReturnType<typeof setTimeout> | undefined;
@@ -26,6 +28,7 @@ async function streamEvents(
     if (closed) return;
     closed = true;
     clearTimeout(heartbeat);
+    clearTimeout(expiry);
     clearTimeout(retryFiles);
     clearTimeout(scheduled);
     unsubscribe();
@@ -140,6 +143,7 @@ async function streamEvents(
     start(value) {
       controller = value;
       value.enqueue(initial[1]);
+      if (maxAgeMs > 0) expiry = setTimeout(abort, maxAgeMs);
       if (dirty) schedule();
     },
     pull() {
@@ -159,9 +163,10 @@ export async function conversationEvents(
   subscribe: ((wake: () => void) => () => void) | null,
   signal: AbortSignal,
   coalesceMs = 150,
+  maxAgeMs = 0,
 ): Promise<Response> {
   const [status, body] = subscribe
-    ? await streamEvents(cursor, read, subscribe, signal, coalesceMs)
+    ? await streamEvents(cursor, read, subscribe, signal, coalesceMs, maxAgeMs)
     : await read(cursor);
   if (status !== 200 || !body) throw new HttpError(status);
   // Invariant: Streams close their connection: Chromium otherwise keeps an
