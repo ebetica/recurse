@@ -1,7 +1,7 @@
-// Busy-only Durable warming: pi-coding-agent 1.4.0 dist/core/cache-warmer.js
-// (MIT, Mario Zechner) streaming-only port; its exports block direct imports.
-// Replace with Pi’s export when available. Replay exact captures through
-// provider wrappers, without generation hooks, idle warming or retries.
+// Durable warming ports Pi 1.4.0 core/cache-warmer.js (MIT, Mario Zechner).
+// Replace with Pi's export when available. Exact wrapped replays have no
+// generation hooks, idle warming or retries; compaction shares the timer.
+// Bounded timer/admission policy: specs/tla/IdleCompaction.tla, not refinement.
 /*
  * Copyright (c) 2025 Mario Zechner, MIT.
  * Permission is hereby granted, free of charge, to any person obtaining a copy
@@ -64,6 +64,11 @@ interface Run {
   delay: number;
   ttl: number;
   tokens: number;
+  cachedAt: number;
+  responded: boolean;
+  canWarm: boolean;
+  refreshing?: boolean;
+  mode?: "warm" | "compact";
   conversationId?: Conversation["id"];
   controller: AbortController;
   cancelTimer?: () => void;
@@ -73,7 +78,10 @@ interface Run {
 export function createCacheWarm(options: {
   models(): Models;
   enabled(): boolean;
-  busy(cid: string): boolean;
+  compactIdle(): boolean;
+  minimumTokens(): number;
+  compact(cid: string, allowed: () => boolean): Promise<unknown>;
+  busy(cid: string, includeBackground?: boolean): boolean;
   current(cid: string, model: Model<Api>): boolean;
   owner(id: Conversation["id"]): string;
   conversationId(cid: string): Conversation["id"] | undefined;
@@ -93,13 +101,46 @@ export function createCacheWarm(options: {
     run?.controller.abort();
   };
   const valid = (cid: string, run: Run) =>
-    !closed &&
-    runs.get(cid) === run &&
-    options.enabled() &&
-    options.busy(cid) &&
-    options.current(cid, run.model);
+    !closed && runs.get(cid) === run && options.current(cid, run.model);
   const reconcile = () => {
-    for (const [cid, run] of runs) if (!valid(cid, run)) cancel(cid);
+    for (const [cid, run] of runs) {
+      if (!valid(cid, run)) {
+        cancel(cid);
+        continue;
+      }
+      const busy = options.busy(cid);
+      if (run.refreshing && (!busy || !options.enabled())) {
+        run.controller.abort();
+        if (options.compactIdle()) continue;
+      }
+      const compactBusy = options.busy(cid, options.enabled());
+      if (run.mode === "compact" && compactBusy) {
+        cancel(cid);
+        continue;
+      }
+      const mode =
+        busy && options.enabled() && run.canWarm
+          ? "warm"
+          : !compactBusy &&
+              options.compactIdle() &&
+              run.responded &&
+              run.tokens >= options.minimumTokens()
+            ? "compact"
+            : undefined;
+      if (mode === undefined) {
+        if (!busy || !options.compactIdle()) cancel(cid);
+        else {
+          run.cancelTimer?.();
+          run.cancelTimer = undefined;
+          run.mode = undefined;
+        }
+      } else if (mode !== run.mode) {
+        run.cancelTimer?.();
+        run.cancelTimer = undefined;
+        run.mode = mode;
+        schedule(cid, run);
+      }
+    }
   };
   const price = (model: Model<Api>, tokens: Partial<Usage>) =>
     calculateCost(model, {
@@ -112,22 +153,52 @@ export function createCacheWarm(options: {
       ...tokens,
     }).total;
   const schedule = (cid: string, run: Run) => {
-    const next = time.now() + run.delay;
-    if (next > run.startedAt + MAX_WARMING_AGE_MS || !valid(cid, run)) {
+    run.cancelTimer?.();
+    run.cancelTimer = undefined;
+    const next = run.cachedAt + run.delay;
+    const deadline = next + Math.floor((run.ttl - run.delay) / 2);
+    if (!valid(cid, run) || time.now() > deadline) {
       cancel(cid);
       return;
     }
-    const deadline = next + Math.floor((run.ttl - run.delay) / 2);
-    run.cancelTimer = time.schedule(() => {
-      run.cancelTimer = undefined;
-      void refresh(cid, run, deadline).catch((error) => {
-        if (runs.get(cid) === run) cancel(cid);
-        options.report(error);
-      });
-    }, run.delay);
+    if (run.mode === "warm" && next > run.startedAt + MAX_WARMING_AGE_MS) {
+      run.canWarm = false;
+      reconcile();
+      return;
+    }
+    run.cancelTimer = time.schedule(
+      () => {
+        run.cancelTimer = undefined;
+        const allowed = () =>
+          valid(cid, run) &&
+          options.compactIdle() &&
+          run.tokens >= options.minimumTokens() &&
+          !options.busy(cid, options.enabled()) &&
+          time.now() <= deadline;
+        const work =
+          run.mode === "compact"
+            ? allowed()
+              ? options.compact(cid, allowed).finally(() => {
+                  if (runs.get(cid) === run) cancel(cid);
+                })
+              : Promise.resolve(cancel(cid))
+            : refresh(cid, run, deadline);
+        void work.catch((error) => {
+          if (runs.get(cid) === run) cancel(cid);
+          options.report(error);
+        });
+      },
+      Math.max(0, next - time.now()),
+    );
   };
   const refresh = async (cid: string, run: Run, deadline: number) => {
-    if (!valid(cid, run) || time.now() > deadline) return cancel(cid);
+    if (
+      !valid(cid, run) ||
+      !options.enabled() ||
+      !options.busy(cid) ||
+      time.now() > deadline
+    )
+      return cancel(cid);
     const cacheHitCost = price(run.model, { cacheRead: run.tokens });
     const cacheMissCost = price(
       run.model,
@@ -137,8 +208,15 @@ export function createCacheWarm(options: {
     );
     const warmCost = price(run.model, { cacheRead: run.tokens, output: 1 });
     const missCost = Math.max(0, cacheMissCost - cacheHitCost);
-    if (!(missCost - warmCost >= CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS))
-      return cancel(cid);
+    if (!(missCost - warmCost >= CACHE_WARMING_MINIMUM_EXPECTED_SAVINGS)) {
+      run.canWarm = false;
+      reconcile();
+      return;
+    }
+    run.refreshing = true;
+    run.controller = new AbortController();
+    let refreshed = false;
+    const refreshedAt = time.now();
     try {
       const message = await options
         .models()
@@ -150,6 +228,8 @@ export function createCacheWarm(options: {
         })
         .result();
       if (message.stopReason !== "error" && message.stopReason !== "aborted") {
+        run.cachedAt = refreshedAt;
+        refreshed = true;
         const id = run.conversationId;
         if (id !== undefined && !closed) {
           const target = await options.conversation(id);
@@ -181,7 +261,13 @@ export function createCacheWarm(options: {
     } catch {
       // Invariant: Best-effort warming never fails an agent's work.
     }
-    if (runs.get(cid) === run) schedule(cid, run);
+    run.refreshing = false;
+    if (runs.get(cid) === run) {
+      // Invariant: Failed replays cannot extend a provider cache's lifetime.
+      if (!refreshed) run.canWarm = false;
+      run.mode = undefined;
+      reconcile();
+    }
   };
   return {
     cancel,
@@ -198,19 +284,22 @@ export function createCacheWarm(options: {
       requestOptions?: Record<string, unknown>,
     ) {
       cancel(cid);
-      if (closed || !options.enabled() || capture.method !== "streamSimple")
+      if (
+        closed ||
+        (!options.enabled() && !options.compactIdle()) ||
+        capture.method !== "streamSimple"
+      )
         return;
       const signal = requestOptions?.signal as AbortSignal | undefined;
       const streamOptions = requestOptions as
         | ModelsSimpleStreamOptions
         | undefined;
-      if (
+      const canWarm = !(
         streamOptions?.reasoning &&
         model.api === "anthropic-messages" &&
         (model.compat as { forceAdaptiveThinking?: boolean } | undefined)
           ?.forceAdaptiveThinking !== true
-      )
-        return;
+      );
       const retention =
         streamOptions?.cacheRetention ??
         (getProviderEnvValue("PI_CACHE_RETENTION") === "long"
@@ -235,6 +324,9 @@ export function createCacheWarm(options: {
         ttl,
         delay: Math.max(1, Math.floor(Math.min(ttl * 0.9, ttl - 10_000))),
         startedAt: time.now(),
+        cachedAt: time.now(),
+        responded: false,
+        canWarm,
         tokens: usage ? usage.input + usage.cacheRead + usage.cacheWrite : 0,
         conversationId: options.conversationId(cid),
         controller: new AbortController(),
@@ -245,7 +337,7 @@ export function createCacheWarm(options: {
       };
       signal?.addEventListener("abort", aborted, { once: true });
       run.removeAbort = () => signal?.removeEventListener("abort", aborted);
-      schedule(cid, run);
+      reconcile();
     },
     extension: defineExtension({
       name: "recurse-cache-warm",
@@ -256,6 +348,7 @@ export function createCacheWarm(options: {
             const run = runs.get(cid);
             if (run) {
               run.conversationId = api.conversationId;
+              run.responded = true;
               run.tokens =
                 message.usage.input +
                 message.usage.cacheRead +

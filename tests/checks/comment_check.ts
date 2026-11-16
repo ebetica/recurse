@@ -1,11 +1,13 @@
 /**
- * Python: module docs <=8 lines; declaration docs <=2; # Invariant:/Spec:.
- * CLI: --help lists modes. tests/check.sh enforces all languages.
+ * JS/TS comment policy. CLI: --help lists modes; tests/check.sh enforces it.
  */
-import { lstatSync, readFileSync } from "node:fs";
+import { lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import ts from "typescript";
 import { resolveConfig } from "prettier";
 import { leadingModuleHelp } from "../../src/skill_context";
+
+const TEST_FUNCTION =
+  /(?:async function test_\w+\s*\(|(?:export )?const \w+\s*:\s*BrowserTest\s*=\s*async\s*\()/y;
 
 export type Violation = {
   /** Repository-relative source path. */
@@ -26,15 +28,19 @@ export function checkComments(
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const ranges = new Map<number, ts.CommentRange>();
   const nodes: ts.Node[] = [];
+  const scanned = new Set<number>();
+  const scan = (pos: number) => {
+    if (scanned.has(pos)) return;
+    scanned.add(pos);
+    for (const range of ts.getLeadingCommentRanges(text, pos) ?? [])
+      ranges.set(range.pos, range);
+    for (const range of ts.getTrailingCommentRanges(text, pos) ?? [])
+      ranges.set(range.pos, range);
+  };
   const collect = (node: ts.Node) => {
     nodes.push(node);
-    for (const pos of [node.pos, node.end]) {
-      for (const range of [
-        ...(ts.getLeadingCommentRanges(text, pos) ?? []),
-        ...(ts.getTrailingCommentRanges(text, pos) ?? []),
-      ])
-        ranges.set(range.pos, range);
-    }
+    scan(node.pos);
+    scan(node.end);
     for (const child of node.getChildren(source)) collect(child);
   };
   collect(source);
@@ -87,23 +93,40 @@ export function checkComments(
   const helpComment = toolHelpSource
     ? comments.find((c) => raw(c).startsWith("/**"))
     : undefined;
+  let testStarts: number[] | undefined;
+  const testFollows = (c: ts.CommentRange) => {
+    testStarts ??= nodes
+      .filter(
+        (node) =>
+          (ts.isCallExpression(node) &&
+            /^(?:test|it)(?:\.|$)/.test(node.expression.getText(source))) ||
+          ((TEST_FUNCTION.lastIndex = node.getStart(source)),
+          TEST_FUNCTION.test(text) && TEST_FUNCTION.lastIndex <= node.end),
+      )
+      .map((node) => node.getStart(source))
+      .sort((a, b) => a - b);
+    const start = testStarts.find((start) => start > c.end);
+    return (
+      start !== undefined &&
+      /^\r?\n(?:[ \t]*\/\/ test-check-allow: [^\r\n]*\r?\n)*[ \t]*$/.test(
+        text.slice(c.end, start),
+      )
+    );
+  };
   const testExemption = (c: ts.CommentRange) =>
     file.split("/").includes("tests") &&
     c.kind === ts.SyntaxKind.SingleLineCommentTrivia &&
     (/^\/\/ test-check-allow: (?:T[1-46-9]|T10) \S[^\r\n]*$/.test(raw(c)) ||
       (/^\/\/ (?:Regression|Feature): #\d+ \S[^\r\n]*$/.test(raw(c)) &&
-        nodes.some(
-          (node) =>
-            ((ts.isCallExpression(node) &&
-              /^(?:test|it)(?:\.|$)/.test(node.expression.getText(source))) ||
-              /^(?:async function test_\w+\s*\(|(?:export )?const \w+\s*:\s*BrowserTest\s*=\s*async\s*\()/.test(
-                node.getText(source),
-              )) &&
-            /^\r?\n(?:[ \t]*\/\/ test-check-allow: [^\r\n]*\r?\n)*[ \t]*$/.test(
-              text.slice(c.end, node.getStart(source)),
-            ),
-        )));
-  const exempt = (c: ts.CommentRange) =>
+        testFollows(c)));
+  const exemptions = new Map<string, boolean>();
+  const exempt = (c: ts.CommentRange) => {
+    const key = `${c.pos}:${c.end}`;
+    let result = exemptions.get(key);
+    if (result === undefined) exemptions.set(key, (result = computeExempt(c)));
+    return result;
+  };
+  const computeExempt = (c: ts.CommentRange) =>
     testExemption(c) ||
     c.pos === helpComment?.pos ||
     directive(c) ||
@@ -141,8 +164,27 @@ export function checkComments(
         ? [node.body as ts.Node]
         : [],
   );
+  const bodyRanges = bodies.map((body) => [body.getStart(source), body.end]);
   const inBody = (c: ts.CommentRange) =>
-    bodies.some((body) => c.pos >= body.getStart(source) && c.end <= body.end);
+    bodyRanges.some(([start, end]) => c.pos >= start! && c.end <= end!);
+  const kept = comments.filter((c) => !exempt(c));
+  const endsSorted = kept.every(
+    (c, index) => index === 0 || kept[index - 1]!.end <= c.end,
+  );
+  const firstAtLeast = (
+    list: ts.CommentRange[],
+    value: number,
+    key: (c: ts.CommentRange) => number,
+  ) => {
+    let low = 0;
+    let high = list.length;
+    while (low < high) {
+      const mid = (low + high) >> 1;
+      if (key(list[mid]!) < value) low = mid + 1;
+      else high = mid;
+    }
+    return low;
+  };
   const singleLineDocTarget = (node: ts.Node) =>
     (ts.isVariableStatement(node) &&
       (ts.isSourceFile(node.parent) || ts.isModuleBlock(node.parent))) ||
@@ -170,22 +212,24 @@ export function checkComments(
         : undefined;
     if (limit === undefined) continue;
     const start = node.getStart(source);
-    const preceding = comments.filter((c) => c.end <= start && !exempt(c));
-    const c = preceding.at(-1);
+    const c = endsSorted
+      ? kept[firstAtLeast(kept, start + 1, (c) => c.end) - 1]
+      : kept.filter((c) => c.end <= start).at(-1);
     const gap = c ? text.slice(c.end, start) : "";
     const direct = c && /^\s*$/.test(gap) && line(start) === line(c.end) + 1;
     const leading = direct && c && ownLine(c);
     if (leading) attached.set(c.pos, limit);
     if (!singleLineDocTarget(node)) continue;
-    const trailing = comments.find(
-      (comment) =>
-        comment.kind === ts.SyntaxKind.SingleLineCommentTrivia &&
-        comment.pos >= node.end &&
-        line(comment.pos) === line(node.end) &&
-        /^[ \t]*,?[ \t]*$/.test(text.slice(node.end, comment.pos)) &&
-        !exempt(comment) &&
-        !inBody(comment),
-    );
+    const next = comments[firstAtLeast(comments, node.end, (c) => c.pos)];
+    const trailing =
+      next &&
+      next.kind === ts.SyntaxKind.SingleLineCommentTrivia &&
+      line(next.pos) === line(node.end) &&
+      /^[ \t]*,?[ \t]*$/.test(text.slice(node.end, next.pos)) &&
+      !exempt(next) &&
+      !inBody(next)
+        ? next
+        : undefined;
     if (trailing) {
       attached.set(trailing.pos, 1);
       if (leading)
@@ -259,16 +303,14 @@ export function report(violations: Violation[], summary = false): string {
 
 if (import.meta.main) {
   if (process.argv.includes("--help")) {
-    console.log(`Usage: bun tests/checks/comment_check.ts [--strict | --strict-python] [--summary]
-Check tracked JS/TS and Python files; Python fixtures are included.
-Python permits one module docstring of at most 8 physical lines and function/class
-docstrings of at most 2. Eight lines allow a purpose and a few safety rules.
-Python # comments must state Invariant: or Spec:; tool/license pragmas are exempt.
+    console.log(`Usage: bun tests/checks/comment_check.ts [--strict] [--summary]
+Check tracked JS/TS files outside fixtures.
 Comment lines use the file's Prettier print width (default 80), including indent.
---strict         Fail on any JS/TS or Python finding (tests/check.sh ts).
---strict-python  Fail only on Python findings.
+--strict         Fail on any finding (tests/check.sh ts).
 --summary        Print at most 50 findings, retaining full counts.
-Without strict flags, findings only warn. Requires python3 for Python files.`);
+Without --strict, findings only warn.
+JS/TS results are cached in the checkout's git directory, keyed by this
+checker's source and each file's path, width and content.`);
     process.exit(0);
   }
   const tracked = Bun.spawnSync([
@@ -284,37 +326,66 @@ Without strict flags, findings only warn. Requires python3 for Python files.`);
     ":(glob,exclude)**/*.lock",
   ]);
   if (tracked.exitCode !== 0) throw new Error(tracked.stderr.toString());
-  const violations: Violation[] = [];
-  const python = [];
-  for (const file of tracked.stdout.toString().split("\0").filter(Boolean)) {
-    if (lstatSync(file).isSymbolicLink()) continue;
-    const isPython = file.endsWith(".py");
-    if (
-      !isPython &&
-      (!/\.[cm]?[jt]sx?$/i.test(file) || file.split("/").includes("fixtures"))
-    )
-      continue;
-    const width = (await resolveConfig(file))?.printWidth ?? 80;
-    const text = readFileSync(file, "utf8");
-    if (isPython) python.push({ file, text, width });
-    else violations.push(...checkComments(file, text, width));
-  }
-  if (python.length) {
-    const result = Bun.spawnSync(
-      [
-        "python3",
-        new URL("./python_comment_check.py", import.meta.url).pathname,
-      ],
-      { stdin: Buffer.from(JSON.stringify(python)) },
+  const files = tracked.stdout
+    .toString()
+    .split("\0")
+    .filter(
+      (file) =>
+        file &&
+        !lstatSync(file).isSymbolicLink() &&
+        /\.[cm]?[jt]sx?$/i.test(file) &&
+        !file.split("/").includes("fixtures"),
     );
-    if (result.exitCode !== 0) throw new Error(result.stderr.toString());
-    violations.push(...(JSON.parse(result.stdout.toString()) as Violation[]));
+  const widths = await Promise.all(
+    files.map(async (file) => (await resolveConfig(file))?.printWidth ?? 80),
+  );
+  const cachePath = Bun.spawnSync([
+    "git",
+    "rev-parse",
+    "--git-path",
+    "recurse-comment-check.json",
+  ])
+    .stdout.toString()
+    .trim();
+  const version = Bun.hash(
+    [
+      readFileSync(import.meta.path, "utf8"),
+      readFileSync(
+        new URL("../../src/skill_context.ts", import.meta.url),
+        "utf8",
+      ),
+      ts.version,
+    ].join("\0"),
+  ).toString(36);
+  let cached: Record<string, Violation[]> = {};
+  try {
+    cached = JSON.parse(readFileSync(cachePath, "utf8"));
+  } catch {}
+  const results: Record<string, Violation[]> = {};
+  const violations: Violation[] = [];
+  for (const [index, file] of files.entries()) {
+    const width = widths[index]!;
+    const text = readFileSync(file, "utf8");
+    const key = `${version}:${width}:${Bun.hash(`${file}\0${text}`).toString(36)}`;
+    const hit = cached[key];
+    results[key] =
+      Array.isArray(hit) &&
+      hit.every(
+        (v) =>
+          v?.file === file &&
+          Number.isInteger(v.line) &&
+          typeof v.rule === "string" &&
+          typeof v.reason === "string",
+      )
+        ? hit
+        : checkComments(file, text, width);
+    violations.push(...results[key]);
   }
+  try {
+    writeFileSync(`${cachePath}.${process.pid}`, JSON.stringify(results));
+    renameSync(`${cachePath}.${process.pid}`, cachePath);
+  } catch {}
   console.log(report(violations, process.argv.includes("--summary")));
-  if (
-    (process.argv.includes("--strict") && violations.length) ||
-    (process.argv.includes("--strict-python") &&
-      violations.some((violation) => violation.file.endsWith(".py")))
-  )
+  if (process.argv.includes("--strict") && violations.length)
     process.exitCode = 1;
 }

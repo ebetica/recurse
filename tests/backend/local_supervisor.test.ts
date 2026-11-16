@@ -11,13 +11,13 @@ import {
   realpathSync,
   rmSync,
   statSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer, connect, Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
+import { linkDependencies } from "./linked_dependencies";
 import * as buildStamp from "../../src/build_stamp.cli";
 import { STRICT_ISOLATED_PATH_ENV } from "../../src/local_roots";
 import { buildFrontend } from "../../src/launcher/build.cli";
@@ -405,11 +405,7 @@ async function copyCheckout(sourceRoot: string): Promise<void> {
     mkdirSync(dirname(target), { recursive: true });
     copyFileSync(join(ROOT, path), target);
   }
-  symlinkSync(
-    realpathSync(join(ROOT, "node_modules")),
-    join(sourceRoot, "node_modules"),
-    "dir",
-  );
+  linkDependencies(sourceRoot);
 }
 
 // Feature: #2539 native frontend builds publish nested stylesheets.
@@ -583,6 +579,31 @@ test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
     ),
   ).toEqual([]);
 });
+
+// Regression: #3301 instances sharing a checkout raced one generation build
+test("two builds of one checkout generation build it once and both succeed", async () => {
+  const checkout = temp("recurse-shared-build-");
+  await copyCheckout(checkout);
+  await git(checkout, "init", "-b", "main");
+  await git(checkout, "add", ".");
+  await git(checkout, "commit", "-qm", "shared generation");
+  const builds = await Promise.all(
+    [0, 1].map(() =>
+      captureFixture([BUN, "src/launch_cli.ts", "build", checkout], {
+        cwd: checkout,
+        timeoutMs: 120_000,
+      }),
+    ),
+  );
+  const logs = builds.map((build) => `${build.stdout}${build.stderr}`);
+  expect(
+    builds.map((build) => build.exitCode),
+    logs.join("\n"),
+  ).toEqual([0, 0]);
+  expect(
+    logs.map((log) => log.includes("frontend build complete")).sort(),
+  ).toEqual([false, true]);
+}, 180_000);
 
 // Regression: #2901 local updates built by an older supervisor must repair missing brand assets.
 test("local launch repairs a stamped frontend without brand assets", async () => {

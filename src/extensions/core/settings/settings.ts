@@ -1,6 +1,6 @@
-// Deferred settings share validation and connection operations with Settings.
-// The bundled recurse-settings skill holds usage; schemas load on demand.
-// Mutations require an operator request; file paths use the tool cwd.
+// Native settings share validation and connection operations with Settings.
+// The bundled recurse-settings skill holds usage.
+// Mutations require operator requests; custom CSS uses shared theme validation.
 // Tree links name local roots without granting access or changing state.
 import { Type } from "typebox";
 import { readFile } from "node:fs/promises";
@@ -16,6 +16,7 @@ import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import { Config, EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL } from "../../../config";
 import {
   readThemeSettings,
+  MAX_THEME_CSS_LENGTH,
   themeDefaults,
   writeThemeSettings,
   type ThemePalette,
@@ -74,6 +75,18 @@ function ghosttyPalette(name: string, text: string): ThemePalette {
   return result;
 }
 
+/** Bound file reads before shared character-count validation. */
+async function readThemeCss(path: string): Promise<string> {
+  const css = await Bun.file(path)
+    .slice(0, MAX_THEME_CSS_LENGTH * 4 + 1)
+    .text();
+  if (css.length > MAX_THEME_CSS_LENGTH)
+    throw new Error(
+      `Custom CSS must contain at most ${MAX_THEME_CSS_LENGTH} characters.`,
+    );
+  return css;
+}
+
 function required<T>(value: T | undefined, name: string): T {
   if (value === undefined)
     throw new Error(`${name} is required for this action.`);
@@ -94,9 +107,8 @@ export function createSettings(
     tools: [
       defineTool({
         name: "recurse_settings",
-        deferred: true,
         description:
-          "Change Recurse settings; read the recurse-settings skill first.",
+          "View or change Recurse settings; returns the requested settings or action result.",
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("add_remote"),
@@ -181,6 +193,12 @@ export function createSettings(
             Type.String({
               description:
                 "PNG/SVG file for set_icon or Ghostty palette file for add_theme; relative to current cwd. No stdin.",
+            }),
+          ),
+          css_path: Type.Optional(
+            Type.String({
+              description:
+                "CSS file for add_theme or selecting an existing custom theme; at most 50,000 characters, relative to cwd.",
             }),
           ),
         }),
@@ -283,6 +301,10 @@ export function createSettings(
                 required(args.name, "name"),
                 await readFile(resolve(api.env!.cwd, file), "utf8"),
               );
+              if (args.css_path !== undefined)
+                palette.css = await readThemeCss(
+                  resolve(api.env!.cwd, args.css_path),
+                );
               settings = await writeThemeSettings(path, {
                 custom: [
                   ...settings.custom.filter((p) => p.name !== palette.name),
@@ -304,7 +326,21 @@ export function createSettings(
               const name = required(args.name, "name");
               if ((args.dark === undefined) !== (args.light === undefined))
                 throw new Error("Supply both dark and light palette names.");
+              let custom: ThemePalette[] | undefined;
+              if (args.css_path !== undefined) {
+                if (!settings.custom.some((p) => p.name === name))
+                  throw new Error(
+                    "CSS can only be attached to a custom theme.",
+                  );
+                const css = await readThemeCss(
+                  resolve(api.env!.cwd, args.css_path),
+                );
+                custom = settings.custom.map((p) =>
+                  p.name === name ? { ...p, css } : p,
+                );
+              }
               settings = await writeThemeSettings(path, {
+                ...(custom === undefined ? {} : { custom }),
                 theme:
                   name === "system" && args.dark === undefined
                     ? settings.theme

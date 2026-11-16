@@ -138,6 +138,7 @@ export function createWindowCommands(
     if (api.hasMaximizedGroup()) api.exitMaximizedGroup();
   };
   return {
+    restore: restoreLayout,
     focus(id: string | null) {
       const group = id ? api.getPanel(id)?.group : undefined;
       if (group && focused !== group.id) {

@@ -15,11 +15,13 @@ import {
   cancelSelectionComment,
   pendingFor,
   currentCommentKey,
+  commentKey,
 } from "./selection-comments.js";
 import { errorText, refreshList, selectedInfo } from "./list-cache.js";
 import { renderContent } from "./content-view.js";
 import { renderComments } from "./comment-bar.js";
 import { contentCache, type ArtifactEl } from "./artifact-state.js";
+import { reviewedVersion, type DocumentChanges } from "../document-review.js";
 
 export async function loadVersions(
   pane: ArtifactEl,
@@ -74,6 +76,54 @@ export async function loadVersions(
       rs.versionsLoading = false;
       renderShell(pane);
     }
+  }
+}
+
+/** The reviewed version's text when the latest Markdown version is newer. */
+async function changesFor(
+  pane: ArtifactEl,
+  info: ArtifactInfo,
+  version: string | null,
+): Promise<{ changes: DocumentChanges; previous: string } | null> {
+  const rs = pane._rs,
+    agentId = rs.agentId!,
+    entry = info.entry;
+  if (info.format !== "markdown" || !entry || !info.version) return null;
+  const doc = commentKey(agentId, info.id)!;
+  const since = reviewedVersion(doc, info.version);
+  if (version !== info.version || since === info.version) return null;
+  try {
+    const snapshot = await contentCache.getOrLoad(
+      `${agentId}\n${info.id}\n${since}\nreviewed`,
+      agentId,
+      info.id,
+      false,
+      async () => {
+        const response = await backendFor(agentId).api(
+          artifactFileUrl(agentId, info.id, entry, since),
+        );
+        if (!response.ok) throw new Error("reviewed version unavailable");
+        return { info, content: await response.text() };
+      },
+    );
+    const changes: DocumentChanges = {
+      doc,
+      version: info.version,
+      since,
+      onReviewed: () => {
+        rs.changes = null;
+        renderShell(pane);
+      },
+      onCompare: () => {
+        rs.changes = null;
+        rs.shownKey = null;
+        renderShell(pane);
+        void showArtifact(pane);
+      },
+    };
+    return { changes, previous: snapshot.content ?? "" };
+  } catch {
+    return null;
   }
 }
 
@@ -154,6 +204,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
         return { info: contentInfo, content };
       },
     );
+    const changes = await changesFor(pane, snapshot.info, requestedVersion);
     if (
       !isCurrentArtifactRequest(
         pane,
@@ -177,6 +228,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
       pane,
       snapshot.info,
       snapshot.content,
+      changes,
     );
     if (
       !isCurrentArtifactRequest(

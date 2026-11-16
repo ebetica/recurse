@@ -42,6 +42,7 @@ export const STRICT_ISOLATED_PATH_ENV = {
 } as const;
 
 export const ISOLATED_FORBIDDEN_ENV: ReadonlySet<string> = new Set([
+  "RECURSE_READ_ONLY_SIGN_INS",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
   "ANTHROPIC_OAUTH_TOKEN",

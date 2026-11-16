@@ -14,6 +14,7 @@ import {
   isFullVersion,
 } from "./model.js";
 import { confirmDiscard } from "../comments.js";
+import { reviewDocument } from "../document-review.js";
 import { renderShell } from "./pane.js";
 import { showArtifact } from "./artifact-detail.js";
 import { setNotice } from "./artifact-detail.js";
@@ -317,6 +318,7 @@ export function renderBar(pane: CommentPane): void {
       return;
     }
     rs.sendFailed = false;
+    reviewDocument(commentRoot(pane));
     const map = comments.get(artifactKey);
     for (const sent of submitted) {
       if (map?.get(sent.cid)?.text === sent.text) {

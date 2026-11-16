@@ -190,9 +190,11 @@ export function classifyReviewFailure(
 }
 
 export function reviewFailureMessage(
-  verdict: SafetyVerdict,
+  verdict: SafetyVerdict & { configurationFailure?: boolean },
   journalFailure = false,
 ): string {
+  if (verdict.configurationFailure)
+    return `[pi-safety] Safety review was skipped, so this action was allowed without review. ${conciseReason(verdict.reason)}`;
   const failure = classifyReviewFailure(verdict.reason, journalFailure);
   return `[pi-safety] Safety review failed, so this action was allowed without review. Reviewer error: ${failure.summary}`;
 }
@@ -244,17 +246,22 @@ export async function reviewWithCandidates(
       args.conversationId,
       args.inputs,
     );
-  let verdict = await call(reviewers[0]!);
+  let selected = reviewers[0]!;
+  let verdict = await call(selected);
   const reviewAttempts = [...(verdict.reviewAttempts ?? [])];
   for (const candidate of reviewers.slice(1)) {
     if (!reviewerAuthFailure(verdict)) break;
+    selected = candidate;
     const candidateVerdict = await call(candidate);
     reviewAttempts.push(...(candidateVerdict.reviewAttempts ?? []));
     verdict = reviewAttempts.length
       ? { ...candidateVerdict, reviewAttempts }
       : candidateVerdict;
   }
-  return verdict;
+  return {
+    ...verdict,
+    reviewer: { provider: selected.model.provider, model: selected.model.id },
+  };
 }
 
 /** The built-in reviewer retries once. Bound custom implementations too so one

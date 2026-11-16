@@ -121,6 +121,8 @@ async function streamEvents(
   });
   signal.addEventListener("abort", abort, { once: true });
   if (signal.aborted) abort();
+  // Invariant: An abandoned request never reads, so it acknowledges nothing.
+  if (closed) return [499, null];
   let initial: readonly [number, Uint8Array];
   try {
     initial = await read(cursor);
@@ -162,8 +164,12 @@ export async function conversationEvents(
     ? await streamEvents(cursor, read, subscribe, signal, coalesceMs)
     : await read(cursor);
   if (status !== 200 || !body) throw new HttpError(status);
+  // Invariant: Streams close their connection: Chromium otherwise keeps an
+  // aborted stream open up to 5 s to drain it, and the server keeps counting
+  // a viewer who left (specs/tla/UnreadSeen.tla).
   return new Response(body as ConstructorParameters<typeof Response>[0], {
     headers: {
+      ...(subscribe ? { connection: "close" } : {}),
       "cache-control": "no-store",
       "x-accel-buffering": "no",
       ...(!subscribe

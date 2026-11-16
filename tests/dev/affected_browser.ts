@@ -425,7 +425,7 @@ export function frontendPlan(
           scriptGroups(change, map),
           "groups that ran the changed functions",
         );
-    } else if (/^web\/[^/]+\.css$/.test(path)) {
+    } else if (/^web\/.+\.css$/.test(path)) {
       if (!map.css[path])
         take(path, null, "stylesheet the map recorded nothing for");
       else {

@@ -22,7 +22,12 @@ report cursor without constructing a Harness. Only unfinished tasks, queued
 input, undelivered reports, pending clears, revivals or promotions reopen;
 idle conversations remain lazy. Unknown or older storage opens normally so
 inspection failures never suppress recovery. Pi owns the turn, tool calls and
-request boundaries; Recurse admits input and projects live state. Runs outlive HTTP requests. [host/clear.ts](host/clear.ts),
+request boundaries; Recurse admits input and projects live state. Runs outlive HTTP requests. Explicit interrupt sends check the committed request
+ledger inside serialized admission before stopping a run; retrying an accepted
+request cannot abort its replacement. Input held by a clear is appended and
+persisted before Stop can let rotation proceed; that Stop is fenced to the
+original opened storage and run, since fresh storage may reuse task ids. The
+admission callback reports whether a run was stopped, false for a replay. [host/clear.ts](host/clear.ts),
 [host/close.ts](host/close.ts) and [archive.ts](archive.ts) handle storage
 rotation, closing and retained history. SQLite work is off the event loop, in
 one lazy worker per database, so a busy database does not delay another.
@@ -83,14 +88,16 @@ Recurse adds a visible error row for interrupted or restart-limited replies and
 compactions, without aborting or retrying the tasks.
 The focused view follows bounded conversation watches for immediate progress and
 stored commits for history; listeners are removed on disconnect and do not read the
-session in observer callbacks. Root-store commit publications also enqueue derived
+session in observer callbacks. Entry catch-up fences captured live generations by
+successful task id, so a concurrently committed thought/tool step appears once
+and keeps its disclosure state. Failed attempts do not fence their task's retries. Root-store commit publications also enqueue derived
 message-search appends outside the reply path. Retained stores move their search
 sidecar with SQLite files after final sync; search service cleanup finishes before
 the archive index closes.
 
 [activity.ts](activity.ts) maintains a per-root `durable/activity` marker only
 while live tasks, queued input or undelivered reports remain, refreshing it each
-minute and removing it when idle or closed. Open storage and WAL files are not
+minute and removing it when idle or closed. Open storage, WAL files and background compaction tasks are not
 activity signals. Deployment adapters may use the fresh marker as a keepalive
 hint; recovery always reads authoritative storage, never the marker.
 
@@ -116,38 +123,49 @@ Agent Skills locations to both autocomplete and each fresh request, including
 subagents. Names, full descriptions and file paths are advertised; skill bodies
 are read on demand. Resource reads do not reuse the tree's skill-context cache.
 Tool instructions resolve asynchronously before the detached snapshot is rendered.
-Changes are applied at request boundaries, and
-[request_capture.ts](request_capture.ts) records the exact request for the
-inspector. One lazy host-owned Worker serializes captured requests, including
-images, off the main thread. Posting a request detaches its snapshot before the
-provider can mutate it; inspection and idle persistence await its exact JSON.
-Only options are JSON-normalized on the main thread to omit callbacks, including
-nested telemetry callbacks; AbortSignal stays excluded. Credential overrides are
-refused before posting. Worker failures surface as errors, never stale captures;
-shutdown drains captures before terminating the thread. The
-`request_capture_snapshot` span measures the main-thread handoff, not encoding.
+[request_capture.ts](request_capture.ts) snapshots before provider mutation. One
+lazy host Worker encodes context and images off-loop. Captures exclude callbacks,
+AbortSignal, credential overrides, transport headers and credential-bearing model
+metadata. Inspection and idle files await exact JSON; failures reject inspection
+instead of serving stale data. Shutdown drains the worker.
+`request_capture_snapshot` measures the handoff, not encoding.
+Safety reviews keep separate latest request/reply snapshots for operator inspection
+using the same worker and idle files. They never feed cache warming; failures log
+only the conversation id and never change verdicts. Side deletion drops captures.
 Registry tool wrappers shorten Pi-owned model-facing descriptions;
 Pi's parameter schemas and execution stay unchanged. Pi wrappers put native
 codemode usage in the tool description and list script-only tool names in the
-codemode section, without schemas, including deferred tools the model may call
-(`artifact`, `recurse_settings`); on-demand MCP tools appear only by server in
-`mcp_servers`. Discovery is unchanged. Message provenance is separate from user text
+codemode section, without schemas. `artifact` and `recurse_settings` are native
+model tools and remain callable from scripts; on-demand MCP tools appear only
+by server in `mcp_servers`. Discovery is unchanged. Message provenance is separate from user text
 ([../runtime/prompt_stamp.ts](../runtime/prompt_stamp.ts)).
-[models.ts](models.ts) and [model_selection.ts](model_selection.ts) resolve
-models; Settings owns credentials. Pi supplies the model catalog. Fable 5.2
-retains only a model-scoped Claude CLI identity override required by Anthropic
-subscriptions with Pi 1.5.1. Anthropic message threads are disabled so each
-captured request and cache replay is self-contained, with no server-held
-conversation dependency. Pi's credential store defers its first read
-until an asynchronous auth operation. Credential and stored-catalog revision
-checks, locked reads and writes use asynchronous filesystem calls, preserving
-Pi's cross-process locking and external Settings-update visibility. The
+[models.ts](models.ts)/[model_selection.ts](model_selection.ts) resolve models;
+Settings owns credentials. The [loader](../../pi_model_config.worker.ts) shares
+Pi's built-ins/store across listing, turns and internal requests. Regular files
+(1 MiB/128 entries) load off-thread within 2s, or keep built-ins. Only new IDs
+accept metadata/non-auth headers (32/8 KiB); catalog IDs/omissions and
+`modelOverrides` stay untouched. Existing/Settings providers keep endpoint/auth
+and selection rules; ignored fields log counts. File-only providers require
+literal keys, HTTP(S), Anthropic messages or OpenAI completions/responses and
+explicit selection. Fetch strips ambient headers; skips log IDs/reasons.
+Codex uses SSE. Safety uses shipped/Settings models, never file-backed catalogs
+or cached lists. Settings keeps pins. Policy follows stored identity each run.
+Invalid reviewer configuration tries trusted fallbacks, then allows with a warning
+and failure log. Provider failures also allow; invalid optional rules still block. File models remain available for non-security requests. Fable's UA
+fallback is unchanged. Anthropic disables message threads: captures and replays
+are self-contained. Pi's credential store reads lazily during async auth. Credential/catalog checks
+and locked I/O are asynchronous, retaining cross-process locking and Settings
+update visibility. The
 [cache-warming extension](../../extensions/extra/cache-warm/README.md) replays
 the last captured main-model request only while live work remains. Replay
-usage is persisted without changing model context. Durable does not construct
+usage is persisted without changing model context. Its optional idle mode
+compacts long contexts just before cache expiry through the normal Pi compaction
+path, without creating a run or keeping the instance awake. Durable does not construct
 Pi's AgentSession cache warmer, so Pi's idle-warming default does not apply.
 `follow.ts` keeps the latest committed assistant usage and its storage-session
 identity in its live row for API status, clearing it on compaction or close.
+It also caches Pi's active run first-entry boundary for search to exclude the
+caller's current retrieval turn without reading history.
 The identity matches `/view` across projection rebuilds and changes on Clear;
 clients must not reuse usage from another session. Status uses the UI's shared
 occupancy projection without opening storage; cold or reopened-but-unsampled

@@ -1,7 +1,12 @@
 // Query Workers decode ripgrep and reap aborted children without importing
 // SQLite. Standalone projection callers load their fallback writer lazily.
 import { runRipgrep } from "./query.worker";
-import type { SearchFile, SearchOptions, SearchTarget } from "./index";
+import {
+  SearchInputError,
+  type SearchFile,
+  type SearchOptions,
+  type SearchTarget,
+} from "./index";
 
 export type Work =
   | { op: "sync"; target: SearchTarget }
@@ -37,7 +42,11 @@ self.onmessage = async (event: MessageEvent<Request>) => {
     self.postMessage({ id: request.id, value });
   } catch (error) {
     // Spec: @tla reply request
-    self.postMessage({ id: request.id, error: (error as Error).message });
+    self.postMessage({
+      id: request.id,
+      error: (error as Error).message,
+      invalidInput: error instanceof SearchInputError,
+    });
   } finally {
     controllers.delete(request.id);
   }

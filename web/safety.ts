@@ -1,6 +1,7 @@
 // Operator safety escape hatch applies per conversation from the next turn.
 // Desired toggle/label differ from effective launched state while running;
 // next-turn wording exposes queued changes. Drafts have nothing to persist.
+// Turning review off requires a protected confirmation; enabling is one click.
 import { backendFor } from "./backends/backend.js";
 import { state } from "./state.js";
 import { $ } from "./dom.js";
@@ -41,6 +42,7 @@ function activeOff(conv: Conversation): boolean | undefined {
 export function showConversationSafety(conv: Conversation | null): void {
   const eligible = !!conv && conv.id !== DRAFT;
   row.classList.toggle("on", eligible);
+  delete row.dataset.themeProtected;
   unavailable.hidden = true;
   if (!conv || !eligible) {
     showModelResponse(null, []);
@@ -55,6 +57,8 @@ export function showConversationSafety(conv: Conversation | null): void {
   row.classList.toggle("off", desired);
   row.classList.toggle("pending", pending);
   const reason = !desired ? conv.safety_unavailable : null;
+  if (desired || activeOff(conv) === true || reason)
+    row.dataset.themeProtected = "safety-warning";
   btn.setAttribute("aria-checked", String(!desired));
   btn.setAttribute(
     "aria-label",
@@ -79,8 +83,57 @@ export function showConversationSafety(conv: Conversation | null): void {
 export function hideSafety(): void {
   showModelResponse(null, []);
   row.classList.remove("on", "off", "pending");
+  delete row.dataset.themeProtected;
   unavailable.hidden = true;
   btn.disabled = true;
+}
+
+/** Whether local keyboard commands belong to the safety confirmation. */
+export function safetyConfirmationOpen(): boolean {
+  return !!$('[data-theme-protected="safety-confirmation"][open]');
+}
+
+/** Cancel the confirmation through the app's local-layer Escape route. */
+export function closeSafetyConfirmation(): boolean {
+  const dialog = $<HTMLDialogElement>(
+    '[data-theme-protected="safety-confirmation"][open]',
+  );
+  if (!dialog) return false;
+  dialog.close("cancel");
+  return true;
+}
+
+/** Require a separate operator click outside the themeable safety switch. */
+function confirmSafetyOff(): Promise<boolean> {
+  const dialog = document.createElement("dialog");
+  dialog.className = "settings-sheet";
+  dialog.dataset.themeProtected = "safety-confirmation";
+  dialog.setAttribute("aria-labelledby", "safety-confirm-title");
+  dialog.innerHTML = `<form method="dialog">
+    <header class="settings-sheet-head"><h2 id="safety-confirm-title">Turn off safety review?</h2></header>
+    <div class="settings-detail-content">
+      <p>Tools will run without per-action safety review in this conversation.</p>
+      <button class="btn" value="cancel" autofocus>Cancel</button>
+      <button class="btn" value="off">Turn off safety review</button>
+    </div>
+  </form>`;
+  return new Promise((resolve) => {
+    dialog.addEventListener(
+      "close",
+      () => {
+        dialog.remove();
+        resolve(dialog.returnValue === "off");
+      },
+      { once: true },
+    );
+    document.body.append(dialog);
+    dialog.showModal();
+    // Invariant: Theme suspension precedes focus, even when CSS hid the dialog.
+    queueMicrotask(() => {
+      if (dialog.open)
+        dialog.querySelector<HTMLButtonElement>("[autofocus]")?.focus();
+    });
+  });
 }
 
 btn.onclick = async () => {
@@ -88,6 +141,9 @@ btn.onclick = async () => {
   const id = conv?.id;
   if (busy || !conv || !id || id === DRAFT) return;
   const previous = desiredOff(conv);
+  if (!previous && !(await confirmSafetyOff())) return;
+  if (busy || state.currentConv?.id !== id || desiredOff(conv) !== previous)
+    return;
   const desired = !previous;
   busy = true;
   // Invariant: Optimistically move only the DESIRED state; the effective state

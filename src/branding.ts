@@ -9,6 +9,28 @@ type Icon = { type: "image/png" | "image/svg+xml"; data: string };
 type Brand = { name: string | null; icon: Icon | null };
 const writes = new Map<string, Promise<unknown>>();
 
+export const BRAND_ICON_NAMES = [
+  "favicon-32.png",
+  "favicon-dark-32.png",
+  "favicon.svg",
+  "apple-touch-icon.png",
+  "app-icon.svg",
+  "app-icon-192.png",
+  "app-icon-512.png",
+  "app-icon-maskable-192.png",
+  "app-icon-maskable-512.png",
+] as const;
+
+/** Version default icons by the bytes in the frontend snapshot. */
+export function defaultIconUrl(
+  name: string,
+  assets: ReadonlyMap<string, Uint8Array>,
+): string {
+  const path = `brand/${name}`;
+  const bytes = assets.get(path);
+  return `/static/${path}${bytes ? `?v=${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}` : ""}`;
+}
+
 /** Branding shares the existing instance config directory. */
 export const brandingFile = (configDir: string) =>
   join(configDir, "branding.json");

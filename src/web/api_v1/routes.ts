@@ -1,6 +1,7 @@
 // Local v1 reads project cached base tree rows, live usage and shell snapshots.
 // Context reads never open stores or scan history; cold/unknown usage is null.
 // Compaction shares the operator lifecycle, not operator-route access.
+import { authMethod } from "../request_auth";
 import { dirname } from "node:path";
 import { brandingFile, readBrand } from "../../branding";
 import { SERVICE_MESSAGE_MAX_CHARS } from "../../auth/service";
@@ -211,7 +212,7 @@ export function registerApiV1(router: Router, deps: Deps): void {
           interrupt: body.interrupt,
           client_message_id: body.client_message_id,
         },
-        ex.state.auth_method === "backend-key"
+        authMethod(ex) === "backend-key"
           ? null
           : ex.request.headers.get("x-recurse-agent"),
         typeof ex.state.backend_agent === "string"

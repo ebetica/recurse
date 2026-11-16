@@ -135,7 +135,15 @@ describe("corpus", () => {
           expect: (item, got) => {
             const current = (item as unknown as StaticCase).current;
             expect(got.status, item.name).toBe(current.status);
-            expect(got.headers, item.name).toEqual(current.headers);
+            expect(got.headers, item.name).toEqual({
+              ...current.headers,
+              ...(item.request.method === "GET" && item.request.path === "/"
+                ? {
+                    "content-security-policy":
+                      "font-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' data: blob:; object-src 'none'; base-uri 'self'",
+                  }
+                : {}),
+            });
             let body = got.body;
             if (current.theme) {
               const {
@@ -188,12 +196,14 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
     await Bun.file("web/index.html").text(),
   );
   await copyFile("web/icons.ts", join(root, "web/icons.ts"));
+  let now = 0;
   const frontend = await FrontendCache.create({
     htmlPath: join(root, "index.html"),
     staticDir: join(root, "web/dist"),
     fallbackShell: "",
     fixedVersion: "unused",
     live: true,
+    nowMs: () => now,
   });
   const router = new Router();
   registerStaticRoutes(router, {
@@ -248,7 +258,10 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
     const faviconUrl = shell.match(
       /<link rel="icon" href="([^"]+)" type="image\/svg\+xml"/,
     )?.[1];
-    expect(faviconUrl).toBe("/static/brand/favicon.svg");
+    const svgBytes = await readFile(join(root, "web/dist/brand/favicon.svg"));
+    expect(faviconUrl).toBe(
+      `/static/brand/favicon.svg?v=${createHash("sha256").update(new Uint8Array(svgBytes)).digest("hex").slice(0, 12)}`,
+    );
     const favicon = await fetch(
       `http://127.0.0.1:${running.port}${faviconUrl}`,
       { headers: { "accept-encoding": "identity" } },
@@ -293,6 +306,33 @@ test("shell import map aliases lazy chunks to the versioned entry", async () => 
       expect(bytes.readUInt32BE(16)).toBe(size);
       expect(bytes.readUInt32BE(20)).toBe(size);
     }
+    const changedSvg = `${svgBytes.toString()}\n`;
+    await writeFile(join(root, "web/dist/brand/favicon.svg"), changedSvg);
+    now = 1100;
+    await frontend.snapshot();
+    const updatedShell = await (
+      await fetch(`http://127.0.0.1:${running.port}/`)
+    ).text();
+    const updatedHash = createHash("sha256")
+      .update(changedSvg)
+      .digest("hex")
+      .slice(0, 12);
+    expect(updatedShell).toContain(
+      `/static/brand/favicon.svg?v=${updatedHash}`,
+    );
+    expect(updatedShell).not.toContain(faviconUrl!);
+    expect(updatedShell).not.toContain('rel="modulepreload"');
+    await writeFile(
+      join(root, "web/dist/app.js"),
+      'import("./host-abc12345.js");\n',
+    );
+    now = 2200;
+    await frontend.snapshot();
+    expect(
+      await (await fetch(`http://127.0.0.1:${running.port}/`)).text(),
+    ).toContain(
+      '<link rel="modulepreload" href="/static/host-abc12345.js" media="(min-width: 701px)">',
+    );
   } finally {
     await running.close();
   }

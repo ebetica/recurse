@@ -15,7 +15,8 @@ import {
   sendFailureCopy,
   type OptimisticEntry,
 } from "./pending-queue/pending-message.js";
-import { activityMessageT, userBubble } from "./thread-render.js";
+import { activityMessageT } from "./thread-render.js";
+import { userBubble } from "./thread-render/user-bubble.js";
 import { loaded, rowThreads } from "./row-thread-state.js";
 import { paint } from "./conversation/thread.js";
 import { refreshConv } from "./conversation/fetch.js";

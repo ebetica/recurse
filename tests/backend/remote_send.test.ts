@@ -1,6 +1,7 @@
-import { expect, test } from "bun:test";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { afterAll, beforeAll, expect, setSystemTime, test } from "bun:test";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { retire } from "../../src/utils/trash";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { BackendKeys } from "../../src/auth/backend_keys";
@@ -10,6 +11,16 @@ import { publishLoopbackToken } from "../../src/web/request_auth";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
 import { appWorld, PASSWORD } from "./web_app_support";
 import { fauxHost, held, until } from "./fixtures/durable_host/host";
+import { modelsJsonWorker } from "./models_json_worker";
+
+let worker: Awaited<ReturnType<typeof modelsJsonWorker>>;
+beforeAll(async () => {
+  worker = await modelsJsonWorker();
+  await worker.ready;
+});
+afterAll(async () => {
+  await worker?.close();
+});
 
 // Regression: #2855 Remote creation names the sender and bare-id replies suggest the polling-home address. (also #3002 Remote sidebar fields and operator tag actions cross the backend proxy; #3029 Healthy sends skip readiness requests and recovery deduplicates admission; #3032 Bounded outcome waits survive reader cancellation; #3034 Headerless legacy contacts retain older compatibility.)
 test("home agents send text to connected remote agents", async () => {
@@ -47,6 +58,15 @@ test("home agents send text to connected remote agents", async () => {
     fauxHost(join(root, "provider"), undefined, true),
   );
   for (const [i, app] of apps.entries()) {
+    app.connectedBackends.pollWaitSeconds = 0.05;
+    app.instance.oauth.nativeRequest = async (request) => {
+      const run = await worker.request("auth", {
+        input: JSON.stringify(request) + "\n",
+        env: await app.instance.oauth.workerEnv(),
+      });
+      expect(run.exitCode, run.stderr.toString()).toBe(0);
+      return JSON.parse(run.stdout.toString());
+    };
     const deps = (app.instance.durable as unknown as { deps: DurableHostDeps })
       .deps;
     const provider = (fixtures[i]!.host as unknown as { deps: DurableHostDeps })
@@ -66,7 +86,6 @@ test("home agents send text to connected remote agents", async () => {
   let advertisedApi: string | undefined;
   let hideApi = false;
   let releasePoll: (() => void) | undefined;
-  let delayWake = false;
   let dropDeliveryResponse = false;
   let deliveryGate: ReturnType<typeof Promise.withResolvers<void>> | undefined;
   const deliveryStarted = Promise.withResolvers<void>();
@@ -74,6 +93,15 @@ test("home agents send text to connected remote agents", async () => {
   let versionReads = 0;
   let statusReads = 0;
   const v1Reads: string[] = [];
+  const connectionKeys = new BackendKeys(worlds[1]!.env.CHAT_DATA_DIR!);
+  const mintConnectionKey = async (body: string) => {
+    const { password, name } = JSON.parse(body) as {
+      password: string;
+      name: string;
+    };
+    expect(password).toBe(PASSWORD);
+    return Response.json(await connectionKeys.mint(name));
+  };
   const versionGateway = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -81,10 +109,6 @@ test("home agents send text to connected remote agents", async () => {
     async fetch(request) {
       const url = new URL(request.url);
       const api = advertisedApi;
-      if (url.pathname === "/api/status" && delayWake) {
-        delayWake = false;
-        await Bun.sleep(31_000);
-      }
       if (url.pathname.startsWith("/api/v1/"))
         v1Reads.push(url.pathname + url.search);
       if (url.pathname === "/api/status") statusReads++;
@@ -92,6 +116,8 @@ test("home agents send text to connected remote agents", async () => {
       const headers = new Headers(request.headers);
       headers.set("accept-encoding", "identity");
       const body = request.body ? await request.text() : undefined;
+      if (url.pathname === "/api/backend-keys" && request.method === "POST")
+        return mintConnectionKey(body!);
       const deliver = url.pathname.endsWith("/deliver");
       if (deliver) {
         deliveryIds.push(JSON.parse(body!).client_message_id);
@@ -620,6 +646,8 @@ test("home agents send text to connected remote agents", async () => {
         )
       ).status,
     ).toBe(200);
+    const deliveryTimeout = remote!.relayInbox.deliveryTimeoutMs;
+    remote!.relayInbox.deliveryTimeoutMs = 1000;
     const unconfirmedCli = bCli("unsettled", "Claim without result");
     const claim = await call(
       1,
@@ -631,18 +659,26 @@ test("home agents send text to connected remote agents", async () => {
       .requests;
     expect(claims).toHaveLength(1);
     const pendingId = claims[0]!.id;
-    const reoffer = await call(
-      1,
-      "/api/relay/requests?labels=unsettled&wait=25",
-      undefined,
-      aHeaders,
+    setSystemTime(Date.now() + 10_001);
+    try {
+      const reoffer = await call(
+        1,
+        "/api/relay/requests?labels=unsettled&wait=0",
+        undefined,
+        aHeaders,
+      );
+      expect(
+        ((await reoffer.json()) as { requests: { id: string }[] }).requests.map(
+          (r) => r.id,
+        ),
+      ).toEqual([pendingId]);
+    } finally {
+      setSystemTime();
+    }
+    expect(await unconfirmedCli).toContain(
+      "Not confirmed: the home disconnected before confirming; the message may have arrived",
     );
-    expect(
-      ((await reoffer.json()) as { requests: { id: string }[] }).requests.map(
-        (r) => r.id,
-      ),
-    ).toEqual([pendingId]);
-    expect(await unconfirmedCli).toContain("Not confirmed:");
+    remote!.relayInbox.deliveryTimeoutMs = deliveryTimeout;
     const result = await call(
       1,
       `/api/relay/messages/${pendingId}`,
@@ -892,6 +928,8 @@ test("home agents send text to connected remote agents", async () => {
       port: 0,
       async fetch(request) {
         const path = new URL(request.url).pathname;
+        if (path === "/api/backend-keys" && request.method === "POST")
+          return mintConnectionKey(await request.text());
         if (path.endsWith("/read") && fault === "large")
           return Response.json({ text: "x".repeat(2 * 1024 * 1024) });
         if (path === "/api/v1/agents" && fault === "large")
@@ -1019,6 +1057,30 @@ test("home agents send text to connected remote agents", async () => {
     }
     expect((await cli("read", `${y}@hostile`)).err).toContain("remote offline");
     const hostileKeyId = echoedCredential.split("_")[1]!;
+    const invalidCredential =
+      echoedCredential.slice(0, -1) +
+      (echoedCredential.endsWith("0") ? "1" : "0");
+    expect(
+      (
+        await fetch(servers[1]!.url + "/api/status", {
+          headers: {
+            authorization: `Bearer ${invalidCredential}`,
+            "user-agent": echoedCredential,
+          },
+        })
+      ).status,
+    ).toBe(401);
+    await apps[1]!.sink.file!.flush();
+    const rejectionLog = await readFile(
+      join(worlds[1]!.env.CHAT_DATA_DIR!, "logs/recurse.log"),
+      "utf8",
+    );
+    expect(rejectionLog).toContain("event=backend_key_rejected");
+    expect(rejectionLog).toContain(`key_id=${hostileKeyId}`);
+    expect(rejectionLog).toContain("ip=127.0.0.1");
+    expect(rejectionLog).toContain("user_agent=<redacted>");
+    expect(rejectionLog).not.toContain(echoedCredential);
+    expect(rejectionLog).not.toContain(invalidCredential);
     expect(
       (
         await fetch(servers[1]!.url + `/api/backend-keys/${hostileKeyId}`, {
@@ -1174,7 +1236,6 @@ test("home agents send text to connected remote agents", async () => {
     );
     fixtures[1]!.faux.setResponses([fauxAssistantMessage("recovered")]);
     dropDeliveryResponse = true;
-    delayWake = true;
     const deliveriesBefore = deliveryIds.length;
     const retry = await cli(
       "send",
@@ -1279,7 +1340,7 @@ test("home agents send text to connected remote agents", async () => {
       (
         await call(2, "/api/backends", {
           label: "B",
-          url: servers[1]!.url,
+          url: versionGateway.url.origin,
           password: PASSWORD,
         })
       ).status,
@@ -1425,7 +1486,9 @@ test("home agents send text to connected remote agents", async () => {
     await Promise.all(fixtures.map((f) => f.host.close()));
     await Promise.all(apps.flatMap((app) => app.detached));
     await Promise.all(
-      worlds.map(({ root }) => rm(root, { recursive: true, force: true })),
+      worlds.map(({ root }) =>
+        retire(root, join(dirname(root), `remote-send-trash-${process.pid}`)),
+      ),
     );
   }
-}, 180_000);
+}, 30_000);

@@ -216,10 +216,9 @@ const initialAuthoritativeRead = new Promise<void>((resolve) => {
   resolveInitialAuthoritativeRead = resolve;
 });
 
-// Startup generation monitoring waits for whichever poll generation first
-// completes the open conversation read. A focus/pageshow wake may supersede the
-// original poll; awaiting that original call alone would then resolve too
-// early.
+// Startup generation monitoring waits for a current tree and, when selected,
+// the open conversation read. A focus/pageshow wake may supersede the original
+// poll; awaiting that original call alone would then resolve too early.
 export function waitForInitialAuthoritativeRead(): Promise<void> {
   return initialAuthoritativeRead;
 }
@@ -703,7 +702,9 @@ async function runPoll(force: boolean): Promise<void> {
     if (
       generation === pollGeneration &&
       treeReadSucceeded &&
-      conversationReadSucceeded
+      (conversationReadSucceeded ||
+        (!bootRestorePending() &&
+          (!state.selectedId || state.selectedId === DRAFT)))
     ) {
       resolveInitialAuthoritativeRead?.();
       resolveInitialAuthoritativeRead = null;

@@ -153,10 +153,6 @@ function resolvedValue(auth) {
 		? /^Bearer\s+(.+)$/iu.exec(authorization)?.[1] : undefined;
 }
 
-function modelsPathFor(authPath) {
-	return resolve(dirname(authPath), "models.json");
-}
-
 function readStoredCredentialFrom(authPath, providerId) {
 	try {
 		return JSON.parse(readFileSync(authPath, "utf8"))?.[providerId];
@@ -170,12 +166,9 @@ async function makeRuntime(imported, authPath) {
 		|| typeof imported.readStoredCredential !== "function") {
 		throw new Error("package_mismatch");
 	}
-	// Invariant: Static catalogs only: the worker never refreshes model
-	// availability over the network, and getAuth still refreshes/persists OAuth
-	// through the normal request-auth path.
 	return imported.ModelRuntime.create({
 		authPath,
-		modelsPath: modelsPathFor(authPath),
+		modelsPath: null,
 		allowModelNetwork: false,
 		refreshOnCreate: false,
 	});
@@ -273,11 +266,11 @@ async function main(request, root, imported, FileAuthStorageBackend) {
 			|| (request.update !== undefined && typeof request.update !== "boolean")) {
 			throw new Error("invalid_input");
 		}
-		const runtime = await makeRuntime(imported, authPath);
-		if (typeof runtime.refresh !== "function"
-			|| typeof runtime.getProvider !== "function") {
-			throw new Error("package_mismatch");
-		}
+		const { durableModels, trustedModelCatalog } = await import("./agents/durable/models.ts");
+		const catalogErrors = [];
+		const catalogNotes = [];
+		const reserved = extraProviders(request);
+		const runtime = durableModels(dirname(authPath), (message, note) => { (note ? catalogNotes : catalogErrors).push(message); }, () => [...reserved]);
 		const errors = [];
 		if (request.update === true) {
 			const controller = new AbortController();
@@ -301,13 +294,14 @@ async function main(request, root, imported, FileAuthStorageBackend) {
 		const levels = await thinkingLevelsReader(root);
 		let levelsUnavailable = levels.unavailable;
 		const models = [];
-		for (const id of ids) {
+		for (const id of new Set([...ids, ...reserved, ...runtime.getProviders().map((provider) => provider.id).filter((id) => !trustedModelCatalog(runtime).getProvider(id))])) {
 			const provider = runtime.getProvider(id);
 			for (const model of provider?.getModels() ?? []) {
 				if (typeof model?.id !== "string" || !model.id
 					|| !Number.isSafeInteger(model.contextWindow)
 					|| model.contextWindow <= 0) continue;
 				models.push({ provider: id, id: model.id,
+					...(!trustedModelCatalog(runtime).getProvider(id) ? { file_provider: true } : {}),
 					name: typeof model.name === "string" && model.name
 						? model.name : model.id,
 					context_window: model.contextWindow });
@@ -321,6 +315,8 @@ async function main(request, root, imported, FileAuthStorageBackend) {
 			}
 		}
 		emit({ kind: "models", models, errors: errors.slice(0, 16),
+			...(catalogErrors.length ? { catalog_errors: catalogErrors } : {}),
+			...(catalogNotes.length ? { catalog_notes: catalogNotes } : {}),
 			...(levelsUnavailable
 				? { reasoning_levels_unavailable: levelsUnavailable } : {}) });
 		return;

@@ -125,4 +125,5 @@ export async function forgetFork(
     main.owners.delete(String(fork.conversation));
   }
   main.captures.forget(cid);
+  main.reviewCaptures.forget(cid);
 }

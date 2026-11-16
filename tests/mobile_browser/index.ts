@@ -21,6 +21,7 @@ import { tests as hold } from "./test_hold_confirm";
 import { tests as recovery } from "./test_recovery";
 import { tests as wake } from "./test_wake";
 import { tests as settings } from "./test_settings";
+import { tests as twoFactor } from "./test_two_factor";
 import { tests as notifications } from "./test_notification_clicks";
 import { tests as remotes } from "./test_remotes";
 import { tests as settingsSync } from "./test_settings_sync";
@@ -31,9 +32,15 @@ import { tests as newAgentFocus } from "./test_new_agent_focus";
 import { tests as conversationTitle } from "./test_conversation_title";
 import { tests as mobileLayout } from "./test_mobile_layout";
 import { tests as panesArtifacts } from "./test_panes_artifacts";
-import { tests as panesFiles } from "./test_panes_files";
-import { tests as documentPreviews } from "./test_document_previews";
+import { tests as artifactVisit } from "./test_artifact_visit";
+import { tests as files } from "./test_files";
+import { tests as filesNavigation } from "./test_files_navigation";
+import { tests as filesViewers } from "./test_files_viewers";
+import { tests as filesDocuments } from "./test_files_documents";
+import { tests as filesComments } from "./test_files_comments";
 import { tests as explorer } from "./test_explorer";
+import { tests as fileEdit } from "./test_file_edit";
+import { tests as remoteExplorer } from "./test_remote_explorer";
 import { tests as visibleAttachments } from "./test_visible_attachments";
 import { tests as lineComments } from "./test_line_comments";
 import { tests as selectionComments } from "./test_selection_comments";
@@ -78,6 +85,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["recovery", recovery],
   ["wake", wake],
   ["settings", settings],
+  ["two-factor", twoFactor],
   ["notifications", notifications],
   ["remotes", remotes],
   ["settings-sync", settingsSync],
@@ -87,9 +95,13 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["new-agent-focus", newAgentFocus],
   ["conversation-title", conversationTitle],
   ["mobile-layout", mobileLayout],
-  ["panes-artifacts", panesArtifacts],
-  ["panes-files", [...panesFiles, ...documentPreviews]],
+  ["panes-artifacts", [...panesArtifacts, ...artifactVisit]],
+  ["files", [...files, ...filesNavigation]],
+  ["files-viewers", [...filesViewers, ...filesDocuments]],
+  ["files-comments", filesComments],
   ["explorer", explorer],
+  ["file-edit", fileEdit],
+  ["remote-explorer", remoteExplorer],
   ["visible-attachments", visibleAttachments],
   ["line-comments", lineComments],
   ["selection-comments", [...selectionComments, ...longSelection]],

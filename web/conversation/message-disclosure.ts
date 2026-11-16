@@ -30,6 +30,8 @@ export class MessageDisclosureState {
   }
 }
 
+export const messageDisclosures = new MessageDisclosureState();
+
 export function messageDisclosureIdentity(entry: MessageEntry): string {
   return entry.id ? `id:${entry.id}` : `offset:${entry.offset}`;
 }

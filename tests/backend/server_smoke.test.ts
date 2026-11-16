@@ -65,8 +65,7 @@ function checkout(scope = root): string {
     cpSync(join(REPO, "web", file), join(dir, "web", file), {
       recursive: true,
     });
-  for (const linked of ["node_modules"])
-    symlinkSync(join(REPO, linked), join(dir, linked));
+  symlinkSync(join(REPO, "node_modules"), join(dir, "node_modules"));
   return dir;
 }
 

@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
+import { createHash } from "node:crypto";
 import { readFile, rm, writeFile } from "node:fs/promises";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -46,6 +47,45 @@ test("name and icon persist through HTTP and native settings actions without res
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   try {
+    const signedOut = await (await fetch(`${running.url}/`)).text();
+    const loginIcon = signedOut.match(/<link rel="icon" href="([^"]+)"/)?.[1];
+    expect(loginIcon).toBeDefined();
+    const shell = await (await request("/")).text();
+    const links = [
+      ...shell.matchAll(
+        /<link rel="(?:icon|apple-touch-icon)" href="([^"]+)"/g,
+      ),
+    ].map((match) => match[1]!);
+    expect(links).toHaveLength(4);
+    const initialManifestResponse = await fetch(
+      `${running.url}/manifest.webmanifest`,
+    );
+    expect(initialManifestResponse.status).toBe(200);
+    expect(
+      (await fetch(`${running.url}/manifest.webmanifest`, { method: "HEAD" }))
+        .status,
+    ).toBe(200);
+    const initialManifest = (await initialManifestResponse.json()) as {
+      icons: { src: string; type: string }[];
+    };
+    for (const url of [
+      loginIcon!,
+      ...links,
+      ...initialManifest.icons.map((icon) => icon.src),
+    ]) {
+      const response = await fetch(`${running.url}${url}`);
+      expect(response.status).toBe(200);
+      expect(
+        (await fetch(`${running.url}${url}`, { method: "HEAD" })).status,
+      ).toBe(200);
+      expect(response.headers.get("content-type")).toStartWith("image/");
+      const hash = createHash("sha256")
+        .update(new Uint8Array(await response.arrayBuffer()))
+        .digest("hex")
+        .slice(0, 12);
+      expect(new URL(url, running.url).searchParams.get("v")).toBe(hash);
+    }
+    expect((await fetch(`${running.url}/static/app.js`)).status).toBe(401);
     expect(
       (
         await fetch(`${running.url}/api/settings/branding`, {
@@ -106,6 +146,16 @@ test("name and icon persist through HTTP and native settings actions without res
     expect(manifest.short_name).toBe(manifest.name);
     expect(manifest.icons).toHaveLength(1);
     expect(manifest.icons[0].type).toBe("image/svg+xml");
+    expect((await fetch(`${running.url}${manifest.icons[0].src}`)).status).toBe(
+      200,
+    );
+    expect(
+      (
+        await fetch(`${running.url}${manifest.icons[0].src}`, {
+          method: "HEAD",
+        })
+      ).status,
+    ).toBe(200);
     const icon = await request(manifest.icons[0].src);
     expect(icon.headers.get("content-type")).toBe("image/svg+xml");
     expect(icon.headers.get("content-security-policy")).toContain("sandbox");
@@ -181,7 +231,7 @@ test("name and icon persist through HTTP and native settings actions without res
       await request("/manifest.webmanifest")
     ).json()) as typeof manifest;
     expect(defaults.name).toBe("Recurse");
-    expect(defaults.icons[0].src).toBe("/static/brand/app-icon.svg");
+    expect(defaults.icons).toEqual(initialManifest.icons);
   } finally {
     await running.close();
     await app.instance.shutdown();

@@ -1,22 +1,21 @@
-// Shared inert Markdown preview for Artifacts and Files, including embeds,
-// images, links, highlighting, Mermaid, and math. Published siblings take
-// precedence over document-relative local paths; web images require a click.
-import {
-  externalHttpHostname,
-  htmlPreviewSrcdoc,
-  URL_ATTRIBUTES,
-} from "./artifacts/model.js";
+// Shared inert Markdown for Artifacts and Files: embeds, images, links, code,
+// Mermaid, and math. Published siblings precede local paths; web images require
+// a click. Relative links require an in-app policy. Each pane registers the
+// desktop double-click image handler.
+import { htmlPreviewSrcdoc, URL_ATTRIBUTES } from "./artifacts/model.js";
 import { nextArtifactFrameDescriptionId } from "./artifacts/embed.js";
 import { loadDecodedArtifactImage } from "./artifacts/image-loading.js";
 import { renderMathIn, renderMathPlaceholders } from "./math.js";
 import { isMermaidLang, renderMermaidIn } from "./mermaid.js";
-import { md } from "./util.js";
+import { documentMarkdownFragment } from "./util.js";
+import { diffKeys, markDocumentChanges } from "./document-diff.js";
 import {
   externalImageButton,
   imageFailure,
   imageHost,
   originalPathImage,
   referenceImageUrl,
+  registerDocumentImages,
 } from "./image-preview/references.js";
 
 const EMBED_RE = /```html-embed[^\n]*\n([\s\S]*?)```/g;
@@ -25,6 +24,27 @@ const FORBIDDEN_DOCUMENT_TAGS =
 
 function isRelative(value: string | null): boolean {
   return !!value && !/^([a-z][a-z0-9+.-]*:|\/\/|\/|#)/i.test(value);
+}
+
+/** Label URL-like captions that claim a different destination host. */
+function misleadingLinkHost(link: HTMLAnchorElement, host: string): boolean {
+  const text = (link.textContent || "").trim();
+  if (
+    !/^(?:https?:\/\/|\/\/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?=[:/?#]|$))/i.test(text)
+  )
+    return false;
+  try {
+    const visible = new URL(
+      text.startsWith("//")
+        ? `https:${text}`
+        : /^https?:\/\//i.test(text)
+          ? text
+          : `https://${text}`,
+    );
+    return visible.hostname !== host;
+  } catch {
+    return false;
+  }
 }
 
 function removeUrlSurfaces(root: ParentNode): void {
@@ -122,11 +142,14 @@ export async function revealArtifactImage(
 
 export interface DocumentMarkdownOptions {
   resolveRelative: (path: string, image: boolean) => string | null;
+  openRelative: (path: string, fragment: string) => boolean;
   signal: AbortSignal;
   title: string;
   agentId: string;
   documentPath?: string;
   artifactId?: string;
+  /** An earlier version's text: highlight what is new since it. */
+  previous?: string | null;
 }
 
 function markdownFragment(
@@ -137,7 +160,7 @@ function markdownFragment(
   // SVG refs, and media cannot issue a request in the gap before this policy
   // runs.
   const template = document.createElement("template");
-  template.innerHTML = md(source);
+  template.content.append(documentMarkdownFragment(source));
   const mermaidBlocks = [
     ...template.content.querySelectorAll<HTMLElement>("pre > code"),
   ].filter((el) =>
@@ -154,8 +177,11 @@ function markdownFragment(
 
   for (const { image, source } of images) {
     if (!image.isConnected && !template.content.contains(image)) continue;
+    diffKeys.set(image, source || "");
     if (imageHost(source)) {
-      image.replaceWith(externalImageButton(source!, image.alt));
+      const button = externalImageButton(source!, image.alt);
+      diffKeys.set(button, source!);
+      image.replaceWith(button);
       continue;
     }
     const fallback = referenceImageUrl(
@@ -208,45 +234,93 @@ function markdownFragment(
   }
   for (const { link, href } of links) {
     if (!link.isConnected && !template.content.contains(link)) continue;
-    const resolved = isRelative(href)
-      ? options.resolveRelative(href!, false)
-      : null;
+    if (!href?.trim()) continue;
+    const relative = isRelative(href);
+    const separator = href.indexOf("#");
+    const path = separator < 0 ? href : href.slice(0, separator);
+    const fragment = separator < 0 ? "" : href.slice(separator);
+    const resolved = relative ? options.resolveRelative(path, false) : null;
     if (resolved) {
-      link.href = resolved;
+      link.href = resolved + fragment;
+      link.target = "_blank";
+      link.rel = "noopener noreferrer";
+      link.addEventListener("click", (event) => {
+        if (
+          !event.defaultPrevented &&
+          event.button === 0 &&
+          !event.metaKey &&
+          !event.ctrlKey &&
+          !event.shiftKey &&
+          !event.altKey &&
+          options.openRelative(path, fragment)
+        )
+          event.preventDefault();
+      });
       continue;
     }
-    if (href?.startsWith("#")) {
+    if (href.startsWith("#")) {
       link.href = href;
       continue;
     }
-    const host = externalHttpHostname(href);
-    if (host) {
-      link.href = href!;
-      link.target = "_blank";
-      link.rel = "noopener noreferrer";
-      link.referrerPolicy = "no-referrer";
+    link.href = href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.referrerPolicy = "no-referrer";
+    let host = "";
+    try {
+      const destination = new URL(href, location.href);
+      if (/^https?:$/.test(destination.protocol)) host = destination.hostname;
+    } catch {}
+    if (host && misleadingLinkHost(link, host)) {
       const visible = document.createElement("span");
       visible.className = "artifact-link-host";
       visible.textContent = ` (${host})`;
       link.after(visible);
-    } else {
-      link.classList.add("artifact-blocked-link");
-      const visible = document.createElement("span");
-      visible.className = "artifact-link-host";
-      visible.textContent = " (link blocked)";
-      link.after(visible);
     }
   }
-  const fragment = template.content;
   // Invariant: Mermaid replaces the code element inside its <pre>, so it
   // happens after the fragment is attached and the sanitizer's done with it.
   queueMicrotask(() => {
     for (const el of mermaidBlocks) {
       if (!el.parentElement?.isConnected) continue;
-      renderMermaidIn(el.parentElement.parentElement ?? fragment);
+      renderMermaidIn(el.parentElement.parentElement ?? template.content);
     }
   });
-  return fragment;
+  return template.content;
+}
+
+/** Scroll only the opened document, without navigating the app fragment. */
+export function scrollDocumentFragment(
+  root: HTMLElement,
+  fragment: string,
+): boolean {
+  if (!fragment) return false;
+  let name: string;
+  try {
+    name = decodeURIComponent(fragment.replace(/^#/, ""));
+  } catch {
+    return false;
+  }
+  const target = [
+    ...root.querySelectorAll<HTMLElement>(
+      "[id], a[name], h1, h2, h3, h4, h5, h6",
+    ),
+  ].find(
+    (element) =>
+      element.id === name ||
+      element.getAttribute("name") === name ||
+      (/^H[1-6]$/.test(element.tagName) &&
+        (element.textContent || "")
+          .toLowerCase()
+          .replace(/[^\p{L}\p{N}_\s-]/gu, "")
+          .trim()
+          .replace(/\s/g, "-") === name),
+  );
+  if (!target) return false;
+  requestAnimationFrame(() => {
+    if (target.isConnected) target.scrollIntoView({ block: "start" });
+  });
+  return true;
 }
 
 function appendMarkdown(
@@ -256,12 +330,13 @@ function appendMarkdown(
 ): void {
   const section = document.createElement("section");
   section.className = "content artifact-markdown";
+  registerDocumentImages(section, options.agentId, options.signal);
   section.appendChild(markdownFragment(source, options));
   body.appendChild(section);
   queueMicrotask(() => renderMathIn(section));
 }
 
-function appendEmbed(body: HTMLElement, source: string, title: string): void {
+function embedNodes(source: string, title: string): HTMLElement[] {
   const frame = document.createElement("iframe");
   const description = document.createElement("p");
   description.className = "sr-only";
@@ -272,7 +347,25 @@ function appendEmbed(body: HTMLElement, source: string, title: string): void {
   frame.title = `${title} live preview`;
   frame.setAttribute("aria-describedby", description.id);
   frame.srcdoc = htmlPreviewSrcdoc(source);
-  body.append(description, frame);
+  return [description, frame];
+}
+
+function documentParts(
+  source: string,
+): { markdown?: string; embed?: string }[] {
+  const parts: { markdown?: string; embed?: string }[] = [];
+  let last = 0,
+    match: RegExpExecArray | null;
+  EMBED_RE.lastIndex = 0;
+  while ((match = EMBED_RE.exec(source)) !== null) {
+    const before = source.slice(last, match.index);
+    if (before.trim()) parts.push({ markdown: before });
+    parts.push({ embed: match[1] });
+    last = EMBED_RE.lastIndex;
+  }
+  const rest = source.slice(last);
+  if (rest.trim() || !parts.length) parts.push({ markdown: rest });
+  return parts;
 }
 
 export function renderDocumentMarkdown(
@@ -280,15 +373,48 @@ export function renderDocumentMarkdown(
   source: string,
   options: DocumentMarkdownOptions,
 ): void {
-  let last = 0,
-    match: RegExpExecArray | null;
-  EMBED_RE.lastIndex = 0;
-  while ((match = EMBED_RE.exec(source)) !== null) {
-    const before = source.slice(last, match.index);
-    if (before.trim()) appendMarkdown(body, before, options);
-    appendEmbed(body, match[1], options.title);
-    last = EMBED_RE.lastIndex;
+  if (typeof options.previous === "string")
+    return renderChanges(body, options.previous, source, options);
+  for (const part of documentParts(source))
+    if (part.embed !== undefined)
+      body.append(...embedNodes(part.embed, options.title));
+    else appendMarkdown(body, part.markdown!, options);
+}
+
+function flatDocument(
+  source: string,
+  options: DocumentMarkdownOptions,
+): DocumentFragment {
+  const fragment = document.createDocumentFragment();
+  for (const part of documentParts(source)) {
+    if (part.embed === undefined) {
+      fragment.append(markdownFragment(part.markdown!, options));
+      continue;
+    }
+    const holder = document.createElement("div");
+    holder.className = "doc-diff-embed";
+    holder.append(...embedNodes(part.embed, options.title));
+    diffKeys.set(holder, `EMBED|${part.embed}`);
+    fragment.append(holder);
   }
-  const rest = source.slice(last);
-  if (rest.trim() || !body.children.length) appendMarkdown(body, rest, options);
+  return fragment;
+}
+
+function renderChanges(
+  body: HTMLElement,
+  previous: string,
+  source: string,
+  options: DocumentMarkdownOptions,
+): void {
+  const section = document.createElement("section");
+  section.className = "content artifact-markdown";
+  registerDocumentImages(section, options.agentId, options.signal);
+  const current = flatDocument(source, options);
+  // Invariant: The earlier version is only compared, never shown: its image
+  // loads start aborted and its embeds are never attached.
+  const signal = AbortSignal.abort();
+  markDocumentChanges(flatDocument(previous, { ...options, signal }), current);
+  section.append(current);
+  body.appendChild(section);
+  queueMicrotask(() => renderMathIn(section));
 }

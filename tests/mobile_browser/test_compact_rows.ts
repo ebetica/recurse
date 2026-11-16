@@ -129,16 +129,60 @@ export const tests: BrowserTest[] = [
           status: "idle",
           rows,
         }));
+        await page.clock.install();
         await gotoRoot(page, base);
         const divider = page.locator(".compacted-activity");
         const jump = page.locator(".compaction-jump-link");
+        const kept = page.locator(`[data-row-id="row:${keptMessageId}"]`);
         await jump.waitFor();
         expect(await divider.count()).toBe(0);
         expect(await jump.count()).toBe(1);
-        expect(
-          await page.locator(`[data-row-id="row:${keptMessageId}"]`).count(),
-        ).toBe(0);
+        expect(await kept.count()).toBe(0);
+        await page.evaluate((rowId) => {
+          const browser = globalThis as any;
+          const { document } = browser;
+          const scroll = document.querySelector("#scroll");
+          const order: string[] = (browser.keptJumpOrder = []);
+          const once = (event: string) =>
+            order.includes(event) || order.push(event);
+          const row = () => document.querySelector(`[data-row-id="${rowId}"]`);
+          browser.jumpTargets = [];
+          new browser.MutationObserver(() => {
+            for (const element of document.querySelectorAll(
+              ".file-jump-target",
+            ))
+              browser.jumpTargets.push(element.dataset.rowId);
+            if (row()?.classList.contains("file-jump-target")) once("add");
+            else if (order.includes("add")) once("remove");
+          }).observe(document.body, {
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["class"],
+          });
+          scroll.addEventListener("scrollend", () => {
+            if (!order.includes("add") || order.includes("scrollend")) return;
+            once("scrollend");
+            const box = row().getBoundingClientRect();
+            const view = scroll.getBoundingClientRect();
+            if (
+              row().classList.contains("file-jump-target") &&
+              box.top < view.bottom &&
+              box.bottom > view.top
+            )
+              once("shown");
+          });
+        }, `row:${keptMessageId}`);
         await jump.click();
+        await page.waitForFunction(() =>
+          (globalThis as any).keptJumpOrder.includes("add"),
+        );
+        await page.clock.fastForward(2000);
+        await page.waitForFunction(() =>
+          (globalThis as any).keptJumpOrder.includes("remove"),
+        );
+        expect(
+          await page.evaluate(() => (globalThis as any).keptJumpOrder),
+        ).toEqual(["add", "scrollend", "shown", "remove"]);
         if (durable) {
           await divider.waitFor();
           await waitForLayout(page);
@@ -150,13 +194,9 @@ export const tests: BrowserTest[] = [
             await compactedActivity.locator(".turn-thinking-toggle").count(),
           ).toBe(0);
         }
-        const target = page.locator(
-          `[data-row-id="row:${keptMessageId}"].file-jump-target`,
-        );
-        await target.waitFor();
         await waitForLayout(page);
         expect(
-          await target.evaluate((element) => {
+          await kept.evaluate((element) => {
             const browser = globalThis as any;
             const bounds = element.getBoundingClientRect();
             const viewport = browser.document
@@ -170,8 +210,8 @@ export const tests: BrowserTest[] = [
         );
         expect(await divider.locator(".disclosure-body").count()).toBe(0);
         expect(
-          await page.locator(".compacted-activity.file-jump-target").count(),
-        ).toBe(0);
+          await page.evaluate(() => (globalThis as any).jumpTargets),
+        ).not.toContain(`row:${summaryId}`);
         if (cut === "server") {
           expect(await divider.innerText()).toBe(SERVER_COMPACTION_MARKER);
           expect(await divider.locator("button").count()).toBe(0);

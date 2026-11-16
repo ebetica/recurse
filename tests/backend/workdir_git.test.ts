@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   realpathSync,
+  readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -221,6 +222,13 @@ test("worktree summary computes one real diff and owns PR refresh separately", a
     root,
     { ...env, ...BUILD_ENV },
   );
+  const calls = join(root, "git-calls");
+  rmSync(join(root, "bin", "git"));
+  writeFileSync(
+    join(root, "bin", "git"),
+    `#!/bin/sh\nprintf '%s\\n' "$*" >> '${calls}'\nexec '${GIT}' "$@"\n`,
+    { mode: 0o755 },
+  );
   const wg = new WorkdirGit({
     repoUrl: "unused",
     repoDir: root,
@@ -241,18 +249,43 @@ test("worktree summary computes one real diff and owns PR refresh separately", a
           deletions: null,
           status: "modified",
         },
-        {
-          path: "untracked",
-          additions: null,
-          deletions: null,
-          status: "untracked",
-        },
       ]);
+      expect(result.untracked).toEqual(["untracked"]);
       expect(measurement.counters.get("git_diff_subprocesses")).toBe(1);
       expect(result.currentPr).toBeNull();
     },
     { write() {} },
   );
+  expect(readFileSync(calls, "utf8")).toContain("ls-files --others");
+  writeFileSync(calls, "");
+  expect((await wg.worktreeDiff(join(root, "r"))).untracked).toEqual([
+    "untracked",
+  ]);
+  expect(readFileSync(calls, "utf8")).toContain("ls-files --others");
+  writeFileSync(calls, "");
+  for (const [base, include] of [
+    ["main", true],
+    ["HEAD", false],
+  ] as const) {
+    expect(
+      (
+        await wg.worktreeDiff(
+          join(root, "r"),
+          base,
+          "stored",
+          undefined,
+          include,
+        )
+      ).untracked,
+    ).toEqual([]);
+  }
+  expect(readFileSync(calls, "utf8")).not.toContain("ls-files");
+  const [head, overlay] = await Promise.all([
+    wg.worktreeDiff(join(root, "r"), "HEAD"),
+    wg.worktreeDiff(join(root, "r"), "HEAD", "stored", undefined, false),
+  ]);
+  expect(head.untracked).toEqual(["untracked"]);
+  expect(overlay.untracked).toEqual([]);
 });
 
 test("a gh lookup past its timeout is killed, reads as no PR and backs off", async () => {

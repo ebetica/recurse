@@ -11,7 +11,13 @@ import zlib from "node:zlib";
 
 import { concatBytes, negotiateAcceptEncoding } from "../http_transport";
 import { htmlEscape } from "../auth/session";
-import { brandingFile, brandResponse, readBrand } from "../branding";
+import {
+  BRAND_ICON_NAMES,
+  brandingFile,
+  brandResponse,
+  defaultIconUrl,
+  readBrand,
+} from "../branding";
 import type { Release } from "../release";
 import { readTheme } from "../themes";
 import {
@@ -21,7 +27,7 @@ import {
   conditionalJson,
   ifNoneMatchMatches,
 } from "./caching";
-import { HttpError, jsonResponse, type Router } from "./router";
+import { HttpError, jsonResponse, type Handler, type Router } from "./router";
 import { API_MAJOR, API_REVISION } from "./api_v1/schema";
 
 /** Content types for the static frontend assets served at /static. */
@@ -82,6 +88,22 @@ export function frontendGenerationBytes(
   for (const name of FRONTEND_ASSET_NAMES)
     digest.update(name).update(assets.get(name) ?? "missing");
   return digest.digest("hex").slice(0, 20);
+}
+
+/**
+ * Names the desktop windows chunk that app.js imports in the shell's
+ * desktop-only preload, or drops the preload when no build names one.
+ */
+function preloadWindows(shell: string, app: Uint8Array | undefined): string {
+  const chunk = app
+    ? /import\("\.\/(host-[A-Za-z0-9]+\.js)"\)/u.exec(
+        new TextDecoder().decode(app),
+      )?.[1]
+    : undefined;
+  return shell.replace(
+    /<link rel="modulepreload" href="\/static\/__WINDOWS_CHUNK__"[^>]*>\n?/u,
+    (link) => (chunk ? link.replace("__WINDOWS_CHUNK__", chunk) : ""),
+  );
 }
 
 const readBytes = async (path: string) => new Uint8Array(await readFile(path));
@@ -195,6 +217,7 @@ export class FrontendCache {
       this.htmlPath,
       this.iconsPath,
       ...FRONTEND_ASSET_NAMES.map((name) => join(this.staticDir, name)),
+      ...BRAND_ICON_NAMES.map((name) => join(this.staticDir, "brand", name)),
     ];
   }
 
@@ -225,7 +248,10 @@ export class FrontendCache {
     }
     shell = await fillIconSlots(shell, this.iconsPath);
     const assets = new Map<string, Uint8Array>();
-    for (const name of FRONTEND_ASSET_NAMES) {
+    for (const name of [
+      ...FRONTEND_ASSET_NAMES,
+      ...BRAND_ICON_NAMES.map((name) => `brand/${name}`),
+    ]) {
       // Invariant: A staged dist publish briefly renames files away: an
       // ordinary gap.
       try {
@@ -240,7 +266,7 @@ export class FrontendCache {
         "frontend generation changed while being read",
       );
     for (const bytes of assets.values()) brotliCopy(bytes);
-    return [shell, assets, after];
+    return [preloadWindows(shell, assets.get("app.js")), assets, after];
   }
 
   async snapshot(): Promise<FrontendSnapshot> {
@@ -626,7 +652,7 @@ export function registerStaticRoutes(
 ): void {
   router.get("/", async (ex) => {
     // Invariant: Derive the version from the same shell bytes that are served.
-    const [shell, , version] = await deps.frontend.snapshot();
+    const [shell, assets, version] = await deps.frontend.snapshot();
     const theme = await readTheme(deps.themesFile);
     const brand = brandResponse(
       await readBrand(brandingFile(dirname(deps.themesFile))),
@@ -647,9 +673,13 @@ export function registerStaticRoutes(
         brand.custom_name ? 'id="brand-name"' : 'id="brand-name" hidden',
       )
       .replace(
-        /(href|src)="\/static\/brand\/(?:favicon(?:-dark)?-32\.png|favicon\.svg|apple-touch-icon\.png|mark\.svg)"/gu,
-        (original, attr: string) =>
-          brand.icon ? `${attr}="${brand.icon}"` : original,
+        /(href|src)="\/static\/brand\/(favicon(?:-dark)?-32\.png|favicon\.svg|apple-touch-icon\.png|mark\.svg)"/gu,
+        (original, attr: string, name: string) =>
+          brand.icon
+            ? `${attr}="${brand.icon}"`
+            : name === "mark.svg"
+              ? original
+              : `${attr}="${defaultIconUrl(name, assets)}"`,
       )
       .replace(
         /(<link rel="icon"[^>]*type=")[^"]*"/gu,
@@ -657,11 +687,24 @@ export function registerStaticRoutes(
           brand.icon ? `${prefix}${brand.icon_type}"` : original,
       )
       .replace(/__APP__|__VERSION__|__THEME__/gu, (token) => tokens[token]!)
-      .replace('id="theme"', `id="theme" data-version="${theme.version}"`);
-    return conditionalBytes(ex.request, page, "text/html", PRIVATE_REVALIDATE);
+      .replace(
+        'id="theme"',
+        `id="theme" data-version="${theme.version}"${theme.customCss ? ` data-custom-css="${htmlEscape(theme.customCss)}"` : ""}`,
+      );
+    const response = conditionalBytes(
+      ex.request,
+      page,
+      "text/html",
+      PRIVATE_REVALIDATE,
+    );
+    response.headers.set(
+      "content-security-policy",
+      "font-src 'self' data:; style-src 'self' 'unsafe-inline'; connect-src 'self' data: blob:; object-src 'none'; base-uri 'self'",
+    );
+    return response;
   });
 
-  router.get("/app-icon", async () => {
+  router.add(["GET", "HEAD"], "/app-icon", async () => {
     const { icon } = await readBrand(brandingFile(dirname(deps.themesFile)));
     if (!icon) throw new HttpError(404);
     return new Response(new Uint8Array(Buffer.from(icon.data, "base64")), {
@@ -726,60 +769,57 @@ export function registerStaticRoutes(
     return jsonResponse({ ready: false, active_agents: null }, 200, noStore);
   });
 
-  router.get(
-    "/static/{path:path}",
-    async (ex) => {
-      // Invariant: Behind auth like the page itself; resolved inside staticDir
-      // only.
-      const path = ex.params.path!;
-      const requested = ex.query.v ?? null;
-      const [, cachedAssets, current] = await deps.frontend.snapshot();
-      const cached = cachedAssets.get(path);
-      const ext = suffix(path);
-      if (cached !== undefined) {
-        const media = STATIC_TYPES[ext] ?? "application/octet-stream";
-        if (ext === ".js" && requested !== current)
-          return reloadResponse(current);
-        const brotli = acceptsBrotli(ex.request.headers)
-          ? brotliCopy(cached)
-          : undefined;
-        return conditionalBytes(
-          ex.request,
-          brotli ?? cached,
-          media,
-          requested === current ? IMMUTABLE_YEAR : PRIVATE_REVALIDATE,
-          brotli ? { "content-encoding": "br" } : {},
-        );
-      }
-      const base = await realpath(resolve(deps.staticDir)).catch(() =>
-        resolve(deps.staticDir),
-      );
-      let full: string;
-      try {
-        full = await realpath(resolve(base, path));
-      } catch {
-        throw new HttpError(404);
-      }
-      if (full !== base && !full.startsWith(base + sep))
-        throw new HttpError(404);
-      const info = await stat(full).catch(() => null);
-      if (!info?.isFile()) throw new HttpError(404);
-      const name = basename(full);
-      const fullExt = suffix(full);
-      const media = STATIC_TYPES[fullExt] ?? "application/octet-stream";
-      const isEntry = (FRONTEND_ASSET_NAMES as readonly string[]).includes(
-        name,
-      );
-      const isChunk =
-        fullExt === ".js" && !isEntry && SPLIT_CHUNK_RE.test(name);
-      // Invariant: Never execute a new bundle inside an older HTML shell.
-      if (fullExt === ".js" && isEntry && requested !== current)
+  const staticHandler: Handler = async (ex) => {
+    // Invariant: Resolve only inside staticDir.
+    const path = ex.params.path ?? ex.path.slice("/static/".length);
+    const requested = ex.query.v ?? null;
+    const [, cachedAssets, current] = await deps.frontend.snapshot();
+    const cached = path.startsWith("brand/")
+      ? undefined
+      : cachedAssets.get(path);
+    const ext = suffix(path);
+    if (cached !== undefined) {
+      const media = STATIC_TYPES[ext] ?? "application/octet-stream";
+      if (ext === ".js" && requested !== current)
         return reloadResponse(current);
-      return fileResponse(ex.request, full, media, {
-        "cache-control":
-          requested === current || isChunk ? IMMUTABLE_YEAR : "no-cache",
-      });
-    },
-    { query: { v: { type: "str" } } },
-  );
+      const brotli = acceptsBrotli(ex.request.headers)
+        ? brotliCopy(cached)
+        : undefined;
+      return conditionalBytes(
+        ex.request,
+        brotli ?? cached,
+        media,
+        requested === current ? IMMUTABLE_YEAR : PRIVATE_REVALIDATE,
+        brotli ? { "content-encoding": "br" } : {},
+      );
+    }
+    const base = await realpath(resolve(deps.staticDir)).catch(() =>
+      resolve(deps.staticDir),
+    );
+    let full: string;
+    try {
+      full = await realpath(resolve(base, path));
+    } catch {
+      throw new HttpError(404);
+    }
+    if (full !== base && !full.startsWith(base + sep)) throw new HttpError(404);
+    const info = await stat(full).catch(() => null);
+    if (!info?.isFile()) throw new HttpError(404);
+    const name = basename(full);
+    const fullExt = suffix(full);
+    const media = STATIC_TYPES[fullExt] ?? "application/octet-stream";
+    const isEntry = (FRONTEND_ASSET_NAMES as readonly string[]).includes(name);
+    const isChunk = fullExt === ".js" && !isEntry && SPLIT_CHUNK_RE.test(name);
+    // Invariant: Never execute a new bundle inside an older HTML shell.
+    if (fullExt === ".js" && isEntry && requested !== current)
+      return reloadResponse(current);
+    return fileResponse(ex.request, full, media, {
+      "cache-control":
+        requested === current || isChunk ? IMMUTABLE_YEAR : "no-cache",
+    });
+  };
+  const query = { query: { v: { type: "str" as const } } };
+  router.get("/static/{path:path}", staticHandler, query);
+  for (const name of BRAND_ICON_NAMES)
+    router.add(["HEAD"], `/static/brand/${name}`, staticHandler, query);
 }

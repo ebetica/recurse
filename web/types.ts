@@ -236,6 +236,8 @@ export interface ToolEntry {
       }[]
     | null;
   count?: number;
+  /** Successful native publications from the view's owned file metadata. */
+  published_files?: number;
   // byte offset of the stored line
   offset: number;
   // 1-based call ordinal within the turn
@@ -310,6 +312,7 @@ export interface Turn {
 export interface PromptView {
   system: string;
   naming?: { title: string | null; request: unknown; reply: unknown } | null;
+  safety_review?: unknown;
   // Latest captured request; older captures may omit it.
   system_messages?: unknown[] | null;
   capture_status?: "captured" | "pending" | "unavailable";

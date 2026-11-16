@@ -93,6 +93,14 @@ async function expandContextImports(
   return output;
 }
 
+/** Resolve project instructions and Markdown imports used in prompts. */
+export async function loadPromptContextFiles(cwd: string, agentDir: string) {
+  return expandContextImports(
+    loadProjectContextFiles({ cwd, agentDir }),
+    agentDir,
+  );
+}
+
 export async function loadPromptResources(
   cwd: string,
   agentDir: string,
@@ -100,10 +108,7 @@ export async function loadPromptResources(
   home?: string,
 ): Promise<PromptResources> {
   return {
-    contextFiles: await expandContextImports(
-      loadProjectContextFiles({ cwd, agentDir }),
-      agentDir,
-    ),
+    contextFiles: await loadPromptContextFiles(cwd, agentDir),
     skills: loadSkills({
       cwd,
       agentDir,

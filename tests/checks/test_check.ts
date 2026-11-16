@@ -6,6 +6,107 @@ import { existsSync, lstatSync, readFileSync } from "node:fs";
 import ts from "typescript";
 import type { Violation } from "./comment_check";
 
+/** Findings ("rule reason") tolerated per file; a count above its cap fails. */
+const CAPS: Record<string, Record<string, number>> = {
+  "T3 hand-made deps cast": {
+    "tests/backend/durable_interrupt.test.ts": 1,
+    "tests/backend/durable_prompt.test.ts": 1,
+    "tests/backend/durable_turn_prompt.test.ts": 1,
+    "tests/backend/http_routes_app.ts": 1,
+    "tests/backend/http_tree.test.ts": 1,
+  },
+  "T10 links the shared node_modules; use linkDependencies": {
+    "tests/backend/affected_tests.test.ts": 1,
+    "tests/backend/server_smoke.test.ts": 1,
+  },
+  "T6 positive visibility snapshot; wait with locator.waitFor() or browserExpect(locator).toBeVisible()":
+    {
+      "tests/mobile_browser/common.ts": 1,
+      "tests/mobile_browser/test_active_agents.ts": 1,
+      "tests/mobile_browser/test_artifact_visit.ts": 2,
+      "tests/mobile_browser/test_changes_expand.ts": 1,
+      "tests/mobile_browser/test_composer.ts": 5,
+      "tests/mobile_browser/test_durable.ts": 1,
+      "tests/mobile_browser/test_explorer.ts": 3,
+      "tests/mobile_browser/test_files.ts": 9,
+      "tests/mobile_browser/test_header.ts": 6,
+      "tests/mobile_browser/test_image_box_crops.ts": 2,
+      "tests/mobile_browser/test_image_drawing.ts": 3,
+      "tests/mobile_browser/test_image_swipe.ts": 4,
+      "tests/mobile_browser/test_mobile_layout.ts": 3,
+      "tests/mobile_browser/test_pane_chrome.ts": 2,
+      "tests/mobile_browser/test_pane_hotkeys.ts": 16,
+      "tests/mobile_browser/test_pane_powerbar.ts": 1,
+      "tests/mobile_browser/test_panes_artifacts.ts": 16,
+      "tests/mobile_browser/test_platform_commands.ts": 7,
+      "tests/mobile_browser/test_selection_comments.ts": 3,
+      "tests/mobile_browser/test_settings.ts": 5,
+      "tests/mobile_browser/test_side_history.ts": 1,
+      "tests/mobile_browser/test_sidebar.ts": 2,
+      "tests/mobile_browser/test_turn_groups.ts": 8,
+      "tests/mobile_browser/test_turns.ts": 1,
+      "tests/mobile_browser/test_visible_attachments.ts": 5,
+      "tests/mobile_browser/test_waiting_takeover.ts": 2,
+      "tests/mobile_browser/thread_disclosures.ts": 1,
+      "tests/mobile_browser/thread_tools.ts": 1,
+    },
+  "T6 sleep of a second or more": {
+    "tests/mobile_browser/server/agents.ts": 1,
+    "tests/mobile_browser/test_durable.ts": 1,
+  },
+  "T6 explicit browser timeout": {
+    "tests/mobile_browser/artifact_reopen.ts": 1,
+    "tests/mobile_browser/common.ts": 1,
+    "tests/mobile_browser/logging.test.ts": 1,
+    "tests/mobile_browser/parallel.test.ts": 3,
+    "tests/mobile_browser/test_changes_expand.ts": 5,
+    "tests/mobile_browser/test_composer.ts": 5,
+    "tests/mobile_browser/test_durable.ts": 17,
+    "tests/mobile_browser/test_failed_send_hold.ts": 6,
+    "tests/mobile_browser/test_line_comments.ts": 3,
+    "tests/mobile_browser/test_model_response.ts": 1,
+    "tests/mobile_browser/test_panes_artifacts.ts": 6,
+    "tests/mobile_browser/test_platform_commands.ts": 2,
+    "tests/mobile_browser/test_recovery.ts": 2,
+    "tests/mobile_browser/test_remote_sidebar.ts": 3,
+    "tests/mobile_browser/test_remotes.ts": 5,
+    "tests/mobile_browser/test_themes.ts": 1,
+    "tests/mobile_browser/test_turn_groups.ts": 1,
+    "tests/mobile_browser/test_turns.ts": 2,
+    "tests/mobile_browser/test_wake.ts": 1,
+    "tests/mobile_browser/thread_disclosures.ts": 1,
+    "tests/mobile_browser/thread_tools.ts": 1,
+  },
+};
+
+const bare = (node: ts.Expression): ts.Expression =>
+  ts.isParenthesizedExpression(node) ? bare(node.expression) : node;
+const bareType = (node: ts.TypeNode): ts.TypeNode =>
+  ts.isParenthesizedTypeNode(node) ? bareType(node.type) : node;
+
+/** Drop findings within their file's cap; flag caps that can be lowered. */
+function capped(file: string, findings: Violation[]): Violation[] {
+  const kept = [...findings];
+  for (const [key, caps] of Object.entries(CAPS)) {
+    const [rule, reason] = [key.split(" ")[0]!, key.replace(/^\S+ /, "")];
+    const cap = caps[file] ?? 0;
+    const hits = kept.filter((v) => v.rule === rule && v.reason === reason);
+    if (hits.length > cap)
+      for (const hit of hits) hit.reason = `${reason} (cap ${cap} here)`;
+    else {
+      for (const hit of hits) kept.splice(kept.indexOf(hit), 1);
+      if (hits.length < cap)
+        kept.push({
+          file,
+          line: 1,
+          rule,
+          reason: `${reason} cap is ${cap}; lower it to ${hits.length}`,
+        });
+    }
+  }
+  return kept;
+}
+
 export function checkTests(file: string, text: string): Violation[] {
   const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
   const nodes: ts.Node[] = [];
@@ -405,6 +506,13 @@ export function checkTests(file: string, text: string): Violation[] {
         /(?:^|\.)(?:spawnSync|execSync|execFileSync)$/.test(call)
       )
         add(pos, "T10", "synchronous subprocess in a test");
+      if (
+        /^tests\/(?:backend|extensions)\//.test(file) &&
+        /(?:^|\.)symlinkSync$/.test(call) &&
+        node.arguments[0] &&
+        /node_modules/.test(code(node.arguments[0]))
+      )
+        add(pos, "T10", "links the shared node_modules; use linkDependencies");
       if (ts.isPropertyAccessExpression(node.expression)) {
         const receiver = node.expression.expression;
         const method = node.expression.name.text;
@@ -414,6 +522,30 @@ export function checkTests(file: string, text: string): Violation[] {
         ) {
           const subject = receiver.arguments[0],
             expected = node.arguments[0];
+          const awaited = subject && bare(subject);
+          const visibility =
+            awaited &&
+            ts.isAwaitExpression(awaited) &&
+            bare(awaited.expression);
+          const visibilityMethod =
+            visibility &&
+            ts.isCallExpression(visibility) &&
+            bare(visibility.expression);
+          if (
+            file.startsWith("tests/mobile_browser/") &&
+            visibilityMethod &&
+            ts.isPropertyAccessExpression(visibilityMethod) &&
+            visibilityMethod.name.text === "isVisible" &&
+            (method === "toBeTrue" ||
+              (method === "toBe" &&
+                expected &&
+                bare(expected).kind === ts.SyntaxKind.TrueKeyword))
+          )
+            add(
+              pos,
+              "T6",
+              "positive visibility snapshot; wait with locator.waitFor() or browserExpect(locator).toBeVisible()",
+            );
           if (/^(?:toBe|toEqual)$/.test(method)) {
             if (imported(subject) && (literal(expected) || imported(expected)))
               add(pos, "T2", "restates an imported constant");
@@ -446,6 +578,14 @@ export function checkTests(file: string, text: string): Violation[] {
           /^\s*\)?;?\s*expect\b/.test(text.slice(node.end))
         )
           add(pos, "T6", "sleep followed by assertion");
+        const ms = node.arguments[0];
+        if (
+          call === "Bun.sleep" &&
+          ms &&
+          ts.isNumericLiteral(ms) &&
+          Number(ms.text.replaceAll("_", "")) >= 1000
+        )
+          add(pos, "T6", "sleep of a second or more");
       }
       if (
         /^(?:test|it)(?:\.|$)/.test(call) &&
@@ -456,12 +596,33 @@ export function checkTests(file: string, text: string): Violation[] {
         add(pos, "T4", "test references deleted Python implementation");
     }
     if (
+      file.startsWith("tests/mobile_browser/") &&
+      ts.isPropertyAssignment(node) &&
+      ts.isIdentifier(node.name) &&
+      node.name.text === "timeout" &&
+      ts.isNumericLiteral(node.initializer)
+    )
+      add(pos, "T6", "explicit browser timeout");
+    if (
       ts.isAsExpression(node) &&
       /as unknown as (?:Document|Window|Element|HTML\w*Element)$/.test(
         code(node),
       )
     )
       add(pos, "T3", "fake DOM cast");
+    const inner = ts.isAsExpression(node) && bare(node.expression);
+    const target = ts.isAsExpression(node) && bareType(node.type);
+    if (
+      file.startsWith("tests/backend/") &&
+      target &&
+      ts.isTypeReferenceNode(target) &&
+      /Deps$/.test(code(target.typeName).split(".").at(-1)!) &&
+      inner &&
+      ts.isAsExpression(inner) &&
+      bareType(inner.type).kind === ts.SyntaxKind.UnknownKeyword &&
+      bare(inner.expression).kind !== ts.SyntaxKind.NullKeyword
+    )
+      add(pos, "T3", "hand-made deps cast");
     if (
       ts.isStringLiteralLike(node) &&
       /^(?:anthropic\/|openai[^/]*\/|claude-|gpt-)/.test(node.text) &&
@@ -483,7 +644,7 @@ export function checkTests(file: string, text: string): Violation[] {
       add(offset, "T4", "fixture recorded by deleted Python implementation");
     offset += row.length + 1;
   }
-  return findings;
+  return capped(file, findings);
 }
 
 function testTitle(node: ts.Node, source: ts.SourceFile): string | undefined {
@@ -523,7 +684,14 @@ function testComments(file: string, text: string) {
         comments.set(comment.pos, comment);
     const title = testTitle(node, source);
     if (title)
-      cases.push({ start: node.getStart(source), end: node.end, title });
+      cases.push({
+        start: (ts.isVariableDeclaration(node)
+          ? node.parent.parent
+          : node
+        ).getStart(source),
+        end: node.end,
+        title,
+      });
     ts.forEachChild(node, visit);
   };
   visit(source);
@@ -538,6 +706,11 @@ function testComments(file: string, text: string) {
     return {
       text: text.slice(comment.pos, comment.end),
       title: owner?.title ?? "",
+      adjacent:
+        owner !== undefined &&
+        /^\r?\n(?:[ \t]*\/\/ test-check-allow: [^\r\n]*\r?\n)*[ \t]*$/.test(
+          text.slice(comment.end, owner.start),
+        ),
       line: source.getLineAndCharacterOfPosition(comment.pos).line + 1,
     };
   });
@@ -554,8 +727,14 @@ export function taggedTests(file: string, text: string) {
           {
             kind: tag[1]!.toLowerCase(),
             pr: tag[2]!,
+            prs: [
+              ...new Set(
+                [...comment.text.matchAll(/#(\d+)/g)].map((id) => id[1]!),
+              ),
+            ],
             reason: tag[3]!,
             title: comment.title,
+            adjacent: comment.adjacent,
             line: comment.line,
           },
         ]
@@ -568,18 +747,15 @@ export function deletedRegressions(
   before: string,
   after: string,
   body: string,
+  kept = taggedTests(file, after)
+    .filter((tag) => tag.adjacent)
+    .flatMap((tag) => tag.prs.map((pr) => ({ title: tag.title, pr }))),
 ): Violation[] {
   const findings: Violation[] = [];
-  const source = ts.createSourceFile(file, after, ts.ScriptTarget.Latest, true);
-  const titles = new Set<string>();
-  const visit = (node: ts.Node) => {
-    const title = testTitle(node, source);
-    if (title) titles.add(title);
-    ts.forEachChild(node, visit);
-  };
-  visit(source);
-  for (const tag of taggedTests(file, before)) {
-    if (!tag.title || titles.has(tag.title)) continue;
+  for (const tag of taggedTests(file, before).flatMap((tag) =>
+    tag.prs.map((pr) => ({ ...tag, pr })),
+  )) {
+    if (!tag.title) continue;
     const declaration = `Removes-${tag.kind}: #${tag.pr} ${file} ${tag.title}`;
     if (
       body
@@ -591,6 +767,13 @@ export function deletedRegressions(
         )
     )
       continue;
+    const match = kept.findIndex(
+      (next) => next.title === tag.title && next.pr === tag.pr,
+    );
+    if (match >= 0) {
+      kept.splice(match, 1);
+      continue;
+    }
     findings.push({
       file,
       line: tag.line,
@@ -655,8 +838,10 @@ if (import.meta.main) {
   const flag = (name: string) => args[args.indexOf(name) + 1];
   if (args.includes("--help"))
     console.log(
-      "bun tests/checks/test_check.ts [--strict[=T1,T2,...]] [--summary] [--diff BASE --pr-body FILE]\n" +
-        "--diff requires an exact PR-body line Test-review: PASS <full head SHA> for added or changed test-check-allow comments or allowance entries, including moved or renamed comments. The SHA must equal git HEAD and tests/ must have no uncommitted changes. The Coordinator adds this line only after an independent test reviewer passes that exact head under docs/agents/test-review.md. Old operator approval lines are not accepted. Growing tracked source files ending at 1500 or more lines also require Simplify-review: <path> <simplified|none-found|follow-up #PR> <full head SHA>, one exact line per file; see docs/agents/simplify-review.md.",
+      "bun tests/checks/test_check.ts [--strict[=T1,T2,...]] [--summary] [(--diff REF | --diff-exact BASE) --pr-body FILE]\n" +
+        "--diff compares the working tree with git merge-base REF HEAD; --diff-exact uses BASE directly. The resolved base SHA is printed once. Use only one diff flag.\n" +
+        "Both diff modes require every Feature/Regression tag PR id at the resolved base to remain in a tag directly above the same named test, including moves between test files and regardless of tag kind. Missing ids need a PR-body line Removes-feature: #PR <file> <test name> or Removes-regression: #PR <file> <test name>, matching the original kind; trailing reasons are allowed.\n" +
+        "Both diff modes require an exact PR-body line Test-review: PASS <full head SHA> for added or changed test-check-allow comments or allowance entries, including moved or renamed comments. The SHA must equal git HEAD and tests/ must have no uncommitted changes. The Coordinator adds this line only after an independent test reviewer passes that exact head under docs/agents/test-review.md. Old operator approval lines are not accepted. Growth reviews run only with an explicit diff flag and --pr-body FILE. Growing tracked source files within 100 lines of the hard cap require an effort-4 architecture sweep, recorded as Simplify-review: <path> architecture-sweep <full head SHA>. Other growing tracked source files ending at 1500 or more lines require Simplify-review: <path> <simplified|none-found|follow-up #PR> <full head SHA>, one exact line per file; see docs/agents/simplify-review.md.",
     );
   else {
     const strictFlags = args.filter(
@@ -673,11 +858,21 @@ if (import.meta.main) {
       throw new Error(
         "Use --strict once, optionally with distinct comma-separated T1-T10 rules",
       );
+    const diffFlags = args.filter(
+      (arg) => arg === "--diff" || arg === "--diff-exact",
+    );
+    const diffFlag = diffFlags[0];
+    if (diffFlags.length > 1)
+      throw new Error("Use only one of --diff REF or --diff-exact BASE");
     if (
-      args.includes("--diff") &&
-      (!flag("--diff") || !args.includes("--pr-body") || !flag("--pr-body"))
+      diffFlag &&
+      (!flag(diffFlag) ||
+        flag(diffFlag)!.startsWith("--") ||
+        !args.includes("--pr-body") ||
+        !flag("--pr-body") ||
+        flag("--pr-body")!.startsWith("--"))
     )
-      throw new Error("--diff requires BASE and --pr-body FILE");
+      throw new Error(`${diffFlag} requires a ref and --pr-body FILE`);
     const git = async (...args: string[]) => {
       const proc = Bun.spawn(["git", ...args], {
         stdout: "pipe",
@@ -741,16 +936,22 @@ if (import.meta.main) {
             findings.splice(i, 1);
       }
     }
-    if (args.includes("--diff")) {
-      const base = flag("--diff")!,
-        body = readFileSync(flag("--pr-body")!, "utf8");
+    if (diffFlag) {
+      const ref = flag(diffFlag)!;
+      const base = (
+        diffFlag === "--diff"
+          ? await git("merge-base", ref, "HEAD")
+          : await git("rev-parse", "--verify", `${ref}^{commit}`)
+      ).trim();
+      console.log(`Diff base: ${base}`);
+      const body = readFileSync(flag("--pr-body")!, "utf8");
       const newFeatures: Violation[] = [];
       const head = (await git("rev-parse", "HEAD")).trim();
       const bodyLines = body.split(/\r?\n/);
       const simplified = new Set(
         bodyLines.flatMap((line) => {
           const match = line.match(
-            /^Simplify-review: (.+) (?:simplified|none-found|follow-up #[1-9]\d*) ([0-9a-f]{40})$/,
+            /^Simplify-review: (.+) (?:simplified|none-found|follow-up #[1-9]\d*|architecture-sweep) ([0-9a-f]{40})$/,
           );
           return match?.[2] === head ? [match[1]] : [];
         }),
@@ -775,7 +976,16 @@ if (import.meta.main) {
         const text = readFileSync(file, "utf8");
         if (!source.test(file) && !text.startsWith("#!")) continue;
         const lines = countLines(text);
-        if (lines < 1500 || simplified.has(file)) continue;
+        const sweep = lines >= 2400;
+        if (
+          lines < 1500 ||
+          (sweep
+            ? bodyLines.includes(
+                `Simplify-review: ${file} architecture-sweep ${head}`,
+              )
+            : simplified.has(file))
+        )
+          continue;
         const existed = (
           await git("ls-tree", "--name-only", base, "--", file)
         ).trim();
@@ -788,13 +998,15 @@ if (import.meta.main) {
           file,
           line: 1,
           rule: "T8",
-          reason: `growing source file (${lines} lines) needs Simplify-review: ${file} <simplified|none-found|follow-up #PR> ${head}; see docs/agents/simplify-review.md`,
+          reason: sweep
+            ? `growing source file (${lines} lines) needs an architecture sweep: commission a read-only effort-4 subagent under docs/agents/simplify-review.md, then record Simplify-review: ${file} architecture-sweep ${head}. Removing lines merely to fit under the limit is not acceptable; the 2,500-line hard cap still applies.`
+            : `growing source file (${lines} lines) needs Simplify-review: ${file} <simplified|none-found|follow-up #PR> ${head}; see docs/agents/simplify-review.md`,
         });
       }
       const reviewed =
         bodyLines.includes(`Test-review: PASS ${head}`) &&
         !(await git("diff", "--name-only", "HEAD", "--", "tests/")).trim();
-      for (const file of (
+      const changed = (
         await git(
           "diff",
           "--name-only",
@@ -807,12 +1019,48 @@ if (import.meta.main) {
         )
       )
         .split("\0")
-        .filter(Boolean)) {
-        const existed = (
-          await git("ls-tree", "--name-only", base, "--", file)
-        ).trim();
-        const before = existed ? await git("show", `${base}:${file}`) : "";
-        const after = existsSync(file) ? readFileSync(file, "utf8") : "";
+        .filter(Boolean);
+      const snapshots = await Promise.all(
+        changed.map(async (file) => {
+          const existed = (
+            await git("ls-tree", "--name-only", base, "--", file)
+          ).trim();
+          return {
+            file,
+            before: existed ? await git("show", `${base}:${file}`) : "",
+            after: existsSync(file) ? readFileSync(file, "utf8") : "",
+          };
+        }),
+      );
+      const oldTags = snapshots.flatMap(({ file, before }) =>
+        taggedTests(file, before),
+      );
+      const matches = new Map<number, (typeof oldTags)[number]>();
+      const matchFeature = (
+        tag: (typeof oldTags)[number],
+        seen = new Set<number>(),
+      ): boolean => {
+        for (const [index, old] of oldTags.entries()) {
+          if (
+            seen.has(index) ||
+            old.title !== tag.title ||
+            !old.prs.some((pr) => tag.prs.includes(pr))
+          )
+            continue;
+          seen.add(index);
+          const prior = matches.get(index);
+          if (!prior || matchFeature(prior, seen)) {
+            matches.set(index, tag);
+            return true;
+          }
+        }
+        return false;
+      };
+      const kept = snapshots
+        .flatMap(({ file, after }) => taggedTests(file, after))
+        .filter((tag) => tag.adjacent)
+        .flatMap((tag) => tag.prs.map((pr) => ({ title: tag.title, pr })));
+      for (const { file, before, after } of snapshots) {
         const oldEntries =
           file === allowanceFile ? allowances(file, before) : [];
         const addedRanges = [
@@ -856,13 +1104,9 @@ if (import.meta.main) {
             reason: `new test allowance for ${allowance.test}: delete the test, or prove the behaviour through an existing integration or browser test on a real path; err on the side of not adding unit tests. An independent test reviewer must pass this exact head; the Coordinator then adds Test-review: PASS ${head} to the PR body`,
           });
         }
-        findings.push(...deletedRegressions(file, before, after, body));
-        const oldTags = taggedTests(file, before);
+        findings.push(...deletedRegressions(file, before, after, body, kept));
         for (const tag of taggedTests(file, after))
-          if (
-            tag.kind === "feature" &&
-            !oldTags.some((old) => old.pr === tag.pr && old.title === tag.title)
-          )
+          if (tag.kind === "feature" && !matchFeature(tag))
             newFeatures.push({
               file,
               line: tag.line,

@@ -1057,6 +1057,10 @@ export function rowsToTurns(
         preparing:
           row.offset === -1 && row.live === true && row.running !== true,
         stat: rowStat(row.stat),
+        published_files:
+          row.name === "publish" || row.name === "codemode"
+            ? (row.files?.length ?? 0)
+            : undefined,
         calls: row.calls,
       });
       active.requestThinking = undefined;

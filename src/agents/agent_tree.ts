@@ -118,7 +118,10 @@ export interface AgentTreeDeps {
   >;
   durable: Pick<DurableHost, "owns" | "stop" | "clear" | "compact">;
   prompts: Pick<Prompts, "dropTurnSystemPrompt">;
-  config: Pick<Config, "chatModel" | "credentialRevision">;
+  config: Pick<
+    Config,
+    "chatModel" | "credentialRevision" | "isFileProviderModel"
+  >;
   supervisor: TreeSupervisor;
   spawnOutcomes: SpawnOutcomes;
   /** pi_session_retirement, injected (runtime_boundary.test.ts). */
@@ -514,7 +517,9 @@ export class AgentTree {
               if (!isValueError(error)) throw error;
               creatorModel = this.deps.config.chatModel().id;
             }
-            model = creatorModel;
+            model = this.deps.config.isFileProviderModel(creatorModel)
+              ? this.deps.config.chatModel().id
+              : creatorModel;
           }
         }
         extra.workdir = this.deps.conversations.effectiveWorkdir(creatorConv);
@@ -539,6 +544,9 @@ export class AgentTree {
       title,
       parent,
       model,
+      ...(req.operator_selected_model === true
+        ? { operatorSelectedModel: true }
+        : {}),
       takenOver: req.taken_over === true,
       muted: truthy(req.muted),
       spawnRequestId: cid,

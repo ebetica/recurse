@@ -1,17 +1,27 @@
 import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import type { Page } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import { renderThemeCss, themePalettes } from "../../src/themes";
 import {
   gotoRoot,
   mockConversation,
   postFixture,
+  rootAgentId,
   runBrowserTests,
   themeColors,
   waitForLayout,
   type BrowserTest,
 } from "./common";
 import { idleConv, row, tree } from "./fixtures";
+
+async function screenshot(page: Page, name: string) {
+  const dir = process.env.RECURSE_SCREENSHOT_DIR;
+  if (!dir) return;
+  await mkdir(dir, { recursive: true });
+  const stage = process.env.RECURSE_SCREENSHOT_STAGE || "after";
+  await page.screenshot({ path: `${dir}/${stage}-${name}.png` });
+}
 
 async function assertTouchTarget(page: Page, selector: string) {
   const hits = await page.locator(selector).evaluate((element) => {
@@ -38,7 +48,7 @@ export const tests: BrowserTest[] = [
   async function test_desktop_rail_actions_and_pane_cycling(browser, base) {
     await postFixture(base, "seed-artifact-app");
     const { demo } = await postFixture(base, "seed-published-sizes");
-    await postFixture(base, `seed-artifact-app?agent=${demo}`);
+    await postFixture(base, "seed-artifact-app", { agent: demo });
     for (const width of [412, 1280]) {
       const context = await browser.newContext({
         viewport: { width, height: 915 },
@@ -52,21 +62,13 @@ export const tests: BrowserTest[] = [
       await page
         .locator('#pane-menu-panels [data-pane="report"]')
         .waitFor({ state: "attached" });
-      const dir = process.env.RECURSE_SCREENSHOT_DIR;
-      const stage = process.env.RECURSE_SCREENSHOT_STAGE || "after";
-      if (dir) {
-        await mkdir(dir, { recursive: true });
-        await page.screenshot({ path: `${dir}/${stage}-${width}-rail.png` });
-      }
+      await screenshot(page, `${width}-rail`);
       if (width === 412) {
         await page.locator("#pane-fab").click();
         expect(await page.locator("#pane-menu #takeover-btn").isVisible()).toBe(
           true,
         );
-        if (dir)
-          await page.screenshot({
-            path: `${dir}/${stage}-${width}-rail-menu.png`,
-          });
+        await screenshot(page, `${width}-rail-menu`);
         await context.close();
         continue;
       }
@@ -74,7 +76,7 @@ export const tests: BrowserTest[] = [
       const actions = page.locator("#pane-rail > button");
       expect(
         await actions.evaluateAll((els) => els.map((el) => el.id)),
-      ).toEqual(["takeover-btn", "share-link-btn"]);
+      ).toEqual(["new-top", "share-link-btn", "takeover-btn"]);
       expect(
         await page
           .locator("#agent-list-foot > button")
@@ -92,8 +94,219 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator('#pane-rail [aria-label="Agents"]').count(),
       ).toBe(0);
-      for (const selector of ["#settings-btn", "#trash-btn", "#takeover-btn"])
+      for (const selector of ["#settings-btn", "#trash-btn"])
         await assertTouchTarget(page, selector);
+      const newBox = (await page.locator("#new-top").boundingBox())!;
+      const linkBox = (await page.locator("#share-link-btn").boundingBox())!;
+      expect({
+        column: Math.abs(
+          newBox.x + newBox.width / 2 - (linkBox.x + linkBox.width / 2),
+        ),
+        gap: linkBox.y - (newBox.y + newBox.height),
+      }).toEqual({ column: 0, gap: 0 });
+      const railStates = (selector: string) =>
+        page.evaluate(
+          (selector) =>
+            [...(globalThis as any).document.querySelectorAll(selector)]
+              .filter((button) => button.getClientRects().length)
+              .map((button) => {
+                button.scrollIntoView({ block: "nearest" });
+                const style = (globalThis as any).getComputedStyle(button);
+                const box = button.getBoundingClientRect();
+                const badge = button
+                  .querySelector(".rail-count")
+                  ?.getBoundingClientRect();
+                const x = box.left + box.width / 2;
+                const y = box.top + box.height / 2;
+                const hits = (dx: number, dy: number) => {
+                  const hit = button.ownerDocument.elementFromPoint(
+                    x + dx,
+                    y + dy,
+                  );
+                  return button.contains(hit) && !hit.closest(".rail-count");
+                };
+                const edge = box.width / 2 - 2;
+                return {
+                  circle:
+                    Math.abs(box.width - box.height) < 0.5 &&
+                    [
+                      [0, 0],
+                      [-21, 0],
+                      [21, 0],
+                      [0, -21],
+                      [0, 21],
+                    ].every(([dx, dy]) => hits(dx, dy)) &&
+                    [
+                      [-edge, -edge],
+                      [edge, -edge],
+                      [-edge, edge],
+                      [edge, edge],
+                    ].every(([dx, dy]) => !hits(dx, dy)),
+                  filled: style.backgroundColor !== "rgba(0, 0, 0, 0)",
+                  active: button.classList.contains("active"),
+                  badge: badge && [
+                    badge.right - box.right,
+                    badge.bottom - box.bottom,
+                  ],
+                };
+              }),
+          selector,
+        );
+      const railState = async (selector: string) =>
+        (await railStates(selector))[0];
+      for (const button of await railStates("#pane-rail button"))
+        expect(button).toMatchObject({ circle: true, filled: button.active });
+      const files = '#pane-rail .rail-btn[data-pane="files"]';
+      if ((await page.locator(files).getAttribute("aria-expanded")) === "true")
+        await page.locator(files).click();
+      await page.mouse.move(0, 0);
+      const resting = await railState(files);
+      expect(resting).toMatchObject({ circle: true, filled: false });
+      expect(resting.badge).toBeTruthy();
+      await page.locator(files).hover();
+      expect(await railState(files)).toEqual({ ...resting, filled: true });
+      await page.mouse.move(0, 0);
+      await page.locator("#new-top").focus();
+      await page.keyboard.press("Tab");
+      expect(
+        await page
+          .locator("#share-link-btn")
+          .evaluate((el) => el.matches(":focus-visible")),
+      ).toBe(true);
+      expect(await railState("#share-link-btn")).toMatchObject({
+        circle: true,
+        filled: true,
+      });
+      await page.locator("#share-link-btn").hover();
+      await page.mouse.down();
+      expect(await railState("#share-link-btn")).toMatchObject({
+        circle: true,
+        filled: true,
+      });
+      await page.mouse.move(0, 0);
+      await page.mouse.up();
+      await page.locator(files).click();
+      await page.locator(`${files}.active`).waitFor();
+      await page.mouse.move(0, 0);
+      expect(await railState(files)).toEqual({
+        ...resting,
+        filled: true,
+        active: true,
+      });
+      await page.setViewportSize({ width: 1280, height: 320 });
+      for (const button of await railStates("#pane-rail button"))
+        expect(button.circle).toBe(true);
+      await page.setViewportSize({ width: 1280, height: 915 });
+      await page.evaluate(
+        () =>
+          new Promise((done) => {
+            const frame = (globalThis as any).requestAnimationFrame;
+            frame(() => frame(done));
+          }),
+      );
+      expect(
+        await page.evaluate(() => {
+          const doc = (globalThis as any).document;
+          const box = (el: any) => el.getBoundingClientRect();
+          const hit = (x: number, y: number, selector: string) =>
+            !!doc.elementFromPoint(x, y)?.closest(selector);
+          const sidebar = box(doc.querySelector("#sidebar"));
+          const rail = box(doc.querySelector("#pane-rail"));
+          const windows = [...doc.querySelectorAll("#dock .dv-groupview")]
+            .map(box)
+            .sort((a, b) => a.left - b.left);
+          const edges = [sidebar, ...windows, rail];
+          const y = 915 / 2;
+          return {
+            windows: windows.length,
+            gaps: edges.slice(1).map((next, i) => next.left - edges[i].right),
+            spans: edges.map((edge) => [edge.top, edge.bottom]),
+            sidebarCorners: [
+              [0, 0],
+              [sidebar.right - 1, 914],
+            ].every(([x, y]) => hit(x, y, "#sidebar")),
+            windowCorners: windows.every(
+              (w) =>
+                hit(w.left + 5, 0, ".dv-groupview") &&
+                hit(w.right - 5, 0, ".dv-groupview") &&
+                hit(w.left + 5, 914, ".dv-render-overlay") &&
+                hit(w.right - 5, 914, ".dv-render-overlay"),
+            ),
+            grips: [
+              ...[-6, 2, 3].map((dx) =>
+                hit(sidebar.right + dx, y, ".resize-grip.sb"),
+              ),
+              ...[-2, 1].map((dx) => hit(windows[1].left + dx, y, ".dv-sash")),
+            ],
+          };
+        }),
+      ).toEqual({
+        windows: 2,
+        gaps: [0, 0, 0],
+        spans: [
+          [0, 915],
+          [0, 915],
+          [0, 915],
+          [0, 915],
+        ],
+        sidebarCorners: true,
+        windowCorners: true,
+        grips: [true, true, false, true, true],
+      });
+      await page.setViewportSize({ width: 1280, height: 240 });
+      const agentList = page.locator("#agent-list");
+      await agentList.hover();
+      await page.mouse.wheel(0, 200);
+      await page.waitForFunction(
+        () =>
+          (globalThis as any).document.querySelector("#agent-list").scrollTop,
+      );
+      expect(
+        await agentList.evaluate((list) => {
+          const box = list.getBoundingClientRect();
+          const track = (list.offsetWidth - list.clientWidth) / 2;
+          return {
+            overflows: list.scrollHeight > list.clientHeight,
+            trackClear:
+              track > 0 &&
+              [...Array(track).keys()].every(
+                (i) =>
+                  list.ownerDocument.elementFromPoint(
+                    box.right - 1 - i,
+                    box.top + box.height / 2,
+                  ) === list,
+              ),
+          };
+        }),
+      ).toEqual({ overflows: true, trackClear: true });
+      await page.setViewportSize({ width: 1280, height: 915 });
+      await page.locator("#main .msg").first().click();
+      await page.keyboard.press("w");
+      await page.locator("#window-key-hints").waitFor({ state: "visible" });
+      await page.keyboard.press("f");
+      await page.locator("#main.fullscreen #top-actions #new-top").waitFor();
+      await assertTouchTarget(page, "#new-top");
+      await page.keyboard.press("w");
+      await page.locator("#window-key-hints").waitFor({ state: "visible" });
+      await page.keyboard.press("f");
+      await page.locator("#pane-rail > #new-top:first-child").waitFor();
+      await page.keyboard.press("t");
+      await page.locator("#pane-rail.prefix-on").waitFor();
+      expect(
+        await page.locator("#new-top").evaluate((button) => {
+          const box = button.getBoundingClientRect();
+          const hint = (globalThis as any).getComputedStyle(button, "::after");
+          return [1, 3].every((quarter) =>
+            button.contains(
+              button.ownerDocument.elementFromPoint(
+                box.right + 4 - (parseFloat(hint.width) * quarter) / 4,
+                box.bottom + 4 - (parseFloat(hint.height) * quarter) / 4,
+              ),
+            ),
+          );
+        }),
+      ).toBe(true);
+      await page.keyboard.press("Escape");
       const first = page.locator("#pane-rail [data-pane]").first();
       const childTop = (await first.boundingBox())!.y;
       expect(
@@ -137,10 +350,20 @@ export const tests: BrowserTest[] = [
       const ids = await page
         .locator("#pane-rail [data-pane]")
         .evaluateAll((els) => els.map((el) => el.getAttribute("data-pane")));
-      expect(ids.length).toBeGreaterThanOrEqual(2);
-      if ((await first.getAttribute("aria-expanded")) === "false")
-        await first.click();
-      await page.locator(`.pane-col[data-pane="${ids[0]}"] .pane-body`).focus();
+      expect(ids.length).toBeGreaterThanOrEqual(3);
+      expect(ids[0]).toBe("chat");
+      const second = page.locator(`#pane-rail [data-pane="${ids[1]}"]`);
+      if ((await second.getAttribute("aria-expanded")) === "false")
+        await second.click();
+      await page.locator(`.pane-col[data-pane="${ids[1]}"] .pane-body`).focus();
+      const focusedWindow = (id: string) =>
+        page.waitForFunction((id) => {
+          const active = (globalThis as any).document.activeElement;
+          return (
+            (active?.closest(".pane-col")?.dataset.pane ||
+              (active?.closest("#main") ? "chat" : undefined)) === id
+          );
+        }, id);
       for (let index = 0; index < Math.min(9, ids.length); index++) {
         expect(
           await page
@@ -149,18 +372,7 @@ export const tests: BrowserTest[] = [
         ).toContain(`(g${index + 1})`);
         await page.keyboard.press("g");
         await page.keyboard.press(String(index + 1));
-        await page.waitForFunction(
-          (id) =>
-            (globalThis as any).document.activeElement?.closest(".pane-col")
-              ?.dataset.pane === id,
-          ids[index],
-        );
-        const active = await page.evaluate(
-          () =>
-            (globalThis as any).document.activeElement?.closest(".pane-col")
-              ?.dataset.pane,
-        );
-        expect(active).toBe(ids[index]);
+        await focusedWindow(ids[index]!);
         if (ids[index] === "explorer") await page.keyboard.press("Escape");
         expect(
           await page.locator("#trash-btn").getAttribute("class"),
@@ -184,10 +396,7 @@ export const tests: BrowserTest[] = [
       );
       await page.keyboard.press("o");
       await page.locator("#pane-finder-query").fill("Files");
-      if (dir)
-        await page.screenshot({
-          path: `${dir}/${stage}-${width}-pane-finder.png`,
-        });
+      await screenshot(page, `${width}-pane-finder`);
       await page.keyboard.press("Enter");
       await page.waitForFunction(
         () =>
@@ -247,8 +456,7 @@ export const tests: BrowserTest[] = [
           )
         );
       });
-      if (dir)
-        await page.screenshot({ path: `${dir}/${stage}-1280-full-titles.png` });
+      await screenshot(page, `1280-full-titles`);
       await page.keyboard.press("Shift+H");
       await page.locator("#sidebar").waitFor({ state: "visible" });
       await page.waitForFunction(() =>
@@ -387,8 +595,7 @@ export const tests: BrowserTest[] = [
         ),
       ).toBe(true);
       await page.mouse.move(640, 400);
-      if (dir)
-        await page.screenshot({ path: `${dir}/${stage}-desktop-windows.png` });
+      await screenshot(page, `desktop-windows`);
       await page
         .locator('#dock .dv-tab[data-dock-panel="report"] .dock-tab-icon')
         .click();
@@ -421,8 +628,7 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator(".pane-col.mobile-active").getAttribute("data-pane"),
       ).toBe("files");
-      if (dir)
-        await page.screenshot({ path: `${dir}/${stage}-phone-overlay.png` });
+      await screenshot(page, `phone-overlay`);
       await page.locator(".pane-col.mobile-active .pane-head .x").click();
       await page.locator("#panes").waitFor({ state: "hidden" });
       expect(await page.locator("#main").isVisible()).toBeTrue();
@@ -431,9 +637,9 @@ export const tests: BrowserTest[] = [
         .locator("#agent-list-foot #trash-btn")
         .waitFor({ state: "attached" });
       expect(await page.locator("#agent-list-foot #trash-btn").count()).toBe(1);
-      expect(await page.locator("#agent-list-foot #settings-btn").count()).toBe(
-        1,
-      );
+      await browserExpect
+        .poll(() => page.locator("#agent-list-foot #settings-btn").count())
+        .toBe(1);
       const nodes = (await (
         await page.request.get(`${base}api/tree`)
       ).json()) as Array<{ id: string; parent: string | null }>;
@@ -466,10 +672,7 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator("#agent-list-foot #trash-btn").isVisible(),
       ).toBe(true);
-      if (dir)
-        await page.screenshot({
-          path: `${dir}/${stage}-${width}-rail-root.png`,
-        });
+      await screenshot(page, `${width}-rail-root`);
       await context.close();
     }
   },
@@ -505,13 +708,7 @@ export const tests: BrowserTest[] = [
       });
       await gotoRoot(page, base);
       await page.locator("#pane-fab").click();
-      const dir = process.env.RECURSE_SCREENSHOT_DIR;
-      if (dir) {
-        await mkdir(dir, { recursive: true });
-        await page.screenshot({
-          path: `${dir}/${process.env.RECURSE_SCREENSHOT_STAGE || "after"}-${width}-enabled-menu.png`,
-        });
-      }
+      await screenshot(page, `${width}-enabled-menu`);
       if (width === 412) await page.locator("#takeover-btn").tap();
       else await page.locator("#takeover-btn").click();
       await page
@@ -713,7 +910,7 @@ export const tests: BrowserTest[] = [
   },
   // Regression: #3250 Phone menus paint above the header fade; #3233 header geometry waits for mounted desktop Chat.
   async function test_single_row_header(browser, base) {
-    await postFixture(base, "seed-artifact-app?reader=long");
+    await postFixture(base, "seed-artifact-app", { reader: "long" });
     for (const [width, height, theme] of [
       [412, 915, "Material Dark"],
       [412, 915, "GitHub Light"],
@@ -789,37 +986,34 @@ export const tests: BrowserTest[] = [
           themePalettes.find((palette) => palette.name === theme)!,
         ),
       );
-      const shot = async (stage: string) => {
-        const dir = process.env.RECURSE_SCREENSHOT_DIR;
-        if (!dir) return;
-        await mkdir(dir, { recursive: true });
-        await page.screenshot({
-          path: `${dir}/${process.env.RECURSE_SCREENSHOT_STAGE || "after"}-${width}x${height}-${theme.replaceAll(" ", "-")}-${stage}.png`,
-        });
-      };
-      if (width === 1280)
-        await page
-          .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
-          .waitFor();
-      await waitForLayout(page);
-      const boxes = await Promise.all(
-        (width < 700
-          ? ["#up-top", "#conv-status", "#conv-title"]
-          : ["#up-top", "#conv-status", "#conv-title", "#chip-kids", "#new-top"]
-        ).map((id) => page.locator(id).boundingBox()),
-      );
-      const header = (await page.locator("#topbar").boundingBox())!;
-      expect(header.height).toBe(48);
-      for (const box of boxes) {
-        expect(box).toBeTruthy();
-        expect(
-          Math.abs(box!.y + box!.height / 2 - (header.y + header.height / 2)),
-        ).toBeLessThan(2);
-      }
-      for (let i = 1; i < boxes.length; i++)
-        expect(boxes[i]!.x).toBeGreaterThanOrEqual(
-          boxes[i - 1]!.x + boxes[i - 1]!.width,
+      const shot = (stage: string) =>
+        screenshot(
+          page,
+          `${width}x${height}-${theme.replaceAll(" ", "-")}-${stage}`,
         );
+      await waitForLayout(page);
+      const assertHeaderRow = async (ids: string[]) => {
+        const boxes = await Promise.all(
+          ids.map((id) => page.locator(id).boundingBox()),
+        );
+        const header = (await page.locator("#topbar").boundingBox())!;
+        expect(header.height).toBe(48);
+        for (const box of boxes) {
+          expect(box).toBeTruthy();
+          expect(
+            Math.abs(box!.y + box!.height / 2 - (header.y + header.height / 2)),
+          ).toBeLessThan(2);
+        }
+        for (let i = 1; i < boxes.length; i++)
+          expect(boxes[i]!.x).toBeGreaterThanOrEqual(
+            boxes[i - 1]!.x + boxes[i - 1]!.width,
+          );
+      };
+      await assertHeaderRow(
+        width < 700
+          ? ["#up-top", "#conv-status", "#conv-title"]
+          : ["#up-top", "#conv-status", "#conv-title", "#chip-kids"],
+      );
       if (width < 700) {
         expect(
           await page
@@ -830,7 +1024,7 @@ export const tests: BrowserTest[] = [
       for (const id of [
         "#up-top",
         "#conv-title",
-        ...(width < 700 ? ["#menu-btn", "#pane-fab"] : ["#new-top"]),
+        ...(width < 700 ? ["#menu-btn", "#pane-fab"] : []),
       ])
         await assertTouchTarget(page, id);
       await shot("closed");
@@ -841,6 +1035,23 @@ export const tests: BrowserTest[] = [
         const sidebarHeader = await page.locator("#brand").boundingBox();
         expect(await page.locator("#menu-btn").isVisible()).toBe(false);
         await page.locator("#input").blur();
+        await page.keyboard.press("w");
+        await page.locator("#window-key-hints").waitFor({ state: "visible" });
+        await page.keyboard.press("f");
+        await page.locator("#main.fullscreen #top-actions #new-top").waitFor();
+        await assertHeaderRow([
+          "#up-top",
+          "#conv-status",
+          "#conv-title",
+          "#chip-kids",
+          "#new-top",
+        ]);
+        await assertTouchTarget(page, "#new-top");
+        await shot("chat-fullscreen");
+        await page.keyboard.press("w");
+        await page.locator("#window-key-hints").waitFor({ state: "visible" });
+        await page.keyboard.press("f");
+        await page.locator("#pane-rail > #new-top:first-child").waitFor();
         await page.keyboard.press("Shift+H");
         expect(await page.locator("#sidebar").isVisible()).toBe(false);
         await assertTouchTarget(page, "#menu-btn");
@@ -1026,13 +1237,7 @@ export const tests: BrowserTest[] = [
       }));
       await gotoRoot(page, base);
       await page.locator(".live-panel .shell-chip").waitFor();
-      const dir = process.env.RECURSE_SCREENSHOT_DIR;
-      if (dir) {
-        await mkdir(dir, { recursive: true });
-        await page.screenshot({
-          path: `${dir}/${process.env.RECURSE_SCREENSHOT_STAGE || "after"}-${width}-live.png`,
-        });
-      }
+      await screenshot(page, `${width}-live`);
       for (const [selector, label] of [
         [".shell-chip", "1 active shell"],
         [".agent-chip", "4 active agents"],
@@ -1074,13 +1279,7 @@ export const tests: BrowserTest[] = [
         name: "interrupted — context kept",
       });
       await state.waitFor();
-      const dir = process.env.RECURSE_SCREENSHOT_DIR;
-      if (dir) {
-        await mkdir(dir, { recursive: true });
-        await page.screenshot({
-          path: `${dir}/${process.env.RECURSE_SCREENSHOT_STAGE || "after"}-${width}-state.png`,
-        });
-      }
+      await screenshot(page, `${width}-state`);
       expect(await state.getAttribute("id")).toBe("chip-state");
       expect((await state.innerText()).trim()).toBe("");
       expect(await state.locator("svg[aria-hidden=true]").count()).toBe(1);
@@ -1140,6 +1339,152 @@ export const tests: BrowserTest[] = [
       "document.querySelector('#conv-title')?.textContent === 'Parent'",
     );
     expect(await page.locator("#up-top.on").count()).toBe(0);
+    await context.close();
+  },
+  // Regression: #3354 A closed desktop Chat must have a visible way back. (also Feature #3372 closed windows reopen where they were.)
+  async function test_closed_chat_reopens(browser, base) {
+    const { demo } = await postFixture(base, "seed-published-sizes");
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+    });
+    const page = await context.newPage();
+    const root = rootAgentId();
+    await gotoRoot(page, base);
+    await waitForLayout(page);
+    const chatTab = page.locator('#dock .dv-tab[data-dock-panel="chat"]');
+    const chatButton = page.locator(
+      '#pane-rail-panels .rail-btn[data-pane="chat"]',
+    );
+    const parked = page.locator(".dock-parking #main");
+    const focused = (selector: string) =>
+      page.waitForFunction(
+        (selector) =>
+          (globalThis as any).document.activeElement?.matches(selector),
+        selector,
+      );
+    const closeChat = async () => {
+      await chatTab.getByRole("button").click();
+      await parked.waitFor({ state: "attached" });
+      await chatButton.and(page.locator('[aria-expanded="false"]')).waitFor();
+    };
+    const reopened = async () => {
+      await page
+        .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
+        .waitFor();
+      await chatButton.and(page.locator('[aria-expanded="true"]')).waitFor();
+    };
+    expect(
+      await page
+        .locator("#pane-rail-panels .rail-btn")
+        .first()
+        .getAttribute("data-pane"),
+    ).toBe("chat");
+    expect(await chatButton.getAttribute("title")).toBe("Chat (g1)");
+    await closeChat();
+    expect(
+      await chatButton.evaluate((button) => {
+        const box = button.getBoundingClientRect();
+        const x = box.left + box.width / 2;
+        const y = box.top + box.height / 2;
+        return [
+          [0, 0],
+          [-21, 0],
+          [21, 0],
+          [0, -21],
+          [0, 21],
+        ].every(([dx, dy]) =>
+          button.contains(
+            button.ownerDocument.elementFromPoint(x + dx, y + dy),
+          ),
+        );
+      }),
+    ).toBeTrue();
+    await screenshot(page, "1280x800-chat-closed");
+    await chatButton.click();
+    await reopened();
+    await focused("#scroll");
+    await page.keyboard.press("w");
+    await page.keyboard.press("q");
+    await parked.waitFor({ state: "attached" });
+    await page.keyboard.press("g");
+    await page.keyboard.press("1");
+    await reopened();
+    await focused("#scroll");
+    await closeChat();
+    await page.locator(`.agent[data-id="${root}"]`).click();
+    await reopened();
+    await closeChat();
+    await page.locator("#new-top").click();
+    await reopened();
+    await focused("#input");
+    await gotoRoot(page, base);
+    await page.locator(`.agent.selected[data-id="${root}"]`).waitFor();
+    await page.locator('.rail-btn[data-pane="explorer"]').click();
+    await page.locator('#dock .dv-tab[data-dock-panel="explorer"]').waitFor();
+    await closeChat();
+    await page.reload();
+    await page.locator('#dock .dv-tab[data-dock-panel="explorer"]').waitFor();
+    await reopened();
+    const tab = (id: string) =>
+      page.locator(`#dock .dv-tab[data-dock-panel="${id}"]`);
+    const tips = page.locator('#pane-rail .rail-btn[data-pane="tips"]');
+    await tips.click();
+    await tab("tips").waitFor();
+    const windows = () =>
+      page.evaluate(async () => {
+        const win = globalThis as any;
+        await new Promise((done) =>
+          win.requestAnimationFrame(() => win.requestAnimationFrame(done)),
+        );
+        return [...win.document.querySelectorAll("#dock .dv-groupview")]
+          .map((group: any) => {
+            const { left, top, width, height } = group.getBoundingClientRect();
+            const tabs = [...group.querySelectorAll(".dv-tab")];
+            const ids = tabs.map((tab: any) => tab.dataset.dockPanel).join();
+            return { ids, box: [left, top, width, height] as number[] };
+          })
+          .sort((a: any, b: any) => a.box[0] - b.box[0]);
+      });
+    const [first] = await windows();
+    await tab("chat").click();
+    await page.keyboard.type("wrlll");
+    await page.keyboard.press("Enter");
+    const placed = await windows();
+    expect(placed[0]!.box[2]).toBeGreaterThan(first!.box[2]! + 20);
+    const places = async () => {
+      const now = await windows();
+      const moved = now.some((window, index) =>
+        window.box.some(
+          (v, side) => Math.abs(v - placed[index]!.box[side]!) > 1,
+        ),
+      );
+      return { ids: now.map((window) => window.ids), moved };
+    };
+    const unmoved = { ids: ["chat", "tips", "explorer"], moved: false };
+    expect(await places()).toEqual(unmoved);
+    await closeChat();
+    await page.keyboard.type("g1");
+    await reopened();
+    expect(await places()).toEqual(unmoved);
+    await tab("tips").getByRole("button").click();
+    await tab("tips").waitFor({ state: "detached" });
+    await tips.click();
+    await tab("tips").waitFor();
+    expect(await places()).toEqual(unmoved);
+    for (const id of [demo, root]) {
+      await closeChat();
+      await page.locator(`.agent[data-id="${id}"]`).click();
+      await page.locator(`.agent.selected[data-id="${id}"]`).waitFor();
+      await reopened();
+    }
+    await tab("explorer").waitFor();
+    expect(await places()).toEqual(unmoved);
+    await closeChat();
+    await tab("tips").getByRole("button").click();
+    await tab("tips").waitFor({ state: "detached" });
+    await chatButton.click();
+    await reopened();
+    expect((await places()).ids).toEqual(["chat", "explorer"]);
     await context.close();
   },
 ];

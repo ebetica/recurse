@@ -28,6 +28,7 @@ export type PolicyRoute = PolicyCandidate & {
 export type TrustedModelPolicy = {
   version: 1;
   active: PolicyModel;
+  reviewer_pin?: PolicyModel;
   reviewer: PolicyRoute;
   summary: PolicyRoute;
 };
@@ -136,15 +137,34 @@ export function loadTrustedModelPolicy(
   const candidate = value as Record<string, unknown>;
   const active = model(candidate.active);
   const reviewer = route(candidate.reviewer, true);
+  const pin =
+    candidate.reviewer_pin === undefined
+      ? undefined
+      : model(candidate.reviewer_pin);
   const summary = route(candidate.summary);
-  if (candidate.version !== 1 || !active || !reviewer || !summary) {
+  if (
+    candidate.version !== 1 ||
+    !active ||
+    !reviewer ||
+    !summary ||
+    (candidate.reviewer_pin !== undefined && !pin)
+  ) {
     return { status: "invalid" };
   }
-  return { status: "valid", policy: { version: 1, active, reviewer, summary } };
+  return {
+    status: "valid",
+    policy: {
+      version: 1,
+      active,
+      reviewer,
+      summary,
+      ...(pin ? { reviewer_pin: pin } : {}),
+    },
+  };
 }
 
 function sameModel(
-  actual: Model<any> | undefined,
+  actual: Pick<Model<any>, "provider" | "id"> | undefined,
   expected: PolicyModel,
 ): boolean {
   if (!actual || actual.provider !== expected.provider) return false;
@@ -161,10 +181,27 @@ export type ReviewSelection = {
   effort: ReviewEffort;
 };
 
-// Prove policy ownership of ctx.model, then try runner-ordered reviewer
-// candidates. Never infer candidates. Only an absent key during old-runner
-// overlap uses the active model at low effort without lookup or provider
-// change.
+/** Bounded diagnostics when no trusted candidate resolves. */
+export function reviewerConfigurationCategory(
+  ctx: ExtensionContext,
+  state: TrustedModelPolicyState,
+  activeModel: Pick<Model<any>, "provider" | "id"> | undefined,
+): string {
+  if (state.status === "invalid") return "invalid_policy";
+  if (state.status === "valid") {
+    const { policy } = state;
+    const pin = policy.reviewer_pin;
+    if (pin && !sameModel(ctx.modelRegistry.find(pin.provider, pin.model), pin))
+      return "unsupported_reviewer_pin";
+    if (!sameModel(activeModel, policy.active))
+      return "acting_identity_mismatch";
+  }
+  return "no_trusted_candidates";
+}
+
+// Try runner-ordered candidates in the trusted registry even when the acting
+// identity or reviewer pin is stale. Never infer candidates from file models.
+// Only an absent policy uses the trusted active model at low effort.
 export function pickReviewerCandidates(
   ctx: ExtensionContext,
   state: TrustedModelPolicyState,
@@ -175,13 +212,17 @@ export function pickReviewerCandidates(
   }
   if (state.status !== "valid") return undefined;
   const policy = state.policy;
-  if (!sameModel(ctx.model, policy.active)) return undefined;
   const target = policy[purpose];
   const candidates =
-    purpose === "reviewer" ? [target, ...(target.candidates ?? [])] : [target];
+    purpose === "reviewer"
+      ? [target, ...(target.candidates ?? [])]
+      : [target, policy.reviewer, ...(policy.reviewer.candidates ?? [])];
   const selected: ReviewSelection[] = [];
+  const seen = new Set<string>();
   for (const candidate of candidates) {
-    if (!candidate.provider) continue;
+    const key = `${candidate.provider}\u0000${candidate.model}`;
+    if (!candidate.provider || seen.has(key)) continue;
+    seen.add(key);
     const model = ctx.modelRegistry.find(candidate.provider, candidate.model);
     if (model && sameModel(model, candidate)) {
       selected.push({ model, effort: candidate.effort });

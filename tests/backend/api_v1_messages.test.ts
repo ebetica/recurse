@@ -13,7 +13,7 @@ import { Value } from "typebox/value";
 import { setSafetyReviewOff } from "../../src/extensions/core/safety/durable";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { apiSchema } from "../../src/web/api_v1/schema";
-import { held } from "./fixtures/durable_host/host";
+import { held, until } from "./fixtures/durable_host/host";
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { appWorld } from "./web_app_support";
 
@@ -227,3 +227,97 @@ test("send v1 message through the fake provider", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+// Regression: #3324 interrupt retries keep the replacement run alive.
+test.each([false, true])(
+  "a lost interrupt acknowledgement keeps its replacement (clear=%s)",
+  async (clearing) => {
+    const { root, env } = appWorld({ password: true });
+    seedPiModelList(join(root, "data", "config"));
+    const app = await buildApp({ env, sink: new WebLogSink(() => {}) });
+    const initial = held(fauxAssistantMessage("old reply"));
+    const replacement = held(fauxAssistantMessage("replacement completed"));
+    const faux = fauxProvider();
+    faux.setResponses([initial.step, replacement.step]);
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const deps = (
+      app.instance.durable as unknown as {
+        deps: { models: typeof models; settings: () => string[] };
+      }
+    ).deps;
+    deps.models = models;
+    deps.settings = () => ["faux/faux-1", "off"];
+    const running = await app.serve({ port: 0 });
+    try {
+      await until(() => app.instance.lifecycle.readinessSnapshot().ready);
+      const target = String(
+        (await app.instance.create.create({ title: "Receiver", muted: true }))
+          .id,
+      );
+      const token = (
+        await Bun.file(join(env.CHAT_DATA_DIR!, "server.json")).json()
+      ).token as string;
+      const headers = {
+        "x-loopback-token": token,
+        "content-type": "application/json",
+      };
+      const url = `${running.url}/api/v1/agents/${target}/messages`;
+      const post = (body: unknown) =>
+        fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+      await post({ text: "initial prompt", client_message_id: "initial" });
+      await initial.started;
+      const original = clearing
+        ? await app.instance.durable.open(target)
+        : undefined;
+      if (clearing) await app.instance.durable.clear(target);
+      const send = {
+        text: "replacement prompt",
+        interrupt: true,
+        client_message_id: "replacement",
+      };
+      const lost = await post(send);
+      await lost.body?.cancel();
+      await replacement.started;
+      const run = await app.instance.durable.stopStatus(target);
+      expect(run[0]).toBe("running");
+      const retry = await post(send);
+      expect(retry.status).toBe(200);
+      expect(await retry.json()).toMatchObject({
+        message_id: "op:operator::replacement",
+        interrupted: false,
+      });
+      if (original)
+        expect(await app.instance.durable.stop(target, run[1]!, original)).toBe(
+          false,
+        );
+      expect(await app.instance.durable.stopStatus(target)).toEqual(run);
+      replacement.release();
+      await until(
+        () => app.instance.durable.metadata(target).status === "idle",
+      );
+      const page = (await (
+        await fetch(`${url}?full=true`, { headers })
+      ).json()) as { messages: { kind: string; text?: string }[] };
+      expect(
+        page.messages.filter(
+          (message) =>
+            message.kind === "user" &&
+            message.text?.includes("replacement prompt"),
+        ),
+      ).toHaveLength(1);
+      expect(
+        page.messages
+          .filter((message) => message.kind === "assistant")
+          .map((m) => m.text),
+      ).toEqual(["replacement completed"]);
+      expect(faux.state.callCount).toBe(2);
+    } finally {
+      initial.release();
+      replacement.release();
+      await running.close();
+      await app.instance.shutdown();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

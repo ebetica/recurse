@@ -4,7 +4,8 @@
 // (web/push-worker.ts) and the manifest iOS needs for Home Screen Web Push.
 
 import { readFile } from "node:fs/promises";
-import { brandResponse, readBrand } from "../branding";
+import { brandResponse, defaultIconUrl, readBrand } from "../branding";
+import type { FrontendCache } from "./static";
 
 import {
   parseSubscription,
@@ -17,7 +18,12 @@ import { HttpError, jsonResponse, type Router } from "./router";
 export function registerNotificationRoutes(
   router: Router,
   push: Pick<PushNotifications, "publicKey" | "subscribe" | "unsubscribe">,
-  page: { workerSource: string; displayName: string; brandingFile?: string },
+  page: {
+    workerSource: string;
+    displayName: string;
+    brandingFile?: string;
+    frontend: Pick<FrontendCache, "snapshot">;
+  },
 ): void {
   let worker: Promise<string> | null = null;
   router.get("/push-worker.js", async () => {
@@ -32,45 +38,53 @@ export function registerNotificationRoutes(
       },
     });
   });
-  router.get("/manifest.webmanifest", async () => {
+  router.add(["GET", "HEAD"], "/manifest.webmanifest", async () => {
     const brand = brandResponse(
       page.brandingFile
         ? await readBrand(page.brandingFile)
         : { name: null, icon: null },
       page.displayName,
     );
-    return jsonResponse({
-      name: brand.name,
-      short_name: brand.name,
-      start_url: "/",
-      scope: "/",
-      display: "fullscreen",
-      icons: brand.icon
-        ? [
-            {
-              src: brand.icon,
-              sizes: "any",
-              type: brand.icon_type,
-              purpose: "any maskable",
-            },
-          ]
-        : [
-            {
-              src: "/static/brand/app-icon.svg",
-              sizes: "any",
-              type: "image/svg+xml",
-              purpose: "any",
-            },
-            ...[192, 512].flatMap((size) =>
-              ["any", "maskable"].map((purpose) => ({
-                src: `/static/brand/app-icon${purpose === "maskable" ? "-maskable" : ""}-${size}.png`,
-                sizes: `${size}x${size}`,
-                type: "image/png",
-                purpose,
-              })),
-            ),
-          ],
-    });
+    const [, assets] = await page.frontend.snapshot();
+    return jsonResponse(
+      {
+        name: brand.name,
+        short_name: brand.name,
+        start_url: "/",
+        scope: "/",
+        display: "fullscreen",
+        icons: brand.icon
+          ? [
+              {
+                src: brand.icon,
+                sizes: "any",
+                type: brand.icon_type,
+                purpose: "any maskable",
+              },
+            ]
+          : [
+              {
+                src: defaultIconUrl("app-icon.svg", assets),
+                sizes: "any",
+                type: "image/svg+xml",
+                purpose: "any",
+              },
+              ...[192, 512].flatMap((size) =>
+                ["any", "maskable"].map((purpose) => ({
+                  src: defaultIconUrl(
+                    `app-icon${purpose === "maskable" ? "-maskable" : ""}-${size}.png`,
+                    assets,
+                  ),
+                  sizes: `${size}x${size}`,
+                  type: "image/png",
+                  purpose,
+                })),
+              ),
+            ],
+      },
+      200,
+      { "cache-control": "no-cache" },
+    );
   });
   const refused = (error: unknown): never => {
     if (error instanceof PushSubscriptionError)

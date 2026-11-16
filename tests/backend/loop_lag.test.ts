@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import { LoopLag } from "../../src/observability/loop_lag";
-import { slowSpan, startSlowSpan } from "../../src/observability/slow_span";
+import {
+  slowSpan,
+  startOpenPhase,
+  startSlowSpan,
+} from "../../src/observability/slow_span";
 import {
   logger,
   type RuntimeLogRecord,
@@ -13,6 +17,7 @@ function sampler(
   summaryMs?: number,
   now?: () => number,
   conversations?: () => readonly string[],
+  idleIntervalMs?: number,
 ) {
   const records: RuntimeLogRecord[] = [];
   const loopLag = new LoopLag({
@@ -21,6 +26,7 @@ function sampler(
     runningConversations: conversations ?? (() => running),
     ...(summaryMs === undefined ? {} : { summaryMs }),
     ...(now === undefined ? {} : { now }),
+    ...(idleIntervalMs === undefined ? {} : { idleIntervalMs }),
   });
   return { loopLag, records };
 }
@@ -124,7 +130,13 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
 test("the summary is logged for an active window and not for an idle one", async () => {
   const running: string[] = [];
   let now = 0;
-  const { loopLag, records } = sampler(running, 300, () => (now += 10));
+  const { loopLag, records } = sampler(
+    running,
+    300,
+    () => (now += 10),
+    undefined,
+    20,
+  );
   loopLag.start();
   try {
     const state = loopLag as unknown as { windowStart: number };
@@ -147,4 +159,38 @@ test("the summary is logged for an active window and not for an idle one", async
   expect(summaries[0]!.message).toMatch(
     /^event=event_loop_lag max_ms=\S+ p50_ms=\S+ p99_ms=\S+ samples=\d+$/,
   );
+});
+
+// Feature: #3314 an idle sampler wakes every stallMs and still logs stalls.
+test("an idle sampler logs a stall it spans and speeds up for a request or open", async () => {
+  const other = sampler([]).loopLag;
+  other.start();
+  const { loopLag, records } = sampler([]);
+  const state = loopLag as unknown as { scheduledMs: number };
+  loopLag.start();
+  try {
+    while (state.scheduledMs !== 250) await Bun.sleep(5);
+    const until = performance.now() + 700;
+    while (performance.now() < until) {}
+    while (
+      !records.some((r) => r.message.startsWith("event=event_loop_stall "))
+    )
+      await Bun.sleep(5);
+    while (state.scheduledMs !== 250) await Bun.sleep(5);
+    const done = loopLag.request({ route: "/api/tree" });
+    expect(state.scheduledMs).toBe(20);
+    done();
+    while (state.scheduledMs !== 250) await Bun.sleep(5);
+    other.stop();
+    const phase = startOpenPhase("c1");
+    expect(state.scheduledMs).toBe(20);
+    phase.close();
+    while (state.scheduledMs !== 250) await Bun.sleep(5);
+  } finally {
+    other.stop();
+    loopLag.stop();
+  }
+  expect(
+    records.filter((r) => r.message.startsWith("event=event_loop_stall ")),
+  ).toHaveLength(1);
 });

@@ -1,7 +1,7 @@
-// One Harness per conversation; runs outlive HTTP requests. The host keeps open
-// handles, live rows and per-conversation order; host/ holds the lifecycles
-// (open, registry, send, clear, delete, close, title, import, reads). Settings
-// owns auth. Reap, clear and recovery verify group cleanup before retiring.
+// @tla specs/tla/send/OperatorSend.tla: Stop preserves the committed inbox.
+// One Harness per conversation; runs outlive HTTP. Keep handles, live rows and
+// per-conversation order; host/ holds lifecycles. Settings owns auth.
+// Reap, clear and recovery verify group cleanup before retiring.
 import { runStateClock } from "../run_state_clock";
 import { ServerStoppingError } from "./stopping_error";
 import { IdleHarnesses } from "./idle_harnesses";
@@ -193,10 +193,12 @@ export class DurableHost {
   readonly liveRows = new Map<string, LiveRow>();
   readonly cacheWarmers = new Set<ReturnType<Runtime["createCacheWarm"]>>();
 
-  /** API v1 idle reasons: run, inbox or shell, including descendants. */
-  cacheWarmBusy(cid: string): boolean {
+  /** Warming includes shells and descendants; compaction checks own input. */
+  cacheWarmBusy(cid: string, includeBackground = true): boolean {
     for (const [other, row] of this.liveRows) {
-      if (!row.runId && !row.queued && !row.shells.size) continue;
+      if (!includeBackground && other !== cid) continue;
+      if (!row.runId && !row.queued && !(includeBackground && row.shells.size))
+        continue;
       let id: string | undefined = other;
       const seen = new Set<string>();
       while (id && !seen.has(id)) {
@@ -440,7 +442,17 @@ export class DurableHost {
       const rt = await runtime();
       if (this.modelsValue === null) {
         const models =
-          this.deps.models ?? rt.durableModels(this.deps.piAgentDir);
+          this.deps.models ??
+          rt.durableModels(
+            this.deps.piAgentDir,
+            (message, note) =>
+              this.deps.log(
+                note ? "pi_model_config_note" : "pi_model_config_invalid",
+                { message },
+                note ? undefined : WARNING,
+              ),
+            () => Object.keys(this.deps.customProviders?.() ?? {}),
+          );
         const { usageLimits } = this.deps;
         this.modelsValue = usageLimits
           ? rt.observeUsageLimits(models, usageLimits)
@@ -450,11 +462,6 @@ export class DurableHost {
         this.deps.customProviderEnvValue?.(provider),
       );
     }
-    try {
-      this.syncCustom!(this.deps.customProviders?.() ?? {});
-    } catch {
-      // Invariant: An unreadable model-providers.json keeps the last providers.
-    }
     if (!this.deps.models) {
       this.catalogRefresh ??= this.modelsValue
         .refresh({ allowNetwork: false })
@@ -462,6 +469,11 @@ export class DurableHost {
           this.catalogRefresh = null;
         });
       await this.catalogRefresh;
+    }
+    try {
+      this.syncCustom!(this.deps.customProviders?.() ?? {});
+    } catch {
+      // Invariant: An unreadable model-providers.json keeps the last providers.
     }
     return this.modelsValue;
   }
@@ -772,13 +784,21 @@ export class DurableHost {
   }
 
   /**
-   * Abort the current run, or only `expectedRun` when given; queued input
-   * stays queued. False when no matching run was in progress.
+   * Abort the matching run, retaining queued input; `expected` fences storage.
+   * False when no matching run or opened storage remains.
    */
-  async stop(cid: string, expectedRun?: string): Promise<boolean> {
-    const { harness } = await this.open(cid);
+  async stop(
+    cid: string,
+    expectedRun?: string,
+    expected?: Opened,
+  ): Promise<boolean> {
+    const opened = await this.open(cid);
+    if (expected !== undefined && opened !== expected) return false;
+    const { harness, conversation } = opened;
     this.invalidatePromptCache(cid);
-    const run = (await this.live(cid))?.run;
+    const { LiveDoc } = await runtime();
+    const run = (await harness.snapshot(LiveDoc, conversation.id, context))
+      ?.run;
     if (run === undefined) return false;
     if (expectedRun !== undefined && String(run.taskId) !== expectedRun)
       return false;
@@ -844,8 +864,8 @@ export class DurableHost {
   }
 
   /** The latest captured request, for the inspector (host/reads.ts). */
-  prompt(cid: string): Promise<Rec> {
-    return prompt(this, cid);
+  prompt(cid: string, includeSafetyReview = false): Promise<Rec> {
+    return prompt(this, cid, includeSafetyReview);
   }
 
   /** Full payloads, addressed by their existing tool task identity. */

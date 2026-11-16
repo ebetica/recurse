@@ -12,6 +12,7 @@ import {
   gotoRoot,
   mockConversation,
   postFixture,
+  recordJumpHighlight,
   summary,
   visibleAndUncovered,
   waitForLayout,
@@ -151,7 +152,7 @@ export const liveTests: BrowserTest[] = [
           status: 200,
           contentType: "text/event-stream",
           body:
-            `retry: 3000\n\n` +
+            `retry: 100\n\n` +
             `id: receipts:${eventRevision}\n` +
             "event: snapshot\n" +
             `data: ${JSON.stringify({ status: "ready", instance_id: "receipts", revision: eventRevision, blocks: currentRows, older: false, newer: false })}\n\n`,
@@ -842,6 +843,25 @@ export const liveTests: BrowserTest[] = [
         const series = boundary.locator(".turn-series-toggle").first();
         await series.click();
         expect(await series.getAttribute("aria-expanded")).toBe("true");
+        const tool = boundary.locator(".turn-tool").first();
+        await tool.locator(".turn-tool-head").click();
+        expect(await tool.locator(".tool-payload pre").last().innerText()).toBe(
+          "read ok",
+        );
+        const agent = new URLSearchParams(
+          new URL(page.url()).hash.slice(1),
+        ).get("agent");
+        const view = await page.request.get(
+          `${base}api/conversations/${agent}/view?limit=100`,
+        );
+        expect(view.status()).toBe(200);
+        const call = (await view.json()).blocks.find(
+          (row: { name?: string }) => row.name === "read",
+        );
+        const details = await page.request.get(
+          `${base}api/conversations/${agent}/tool-details/${call.artifact_id}`,
+        );
+        expect(details.status()).toBe(200);
         expect(errors).toEqual([]);
       } finally {
         await context.close();
@@ -1076,7 +1096,7 @@ export const liveTests: BrowserTest[] = [
       await context.close();
     }
   },
-  // Regression: #3229 wait for settled scrolling and full streamed paragraphs before measuring preservation (also #3065; #2976 short replies add no space; long replies stop at the send).
+  // Regression: #3229 wait for settled scrolling and full streamed paragraphs before measuring preservation (also #3065; #2976 short replies add no space; long replies stop at the send; #3285 scripted scrolls release the pin).
   async function test_send_pins_message_and_live_bar_stays_visible(
     browser,
     base,
@@ -1115,7 +1135,10 @@ export const liveTests: BrowserTest[] = [
           }),
         ).toEqual({ top: 0, extra: 0 });
         for (let part = 0; part < 4; part += 1)
-          await postFixture(base, "scroll-pin-release");
+          await postFixture(base, "release", {
+            agent: empty.agent,
+            gate: "reply",
+          });
         await shortPage.locator("#live-bar").waitFor({ state: "hidden" });
         expect(shortErrors).toEqual([]);
         await shortPage.close();
@@ -1175,7 +1198,7 @@ export const liveTests: BrowserTest[] = [
             };
           });
         const releaseParagraph = async (label: string) => {
-          await postFixture(base, "scroll-pin-release");
+          await postFixture(base, "release", { agent, gate: "reply" });
           await page
             .getByText(
               `${label} paragraph 10. ${"The reply keeps streaming below the message. ".repeat(5)}`.trim(),
@@ -1220,8 +1243,9 @@ export const liveTests: BrowserTest[] = [
           for (let dy = -180; dy <= 200; dy += 20) await touch("touchMove", dy);
           await touch("touchEnd", 200);
         } else {
-          await page.mouse.move(x, y);
-          await page.mouse.wheel(0, -400);
+          await page.evaluate(() => {
+            document.querySelector("#scroll").scrollTop -= 400;
+          });
         }
         await page.waitForFunction(
           (top) => document.querySelector("#scroll").scrollTop < top - 200,
@@ -1264,7 +1288,7 @@ export const liveTests: BrowserTest[] = [
           Math.abs((await geometry()).scrollTop - latest.scrollTop),
         ).toBeLessThanOrEqual(1);
 
-        await postFixture(base, "scroll-pin-release");
+        await postFixture(base, "release", { agent, gate: "reply" });
         await page.locator("#live-bar").waitFor({ state: "hidden" });
         await page.evaluate(() => {
           const input = document.querySelector("#input") as any;
@@ -1310,7 +1334,7 @@ export const liveTests: BrowserTest[] = [
         const queuedHandoffTop = (await geometry()).scrollTop;
         holding = false;
         for (const resolve of waiting) resolve();
-        await postFixture(base, "scroll-pin-release");
+        await postFixture(base, "release", { agent, gate: "reply" });
         const handoff = page.locator("#messages .msg.user[data-row-id]", {
           hasText: "Continue.",
         });
@@ -1323,5 +1347,93 @@ export const liveTests: BrowserTest[] = [
         await context.close();
       }
     }
+  },
+  // Regression: #3316 a jump that scrolls nothing leaves the thread following.
+  async function test_still_jump_keeps_following(browser, base) {
+    const { demo } = await postFixture(base, "seed-files-auto-open");
+    for (let n = 0; n < 4; n += 1)
+      await postFixture(base, "republish-auto-open");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 420 },
+    });
+    const errors = captureErrors(page);
+    await page.goto(`${base}#agent=${demo}`, { waitUntil: "domcontentloaded" });
+    const rows = page.locator("#messages [data-row-id]");
+    await rows.last().waitFor();
+    const highlight = page.locator(".file-jump-target");
+    for (let jump = 0; jump < 2; jump += 1) {
+      if (!(await page.locator('.pane-col[data-pane="files"]').count()))
+        await page.locator('.rail-btn[data-pane="files"]').click();
+      await page
+        .locator('.pane-col[data-pane="files"] .files-card')
+        .first()
+        .getByRole("button")
+        .first()
+        .click();
+      await page
+        .locator(".pane-col.file-tab:visible")
+        .getByRole("button", { name: "Jump to message" })
+        .click();
+      await highlight.waitFor({ state: "attached" });
+      await highlight.waitFor({ state: "detached" });
+    }
+    await page.setViewportSize({ width: 1280, height: 640 });
+    await waitForLayout(page);
+    const before = await rows.count();
+    await postFixture(base, "republish-auto-open");
+    await page.waitForFunction(
+      (count) =>
+        document.querySelectorAll("#messages [data-row-id]").length > count,
+      before,
+    );
+    await waitForLayout(page);
+    expect(
+      await rows.last().evaluate((row) => {
+        const box = row.getBoundingClientRect();
+        const view = document.querySelector("#scroll").getBoundingClientRect();
+        return box.bottom > view.top && box.top < view.bottom;
+      }),
+    ).toBe(true);
+    expect(errors).toEqual([]);
+  },
+  // Regression: #3318 a jump re-aims when images above its row load mid-jump.
+  async function test_jump_reaims_past_loading_images(browser, base) {
+    const { demo } = await postFixture(base, "seed-jump-images");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 1400 },
+    });
+    const errors = captureErrors(page);
+    await page.goto(`${base}#agent=${demo}`, { waitUntil: "domcontentloaded" });
+    await page.locator("#messages [data-row-id]").last().waitFor();
+    await page.locator('.rail-btn[data-pane="files"]').click();
+    await page
+      .locator('.pane-col[data-pane="files"] .files-card')
+      .filter({ has: page.getByText("0.md", { exact: true }) })
+      .getByRole("button")
+      .first()
+      .click();
+    const highlighted = await recordJumpHighlight(page);
+    await page
+      .locator(".pane-col.file-tab:visible")
+      .getByRole("button", { name: "Jump to message" })
+      .click();
+    const row = page.locator(`[data-row-id="${await highlighted()}"]`);
+    await row
+      .and(page.locator(".file-jump-target"))
+      .waitFor({ state: "detached" });
+    await waitForLayout(page);
+    expect(
+      await page
+        .locator("#messages img")
+        .evaluateAll((images) => images.map((image) => image.complete)),
+    ).toEqual([true, true, true]);
+    const offCentre = await row.evaluate((el) => {
+      const scroll = document.querySelector("#scroll");
+      const box = el.getBoundingClientRect();
+      const view = scroll.getBoundingClientRect();
+      return box.top - view.top - (scroll.clientHeight - box.height) / 2;
+    });
+    expect(Math.abs(offCentre)).toBeLessThanOrEqual(1);
+    expect(errors).toEqual([]);
   },
 ];

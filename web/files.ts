@@ -1,8 +1,8 @@
-// Page bounded owner metadata newest-first; preview only visible files.
-// Keep open collections during reads; bound caches and throttle probes.
+// Bound newest-first metadata and visible previews; throttle probes.
 // Image dialogs leave history before Files; browser-cache and share originals.
 // Viewers navigate oldest-first; desktop keys share list cursors and scrolling.
 import { html, nothing, render, type TemplateResult } from "lit";
+import { isTextEditorTarget } from "../src/keyboard_target.js";
 import {
   ATTACHMENT_FILE_ICON,
   BACK_ICON as BACK,
@@ -25,7 +25,10 @@ import { attachmentSize } from "./agent-attachments.js";
 import { jumpToFile, jumpToMessage } from "./conversation/navigation.js";
 import { scrollToLatest } from "./conversation/controls.js";
 import { canDraw, drawOn } from "./image-preview/drawing.js";
-import { installImageZoom } from "./image-preview/zoom.js";
+import {
+  installImageWheelNavigation,
+  installImageZoom,
+} from "./image-preview/zoom.js";
 import { installImageCommentLayout } from "./image-preview/comments-layout.js";
 import {
   closeDrawingEditor,
@@ -56,7 +59,9 @@ import { registerFileTabSource } from "./panes/file-tabs.js";
 import { panePowerbar, renderPowerbarControls } from "./panes/powerbar.js";
 import { paneItem } from "./panes/navigation.js";
 import { copyText } from "./tool_details.js";
-import { renderDocumentMarkdown } from "./document-markdown.js";
+import { highlightSource } from "./source-preview.js";
+import { scrollDocumentFragment } from "./document-markdown.js";
+import { changesStamp, filesMarkdown, noteReviewed } from "./files/markdown.js";
 import { installBoxComments, touchDrewBox } from "./files/box-comments.js";
 import { diffPending, diffPreview, isDiff } from "./files/diff-preview.js";
 import {
@@ -71,6 +76,7 @@ import {
   selectedFile,
   SettledTurnFile,
   versionGroups,
+  versionLabel,
   type FileSelection,
   type FilePreviewState,
   type SessionFile,
@@ -247,8 +253,8 @@ function openImage(cid: string, file: SessionFile): void {
         outside = null;
     });
     dialog.addEventListener("pointercancel", () => (outside = null));
-    dialog.addEventListener("click", () => {
-      if (outside) closeImage();
+    dialog.addEventListener("click", (event) => {
+      if (outside && (phone.matches || event.detail < 2)) closeImage();
       outside = null;
     });
     installBoxComments(body);
@@ -585,15 +591,6 @@ function syncDraw(): void {
 document.addEventListener("recurse:attachment-availability", syncDraw);
 
 document.addEventListener("keydown", (event) => {
-  if (
-    popout &&
-    (event.key === "ArrowLeft" || event.key === "ArrowRight") &&
-    !(event.target as Element).closest("input, textarea, select")
-  ) {
-    stepImage(event.key === "ArrowLeft" ? -1 : 1);
-    event.preventDefault();
-    return;
-  }
   const target = event.target as Element | null;
   if (
     (event.key !== "ArrowLeft" && event.key !== "ArrowRight") ||
@@ -602,10 +599,18 @@ document.addEventListener("keydown", (event) => {
     event.ctrlKey ||
     event.metaKey ||
     event.shiftKey ||
+    isTextEditorTarget(target)
+  )
+    return;
+  if (popout) {
+    stepImage(event.key === "ArrowLeft" ? -1 : 1);
+    event.preventDefault();
+    return;
+  }
+  if (
     !target?.closest?.(
       '.pane-col[data-pane="files"], .pane-col.file-tab:has(.files-detail)',
-    ) ||
-    target.closest("input, textarea, select, [contenteditable]")
+    )
   )
     return;
   const element =
@@ -627,6 +632,7 @@ function installSwipe(
     if (shownId) stepFile(shownId, delta);
   },
 ): void {
+  installImageWheelNavigation(element, step);
   let start: { x: number; y: number } | null = null;
   const scrollsSideways = (node: Element | null): boolean => {
     for (let at = node; at && at !== element; at = at.parentElement)
@@ -916,7 +922,11 @@ function badge(ctx: PaneContext): string | number | null {
 }
 
 function downloadHref(cid: string, file: SessionFile): string | null {
-  if (file.image_url) return `${file.image_url}&download=1`;
+  if (file.image_url)
+    return file.image_url.replace(
+      /^(\/api\/[^#]*\/path-image\?[^#]*)$/,
+      "$1&download=1",
+    );
   if (!file.id || file.unavailable) return null;
   return backendFor(cid).url(
     `/api/conversations/${encodeURIComponent(cid)}/attachments/${encodeURIComponent(file.id)}`,
@@ -1082,6 +1092,7 @@ function previewTemplate(
       src=${detail ? image : image.replace(/\/preview$/, "/thumbnail")}
       loading=${detail ? "eager" : "lazy"}
       decoding="async"
+      referrerpolicy="no-referrer"
       @load=${(event: Event) => {
         syncDraw();
         if (detail) {
@@ -1169,7 +1180,7 @@ function previewTemplate(
           ? diffPreview(preview)
           : rendersAsMarkdown(file)
             ? markdownPreview(cid, file, preview.text ?? "", element)
-            : html`<pre class="report-doc">${preview.text}</pre>`}
+            : html`<pre class="report-doc files-source">${preview.text}</pre>`}
         ${preview.truncated
           ? html`<span class="files-preview-note">Preview truncated.</span>`
           : nothing}
@@ -1186,18 +1197,6 @@ function previewTemplate(
       ? "Loading preview…"
       : "Preview loads when visible."}
   </div>`;
-}
-
-function versionLabel(file: SessionFile, number: number, latest: boolean) {
-  const when = file.created_at
-    ? new Date(file.created_at * 1000).toLocaleString([], {
-        dateStyle: "medium",
-        timeStyle: "short",
-      })
-    : "";
-  return [`Version ${number}`, when, latest ? "latest" : ""]
-    .filter(Boolean)
-    .join(" · ");
 }
 
 // Picking a version opens its tab or updates the legacy detail view.
@@ -1248,45 +1247,38 @@ const NEXT_ICON = unsafeHTML(NEXT);
 const DRAW_ICON = unsafeHTML(PEN_ICON);
 const TRASH_ICON = unsafeHTML(FILE_DELETE_ICON);
 
+const markdownSource = (cid: string) => ({
+  files: allFiles(entry(cid)),
+  previews: entry(cid).previews,
+  load: (file: SessionFile) => {
+    const preview = entry(cid).previews.get(file.key);
+    if (preview?.status === "evicted") preview.status = "idle";
+    loadTextPreview(cid, file);
+  },
+  refresh: repaint,
+});
+
 function markdownPreview(
   cid: string,
   file: SessionFile,
   text: string,
   element?: FilesEl,
-): HTMLElement {
-  const body = document.createElement("div");
-  body.className = "files-markdown artifact-doc report-doc";
+): TemplateResult {
   const controller = new AbortController();
   if (element) element._markdownAbort = controller;
-  renderDocumentMarkdown(body, text, {
-    title: file.name,
-    signal: controller.signal,
-    agentId: cid,
-    documentPath: file.source_path,
-    resolveRelative: (path, image) => {
-      let name: string;
-      try {
-        name = decodeURIComponent(
-          new URL(
-            path,
-            new URL(file.name, "https://files.invalid/"),
-          ).pathname.slice(1),
-        );
-      } catch {
-        return null;
-      }
-      const sibling = versionGroups(allFiles(entry(cid))).find(
-        (group) => group[0]!.name === name,
-      )?.[0];
-      return sibling
-        ? image
-          ? (imageHref(cid, sibling)?.replace(/\/preview$/, "/thumbnail") ??
-            null)
-          : downloadHref(cid, sibling)
-        : null;
-    },
+  return filesMarkdown(cid, file, text, controller.signal, {
+    ...markdownSource(cid),
+    href: (sibling, image) =>
+      image
+        ? (imageHref(cid, sibling)?.replace(/\/preview$/, "/thumbnail") ?? null)
+        : downloadHref(cid, sibling),
+    open: (sibling, fragment) =>
+      openFileTab("files", JSON.stringify([cid, sibling.key]), {
+        cid,
+        file: sibling,
+        fragment,
+      }),
   });
-  return body;
 }
 
 function unavailableLabel(file: SessionFile): string | null {
@@ -1540,6 +1532,8 @@ function syncComments(element: FilesEl, cid: string, file: SessionFile | null) {
     if (commentMount.current === pane) commentMount.current = null;
     return;
   }
+  const source = element.querySelector(".files-source");
+  if (source) highlightSource(source, doc.name);
   claimComments(pane);
   reanchor(pane, doc.id!);
   renderComments(pane);
@@ -1620,6 +1614,7 @@ function renderPane(element: FilesEl, id: string): void {
   const all = allFiles(value);
   const groups = versionGroups(all);
   const files = groups.map((group) => group[0]!);
+  noteReviewed(id, files);
   const query = coarsePointer.matches ? "" : value.filter.trim().toLowerCase();
   const matching = groups.filter((group) =>
     group[0]!.name.toLowerCase().includes(query),
@@ -1644,6 +1639,7 @@ function renderPane(element: FilesEl, id: string): void {
     failedDeletion: value.failedDeletion?.key,
     filter: value.filter,
     query,
+    changes: shown && changesStamp(id, shown, markdownSource(id)),
     files: all.map((file) => [
       file.key,
       file.references,
@@ -1822,6 +1818,7 @@ function renderFile(element: FilesEl, cid: string, file: SessionFile): void {
     preview?.truncated,
     versions.map((item) => item.key),
     position,
+    changesStamp(cid, file, markdownSource(cid)),
   ]);
   if (
     element._filesHash !== hash &&
@@ -1932,6 +1929,7 @@ registerFileTabSource("files", (key, id) => {
     )
   )
     return null;
+  let fragment = "";
   let attempt: { cancelled: boolean; file?: SessionFile | null } | undefined;
   const release = () => {
     if (attempt) attempt.cancelled = true;
@@ -1954,8 +1952,13 @@ registerFileTabSource("files", (key, id) => {
       }
     },
     prepare(seed: unknown) {
-      const value = seed as { cid: string; file: SessionFile };
+      const value = seed as {
+        cid: string;
+        file: SessionFile;
+        fragment?: string;
+      };
       if (value?.cid !== cid || value.file?.key !== fileKey) return;
+      fragment = value.fragment || "";
       release();
       attempt = { cancelled: false, file: value.file };
       pane.title = value.file.name;
@@ -2010,10 +2013,12 @@ registerFileTabSource("files", (key, id) => {
       installSwipe(body, (delta) => stepFile(cid, delta, body));
       body.addEventListener("recurse:pdf-pages", repaint);
       renderFile(body, cid, file);
+      if (scrollDocumentFragment(body, fragment)) fragment = "";
     },
     refresh(element: HTMLElement) {
       const view = fileViews.get(element as FilesEl);
       if (view) renderFile(element as FilesEl, cid, view.file);
+      if (scrollDocumentFragment(element, fragment)) fragment = "";
     },
     navigate: navigateFiles,
     leave(element: HTMLElement) {

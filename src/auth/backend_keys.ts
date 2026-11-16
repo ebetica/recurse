@@ -29,15 +29,6 @@ export class BackendKeys {
   private readonly pending = new Set<string>();
   /** Client address of each key's latest request since this start. */
   private readonly clients = new Map<string, string>();
-  private passwords: Promise<unknown> = Promise.resolve();
-
-  /** Keep old-password minting from completing after password revocation. */
-  withPasswordLock<T>(work: () => Promise<T>): Promise<T> {
-    const task = this.passwords.then(work);
-    this.passwords = task.catch(() => {});
-    return task;
-  }
-
   constructor(dataDir: string) {
     this.path = join(dataDir, "backend-keys.json");
   }

@@ -135,6 +135,7 @@ try {
   registry.install(
     createDurableSafety({
       models,
+      reviewModels: models,
       configDir: root,
       trusted: () => ({
         modelPolicy: env.RECURSE_MODEL_POLICY,

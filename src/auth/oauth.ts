@@ -1,11 +1,12 @@
-// Settings provider auth uses Pi's auth.json lock/merge via pi_auth.worker.mjs.
-// This module reads launch selections and persists pending login PKCE state.
+// Settings auth uses Pi's lock/merge; owns launch selections and pending PKCE.
 // Credentials cross pipes/target env only, never argv/logs/extra files/errors.
-// Private writes start at 0600; token POST refuses redirects.
+// Writes start at 0600; token POST refuses redirects. External read-only
+// sign-ins supply status only, never worker auth paths.
 import { chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { PI_PACKAGE_ROOT } from "../build_dir";
+import { ReadOnlyAuthStorage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { slowSpan } from "../observability/slow_span";
 import type { ProcessHandle, ProcessLifecycle } from "../process_lifecycle";
 import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
@@ -130,7 +131,9 @@ export class OAuthStore implements ProviderCredentialStore {
   async storedApiKey(provider: string): Promise<[boolean, string | null]> {
     let data: unknown;
     try {
-      data = await readJsonText(join(await this.agentDir(), AUTH_FILE_NAME));
+      data = this.options.ambient.RECURSE_READ_ONLY_SIGN_INS
+        ? await this.readAuth()
+        : await readJsonText(join(await this.agentDir(), AUTH_FILE_NAME));
     } catch (error) {
       if (errno(error) === "ENOENT") return [false, null];
       return [true, null];
@@ -375,6 +378,22 @@ export class OAuthStore implements ProviderCredentialStore {
   }
 
   async readAuth(): Promise<Json> {
+    const source = this.options.ambient.RECURSE_READ_ONLY_SIGN_INS;
+    if (source) {
+      try {
+        const store = new ReadOnlyAuthStorage(source);
+        return Object.fromEntries(
+          await Promise.all(
+            (await store.list()).map(async ({ providerId }) => [
+              providerId,
+              await store.read(providerId),
+            ]),
+          ),
+        );
+      } catch {
+        throw new Error("Cannot read the read-only sign-ins");
+      }
+    }
     try {
       const data = await readJsonText(
         join(await this.agentDir(), AUTH_FILE_NAME),

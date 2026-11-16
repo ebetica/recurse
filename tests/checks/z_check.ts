@@ -1,9 +1,7 @@
 /**
  * Stacking policy: web UI z-index is a layer token, calc(token + 1-4), 0,
- * auto or inherit. Usage: bun tests/checks/z_check.ts; exits 1 otherwise.
+ * auto or inherit. tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
-import { trackedFiles } from "./color_check.ts";
 import { cssView } from "./radius_check.ts";
 
 export type Finding = { line: number; value: string };
@@ -43,15 +41,4 @@ export function checkFiles(
         `${file}:${line}: z-index ${value} is not a --z- layer token (or a token + 1 to 4)`,
     ),
   );
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles().map((file) => ({
-      file,
-      text: readFileSync(file, "utf8"),
-    })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

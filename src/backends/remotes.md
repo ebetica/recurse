@@ -13,8 +13,10 @@ from is the **home**; agents still run on their own instance.
    for loopback addresses such as `http://127.0.0.1:8000`. Do not put credentials,
    a query or a fragment in the URL. Labels allow 1–32 letters, digits, dots,
    underscores or hyphens, but cannot be only dots.
-3. Choose **Connect remote**. The password is exchanged once, not saved. The
-   remote issues a connection key, which the home stores for later requests.
+3. Choose **Connect remote**. If the remote uses two-factor sign-in, enter its
+   authenticator or unused recovery code when asked, then connect again. The
+   password and code are exchanged once, not saved. The remote issues a
+   connection key, which the home stores for later requests.
    You do not need to copy a key yourself. Connect only instances you trust:
    the home can access remote conversations, change safety settings and manage
    provider sign-ins, models and MCP servers. MCP servers can run commands.

@@ -1,10 +1,14 @@
-// Lazy desktop windows; initial host layout follows pane sizing.
+// The shell preloads desktop windows; phones load them lazily when widened.
 // Phone overlays remain; focus waits for visible, enabled targets until input.
 // Only operator arrangements save; unsaved fresh grids are not rebuilt.
 // Chat stays usable during discovery; unavailable panes retain saved layouts.
-import type { DockHost, DockPanelSpec } from "./host.js";
+import type { DockHost, DockPanelSpec, DockPlace } from "./host.js";
 import type { WindowCommand } from "./commands.js";
 import { MESSAGE_ICON } from "../icons.js";
+import {
+  createFullscreenControl,
+  updateFullscreenControl,
+} from "../panes/powerbar.js";
 import { placeFinder } from "../finder-placement.js";
 import { conversationUiState } from "../conversation-ui-state/store.js";
 import { WINDOW_LAYOUT_STATE_KEY } from "../conversation-ui-state/schema.js";
@@ -16,6 +20,14 @@ import {
 
 type HostModule = typeof import("./host.js");
 const CHAT_PANEL = { id: "chat", title: "Chat", icon: MESSAGE_ICON };
+/** Most closed windows whose place is remembered, newest kept. */
+const MAX_PLACES = 64;
+
+const loadHost = (): Promise<HostModule> =>
+  import("./host.js").then(async (module) => {
+    await module.loadDockStyles();
+    return module;
+  });
 
 export class DesktopDock {
   private host: DockHost | null = null;
@@ -37,7 +49,9 @@ export class DesktopDock {
   private saveRequested = false;
   private applyingLayout = false;
   private background = new Set<string>();
+  private places = new Map<string, DockPlace>();
   private chat: HTMLElement;
+  private chatFullscreen: HTMLButtonElement | null = null;
   private chatFocus: (() => void) | null = null;
   private controlFocus: {
     id: string;
@@ -88,7 +102,7 @@ export class DesktopDock {
                 requested();
             }
           : null;
-      this.showChat();
+      this.showChat(true);
       requestAnimationFrame(() => {
         const focus = this.chatFocus;
         this.chatFocus = null;
@@ -107,6 +121,7 @@ export class DesktopDock {
     this.background.clear();
     this.ownerId = ownerId;
     this.readLayout();
+    this.host?.show(CHAT_PANEL, true);
   }
 
   private readLayout(): void {
@@ -223,7 +238,7 @@ export class DesktopDock {
       if (layout || this.hostOwnerId !== this.ownerId || replaceInvalid)
         host.restore(layout, layout ? undefined : CHAT_PANEL);
       this.hostOwnerId = this.ownerId;
-      if (!layout) host.show(CHAT_PANEL, true);
+      host.show(CHAT_PANEL, true, this.takePlace("chat"));
       this.pendingLayout = null;
       if (replaceInvalid) rememberDefault();
       this.callbacks.refresh();
@@ -272,78 +287,20 @@ export class DesktopDock {
         this.parking?.remove();
         this.panes.classList.remove("docked");
       }
+      this.chatFullscreen?.remove();
       this.finishControlFocus();
       return false;
     }
     if (!this.host) {
       if (this.failed) return false;
-      if (!this.loading)
-        this.loading = import("./host.js")
-          .then(async (module) => {
-            await module.loadDockStyles();
+      if (!this.module) {
+        this.loading ??= loadHost()
+          .then((module) => {
             this.module = module;
-            if (!this.enabled) return;
-            this.container = document.createElement("div");
-            this.container.id = "dock";
-            this.parking = document.createElement("div");
-            this.parking.className = "dock-parking";
-            this.parking.inert = true;
-            this.panes.append(this.container, this.parking);
-            this.observeControlFocus(this.container);
-            this.panes.classList.add("docked", "on");
-            this.host = module.createDockHost(this.container, {
-              element: (id) =>
-                id === "chat" ? this.chat : this.callbacks.element(id),
-              action: (id) => this.callbacks.action(id),
-              fullscreen: (id) => this.callbacks.fullscreen(id),
-              leaveFullscreen: () => this.callbacks.leaveFullscreen(),
-              moved: () => this.syncFocus(),
-              changed: () => this.saveLayout(),
-              arranged: () => {
-                this.userAction();
-                this.saveLayout();
-              },
-              keyboardFocus: (id) => {
-                if (id === "chat") {
-                  const thread = document.getElementById("scroll");
-                  if (thread) {
-                    thread.tabIndex = -1;
-                    this.focusControl(id, thread);
-                  }
-                } else this.callbacks.focus(id);
-              },
-              closed: (id, restoreFocus) => {
-                if (id === "chat") {
-                  this.userAction();
-                  module.adopt(this.parking!, this.chat);
-                  this.host!.remove(id);
-                  this.saveLayout();
-                } else this.callbacks.closed(id, restoreFocus);
-              },
-              shown: (id) => {
-                this.finishControlFocus(id);
-                if (id === "chat") {
-                  const focus = this.chatFocus;
-                  this.chatFocus = null;
-                  focus?.();
-                }
-              },
-              focus: (id) => {
-                if (this.controlFocus?.id === id) {
-                  this.finishControlFocus(id);
-                  return;
-                }
-                if (id === "chat") {
-                  if (document.activeElement instanceof HTMLElement)
-                    document.activeElement.blur();
-                } else this.callbacks.focus(id);
-                this.host?.focus(id);
-              },
-            });
-            this.hostOwnerId = this.ownerId;
-            this.host.show(CHAT_PANEL);
+            if (!this.enabled || this.host) return;
+            this.mount(module);
             this.callbacks.refresh();
-            this.host?.layout();
+            (this.host as DockHost | null)?.layout();
             this.syncFocus();
           })
           .catch((error: unknown) => {
@@ -354,18 +311,22 @@ export class DesktopDock {
           .finally(() => {
             this.loading = null;
           });
-      return false;
+        return false;
+      }
+      this.mount(this.module);
     }
+    const host = this.host!;
     const ids = new Set(specs.map((spec) => spec.id));
     for (const column of this.panes.querySelectorAll<HTMLElement>(
       ".pane-col",
     )) {
       const id = column.dataset.pane!;
-      if (!ids.has(id)) this.host.remove(id);
+      if (!ids.has(id)) this.closeWindow(id);
     }
     for (const spec of specs) {
       const background = this.background.has(spec.id);
-      if (!this.host.has(spec.id)) this.host.show(spec, background);
+      if (!host.has(spec.id))
+        host.show(spec, background, this.takePlace(spec.id));
       this.background.delete(spec.id);
     }
     this.finishControlFocus();
@@ -373,11 +334,108 @@ export class DesktopDock {
     return true;
   }
 
+  private mount(module: HostModule): void {
+    this.chatFullscreen ??= createFullscreenControl("chat", () =>
+      this.callbacks.fullscreen("chat"),
+    );
+    document.getElementById("top-actions")!.append(this.chatFullscreen);
+    this.container = document.createElement("div");
+    this.container.id = "dock";
+    this.parking = document.createElement("div");
+    this.parking.className = "dock-parking";
+    this.parking.inert = true;
+    this.panes.append(this.container, this.parking);
+    this.observeControlFocus(this.container);
+    this.panes.classList.add("docked", "on");
+    this.host = module.createDockHost(this.container, {
+      element: (id) => (id === "chat" ? this.chat : this.callbacks.element(id)),
+      action: (id) =>
+        id === "chat"
+          ? this.chat.classList.contains("fullscreen")
+            ? null
+            : this.chatFullscreen
+          : this.callbacks.action(id),
+      fullscreen: (id) => this.callbacks.fullscreen(id),
+      leaveFullscreen: () => this.callbacks.leaveFullscreen(),
+      moved: () => this.syncFocus(),
+      changed: () => this.saveLayout(),
+      arranged: () => {
+        this.userAction();
+        this.saveLayout();
+      },
+      keyboardFocus: (id) => {
+        if (id === "chat") {
+          const thread = document.getElementById("scroll");
+          if (thread) {
+            thread.tabIndex = -1;
+            this.focusControl(id, thread);
+          }
+        } else this.callbacks.focus(id);
+      },
+      closed: (id, restoreFocus) => {
+        if (id === "chat") {
+          this.userAction();
+          module.adopt(this.parking!, this.chat);
+          this.closeWindow(id);
+          this.saveLayout();
+          this.callbacks.refresh();
+        } else this.callbacks.closed(id, restoreFocus);
+      },
+      shown: (id) => {
+        this.finishControlFocus(id);
+        if (id === "chat") {
+          const focus = this.chatFocus;
+          this.chatFocus = null;
+          focus?.();
+        }
+      },
+      focus: (id) => {
+        if (this.controlFocus?.id === id) {
+          this.finishControlFocus(id);
+          return;
+        }
+        if (id === "chat") {
+          if (document.activeElement instanceof HTMLElement)
+            document.activeElement.blur();
+        } else this.callbacks.focus(id);
+        this.host?.focus(id);
+      },
+    });
+    this.hostOwnerId = this.ownerId;
+    // Invariant: Size the grid without Chat in the row, so its first frame is
+    // final. Focused Chat moves directly, keeping its focus and selection.
+    if (!this.chat.contains(document.activeElement))
+      module.adopt(this.parking, this.chat);
+    this.panes.style.flex = "1";
+    this.host.layout();
+    this.host.show(CHAT_PANEL);
+    this.refreshActions();
+  }
+
   remove(id: string): void {
     if (this.controlFocus?.id === id) this.clearControlFocus();
-    this.host?.remove(id);
+    this.closeWindow(id);
     this.background.delete(id);
     this.saveLayout();
+  }
+
+  private closeWindow(id: string): void {
+    const place = this.host?.remove(id);
+    // Invariant: Only closes in the conversation's own shown layout are noted,
+    // never the previous conversation's teardown or a restore.
+    if (!place || this.pendingLayout || this.applyingLayout) return;
+    const key = `${this.ownerId}\n${id}`;
+    this.places.delete(key);
+    this.places.set(key, place);
+    for (const old of this.places.keys())
+      if (this.places.size > MAX_PLACES) this.places.delete(old);
+  }
+
+  private takePlace(id: string): DockPlace | undefined {
+    const key = `${this.ownerId}\n${id}`;
+    const place = this.places.get(key);
+    this.places.delete(key);
+    return place;
   }
 
   show(id: string): void {
@@ -391,10 +449,12 @@ export class DesktopDock {
 
   showChat(reveal = false): void {
     if (!this.host) return;
-    if (reveal || !this.host.has("chat")) this.userAction();
+    const closed = !this.host.has("chat");
+    if (reveal || closed) this.userAction();
     if (reveal) this.host.restoreWindows();
-    this.host.show(CHAT_PANEL);
+    this.host.show(CHAT_PANEL, false, this.takePlace("chat"));
     this.saveLayout();
+    if (closed) this.callbacks.refresh();
   }
 
   focusControl(id: string, target: HTMLElement): void {
@@ -453,6 +513,11 @@ export class DesktopDock {
   }
 
   refreshActions(): void {
+    if (this.chatFullscreen)
+      updateFullscreenControl(
+        this.chatFullscreen,
+        this.chat.classList.contains("fullscreen"),
+      );
     this.host?.refreshActions();
   }
 

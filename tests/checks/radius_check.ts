@@ -1,9 +1,7 @@
 /**
  * Corner radius policy: border radii sit on one theme scale.
- * Usage: bun tests/checks/radius_check.ts; exits 1 on any other length.
+ * tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
-import { trackedFiles } from "./color_check.ts";
 
 export type Finding = { line: number; value: string };
 
@@ -70,15 +68,4 @@ export function checkFiles(
         `${file}:${line}: border radius ${value} is off the 6/8/10/14px, 999px, 50% scale`,
     ),
   );
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles(true).map((file) => ({
-      file,
-      text: readFileSync(file, "utf8"),
-    })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

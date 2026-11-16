@@ -1,7 +1,14 @@
 // A fresh marker means live Durable work, not merely an open SQLite owner.
 // Writes serialize; idle/close removes the marker after admitted refreshes.
 import { writeFile, unlink } from "node:fs/promises";
-import type { CommitPublication, Harness } from "@earendil-works/pi-durable";
+import {
+  CompactionTask,
+  type CommitPublication,
+  type Harness,
+} from "@earendil-works/pi-durable";
+
+const passive = (task: { kind: string; background: boolean }) =>
+  task.kind === CompactionTask.definition.name && task.background;
 
 export class DurableActivity {
   private readonly tasks = new Set<number>();
@@ -18,7 +25,7 @@ export class DurableActivity {
 
   start(inspection: Awaited<ReturnType<Harness["inspect"]>>): void {
     for (const { record } of inspection.tasks)
-      this.tasks.add(Number(record.id));
+      if (!passive(record)) this.tasks.add(Number(record.id));
     this.started = true;
     this.refresh();
   }
@@ -27,7 +34,8 @@ export class DurableActivity {
     for (const change of publication.changes) {
       if (change.type !== "task") continue;
       const { id, state } = change.value;
-      if (state.status === "terminal") this.tasks.delete(Number(id));
+      if (state.status === "terminal" || passive(change.value))
+        this.tasks.delete(Number(id));
       else this.tasks.add(Number(id));
     }
     queueMicrotask(() => this.refresh());

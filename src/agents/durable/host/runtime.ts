@@ -21,6 +21,7 @@ export {
 } from "@earendil-works/pi-durable/tools";
 export {
   durableModels,
+  trustedModelCatalog,
   customProviderSync,
   providerToken,
   withRequestedEffort,

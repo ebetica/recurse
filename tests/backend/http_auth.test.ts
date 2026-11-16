@@ -12,6 +12,7 @@ import {
 } from "./http_corpus";
 import { buildAuthApp, PASSWORD, type AuthApp } from "./http_auth_app";
 import fixture from "./fixtures/http_auth/cases.json";
+import { exerciseTwoFactorSignIn } from "./http_two_factor";
 
 interface AuthCase {
   readonly name: string;
@@ -200,6 +201,7 @@ describe("http_auth corpus", () => {
         expect(value, item.name).toBe(current.password_value);
       }
     }
+    await exerciseTwoFactorSignIn();
     expect(CASES).toHaveLength(114);
     expect(CASES.filter((c) => c.current.body)).toHaveLength(82);
     expect(CASES.filter((c) => c.current.cookie)).toHaveLength(8);

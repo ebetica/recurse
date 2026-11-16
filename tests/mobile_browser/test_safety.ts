@@ -3,7 +3,7 @@ import { expect as browserExpect } from "playwright/test";
 import { captureErrors, postFixture, type BrowserTest } from "./common";
 
 export const tests: BrowserTest[] = [
-  // Regression: #2509 fail-open reviews were invisible beside the composer toggle.
+  // Regression: #2509 #3390 review failures and recovered requests stay inspectable.
   async function test_safety_reviewer_unavailable_and_recovers(browser, base) {
     const { agent } = await postFixture(base, "seed-safety-review");
     const pages = await Promise.all(
@@ -78,6 +78,18 @@ export const tests: BrowserTest[] = [
         expect(
           await view.locator("#safety-btn").getAttribute("aria-label"),
         ).toBe("Safety review, on");
+        await view.locator(".prompt-banner-row").click();
+        const capture = view.locator(".safety-review-capture");
+        await browserExpect(capture).toBeVisible();
+        await capture.locator("summary").click();
+        const json = await capture.locator("pre").innerText();
+        const review = JSON.parse(json);
+        expect(JSON.stringify(review.context.messages)).toContain(
+          "SAFETY_TOOL_RAN",
+        );
+        expect(review.reply.stopReason).toBe("stop");
+        expect(review.reply.content).toEqual([{ type: "text", text: "OK" }]);
+        expect(json).not.toContain("browser-test");
       }
       expect(errors).toEqual([[], []]);
     } finally {

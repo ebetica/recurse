@@ -1,8 +1,9 @@
-// Working-folder tree and desktop file tabs share source/HTML previews; pane
-// ownership cancels reads, HTML uses the sanitized offline viewer, comments
-// share the outbox. Search is the pane's entry input; its results keep the
-// last answer until the next arrives; desktop keys follow loaded rows.
+// Working-folder tree, file tabs and reply file paths share one viewer and
+// text editor; pane ownership cancels reads; comments share the outbox. Edited
+// text lives only in page memory and the save request; the agent is told only
+// the path. Search results keep the last answer; desktop keys follow rows.
 import { html, nothing, render, type TemplateResult } from "lit";
+import { live } from "lit/directives/live.js";
 import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "./backends/backend.js";
@@ -11,6 +12,9 @@ import { openFileTab, openPane, registerPane, syncPanes } from "./panes.js";
 import { registerFileTabSource } from "./panes/file-tabs.js";
 import { paneItem } from "./panes/navigation.js";
 import { copyText } from "./tool_details.js";
+import { highlightSource } from "./source-preview.js";
+import { requestUiStatus } from "./ui-events.js";
+import { sendOperatorMessage } from "./conversation/operator-send.js";
 import type { PaneCacheDef, PaneContext, PaneNavigation } from "./types.js";
 import {
   ATTACHMENT_FILE_ICON,
@@ -73,6 +77,14 @@ interface View {
   previewError: string;
   previewLoading: boolean;
   previewRequest?: AbortController;
+  /** Editor text; `editBase` is the opened version, null for a new file. */
+  editing: boolean;
+  draft: string;
+  editBase: string | null;
+  saving: boolean;
+  saveError: string;
+  conflict: boolean;
+  pathExpanded: boolean;
   disposed: boolean;
 }
 const views = new WeakMap<HTMLElement, View>();
@@ -93,6 +105,29 @@ phone.addEventListener("change", () => resetCursor(document));
 
 function absolutePath(root: string, path: string): string {
   return `${root.replace(/\/$/, "")}/${path}`;
+}
+const filePath = (view: View, path = view.file!): string =>
+  view.root ? absolutePath(view.root, path) : path;
+const visiblePath = (path: string): string =>
+  path.replace(
+    /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/gu,
+    (char) =>
+      `\\u${char.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`,
+  );
+const unsaved = new Set<string>();
+const draftKey = (view: View): string => `${view.cid}\n${filePath(view)}`;
+
+/** Leaving the editor keeps or discards unsaved text; false keeps editing. */
+function closeEditor(view: View): boolean {
+  if (!view.editing) return true;
+  if (
+    view.draft !== (view.editBase === null ? "" : view.previewText) &&
+    !confirm(`Discard your unsaved changes to ${visiblePath(view.file!)}?`)
+  )
+    return false;
+  unsaved.delete(draftKey(view));
+  Object.assign(view, { editing: false, draft: "", saveError: "" });
+  return true;
 }
 
 function endpoint(
@@ -256,6 +291,7 @@ async function openFile(view: View, path: string, more = false): Promise<void> {
 }
 
 async function loadFile(view: View, path: string, more = false): Promise<void> {
+  if (!more && !closeEditor(view)) return;
   if (!more && view.element._rs && !discardCurrent(view.element as CommentPane))
     return;
   view.previewRequest?.abort();
@@ -276,7 +312,7 @@ async function loadFile(view: View, path: string, more = false): Promise<void> {
   view.previewLoading = true;
   paint(view);
   try {
-    const query: Record<string, string> = { path };
+    const query: Record<string, string> = { path: filePath(view, path) };
     if (more && view.preview?.next !== null && view.preview) {
       query.offset = String(view.preview.next);
       query.version = view.preview.version;
@@ -452,7 +488,7 @@ function tree(view: View, item: Folder, depth = 0): TemplateResult {
                 ? String(!!child)
                 : nothing}
               title=${unavailable
-                ? "Unavailable: symbolic link or special file"
+                ? "Unavailable: broken link or special file"
                 : entry.name}
               @click=${() =>
                 isFolder ? toggle(view, path) : void openFile(view, path)}
@@ -501,12 +537,119 @@ function tree(view: View, item: Folder, depth = 0): TemplateResult {
       : nothing}`;
 }
 
+async function startEditing(view: View): Promise<void> {
+  while (view.preview?.kind === "text" && view.preview.next !== null) {
+    await loadFile(view, view.file!, true);
+    if (view.previewError || view.disposed) return;
+  }
+  const item = view.preview;
+  if (!item?.canonicalPath || item.kind === "binary") return;
+  Object.assign(view, {
+    editing: true,
+    draft: item.kind === "missing" ? "" : view.previewText,
+    editBase: item.kind === "missing" ? null : item.version,
+    saveError: "",
+    conflict: false,
+    notice: "",
+    htmlPreview: false,
+  });
+  paint(view);
+  view.element.querySelector<HTMLElement>(".explorer-editor")?.focus();
+}
+
+async function saveFile(view: View, overwrite = false): Promise<void> {
+  if (view.saving || !view.editing) return;
+  const query: Record<string, string> = {
+    path: filePath(view),
+    canonicalPath: view.preview!.canonicalPath,
+  };
+  if (view.editBase) query.version = view.editBase;
+  if (overwrite) query.overwrite = "true";
+  const text = view.draft;
+  Object.assign(view, { saving: true, saveError: "", conflict: false });
+  paint(view);
+  try {
+    const { response, data } = await backendFor(view.cid).apiJson<
+      ExplorerPreview & { detail?: unknown }
+    >(endpoint(view, "/file", query), {
+      method: "PUT",
+      headers: { "content-type": "text/plain;charset=utf-8" },
+      body: text,
+    });
+    if (!response.ok) {
+      view.conflict =
+        response.status === 409 &&
+        [
+          "The file changed on disk since you opened it.",
+          "A file with this name already exists.",
+        ].includes(String(data.detail));
+      view.saveError =
+        response.status === 405
+          ? "This backend can’t save files yet. Update it, then try again."
+          : typeof data.detail === "string"
+            ? data.detail
+            : "Could not save the file; try again.";
+      return;
+    }
+    unsaved.delete(draftKey(view));
+    Object.assign(view, {
+      editing: view.draft !== text,
+      editBase: data.version,
+      preview: data,
+      previewText: data.text ?? "",
+      notice: view.draft === text ? "Saved." : "",
+    });
+    const told = await sendOperatorMessage(view.cid, {
+      content: `I edited ${filePath(view)}`,
+    }).catch(() => null);
+    if (!told?.ok)
+      view.notice = "Saved, but the agent wasn’t told. Tell it yourself.";
+  } catch {
+    view.saveError = "Could not save the file; try again.";
+  } finally {
+    view.saving = false;
+    paint(view);
+  }
+}
+
+function editor(view: View): TemplateResult {
+  return html`${view.saveError
+      ? html`<p class="explorer-status" role="alert">
+          ${view.saveError}
+          ${view.conflict
+            ? html`<button class="btn sm" @click=${() => saveFile(view, true)}>
+                Overwrite
+              </button>`
+            : nothing}
+        </p>`
+      : nothing}
+    <textarea
+      class="explorer-editor"
+      aria-label="File text"
+      spellcheck="false"
+      autocomplete="off"
+      autocapitalize="off"
+      .value=${live(view.draft)}
+      @input=${(event: Event) => {
+        view.draft = (event.target as HTMLTextAreaElement).value;
+        unsaved.add(draftKey(view));
+      }}
+      @keydown=${(event: KeyboardEvent) => {
+        if ((event.metaKey || event.ctrlKey) && event.key === "s") {
+          event.preventDefault();
+          void saveFile(view);
+        }
+      }}
+    ></textarea>`;
+}
+
 function backToFiles(view: View): void {
   if (view.tabId) {
     openPane("explorer", { focusTarget: "body" });
     return;
   }
-  if (!discardCurrent(view.element as CommentPane)) return;
+  if (!closeEditor(view) || !discardCurrent(view.element as CommentPane))
+    return;
   view.previewRequest?.abort();
   view.file = null;
   paint(view);
@@ -514,12 +657,60 @@ function backToFiles(view: View): void {
 
 function preview(view: View): TemplateResult {
   const item = view.preview;
-  return html`<div class="explorer-filebar">
+  const destination = visiblePath(item?.canonicalPath ?? filePath(view));
+  const name = html`<bdi dir="ltr">${destination}</bdi>`;
+  return html`<div
+      class="explorer-filebar"
+      data-theme-protected="file-destination"
+    >
       <button class="btn sm explorer-back" @click=${() => backToFiles(view)}>
         ${unsafeHTML(BACK_ICON)} Files
       </button>
-      <span class="explorer-filename" title=${view.file!}>${view.file}</span>
-      ${item?.kind === "text" && /\.html?$/i.test(view.file!)
+      ${view.editing
+        ? html`<span class="explorer-filename expanded" title=${destination}
+            >${name}</span
+          >`
+        : html`<button
+            class="explorer-filename ${view.pathExpanded ? "expanded" : ""}"
+            title=${destination}
+            aria-label=${view.pathExpanded
+              ? "Collapse file path"
+              : "Expand file path"}
+            aria-expanded=${String(view.pathExpanded)}
+            @click=${() => {
+              view.pathExpanded = !view.pathExpanded;
+              paint(view);
+            }}
+          >
+            ${name}
+          </button>`}
+      ${view.editing
+        ? html`<button
+              class="btn sm"
+              @click=${() => {
+                if (closeEditor(view)) paint(view);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              class="btn sm primary"
+              ?disabled=${view.saving}
+              @click=${() => saveFile(view)}
+            >
+              ${view.saving ? "Saving…" : "Save"}
+            </button>`
+        : nothing}
+      ${!view.editing &&
+      item?.kind === "text" &&
+      item.canonicalPath &&
+      item.size <= MAX_PREVIEW &&
+      !view.htmlPreview
+        ? html`<button class="btn sm" @click=${() => startEditing(view)}>
+            Edit
+          </button>`
+        : nothing}
+      ${!view.editing && item?.kind === "text" && /\.html?$/i.test(view.file!)
         ? html`<div class="explorer-modes" role="group" aria-label="HTML view">
             ${["Source", "Preview"].map(
               (label) =>
@@ -539,14 +730,49 @@ function preview(view: View): TemplateResult {
             )}
           </div>`
         : nothing}
-      <a
-        class="explorer-download"
-        href=${endpoint(view, "/raw", { path: view.file! })}
-        download
-        aria-label="Download file"
-        >${unsafeHTML(FILE_DOWNLOAD_ICON)}</a
-      >
+      ${item?.kind === "missing" || view.editing
+        ? nothing
+        : html`<a
+            class="explorer-download"
+            href=${endpoint(view, "/raw", { path: filePath(view) })}
+            download
+            aria-label="Download file"
+            >${unsafeHTML(FILE_DOWNLOAD_ICON)}</a
+          >`}
     </div>
+    ${item?.canonicalPath && item.canonicalPath !== filePath(view)
+      ? html`<p
+          class="explorer-status explorer-alias"
+          data-theme-protected="file-destination"
+        >
+          Opens ${visiblePath(filePath(view))} → saves to ${destination}
+        </p>`
+      : nothing}
+    ${item?.promptResource
+      ? html`<p
+          class="explorer-status"
+          data-theme-protected="model-file-warning"
+          role="note"
+        >
+          This file’s contents are sent to the model. Don’t save secrets here.
+        </p>`
+      : nothing}
+    ${view.editing ? editor(view) : nothing}
+    ${item && !item.canonicalPath
+      ? html`<p class="explorer-status" role="alert">
+          Update this backend before editing files; it doesn’t identify the save
+          destination.
+        </p>`
+      : nothing}
+    ${item?.kind === "missing" && item.canonicalPath && !view.editing
+      ? html`<p class="explorer-status">This file doesn’t exist yet.</p>
+          <button
+            class="btn sm primary explorer-more"
+            @click=${() => startEditing(view)}
+          >
+            Create file
+          </button>`
+      : nothing}
     ${view.previewError
       ? html`<p class="explorer-status" role="alert">
           ${view.previewError}
@@ -563,7 +789,7 @@ function preview(view: View): TemplateResult {
           This file cannot be shown as text. Download it to open it.
         </p>`
       : nothing}
-    ${item?.kind === "text"
+    ${item?.kind === "text" && !view.editing
       ? html`<pre
           class="explorer-source report-doc explorer-source-only"
           tabindex="0"
@@ -574,7 +800,7 @@ function preview(view: View): TemplateResult {
           Loading file…
         </p>`
       : nothing}
-    ${item?.kind === "text" && item.next !== null
+    ${item?.kind === "text" && item.next !== null && !view.editing
       ? html`<p class="explorer-status explorer-source-only">
             Showing ${view.previewText.length.toLocaleString()} characters of
             ${(item.size / 1024).toFixed(0)} KB.
@@ -591,7 +817,7 @@ function preview(view: View): TemplateResult {
                 Download the file to read the rest.
               </p>`}`
       : nothing}
-    ${item?.kind === "text"
+    ${item?.kind === "text" && !view.editing
       ? html`<div class="report-comments explorer-source-only"></div>
           <div class="report-bar explorer-source-only"></div>`
       : nothing}
@@ -641,6 +867,7 @@ function syncComments(view: View): void {
   if (!view.previewText.startsWith(shown)) code.textContent = view.previewText;
   else if (shown.length < view.previewText.length)
     code.append(view.previewText.slice(shown.length));
+  highlightSource(code, item!.path);
   claimComments(pane);
   reanchor(pane, id);
   renderComments(pane);
@@ -684,7 +911,7 @@ function paint(view: View): void {
       class="explorer ${view.file && view.htmlPreview
         ? "explorer-preview-mode"
         : ""}"
-      aria-label=${view.tabId ? view.file! : "Working folder"}
+      aria-label=${view.tabId ? visiblePath(view.file!) : "Working folder"}
     >
       ${view.notice
         ? html`<p class="explorer-status" role="status">${view.notice}</p>`
@@ -953,6 +1180,13 @@ function viewFor(element: HTMLElement, cid: string): View {
     htmlPreview: false,
     previewError: "",
     previewLoading: false,
+    editing: false,
+    draft: "",
+    editBase: null,
+    saving: false,
+    saveError: "",
+    conflict: false,
+    pathExpanded: false,
     disposed: false,
   };
   views.set(element, view);
@@ -1009,22 +1243,27 @@ registerFileTabSource("explorer", (key, id) => {
   };
   return {
     id,
-    title: path.split("/").at(-1)!,
+    title: visiblePath(path.split("/").at(-1)!),
     icon: ATTACHMENT_FILE_ICON,
     navigate,
     cache: {
       ...cache,
       key({ agentId }) {
         const key = commentKey(agentId, `explorer:${absolutePath(root, path)}`);
-        return key && comments.get(key)?.size ? agentId : null;
+        return (key && comments.get(key)?.size) ||
+          unsaved.has(`${agentId}\n${absolutePath(root, path)}`)
+          ? agentId
+          : null;
       },
     },
     leave,
     release,
     guardClose(element) {
+      const view = views.get(element);
       return (
-        !(element as ExplorerElement)._rs ||
-        discardCurrent(element as CommentPane)
+        (!view || closeEditor(view)) &&
+        (!(element as ExplorerElement)._rs ||
+          discardCurrent(element as CommentPane))
       );
     },
     visit(agentId) {
@@ -1070,13 +1309,16 @@ registerFileTabSource("explorer", (key, id) => {
           controller: new AbortController(),
         };
         prepared = attempt;
-        const url = `/api/conversations/${encodeURIComponent(ctx.agentId)}/tree/file?${new URLSearchParams({ path })}`;
+        const url = `/api/conversations/${encodeURIComponent(ctx.agentId)}/tree/file?${new URLSearchParams({ path: absolutePath(root, path) })}`;
         void read<ExplorerPreview>(ctx.agentId, url, attempt.controller.signal)
           .then((preview) => {
             if (prepared !== attempt || attempt.controller.signal.aborted)
               return;
             attempt.preview = preview;
-            attempt.exists = preview.root === root && preview.path === path;
+            attempt.exists =
+              preview.root === root &&
+              preview.path === path &&
+              preview.kind !== "missing";
           })
           .catch(() => {
             if (prepared === attempt) attempt.exists = false;
@@ -1118,4 +1360,49 @@ registerPane({
     if (view !== prior) void loadFolder(view, folder(view, ""));
     else paint(view);
   },
+});
+
+/** Open a file path from a reply in the shared viewer, at any location. */
+export async function openFilePath(cid: string, path: string): Promise<void> {
+  try {
+    const preview = await read<ExplorerPreview>(
+      cid,
+      `/api/conversations/${encodeURIComponent(cid)}/tree/file?${new URLSearchParams({ path })}`,
+      AbortSignal.timeout(30_000),
+    );
+    if (!preview.path) throw new Error("This path is a folder.");
+    if (
+      !openFileTab("explorer", JSON.stringify([preview.root, preview.path]), {
+        cid,
+        preview,
+        paths: [preview.path],
+      })
+    )
+      requestUiStatus(
+        "File not opened. Close a file tab or finish the current comments first.",
+      );
+  } catch (error) {
+    requestUiStatus(
+      error instanceof Error ? error.message : "Could not open the file.",
+    );
+  }
+}
+
+document.addEventListener("click", (event) => {
+  const link = (event.target as Element).closest<HTMLAnchorElement>(
+    "a[data-file-path]",
+  );
+  const cid = link?.dataset.fileOwner;
+  if (
+    !link ||
+    !cid ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  )
+    return;
+  event.preventDefault();
+  void openFilePath(cid, link.dataset.filePath!);
 });

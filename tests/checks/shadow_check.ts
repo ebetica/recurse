@@ -1,9 +1,7 @@
 /**
  * Shadow policy: drop shadows come from theme tokens (one elevation scale).
- * Usage: bun tests/checks/shadow_check.ts; exits 1 on non-token offsets.
+ * tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
-import { trackedFiles } from "./color_check.ts";
 import { cssView } from "./radius_check.ts";
 
 export type Finding = { line: number; value: string };
@@ -70,15 +68,4 @@ export function checkFiles(
         `${file}:${line}: drop shadow ${value} should use --expanded-lift, --menu-shadow or --dialog-shadow`,
     ),
   );
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles(true).map((file) => ({
-      file,
-      text: readFileSync(file, "utf8"),
-    })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

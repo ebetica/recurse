@@ -1,6 +1,7 @@
 // Browser connection-health wiring: one deduplicated /api/version probe serves
 // the generation watcher, Retry button, lifecycle wakeups, and outage recovery.
-// Deferred page updates appear in Settings and mark its button until cleared.
+// Generation checks wait for the tree and any open conversation, not a draft
+// or empty selection. Unsent work defers updates in Settings until cleared.
 import { homeBackend } from "./backends/backend.js";
 import { embeddedFrameHidden } from "./state.js";
 import { apiJson, connectionHealth } from "./api.js";

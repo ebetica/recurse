@@ -1,3 +1,4 @@
+// @tla specs/tla/send/OperatorSend.tla: Admit deduplicates before interrupt.
 // One content delivery path for the composer, remote sends and API v1.
 // Startup rejects admission with a retryable response before resolving ids.
 import { pyStrip } from "../auth/provider_store";
@@ -44,6 +45,15 @@ export function createMessageSender(
         !CLIENT_KEY_RE.test(clientMessageId))
     )
       throw new HttpError(422, "invalid client_message_id");
+    let interrupted = false;
+    const interrupt = pyTruthy(body.interrupt)
+      ? {
+          interrupt: true,
+          onInterrupt: (stopped: boolean) => {
+            interrupted = stopped;
+          },
+        }
+      : {};
     // Invariant: Only a live named agent supplies local sender provenance.
     const send = () =>
       relayed
@@ -61,6 +71,7 @@ export function createMessageSender(
             sender && store.load(sender) !== null
               ? {
                   start: false,
+                  ...interrupt,
                   source: "spawn",
                   sender,
                   attachmentIds,
@@ -68,6 +79,7 @@ export function createMessageSender(
                 }
               : {
                   start: false,
+                  ...interrupt,
                   origin: "operator",
                   attachmentIds,
                   clientMessageId: clientMessageId as string | null,
@@ -75,11 +87,7 @@ export function createMessageSender(
           );
     const statusOf = () => (store.load(cid) ?? conv!).status;
     if (pyTruthy(body.interrupt)) {
-      // Invariant: Fence the old run before admitting its replacement.
-      const durable = deps.durable?.owns(store.load(cid)) ? deps.durable : null;
-      const interrupted = relayed
-        ? false
-        : ((await durable?.stop(cid)) ?? false);
+      // Invariant: Serialized admission deduplicates before stopping any run.
       const mid = await send();
       if (mid === null) throw new HttpError(404);
       deps.delivery.requestRun(cid);

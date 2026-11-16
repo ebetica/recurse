@@ -60,15 +60,28 @@ Read a connected remote's live or archived plain-text transcript without waking 
 Requires a backend key. For local history, use the native read tool on transcript.txt.
 `,
   search: `usage: subagent search <query> [target] [--tree | --all] [--deleted]
-                       [--role user|assistant|agent|tool|tool-result] [--limit N]
+                       [--conversation | --role ROLE] [--limit N]
+                       [--since DATE] [--until DATE] [--or TEXT] [--cursor TOKEN]
 
 Find literal, case-insensitive text in full transcripts, including tool arguments
 and results. Without a target, search your own conversation.
 Targets accept local ids, names, unique suffixes, archive ids and id@label.
 --tree includes descendants; --all searches all live agents; --deleted also
 includes retained deleted agents. --role filters entries; --limit is 1-100
-(default 20). Hits print path:line: snippet with agent/time/role.
-Read local matches with the native read tool; use read id@label for remotes.
+(default 20). Your current turn is excluded; historical tool evidence remains.
+Hits print path:line, separate agent/role/time/offset metadata, then an excerpt.
+For history, scope first, filter --role user or assistant, and vary wording.
+Read around a local hit's offset with the native read tool; use read id@label
+--offset LINE --limit N for remotes.
+--conversation excludes tool calls/results; --role selects one role instead.
+--since is inclusive, --until exclusive: UTC dates or ISO timestamps ending Z.
+Repeat --or TEXT for up to eight literals total (4096 characters combined).
+Multi-agent scopes return at most five hits per agent (or half a small limit).
+Start pagination with --cursor start, then repeat the same filters and target
+with the returned cursor. Pages avoid repeats without sorting all matches;
+changed scopes or replaced transcripts require restarting. Cursors track up to
+200 agents. Without --cursor, no pagination metadata is read.
+
 `,
   status: `usage: subagent.py status [-h] [--subtree] [--json] [cid ...]
 
@@ -162,7 +175,7 @@ const USAGE: Record<string, string> = {
   interrupt: "usage: subagent.py interrupt [-h] cid",
   read: "usage: subagent read <id@label> [--offset N] [--limit N]",
   search:
-    "usage: subagent search <query> [target] [--tree | --all] [--deleted] [--role user|assistant|agent|tool|tool-result] [--limit N]",
+    "usage: subagent search <query> [target] [--tree | --all] [--deleted] [--conversation | --role ROLE] [--limit N] [--since DATE] [--until DATE] [--or TEXT] [--cursor TOKEN]",
   tail: "usage: subagent.py tail [-h] cid",
   wait: "usage: subagent.py wait [-h] [--timeout S] cid [cid ...]",
   move: "usage: subagent.py move [-h] (--to new-parent-cid | --top-level) cid",
@@ -245,6 +258,7 @@ export type Parsed = {
   command: string;
   positional: string[];
   options: Map<string, string | true>;
+  alternatives?: string[];
 };
 
 export function parseArguments(args: string[], moduleHelp: string): Parsed {
@@ -299,8 +313,16 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
       switches.add("--tree");
       switches.add("--all");
       switches.add("--deleted");
-      takesValue.add("--role");
-      takesValue.add("--limit");
+      switches.add("--conversation");
+      for (const flag of [
+        "--role",
+        "--limit",
+        "--since",
+        "--until",
+        "--or",
+        "--cursor",
+      ])
+        takesValue.add(flag);
       break;
     case "status":
       switches.add("--subtree");
@@ -328,6 +350,7 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
   }
   const positional: string[] = [];
   const options = new Map<string, string | true>();
+  const alternatives: string[] = [];
   let terminated = false;
   for (let i = 1; i < args.length; i++) {
     const arg = args[i]!;
@@ -360,6 +383,7 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
       if (value === undefined || (inline === undefined && looksLikeOption)) {
         parserFailure(command, `argument ${flag}: expected one argument`);
       }
+      if (command === "search" && flag === "--or") alternatives.push(value!);
       const earlier = options.get(flag);
       options.set(
         flag,
@@ -481,6 +505,10 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
     }
   }
   if (command === "search") {
+    if (options.has("--conversation") && options.has("--role"))
+      parserFailure(command, "choose --conversation or --role, not both");
+    if (alternatives.length > 7)
+      parserFailure(command, "use at most seven --or alternatives");
     if (
       options.has("--all") &&
       (options.has("--tree") || positional.length > 1)
@@ -512,5 +540,10 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
   }
   if (command === "status" && options.has("--subtree") && !positional.length)
     parserFailure(command, "--subtree requires an agent id");
-  return { command, positional, options };
+  return {
+    command,
+    positional,
+    options,
+    ...(alternatives.length ? { alternatives } : {}),
+  };
 }

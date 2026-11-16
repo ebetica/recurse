@@ -1,4 +1,6 @@
 import { expect } from "bun:test";
+import { assertDocumentLinks } from "./document_links";
+import { REFERENCE_LINKS } from "./fixtures/reference_links";
 import {
   ARTIFACT,
   ARTIFACT_VERSION,
@@ -22,8 +24,156 @@ import { mkdir, writeFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import * as artifacts from "../../src/artifacts";
 import { artifactReopen } from "./artifact_reopen";
+import { artifactLinks } from "./artifact_links";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3328 submitting selection comments must not close or hide the Artifact pane.
+  async function test_artifact_comments_keep_pane_open(browser, base, data) {
+    const store = {
+      artifactsDir: join(data, "data", "artifact_repos"),
+      trashDir: join(data, "data", "trash"),
+    };
+    const owner = rootAgentId();
+    const artifact = await artifacts.create(store, {
+      owner,
+      title: "Commented document",
+    });
+    const path = join(String(artifact.repo_path), "index.md");
+    for (const phone of [false, true]) {
+      await writeFile(
+        path,
+        "# Review document\n\n" +
+          Array.from(
+            { length: 5 },
+            (_, n) => `Selection anchor ${n + 1}.`,
+          ).join("\n\n"),
+      );
+      await artifacts.publish(store, owner, String(artifact.id));
+      const context = await browser.newContext({
+        viewport: { width: phone ? 390 : 1280, height: 844 },
+        isMobile: phone,
+        hasTouch: phone,
+      });
+      const page = await context.newPage();
+      const errors = captureErrors(page);
+      const other = !phone
+        ? String(
+            (
+              await (
+                await page.request.post(`${base}api/conversations`, {
+                  data: { parent: null, title: "Comment navigation" },
+                })
+              ).json()
+            ).id,
+          )
+        : null;
+      await page.goto(`${base}#agent=${owner}&artifact=${artifact.id}`);
+      const pane = page.locator('.pane-col[data-pane="report"]');
+      await pane.getByRole("heading", { name: "Review document" }).waitFor();
+      if (!phone) {
+        await page.locator('.rail-btn[data-pane="tips"]').click();
+        await page.locator('.rail-btn[data-pane="report"]').click();
+      }
+      const reply = `Artifact comments accepted ${phone ? "phone" : "desktop"}`;
+      for (let n = 1; n <= 5; n++) {
+        await dispatchArtifactSelection(
+          page,
+          phone ? "touch" : "mouse",
+          `Selection anchor ${n}`,
+        );
+        const popover = page.locator(".report-comment-popover:not([hidden])");
+        await popover
+          .locator("textarea")
+          .fill(n === 5 ? `Reply only ${reply}` : `Note ${n}`);
+        await popover.locator(".report-comment-popover-submit").click();
+      }
+      page.once("dialog", (dialog) => void dialog.dismiss());
+      await page
+        .getByRole("button", { name: "Close Artifacts", exact: true })
+        .click();
+      expect(await pane.locator(".report-comment").count()).toBe(5);
+      expect(await pane.isVisible()).toBeTrue();
+      if (other) {
+        page.once("dialog", (dialog) => void dialog.dismiss());
+        await page.locator(`.agent[data-id="${other}"]`).click();
+        expect(await pane.locator(".report-comment").count()).toBe(5);
+        expect(await pane.isVisible()).toBeTrue();
+      }
+      await writeFile(path, "# Revised document\n\nAll anchors removed.");
+      await artifacts.publish(store, owner, String(artifact.id));
+      const refreshed = page.waitForResponse(
+        (response) => new URL(response.url()).pathname === "/api/artifacts",
+      );
+      await page.evaluate((agentId) => {
+        const browser = globalThis as any;
+        browser.dispatchEvent(
+          new browser.CustomEvent("recurse:ui-refresh", {
+            detail: { agentId },
+          }),
+        );
+      }, owner);
+      await (await refreshed).finished();
+      expect(await pane.locator(".report-comment").count()).toBe(5);
+      expect(
+        await pane
+          .getByRole("heading", { name: "Review document" })
+          .isVisible(),
+      ).toBeTrue();
+      let release = () => {};
+      const gate = new Promise<void>((resolve) => (release = resolve));
+      await page.route(
+        `**/api/conversations/${owner}/deliver`,
+        async (route) => {
+          await gate;
+          await route.continue();
+        },
+      );
+      const delivered = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname ===
+          `/api/conversations/${owner}/deliver`,
+      );
+      await pane.locator(".report-sendbar-send").click();
+      try {
+        expect(await pane.isVisible()).toBeTrue();
+        const pending = page.locator("[data-comment-send]");
+        await pending.waitFor({ state: "attached" });
+        expect(await pending.textContent()).toContain("Note 1");
+        expect(await pending.textContent()).toContain("Selection anchor 5");
+      } finally {
+        release();
+        await delivered;
+      }
+      expect((await delivered).ok()).toBeTrue();
+      await page.unroute(`**/api/conversations/${owner}/deliver`);
+      await page
+        .locator(".msg.assistant", { hasText: reply })
+        .waitFor({ state: "attached" });
+      await pane.getByRole("heading", { name: "Revised document" }).waitFor();
+      expect(await pane.locator(".report-comment").count()).toBe(0);
+      expect(await pane.isVisible()).toBeTrue();
+      await page.reload();
+      await pane.getByRole("heading", { name: "Revised document" }).waitFor();
+      expect(await pane.isVisible()).toBeTrue();
+      if (other) {
+        await page.locator(`.agent[data-id="${other}"]`).click();
+        await page.locator(`.agent[data-id="${owner}"]`).click();
+        await pane.getByRole("heading", { name: "Revised document" }).waitFor();
+        expect(await pane.isVisible()).toBeTrue();
+        expect(
+          (await page.request.delete(`${base}api/conversations/${other}`)).ok(),
+        ).toBeTrue();
+      }
+      expect(errors).toEqual([]);
+      await context.close();
+    }
+    await artifacts.deleteArtifact(
+      store,
+      owner,
+      String(artifact.id),
+      String((await artifacts.get(store, owner, String(artifact.id))).version),
+    );
+  },
   // Regression: #3200 staging a selection comment cannot override a later viewer focus change.
   async function test_artifact_reload_selection_and_content(
     browser,
@@ -212,6 +362,9 @@ export const tests: BrowserTest[] = [
             down,
           );
         }
+        expect(
+          await pane.locator(".report-doc h1 ins.doc-diff-added").textContent(),
+        ).toBe("updated");
         await dispatchArtifactSelection(page, "mouse", "Second updated");
         await page
           .locator(".report-comment-popover:not([hidden]) textarea")
@@ -236,6 +389,9 @@ export const tests: BrowserTest[] = [
         await page.keyboard.press("h");
         expect(await pane.locator(".artifact-list").count()).toBe(0);
         expect(await pane.locator(".report-comment").count()).toBe(1);
+        expect(
+          await pane.locator(".report-comment blockquote").textContent(),
+        ).toBe("Second updated");
         page.once("dialog", (dialog) => void dialog.accept());
         await page.keyboard.press("h");
         await pane.locator(".artifact-list").waitFor();
@@ -339,6 +495,9 @@ export const tests: BrowserTest[] = [
             page.once("dialog", (dialog) => void dialog.dismiss());
             await page.keyboard.press("h");
             expect(await pane.locator(".report-comment").count()).toBe(1);
+            expect(
+              await pane.locator(".report-comment blockquote").textContent(),
+            ).toBe("Second updated");
             page.once("dialog", (dialog) => void dialog.accept());
           } else {
             expect(await draft.isVisible()).toBeTrue();
@@ -353,6 +512,30 @@ export const tests: BrowserTest[] = [
         }
         await pointer.detach();
         await body.focus();
+        await page.keyboard.press("Enter");
+        await pane
+          .getByRole("heading", { name: "Second updated", exact: true })
+          .waitFor();
+        await dispatchArtifactSelection(page, "mouse", "Second updated");
+        const headingDraft = page.locator(
+          ".report-comment-popover:not([hidden])",
+        );
+        await headingDraft.locator("textarea").fill("Heading anchor");
+        await headingDraft.locator(".report-comment-popover-submit").click();
+        expect(
+          await pane.locator(".report-comment blockquote").textContent(),
+        ).toBe("Second updated");
+        const delivered = page.waitForRequest((request) =>
+          request.url().endsWith(`/api/conversations/${owner}/deliver`),
+        );
+        await pane.getByRole("button", { name: "Submit comments" }).click();
+        expect((await delivered).postDataJSON().content).toEndWith(
+          "- line 1, chars 0-14:\n> Second updated\nHeading anchor",
+        );
+        await pane.locator(".report-comment").waitFor({ state: "detached" });
+        await body.focus();
+        await page.keyboard.press("h");
+        await pane.locator(".artifact-list").waitFor();
         await page.keyboard.press("j");
       } else {
         expect(await pane.locator(".artifact-list").count()).toBe(0);
@@ -1188,8 +1371,8 @@ export const tests: BrowserTest[] = [
         .count(),
     ).toBe(0);
     await switchTo("artifact-link-source");
-    const revised = await postFixture(base, `revise-artifact-app?id=${app.id}`);
-    expect(revised.version).not.toBe(app.version);
+    const next = await postFixture(base, "revise-artifact-app", { id: app.id });
+    expect(next.version).not.toBe(app.version);
     await switchTo(rootAgentId());
     await page.locator("#pane-fab.attention").waitFor({ timeout: 25_000 });
     expect(await page.locator("#pane-fab").getAttribute("aria-label")).toBe(
@@ -1538,7 +1721,7 @@ export const tests: BrowserTest[] = [
       },
     );
     await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
+    await page.locator('.rail-btn[data-pane="report"]').click();
     await page
       .locator('#dock .dv-tab[data-dock-panel="report"] button')
       .click();
@@ -1557,6 +1740,10 @@ export const tests: BrowserTest[] = [
       .locator("textarea")
       .evaluate((node: any) => [node.selectionStart, node.selectionEnd]);
     await page.setViewportSize({ width: 390, height: 844 });
+    await page.waitForFunction(
+      () =>
+        (globalThis as any).document.querySelectorAll(".pane-col").length === 1,
+    );
     expect(await page.locator(".pane-col").count()).toBe(1);
     expect(
       await page.locator(".pane-col.mobile-active").getAttribute("data-pane"),
@@ -1605,6 +1792,12 @@ export const tests: BrowserTest[] = [
     await page.locator(".report-comment-popover-submit").click();
     expect(await page.locator(".report-comment").count()).toBe(2);
     await page.locator(".report-sendbar-send").click();
+    expect(
+      await page.locator('.pane-col[data-pane="report"]').isVisible(),
+    ).toBeTrue();
+    await page
+      .getByRole("button", { name: "Close Artifacts", exact: true })
+      .click();
     const pending = page.locator("[data-comment-send]");
     const failure = pending.getByRole("alert");
     await failure.waitFor();
@@ -1634,6 +1827,12 @@ export const tests: BrowserTest[] = [
       .fill("Discard this note");
     await page.locator(".report-comment-popover-submit").click();
     await page.locator(".report-sendbar-send").click();
+    expect(
+      await page.locator('.pane-col[data-pane="report"]').isVisible(),
+    ).toBeTrue();
+    await page
+      .getByRole("button", { name: "Close Artifacts", exact: true })
+      .click();
     const refreshed = page.waitForResponse(
       (response) =>
         response.request().method() === "GET" &&
@@ -1657,7 +1856,7 @@ export const tests: BrowserTest[] = [
     const page = await context.newPage();
     const errors = captureErrors(page);
     await routeArtifacts(page, base);
-    await gotoRoot(page, base);
+    await page.goto(`${base}#agent=${rootAgentId()}&artifact=${ARTIFACT.id}`);
     await page.locator(".agent").first().waitFor();
     const picker = page.locator("#artifact-picker.artifact-title-select");
     await page
@@ -1745,7 +1944,7 @@ export const tests: BrowserTest[] = [
           : [{ ...ARTIFACT, version: currentVersion }, other],
       });
     });
-    await gotoRoot(page, base);
+    await page.goto(`${base}#agent=${rootAgentId()}&artifact=${ARTIFACT.id}`);
     await page.locator(".agent").first().waitFor();
     await page.locator(".report-doc", { hasText: "Visible body" }).waitFor();
     const dialogMessages: string[] = [];
@@ -1796,14 +1995,19 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
-  async function test_svg_artifact_asset(browser, base) {
+  // Regression: #3307 #3363 Artifact Markdown shares link policy and opens sibling documents in-app.
+  async function test_svg_artifact_asset(browser, base, data) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
-    await routeArtifacts(page, base);
-    await page.goto(`${base}#agent=${rootAgentId()}`, {
+    await routeArtifacts(
+      page,
+      base,
+      `# Browser artifact\n\n${REFERENCE_LINKS}\n![SVG chart](chart.svg)\n`,
+    );
+    await page.goto(`${base}#agent=${rootAgentId()}&artifact=${ARTIFACT.id}`, {
       waitUntil: "domcontentloaded",
     });
     await page.locator(".agent").first().waitFor();
@@ -1818,8 +2022,10 @@ export const tests: BrowserTest[] = [
         .getAttribute("src"),
     );
     expect(src.includes(expected[0]) && src.includes(expected[1])).toBeTrue();
+    await assertDocumentLinks(page.locator(".report-doc .artifact-markdown"));
     expect(errors).toEqual([]);
     await context.close();
+    await artifactLinks(browser, base, data);
   },
   // Feature: #2323 a theme change refreshes the sandboxed page without rebuilding.
   async function test_published_app_runs_in_the_pane(browser, base, data) {
@@ -1829,7 +2035,7 @@ export const tests: BrowserTest[] = [
     const page = await context.newPage();
     const errors = captureErrors(page);
     const app = await postFixture(base, "seed-artifact-app");
-    await gotoRoot(page, base);
+    await page.goto(`${base}#agent=${rootAgentId()}&artifact=${app.id}`);
     await page.locator('.pane-col[data-pane="report"]').waitFor();
     expect(await page.locator("#artifact-picker").inputValue()).toBe(app.id);
     const frame = page.frameLocator("iframe.artifact-embed-page");

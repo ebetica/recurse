@@ -1,7 +1,7 @@
 import { expect } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { expect as browserExpect } from "playwright/test";
-import { captureErrors, type BrowserTest } from "./common";
+import { captureErrors, postFixture, type BrowserTest } from "./common";
 
 export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
   browser,
@@ -105,11 +105,11 @@ export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
             await page.screenshot({
               path: `${shots}/${thinking}-${width}-${colorScheme}.png`,
             });
-          await page.request.post(`${base}__browser-test/durable-release`);
+          await postFixture(base, "release", { agent, gate: "reply" });
           await expectWaiting("Reviewing the command result");
           await page.reload();
           await expectWaiting("Reviewing the command result");
-          await page.request.post(`${base}__browser-test/durable-release`);
+          await postFixture(base, "release", { agent, gate: "finish" });
           await page
             .getByText("Live tools finished.", { exact: true })
             .waitFor();
@@ -120,7 +120,8 @@ export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
         } finally {
           if (agent)
             await page.request.post(
-              `${base}__browser-test/durable-thinking-cleanup?agent=${agent}`,
+              `${base}__browser-test/durable-thinking-cleanup`,
+              { data: { agent } },
             );
           await page.close();
         }

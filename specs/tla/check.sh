@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Pinned Linux x64 tools and all TLC output stay in scratch.
-# Usage: specs/tla/check.sh [all|fixed-exclusive|fixed-normal|cold|search|cache|cold-read|search-read|cold-reopen|native|shell|shell-pins|shell-flush|shell-completion|trace]
+# Usage: specs/tla/check.sh [all|idle-compaction|idle-compaction-<control>|send|send-reload-id|send-restart-ledger|send-stale-steer|send-stop-drop|send-restart-drop|send-reverse|send-interrupt-retry|viewport|unread|fixed-exclusive|fixed-normal|cold|search|cache|cold-read|search-read|cold-reopen|native|shell|shell-pins|shell-flush|shell-completion|admission|admission-reservation|admission-preparation|relay|relay-id|relay-startup|relay-idle|relay-wake|relay-revoked|relay-stale|trace]
 set -euo pipefail
 
 case "$(uname -sm)" in
@@ -9,7 +9,7 @@ case "$(uname -sm)" in
 esac
 selected=${1:-all}
 case "$selected" in
-  all|fixed-exclusive|fixed-normal|cold|search|cache|cold-read|search-read|cold-reopen|native|shell|shell-pins|shell-flush|shell-completion|trace) ;;
+  all|idle-compaction|idle-compaction-cancel|idle-compaction-waiting|idle-compaction-strict-min|idle-compaction-no-warm|idle-compaction-minimum|idle-compaction-turn|idle-compaction-queue|idle-compaction-tree|idle-compaction-coupled|idle-compaction-compact-switch|idle-compaction-warm-switch|idle-compaction-deadline|idle-compaction-recheck|idle-compaction-renewal|send|send-reload-id|send-restart-ledger|send-stale-steer|send-stop-drop|send-restart-drop|send-reverse|send-interrupt-retry|viewport|unread|fixed-exclusive|fixed-normal|cold|search|cache|cold-read|search-read|cold-reopen|native|shell|shell-pins|shell-flush|shell-completion|admission|admission-reservation|admission-preparation|relay|relay-id|relay-startup|relay-idle|relay-wake|relay-revoked|relay-stale|trace) ;;
   *) printf 'Unknown case: %s\n' "$selected" >&2; exit 2 ;;
 esac
 if (( $# > 1 )); then printf 'Expected at most one case name.\n' >&2; exit 2; fi
@@ -38,14 +38,70 @@ fetch 'https://cdn.azul.com/zulu/bin/zulu21.40.17-ca-jre21.0.6-linux_x64.tar.gz'
 java="$tools/zulu21.40.17-ca-jre21.0.6-linux_x64/bin/java"
 if [[ ! -x "$java" ]]; then tar -xzf "$tools/jre.tar.gz" -C "$tools"; fi
 run=$(mktemp -d "$scratch/store-lifecycle.XXXXXX")
-cp -- "$source_dir/StoreLifecycle.tla" "$source_dir/ShellHandoff.tla" "$run/"
+cp -- "$source_dir/StoreLifecycle.tla" "$source_dir/ShellHandoff.tla" "$source_dir/LifecycleAdmission.tla" \
+  "$source_dir/ViewportHolds.tla" "$source_dir/UnreadSeen.tla" "$source_dir/IdleCompaction.tla" \
+  "$source_dir/relay/RemoteRelay.tla" "$source_dir/send/OperatorSend.tla" "$run/"
 printf 'Logs and generated configs: %s\n' "$run"
 "$java" -version
 
 run_case() {
   local name=$1 cold=FALSE search=FALSE cache=FALSE exclusive=TRUE expected='' invariants=''
   local model=StoreLifecycle pins=FALSE flush=FALSE completion=FALSE
+  local reservation=FALSE preparation=FALSE bug=none
   case "$name" in
+    idle-compaction) model=IdleCompaction ;;
+    idle-compaction-*)
+      model=IdleCompaction; bug=${name#idle-compaction-}
+      case "$bug" in
+        waiting|coupled|strict-min) expected=BeforeExpiry ;;
+        no-warm) expected=WaitingWarms ;;
+        minimum) expected=MinimumRequired ;;
+        turn) expected=OwnTurnFinished ;;
+        queue) expected=InputQueueEmpty ;;
+        tree) expected=WarmingWaitsForTree ;;
+        compact-switch|warm-switch) expected=SwitchesIndependent ;;
+        deadline) expected=DeadlineRespected ;;
+        recheck) expected=CurrentCapture ;;
+        renewal) expected=NoDoubleExpiry ;;
+        cancel) expected=CancellationFinal ;;
+      esac
+      invariants="TypeOK $expected" ;;
+    send) model=OperatorSend ;;
+    send-reload-id|send-restart-ledger)
+      model=OperatorSend; bug=${name#send-}; expected=SingleDelivery ;;
+    send-stale-steer|send-stop-drop|send-restart-drop)
+      model=OperatorSend; bug=${name#send-}; expected=MessageAccounted ;;
+    send-reverse) model=OperatorSend; bug=reverse; expected=AdmissionOrder ;;
+    send-interrupt-retry) model=OperatorSend; bug=interrupt-retry; expected=RetryKeepsRun ;;
+    viewport) model=ViewportHolds ;;
+    viewport-pin-blind|viewport-paint-blind|viewport-pane-keys|viewport-follow-offset|viewport-scripted-scroll)
+      model=ViewportHolds; bug=${name#viewport-}; expected=ReaderWins ;;
+    viewport-queued-anchor|viewport-disclosure-follow)
+      model=ViewportHolds; bug=${name#viewport-}; expected=OneHold ;;
+    viewport-natural-follow)
+      model=ViewportHolds; bug=natural-follow; expected=PendingBottom
+      invariants=$expected ;;
+    viewport-natural-bottom)
+      model=ViewportHolds; bug=natural-follow; expected=NaturalFollow
+      invariants=$expected ;;
+    viewport-paint-jump|viewport-jump-shift|viewport-jump-gap)
+      model=ViewportHolds; bug=${name#viewport-}; expected=JumpLands ;;
+    viewport-hide-jump|viewport-noop-jump)
+      model=ViewportHolds; bug=${name#viewport-}; expected=JumpEnds ;;
+    viewport-*) model=ViewportHolds; bug=${name#viewport-}; expected=HoldKept ;;
+    relay) model=RemoteRelay ;;
+    relay-id) model=RemoteRelay; bug=unstable-id; expected=SingleDelivery ;;
+    relay-startup) model=RemoteRelay; bug=startup-drop; expected=NoPrematureLoss ;;
+    relay-idle) model=RemoteRelay; bug=idle-pause; expected=PauseOnlyIdle ;;
+    relay-wake) model=RemoteRelay; bug=poll-wake; expected=NoPollingWake ;;
+    relay-revoked) model=RemoteRelay; bug=revoked-poll; expected=NoAutomaticWhileRevoked ;;
+    relay-stale) model=RemoteRelay; bug=stale-success; expected=RevocationOwnership ;;
+    unread) model=UnreadSeen ;;
+    unread-unfenced) model=UnreadSeen; bug=unfenced; expected=ShownCurrent ;;
+    unread-*) model=UnreadSeen; bug=${name#unread-}; expected=DotMatches ;;
+    admission) model=LifecycleAdmission ;;
+    admission-reservation) model=LifecycleAdmission; reservation=TRUE; expected=BusyOnlyIfHeld ;;
+    admission-preparation) model=LifecycleAdmission; preparation=TRUE; expected=BusyOnlyIfHeld ;;
     shell) model=ShellHandoff ;;
     shell-pins) model=ShellHandoff; pins=TRUE; expected=OutputRetained ;;
     shell-flush) model=ShellHandoff; flush=TRUE; expected=HandoffSettled ;;
@@ -59,6 +115,9 @@ run_case() {
     cold-reopen) cold=TRUE; expected=OwnerConnectionCurrent; invariants='TypeOK OwnerConnectionCurrent' ;;
     native) cold=TRUE; expected=NoNativeRenameCrash; invariants='TypeOK NoNativeRenameCrash' ;;
   esac
+  local template="$source_dir/$model.cfg"
+  if [[ "$model" = RemoteRelay ]]; then template="$source_dir/relay/$model.cfg"; fi
+  if [[ "$model" = OperatorSend ]]; then template="$source_dir/send/$model.cfg"; fi
   while IFS= read -r line; do
     case "$line" in
       '  ColdViewBug = '*) line="  ColdViewBug = $cold" ;;
@@ -68,10 +127,13 @@ run_case() {
       '  ReadPinBug = '*) line="  ReadPinBug = $pins" ;;
       '  FlushBug = '*) line="  FlushBug = $flush" ;;
       '  CompletionHandoffBug = '*) line="  CompletionHandoffBug = $completion" ;;
+      '  ReservationDeadlineBug = '*) line="  ReservationDeadlineBug = $reservation" ;;
+      '  PreparationDeadlineBug = '*) line="  PreparationDeadlineBug = $preparation" ;;
+      '  Bug = '*) line="  Bug = \"$bug\"" ;;
       INVARIANTS*) if [[ -n "$invariants" ]]; then line="INVARIANTS $invariants"; fi ;;
     esac
     printf '%s\n' "$line"
-  done < "$source_dir/$model.cfg" > "$run/$name.cfg"
+  done < "$template" > "$run/$name.cfg"
 
   local status=0 start=$SECONDS
   (cd "$run" && timeout 110 "$java" -Djava.io.tmpdir="$run" -Xmx1g -XX:+UseParallelGC \
@@ -89,8 +151,23 @@ run_case() {
   fi
 }
 
-for name in fixed-exclusive fixed-normal cold search cache cold-read search-read cold-reopen native shell shell-pins shell-flush shell-completion; do
-  if [[ "$selected" = all || "$selected" = "$name" ]]; then
+idle_cases='idle-compaction idle-compaction-waiting idle-compaction-minimum
+  idle-compaction-strict-min idle-compaction-no-warm
+  idle-compaction-turn idle-compaction-queue idle-compaction-tree
+  idle-compaction-coupled idle-compaction-compact-switch idle-compaction-warm-switch
+  idle-compaction-deadline idle-compaction-recheck idle-compaction-renewal
+  idle-compaction-cancel'
+viewport_cases='viewport viewport-pin-blind viewport-paint-blind viewport-queued-smooth
+  viewport-paint-clamp viewport-layout-clamp viewport-follow-offset viewport-jump-follow
+  viewport-pane-keys viewport-hidden-layout viewport-unsettled viewport-delayed-layout
+  viewport-scripted-scroll viewport-queued-anchor viewport-paint-jump
+  viewport-hide-jump viewport-jump-shift viewport-jump-gap viewport-noop-jump
+  viewport-natural-follow viewport-natural-bottom viewport-disclosure-follow'
+send_cases='send send-reload-id send-restart-ledger send-stale-steer
+  send-stop-drop send-restart-drop send-reverse send-interrupt-retry'
+unread_cases='unread unread-drain unread-aborted-ack unread-unfenced'
+for name in $idle_cases fixed-exclusive fixed-normal cold search cache cold-read search-read cold-reopen native shell shell-pins shell-flush shell-completion admission admission-reservation admission-preparation $viewport_cases $unread_cases $send_cases relay relay-id relay-startup relay-idle relay-wake relay-revoked relay-stale; do
+  if [[ "$selected" = all || "$selected" = "$name" || ( "$selected" = viewport && "$name" = viewport* ) || ( "$selected" = unread && "$name" = unread* ) || ( "$selected" = idle-compaction && "$name" = idle-compaction* ) || ( "$selected" = send && "$name" = send* ) ]]; then
     if ! run_case "$name"; then
       printf 'Unexpected TLC result; inspect %s/%s.log\n' "$run" "$name" >&2
       exit 1

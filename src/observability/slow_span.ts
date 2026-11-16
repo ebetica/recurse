@@ -86,6 +86,18 @@ export function awaitedReplyBytes(): ((bytes: number) => void) | undefined {
 }
 const opening = new Set<OpenPhase>();
 const completed: OpenPhase[] = [];
+const openListeners = new Set<() => void>();
+
+/** Hear each open phase start; call the returned function to stop. */
+export function onOpenPhase(listener: () => void): () => void {
+  const owned = () => listener();
+  openListeners.add(owned);
+  return () => openListeners.delete(owned);
+}
+
+export function openPhaseCount(): number {
+  return opening.size;
+}
 
 function finishPhase(phase: OpenPhase, ended: number): void {
   if (ended - phase.started < 50) return;
@@ -118,6 +130,7 @@ export function startOpenPhase(cid: string) {
     started: performance.now(),
   };
   opening.add(phase);
+  for (const listener of openListeners) listener();
   return {
     begin(name: string): void {
       if (!opening.has(phase)) return;

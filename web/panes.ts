@@ -3,7 +3,8 @@
 // rail and close on refresh; discovery leaves Chat usable. Embedded apps
 // never schedule discovery, including reads settling after parking.
 import { currentUiOwnerId, DRAFT, embedded, state } from "./state.js";
-import { phoneListEntry } from "./phone-nav.js";
+import { isTextEditorTarget } from "../src/keyboard_target.js";
+import { phoneListEntry, openLinkedPhonePane } from "./phone-nav.js";
 import {
   DELETE_ICON,
   SHARE_ICON,
@@ -13,8 +14,6 @@ import {
   MORE_ICON,
   PANE_ICON,
   MESSAGE_ICON,
-  PANE_COMPRESS_ICON,
-  PANE_EXPAND_ICON,
 } from "./icons.js";
 import { installPaneChrome } from "./panes/chrome.js";
 import { recordPaneOpen } from "./panes/frecency.js";
@@ -23,8 +22,9 @@ import {
   createPanePowerbar,
   paneFullscreenControl,
   retainPanePowerbar,
+  updateFullscreenControl,
 } from "./panes/powerbar.js";
-import { $, inputEl } from "./dom.js";
+import { $, inputEl, scrollEl } from "./dom.js";
 import { pendingCommentCount } from "./comments.js";
 import {
   handleCommentShortcut,
@@ -119,8 +119,11 @@ panesEl.addEventListener("keydown", (event) => {
 panesEl.addEventListener("comments-submitting", (event) => {
   const pane = paneForTarget(event.target);
   const id = pane?.dataset.pane;
-  // Invariant: Comments are persisted; remember the close without discarding
-  // another pane's staged draft.
+  // Invariant: Submitting Artifact comments never changes pane visibility or
+  // the saved window layout, including while delivery is still pending.
+  if (id === ARTIFACTS_PANE_ID) return;
+  // Invariant: Other persisted comments retain their existing close behaviour
+  // without discarding another pane's staged draft.
   if (id && closePane(id, true, true, true) && fileTabs.has(id))
     desktopDock.showChat();
 });
@@ -174,7 +177,7 @@ const desktopDock = new DesktopDock(panesEl, {
 
 // A conversation switch restores only that conversation's explicit visibility
 // choice. A first visit starts from the product default instead of inheriting a
-// pane from the previous conversation; Artifacts may still auto-open by policy.
+// pane from the previous conversation. Artifacts require an explicit choice.
 export function beginPaneVisit(
   agentId: string,
   ownerId = currentUiOwnerId(),
@@ -187,7 +190,10 @@ export function beginPaneVisit(
     artifactsAttention = false;
     railHash = "";
   }
-  if (paneVisitAgentId === agentId && paneVisitOwnerId === ownerId) return;
+  if (paneVisitAgentId === agentId && paneVisitOwnerId === ownerId) {
+    if (!desktopDock.chatOpen()) desktopDock.showChat();
+    return;
+  }
 
   const held = !!paneForTarget(document.activeElement);
   const outgoingOwnerId = paneVisitOwnerId;
@@ -263,22 +269,12 @@ function noteUserPaneAction(
   }
 }
 
-function isTextEntry(element: Element | null): boolean {
-  if (!(element instanceof HTMLElement)) return false;
-  return (
-    element instanceof HTMLInputElement ||
-    element instanceof HTMLTextAreaElement ||
-    element.isContentEditable ||
-    !!element.closest('[contenteditable="true"], [role="textbox"]')
-  );
-}
-
 function artifactAutoOpenGuards(): Pick<
   ArtifactAutoOpenObservation,
   "typing" | "modalOpen" | "unsentComments" | "mobileKeyboardOpen" | "mobile"
 > {
   const active = document.activeElement;
-  const textEntry = isTextEntry(active);
+  const textEntry = isTextEditorTarget(active);
   const mobile = isMobile();
   // Invariant: Avoid viewport layout flush on desktop or focused input;
   // neither needs a visual keyboard check.
@@ -356,7 +352,15 @@ export function openFileTab(
   options: OpenPaneOptions = {},
 ): boolean {
   const id = fileTabs.create(source, key, initial, currentUiOwnerId());
-  return !!id && openPane(id, options);
+  return (
+    !!id &&
+    openLinkedPhonePane(
+      id,
+      mobileActive,
+      () => openPane(id, options),
+      (key) => fileTabs.descriptor(key),
+    )
+  );
 }
 
 function buildCtxFor(id: string): PaneContext {
@@ -520,11 +524,8 @@ export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
     if (isMobile() && !guardLeaveComments()) return false;
     if (isMobile()) for (const paneId of [...open]) closePane(paneId, true);
     desktopDock.showChat(true);
-    const thread = $("#scroll");
-    if (thread) {
-      thread.tabIndex = -1;
-      desktopDock.focusControl("chat", thread);
-    }
+    scrollEl.tabIndex = -1;
+    desktopDock.focusControl("chat", scrollEl);
     if (!isMobile()) recordPaneOpen(id);
     return true;
   }
@@ -640,6 +641,13 @@ export function closeOpenPane(id: string): boolean {
   return closePane(id, true, false);
 }
 
+/** Restore phone files; distinguish missing panes from guard refusals. */
+export function restorePhonePane(id: string, file?: unknown): boolean | null {
+  if (file && !fileTabs.has(id) && !fileTabs.restore(id, { file })) return null;
+  if (!paneDefinitions().some((pane) => pane.id === id)) return null;
+  return open.has(id) || openPane(id);
+}
+
 /** Whether pane `id` is offered for the open agent. */
 export function paneAvailable(id: string): boolean {
   return availableFor(buildCtx()).some((p) => p.id === id);
@@ -661,6 +669,7 @@ function syncFull(): void {
   const mobile = isMobile();
   const chat = document.getElementById("main");
   chat?.classList.toggle("fullscreen", fullId === "chat");
+  placeNew(mobile);
   for (const col of panesEl.querySelectorAll<HTMLElement>(".pane-col")) {
     const on = col.dataset.pane === fullId;
     const modal = mobile && (on || col.dataset.pane === mobileActive);
@@ -670,12 +679,7 @@ function syncFull(): void {
     else col.removeAttribute("aria-modal");
     const body = bodies.get(col.dataset.pane || "");
     const fs = body ? paneFullscreenControl(body) : null;
-    if (fs) {
-      fs.innerHTML = on ? PANE_COMPRESS_ICON : PANE_EXPAND_ICON;
-      fs.title = on ? "Exit fullscreen" : "Fullscreen";
-      fs.setAttribute("aria-label", on ? "Exit fullscreen" : "Open fullscreen");
-      fs.setAttribute("aria-pressed", on ? "true" : "false");
-    }
+    if (fs) updateFullscreenControl(fs, on);
   }
   desktopDock.refreshActions();
 }
@@ -831,34 +835,30 @@ export function paneActionable(): boolean {
   );
 }
 
-/** Offered panes in rail order; the finder can also offer Chat. */
+const CHAT_PANE: PaneDef = { id: "chat", title: "Chat", icon: MESSAGE_ICON };
+const paneOpen = (id: string): boolean =>
+  id !== "chat"
+    ? open.has(id)
+    : isMobile()
+      ? !mobileActive
+      : desktopDock.chatOpen();
+
+/** Offered panes in rail order; the finder also offers Chat, last. */
 export function offeredPanes({ includeChat = false } = {}) {
-  const panes = availableFor(buildCtx())
-    .filter((pane) => !fileTabs.has(pane.id))
-    .map((pane) => ({
-      id: pane.id,
-      title: pane.title || pane.id,
-      icon: pane.icon || PANE_ICON,
-      open: open.has(pane.id),
-      finder: pane.finder,
-    }));
-  return includeChat
-    ? [
-        ...panes,
-        {
-          id: "chat",
-          title: "Chat",
-          icon: MESSAGE_ICON,
-          open: isMobile() ? !mobileActive : desktopDock.chatOpen(),
-          finder: undefined,
-        },
-      ]
-    : panes;
+  const panes = availableFor(buildCtx()).filter((p) => !fileTabs.has(p.id));
+  return (includeChat ? [...panes, CHAT_PANE] : panes).map((pane) => ({
+    id: pane.id,
+    title: pane.title || pane.id,
+    icon: pane.icon || PANE_ICON,
+    open: paneOpen(pane.id),
+    finder: pane.finder,
+  }));
 }
 
-/** Open the offered pane at a one-based rail position. */
+/** Open the pane at a one-based rail position; desktop Chat is first. */
 export function openPaneByIndex(index: number): boolean {
-  const pane = offeredPanes()[index - 1];
+  const panes = offeredPanes();
+  const pane = (isMobile() ? panes : [CHAT_PANE, ...panes])[index - 1];
   return !!pane && openPane(pane.id, { focusTarget: "body" });
 }
 
@@ -943,6 +943,7 @@ function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
   const col = document.createElement("div");
   col.className = fileTabs.has(id) ? "pane-col file-tab" : "pane-col";
   col.dataset.pane = id;
+  col.dataset.theme = "pane";
   const head = createPanePowerbar(
     id,
     p.title || id,
@@ -1089,6 +1090,15 @@ function paneAttention(pane: PaneDef): boolean {
   }
 }
 
+// Spec: Desktop starts the rail with New, above Share link; phones and
+// fullscreen Chat (which covers the rail) keep New in the Chat header.
+function placeNew(mobile = isMobile()): void {
+  const newTop = $("#new-top")!;
+  if (mobile || fullId === "chat") {
+    if (newTop.parentElement !== fabEl.parentElement) fabEl.before(newTop);
+  } else if (railEl.firstElementChild !== newTop) railEl.prepend(newTop);
+}
+
 function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   avail = avail.filter((pane) => !fileTabs.has(pane.id));
   const mobile = isMobile();
@@ -1106,13 +1116,14 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
       $("#pane-menu-divider")!.after(actions[2]);
     } else {
       foot.append(actions[0]);
-      railEl.prepend(actions[1], actions[2]);
+      railEl.prepend(actions[2], actions[1]);
     }
     for (const action of actions) {
       if (mobile) action.setAttribute("role", "menuitem");
       else action.removeAttribute("role");
     }
   }
+  placeNew(mobile);
   const badges = new Map(avail.map((p) => [p.id, paneBadge(p, ctx)]));
   const attentive = avail.filter(paneAttention);
   const hash =
@@ -1122,7 +1133,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     "|" +
     attentive.map((p) => p.id).join(",") +
     "|" +
-    (mobile ? "m" : "d") +
+    (mobile ? "m" : paneOpen("chat") ? "d" : "dc") +
     "|" +
     state.selectedId;
   if (hash === railHash) return;
@@ -1130,7 +1141,10 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   const any = avail.length > 0;
   railEl.classList.toggle(
     "on",
-    !mobile && (any || (!!state.selectedId && state.selectedId !== DRAFT)),
+    !mobile &&
+      (any ||
+        !$("#new-top")!.hidden ||
+        (!!state.selectedId && state.selectedId !== DRAFT)),
   );
   fabEl.classList.toggle("on", mobile);
   fabEl.classList.toggle("attention", attentive.length > 0);
@@ -1145,12 +1159,12 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
 
   const railPanels = $("#pane-rail-panels")!;
   railPanels.innerHTML = "";
-  for (const [index, p] of avail.entries()) {
+  for (const [index, p] of (mobile ? avail : [CHAT_PANE, ...avail]).entries()) {
     const b = document.createElement("button");
     const attention = attentive.includes(p);
     b.className =
       "rail-btn" +
-      (open.has(p.id) ? " active" : "") +
+      (paneOpen(p.id) ? " active" : "") +
       (attention ? " attention" : "");
     b.dataset.pane = p.id;
     const badge = badges.get(p.id) || "";
@@ -1159,7 +1173,7 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     const label = attention ? `${counted} available` : counted;
     b.title = index < 9 ? `${baseLabel} (g${index + 1})` : label;
     b.setAttribute("aria-label", label);
-    b.setAttribute("aria-expanded", open.has(p.id) ? "true" : "false");
+    b.setAttribute("aria-expanded", paneOpen(p.id) ? "true" : "false");
     b.innerHTML = p.icon || `<span>${(p.title || "?").slice(0, 1)}</span>`;
     if (badge) {
       const count = document.createElement("span");
@@ -1422,16 +1436,6 @@ function syncPanesNow(): void {
     railHash = "";
   }
   if (autoDecision.announcement) announceArtifacts(autoDecision.announcement);
-  if (autoDecision.open && availIds.has(ARTIFACTS_PANE_ID)) {
-    openPane(ARTIFACTS_PANE_ID, {
-      // Invariant: A desktop side column can preserve conversation focus. The
-      // full-screen phone surface is an ARIA modal, so focus must enter its
-      // heading.
-      focusHeading: isMobile() ? true : autoDecision.focusHeading,
-      userInitiated: false,
-    });
-    return;
-  }
 
   const files = registry.find((p) => p.id === FILES_PANE_ID);
   let fileGeneration: string | null | undefined;

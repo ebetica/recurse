@@ -173,6 +173,7 @@ export const disclosuresTests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Regression: #3285 a scripted scroll after a jump to latest releases following.
   async function test_shift_g_scrolls_to_latest_message(browser, base) {
     const reply = Array.from(
       { length: 120 },
@@ -212,6 +213,20 @@ export const disclosuresTests: BrowserTest[] = [
           scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight <= 2
         );
       });
+      await waitForLayout(page);
+      const read = await page.evaluate(() => {
+        const scroll = document.querySelector("#scroll") as HTMLElement;
+        scroll.scrollTop = 400;
+        return scroll.scrollTop;
+      });
+      await waitForLayout(page);
+      await page.setViewportSize({ width: 1280, height: 760 });
+      await waitForLayout(page);
+      expect(
+        await page.evaluate(
+          () => (document.querySelector("#scroll") as HTMLElement).scrollTop,
+        ),
+      ).toBe(read);
       expect(errors).toEqual([]);
     } finally {
       await context.close();
@@ -1024,9 +1039,11 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
           const scope = globalThis as any;
           scope.jumpScrollEnd = undefined;
           const settled = () => {
-            if (!document.querySelector(".file-jump-target")) return;
+            const target = document.querySelector(".file-jump-target");
+            if (!target) return;
             element.removeEventListener("scrollend", settled);
             scope.jumpScrollEnd = element.scrollTop;
+            scope.jumpScrollTarget = target.dataset.rowId;
           };
           element.addEventListener("scrollend", settled);
           return element.scrollTop;
@@ -1038,8 +1055,10 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         expect(
           await page.evaluate(() => (globalThis as any).jumpScrollEnd),
         ).not.toBe(startTop);
+        expect(
+          await page.evaluate(() => (globalThis as any).jumpScrollTarget),
+        ).toBe("row:u2");
         const kept = page.locator('[data-row-id="row:u2"]');
-        expect(await kept.getAttribute("class")).toContain("file-jump-target");
         expect(
           await kept.evaluate((element) => {
             const box = element.getBoundingClientRect();
@@ -1082,24 +1101,10 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         expect(await secondEye.getAttribute("aria-expanded")).toBe("true");
         await secondEye.click();
         expect(await boundaries.nth(0).locator(".turn-tool").count()).toBe(0);
-        const centerForReader = async (control: typeof firstEye) => {
-          const scroll = page.locator("#scroll");
-          await scroll.hover();
-          const previous = await scroll.evaluate(
-            (element) => element.scrollTop,
-          );
-          await page.mouse.wheel(0, previous > 0 ? -40 : 40);
-          await page.waitForFunction(
-            (top) => document.querySelector("#scroll").scrollTop !== top,
-            previous,
-          );
-          await waitForLayout(page);
-          await control.evaluate((element) =>
-            element.scrollIntoView({ block: "center" }),
-          );
-          await waitForLayout(page);
-        };
-        await centerForReader(firstEye);
+        await firstEye.evaluate((element) =>
+          element.scrollIntoView({ block: "center" }),
+        );
+        await waitForLayout(page);
         const beforeGroup = (await firstEye.boundingBox())!;
         if (shotDir)
           await page.screenshot({ path: `${shotDir}/${name}-closed.png` });
@@ -1128,7 +1133,10 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
           name: "Hide activity",
           exact: true,
         });
-        await centerForReader(rail);
+        await rail.evaluate((element) =>
+          element.scrollIntoView({ block: "center" }),
+        );
+        await waitForLayout(page);
         const railBox = (await rail.boundingBox())!;
         expect(railBox.y + railBox.height).toBeLessThan(
           (await marker.boundingBox())!.y,
@@ -1151,7 +1159,10 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
         expect(await marker.isVisible()).toBeTrue();
 
         const latestEye = page.locator(".activity-group-toggle").last();
-        await centerForReader(latestEye);
+        await latestEye.evaluate((element) =>
+          element.scrollIntoView({ block: "center" }),
+        );
+        await waitForLayout(page);
         const before = await latestEye.boundingBox();
         expect(before).not.toBeNull();
         const beforeScroll = await page

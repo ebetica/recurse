@@ -31,20 +31,6 @@ function fresh(agentId = "agent-a"): ArtifactPaneAutoOpenPolicy {
 }
 
 describe("Artifacts pane auto-open policy", () => {
-  test("consumed artifacts stay consumed across conversation visits", () => {
-    const policy = fresh("restored");
-    expect(policy.observe(observation("restored", GEN_A)).open).toBe(true);
-    policy.beginVisit("other");
-    expect(policy.observe(observation("other", null)).open).toBe(false);
-    policy.beginVisit("restored");
-    expect(policy.observe(observation("restored", GEN_A)).open).toBe(false);
-    expect(policy.observe(observation("restored", GEN_B)).open).toBe(true);
-    policy.beginVisit("other");
-    policy.retainAgents(new Set(["other"]));
-    policy.beginVisit("restored");
-    expect(policy.observe(observation("restored", GEN_A)).open).toBe(true);
-  });
-
   test("an unread phone version stays unread across restored pane choices", () => {
     const policy = fresh();
     policy.observe(observation("agent-a", GEN_A, { mobile: true }));

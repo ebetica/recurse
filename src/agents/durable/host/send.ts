@@ -1,3 +1,4 @@
+// @tla specs/tla/send/OperatorSend.tla: atomic request deduplication/admission.
 // Admit and withdraw input. Sends and cancels run in order per conversation
 // (DurableHost.serial); input that arrives while a clear waits is held for
 // the fresh storage. Model and effort changes apply only at idle boundaries.
@@ -28,6 +29,7 @@ export interface SendOptions {
   note?: boolean;
   attachmentIds?: readonly string[];
   interrupt?: boolean;
+  onInterrupt?: (interrupted: boolean) => void;
 }
 
 /** One send as a submission: an input, or a note written as a user message. */
@@ -85,12 +87,19 @@ export async function send(
     const { conversation } = opened;
     const clear = host.clears.get(cid);
     if (clear !== undefined) {
-      if (!clear.held.some((item) => item.requestId === requestId)) {
+      const existing = clear.held.some((item) => item.requestId === requestId);
+      const expectedRun = opened.row.runId;
+      if (!existing) {
         clear.held.push(held);
         await writeClear(host, cid, clear);
         if (requestId.startsWith("op:operator:"))
           host.deps.operatorMessageAdmitted?.(cid, Date.now() / 1000);
       }
+      const interrupted =
+        options.interrupt && !existing && expectedRun !== undefined
+          ? await host.stop(cid, expectedRun, opened)
+          : false;
+      options.onInterrupt?.(interrupted);
       host.deps.log("durable_send_admitted", {
         cid,
         request_id: requestId,
@@ -110,7 +119,11 @@ export async function send(
             context,
           )
         : undefined;
-    if (options.interrupt && existing === undefined) await host.stop(cid);
+    const interrupted =
+      options.interrupt && existing === undefined
+        ? await host.stop(cid)
+        : false;
+    options.onInterrupt?.(interrupted);
     const before = host.deps.load(cid);
     const submission = await conversation.submit(draft(held), context);
     if (operator && existing === undefined) {

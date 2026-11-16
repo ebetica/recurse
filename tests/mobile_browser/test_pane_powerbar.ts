@@ -4,11 +4,13 @@ import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { WorkdirGit } from "../../src/workdir_git";
 import {
+  ARTIFACT,
   captureErrors,
   gotoRoot,
   postFixture,
   runBrowserTests,
   routeArtifacts,
+  rootAgentId,
   type BrowserTest,
 } from "./common";
 
@@ -17,7 +19,7 @@ export const tests: BrowserTest[] = [
   async function test_pane_powerbar(browser, base) {
     const app = await postFixture(base, "seed-pane-reading");
     const fixture = app;
-    await postFixture(base, `revise-artifact-app?id=${app.id}`);
+    await postFixture(base, "revise-artifact-app", { id: app.id });
     const git = new WorkdirGit({
       repoUrl: "",
       repoDir: String(app.cwd),
@@ -75,9 +77,9 @@ export const tests: BrowserTest[] = [
           await page.locator(`.rail-btn[data-pane="${id}"]`).click();
         }
         if (width === 1280)
-          await page.locator("#panes").evaluate((node) => {
-            node.style.width = "660px";
-            node.style.flex = "none";
+          await page.addStyleTag({
+            content:
+              "#panes { width: 660px !important; flex: none !important; }",
           });
         const panelId =
           id === "files" && width === 1280
@@ -360,7 +362,7 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     await routeArtifacts(page, base);
-    await gotoRoot(page, base);
+    await page.goto(`${base}#agent=${rootAgentId()}&artifact=${ARTIFACT.id}`);
     const pane = page.locator('.pane-col[data-pane="report"]');
     await pane.locator(".report-doc").waitFor();
     await pane.locator(".artifact-version-btn").click();

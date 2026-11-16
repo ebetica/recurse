@@ -17,6 +17,7 @@ export function settingsRow(
   const row = document.createElement("button");
   row.type = "button";
   row.className = "settings-row";
+  row.dataset.theme = "button";
   row.append(
     span("settings-row-label", "", label),
     span("settings-row-value", "", value),
@@ -69,6 +70,7 @@ export function settingsDetail(
 ): { refresh(): void; open(): void; close(): void } {
   const sheet = document.createElement("dialog");
   sheet.className = "settings-sheet";
+  sheet.dataset.theme = "dialog";
   sheet.setAttribute("aria-label", label);
   const head = document.createElement("header");
   head.className = "settings-sheet-head";

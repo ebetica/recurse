@@ -78,6 +78,7 @@ type Observed = {
     user: string;
   }>;
   notices: string[];
+  logs?: Array<{ event: string; fields: Record<string, unknown> }>;
 };
 
 const baseEnv = (): Record<string, string | undefined> => ({
@@ -263,7 +264,12 @@ async function openDurable(
     extra?: Extension;
   } = {},
 ): Promise<DurableSetup> {
-  const observed: Observed = { decisions: [], reviews: [], notices: [] };
+  const observed: Observed = {
+    decisions: [],
+    reviews: [],
+    notices: [],
+    logs: [],
+  };
   const ran: Array<{ name: string; args: unknown }> = [];
   let mainCalls = 0;
   const models = makeModels({
@@ -302,7 +308,9 @@ async function openDurable(
   registry.install(
     createDurableSafety({
       models,
+      reviewModels: models,
       configDir: "/tmp/pi-agent",
+      log: (event, fields) => observed.logs!.push({ event, fields }),
       trusted: () => ({
         modelPolicy: env.RECURSE_MODEL_POLICY,
         workspaceRoot: env.RECURSE_WORKSPACE_ROOT,
@@ -497,11 +505,6 @@ const CASES: Case[] = [
     configError: true,
   },
   {
-    name: "invalid model policy fails open with notice",
-    calls: [{ name: "bash", args: { command: "git push" } }],
-    env: { RECURSE_MODEL_POLICY: "{not json" },
-  },
-  {
     name: "absent model policy: active model reviews at low",
     calls: [{ name: "bash", args: { command: "git push" } }],
     env: { RECURSE_MODEL_POLICY: undefined },
@@ -578,17 +581,117 @@ test("every case reaches the same decision, reviewer requests, and notice on bot
   console.log(table.join("\n"));
 });
 
+// Regression: #3368 #3382 reviewer configuration failures allow with diagnostics only after trusted candidates are exhausted.
+test("invalid reviewer configuration allows with a warning and failure log", async () => {
+  const policy = JSON.parse(POLICY);
+  const unavailable = {
+    ...policy,
+    reviewer: { provider: "missing", model: "missing", effort: "low" },
+  };
+  for (const [category, value] of [
+    ["invalid_policy", "{not json"],
+    ["no_trusted_candidates", JSON.stringify(unavailable)],
+    [
+      "unsupported_reviewer_pin",
+      JSON.stringify({
+        ...unavailable,
+        reviewer_pin: { provider: "missing", model: "missing" },
+      }),
+    ],
+    [
+      "acting_identity_mismatch",
+      JSON.stringify({
+        ...unavailable,
+        active: { provider: "anthropic", model: "unavailable-acting-model" },
+      }),
+    ],
+  ]) {
+    const result = await viaDurable({
+      name: category!,
+      calls: [{ name: "bash", args: { command: "git push" } }],
+      env: { RECURSE_MODEL_POLICY: value },
+    });
+    expect(result.decisions).toEqual([{ decision: "allow" }]);
+    expect(result.ran).toHaveLength(1);
+    expect(result.reviews).toEqual([]);
+    expect(result.notices).toHaveLength(1);
+    expect(result.notices[0]).toContain("allowed without review");
+    expect(result.notices[0]).toContain("Settings");
+    expect(result.notices[0]).toContain("effort level 1");
+    expect(result.logs).toEqual([
+      {
+        event: "safety_review_failed",
+        fields: {
+          cid: "agent-parity",
+          stage: "configuration",
+          category,
+          elapsed_ms: expect.any(Number),
+          attempts: 0,
+        },
+      },
+    ]);
+  }
+  const fallback = await viaDurable({
+    name: "stale identity with trusted candidates",
+    calls: [{ name: "bash", args: { command: "git push" } }],
+    env: {
+      RECURSE_MODEL_POLICY: JSON.stringify({
+        ...policy,
+        active: { provider: "anthropic", model: "unavailable-acting-model" },
+      }),
+    },
+    reviewer: deny("test refusal"),
+  });
+  expect(fallback.decisions[0]!.decision).toBe("block");
+  expect(fallback.reviews).toHaveLength(1);
+  expect(fallback.ran).toEqual([]);
+  expect(fallback.notices).toEqual([]);
+  expect(fallback.logs).toEqual([]);
+});
+
+// Regression: #3394 parallel writes may run in either order.
 test("path expansion rewrites the arguments the tool receives", async () => {
+  const policy = JSON.parse(POLICY);
+  const allowed = join(process.env.CHAT_DATA_DIR!, "summary-allowed.txt");
+  const denied = join(process.env.CHAT_DATA_DIR!, "summary-denied.txt");
   const durable = await viaDurable({
     name: "expand",
-    calls: [{ name: "write", args: { path: "$HOME/notes.txt", content: "x" } }],
-  });
-  expect(durable.ran).toEqual([
-    {
-      name: "write",
-      args: { path: join(workspace, "notes.txt"), content: "x" },
+    calls: [
+      { name: "write", args: { path: "$HOME/notes.txt", content: "x" } },
+      { name: "write", args: { path: allowed, content: "x" } },
+      { name: "write", args: { path: denied, content: "x" } },
+    ],
+    env: {
+      RECURSE_MODEL_POLICY: JSON.stringify({
+        ...policy,
+        summary: { provider: "missing", model: "missing", effort: "low" },
+      }),
     },
+    reviewer: (_model, action) =>
+      action.includes("summary-denied.txt") ? "DENY: test refusal" : "OK",
+  });
+  expect(durable.ran).toHaveLength(2);
+  expect(durable.ran).toEqual(
+    expect.arrayContaining([
+      {
+        name: "write",
+        args: { path: join(workspace, "notes.txt"), content: "x" },
+      },
+      { name: "write", args: { path: allowed, content: "x" } },
+    ]),
+  );
+  expect(durable.reviews.map((review) => review.model)).toEqual([
+    `${policy.reviewer.provider}/${policy.reviewer.model}`,
+    `${policy.reviewer.provider}/${policy.reviewer.model}`,
   ]);
+  expect(durable.decisions.map((decision) => decision.decision)).toEqual([
+    "allow",
+    "allow",
+    "block",
+  ]);
+  expect(durable.decisions[2]!.reason).toContain("test refusal");
+  expect(durable.notices).toEqual([]);
+  expect(durable.logs).toEqual([]);
 });
 
 test("three denials open the breaker with the same messages on both paths and stop the run", async () => {

@@ -15,14 +15,21 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   createModels,
+  createAssistantMessageEventStream,
   fauxAssistantMessage,
+  fauxThinking,
   fauxToolCall,
   fauxProvider,
+  type AssistantMessageEventStream,
   type FauxResponseStep,
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, LiveDoc } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { DurableHost } from "../../src/agents/durable/host.ts";
+import {
+  DurableViews,
+  type ViewConversation,
+} from "../../src/agents/durable/durable_rows.ts";
 import type { DurableReport } from "../../src/agents/durable/report.ts";
 import {
   openWorkerSqliteStorage,
@@ -97,6 +104,104 @@ async function requestUsers(host: DurableHost): Promise<string[]> {
       text.replace(/\n\[\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC\]$/, ""),
     );
 }
+
+// Regression: #3338 a stored thought must replace its captured live generation.
+test("a commit during a view read keeps one thinking step", async () => {
+  const next = heldAnswer("Finished.");
+  const thought = "Inspect the sample before running the command.";
+  const { host, faux, models } = hostOn(world(), [
+    fauxAssistantMessage(
+      [
+        fauxThinking(thought),
+        fauxToolCall("bash", { command: "printf sample" }),
+      ],
+      { stopReason: "toolUse" },
+    ),
+    next.step,
+  ]);
+  const complete = Promise.withResolvers<void>();
+  const commit = Promise.withResolvers<void>();
+  const captured = Promise.withResolvers<void>();
+  const resume = Promise.withResolvers<void>();
+  let paused = false;
+  const pause = (source: AssistantMessageEventStream) => {
+    const stream = createAssistantMessageEventStream();
+    void (async () => {
+      for await (const event of source) {
+        if (event.type === "done" && !paused) {
+          paused = true;
+          complete.resolve();
+          await commit.promise;
+        }
+        stream.push(event);
+      }
+      stream.end(await source.result());
+    })();
+    return stream;
+  };
+  models.setProvider({
+    ...faux.provider,
+    stream: (...args) => pause(faux.provider.stream(...args)),
+    streamSimple: (...args) => pause(faux.provider.streamSimple(...args)),
+  });
+  let reading: Promise<Rec> | undefined;
+  try {
+    await host.send("c1", "Inspect and run the sample.", "sample");
+    await complete.promise;
+    await until(async () => {
+      const live = await host.live("c1");
+      return (
+        live?.generation?.message?.content.some(
+          (part) => part.type === "toolCall",
+        ) === true
+      );
+    });
+    const opened = await host.open("c1");
+    const conversation: ViewConversation = {
+      id: opened.conversation.id,
+      entries: async (...args) => {
+        captured.resolve();
+        await resume.promise;
+        return opened.conversation.entries(...args);
+      },
+    };
+    const views = new DurableViews();
+    reading = views.page(
+      "c1",
+      opened.harness,
+      conversation,
+      context,
+      {},
+      {
+        limit: 50,
+      },
+    );
+    await captured.promise;
+    commit.resolve();
+    await next.started;
+    const stored = (await blocks(host)).find(
+      (row) => row.role === "assistant" && row.has_thinking,
+    )!;
+    expect(await host.thinking("c1", Number(stored.offset))).toEqual({
+      text: thought,
+      live: false,
+    });
+    resume.resolve();
+    const mixed = (await reading).blocks as Rec[];
+    expect(
+      mixed.filter((row) => row.role === "assistant").map((row) => row.id),
+    ).toEqual([stored.id]);
+    expect(
+      mixed.filter((row) => row.kind === "tool_call").map((row) => row.offset),
+    ).toEqual([stored.offset]);
+  } finally {
+    commit.resolve();
+    resume.resolve();
+    next.release();
+    await reading?.catch(() => undefined);
+    await host.close();
+  }
+});
 
 // Regression: #3055 cold page connections close before clear and shutdown.
 test("view session identity follows Durable storage across clear", async () => {

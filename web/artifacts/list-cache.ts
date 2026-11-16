@@ -19,6 +19,8 @@ import { phoneListEntry } from "../phone-nav.js";
 import { renderShell } from "./pane.js";
 import { showArtifact } from "./artifact-detail.js";
 import { DRAFT, state } from "../state.js";
+import { reviewedVersion } from "../document-review.js";
+import { commentKey } from "./selection-comments.js";
 import { ARTIFACTS_REFRESH_EVENT, UI_REFRESH_EVENT } from "../ui-events.js";
 import {
   ARTIFACTS_PANE_ID,
@@ -131,6 +133,10 @@ export async function refreshList(
       } else {
         cache.list = next;
         cache.loaded = true;
+        // Spec: What a list read finds counts as reviewed when first seen.
+        for (const item of next)
+          if (item.version)
+            reviewedVersion(commentKey(agentId, item.id)!, item.version);
       }
     } catch (err) {
       // Invariant: An abandoned background probe learned nothing. Leave this

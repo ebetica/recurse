@@ -1,7 +1,7 @@
-// Follow an open Harness conversation's live watches and commits: run, shells,
-// queue, model, committed usage and safety state. Promote queued input at idle;
-// write lost-task rows; kick its run reporter. Usage belongs to its storage
-// session.
+// @tla specs/tla/send/OperatorSend.tla: Promote keeps FIFO after Stop/restart.
+// Follow run, shells, queue, model, usage and safety watches/commits.
+// Promote queued input at idle; write lost-task rows; kick the run reporter.
+// Usage belongs to its storage session.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
   AgentDoc,
@@ -47,6 +47,7 @@ export interface ShellInput {
 export interface LiveRow {
   contextUsage?: Rec | null;
   runId?: string;
+  runFirstEntry?: number;
   /** InboxDoc items, set synchronously from commits. */
   queued?: number;
   pending: Rec[];
@@ -256,6 +257,7 @@ export async function followConversation(input: FollowInput): Promise<{
   };
   const run = (await harness.snapshot(LiveDoc, conversation.id, context))?.run;
   row.runId = run && String(run.taskId);
+  row.runFirstEntry = run?.first === undefined ? undefined : Number(run.first);
   row.queued = (
     await harness.snapshot(InboxDoc, conversation.id, context)
   )?.items.length;
@@ -296,6 +298,8 @@ export async function followConversation(input: FollowInput): Promise<{
             : undefined;
         const before = row.runId;
         row.runId = run && String(run.taskId);
+        row.runFirstEntry =
+          run?.first === undefined ? undefined : Number(run.first);
         moved ||= row.runId !== before;
       } else if (
         change.type === "document" &&
@@ -324,7 +328,9 @@ export async function followConversation(input: FollowInput): Promise<{
         (change) =>
           (change.type === "document" &&
             change.record.kind === AgentDoc.definition.kind) ||
-          (change.type === "entry" && change.value.kind === "pi.compaction"),
+          (change.type === "entry" &&
+            (change.value.kind === "pi.compaction" ||
+              change.value.kind === "recurse.note")),
       )
     )
       input.contextChanged?.();

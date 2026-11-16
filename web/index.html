@@ -112,6 +112,10 @@
     --row-bg: color-mix(in srgb, var(--accent) 14%, var(--panel)); background: var(--row-bg); }
   .agent.drop-bad { border-color: var(--danger);
     --row-bg: color-mix(in srgb, var(--danger) 12%, var(--panel)); background: var(--row-bg); cursor: no-drop; }
+  .agent.drop-between { position: relative; }
+  .agent-drop-line { position: absolute; right: 0; height: 2px;
+    background: var(--accent); pointer-events: none; z-index: var(--z-raised); }
+  .agent-drop-line.invalid { background: var(--danger); }
   .agent .row1 { display: flex; align-items: center; gap: var(--space-2); min-width: 0; flex-wrap: nowrap; }
   /* A compact colored, shaped marker for each state — no spelled-out word, so
      it stays small on a phone. The shape (filled dot, hollow ring, square,
@@ -251,9 +255,9 @@
     background: color-mix(in srgb, var(--danger) 8%, transparent); }
   @media (pointer: coarse) { #key-mode { display: none; } }
   #top-actions { display: flex; align-items: center; gap: var(--space-1); }
-  #top-actions.prefix-on .top-act[data-key-hint]:not(:disabled) { color: var(--accent);
+  :is(#top-actions, #pane-rail).prefix-on .top-act[data-key-hint]:not(:disabled) { color: var(--accent);
     background: color-mix(in srgb, var(--accent) 8%, transparent); outline: 1px solid var(--accent-dim); }
-  #top-actions.prefix-on .top-act[data-key-hint]::after { content: attr(data-key-hint);
+  :is(#top-actions, #pane-rail).prefix-on .top-act[data-key-hint]::after { content: attr(data-key-hint);
     display: inline-flex; color: var(--text); background: var(--panel-2);
     border: 1px solid var(--accent-dim); border-radius: 6px; padding: 1px var(--space-2);
     font: 600 0.65625rem/1.2 var(--font-mono); }
@@ -462,8 +466,6 @@
   /* A call pi-safety blocked: amber, like the thread's safety notices. */
   .tool-call.blocked .turn-tool-stat, .tool-call.blocked .tc-call-note {
     color: var(--notice); }
-  .tool-unavailable { margin: -1px var(--space-4) var(--space-3); color: var(--muted);
-    font: 0.65625rem/1.45 var(--font-sans); }
   .tool-detail-body { min-width: 0; padding: var(--space-2) var(--space-4) var(--space-4);
     border-top: 1px solid var(--border); background: var(--panel-2);
     font: 0.78125rem/1.5 var(--font-sans); }
@@ -1327,7 +1329,7 @@
     overflow: auto; font-size: 0.78125rem; }
   #effort-slider { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
   #effort-range { appearance: none; -webkit-appearance: none; flex: 1;
-    min-width: 0; width: auto;
+    min-width: 0; width: auto; --fill: 0%;
     height: 26px; background: transparent; cursor: pointer; margin: 0; }
   #effort-range::-webkit-slider-runnable-track { height: 14px; border-radius: 999px;
     background:
@@ -1628,6 +1630,8 @@ color: var(--warn); font-size: 0.65625rem; line-height: 1; }
 <link rel="stylesheet" href="/static/app.css?v=__VERSION__">
 <style id="theme">__THEME__</style>
 <link rel="stylesheet" href="/static/katex.css?v=__VERSION__">
+<link rel="modulepreload" href="/static/__WINDOWS_CHUNK__" media="(min-width: 701px)">
+<link rel="preload" as="style" href="/static/dockview.css" media="(min-width: 701px)">
 </head>
 <body data-version="__VERSION__">
 

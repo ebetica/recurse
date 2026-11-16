@@ -15,12 +15,18 @@ migration. Recurse updates may require editing a custom script.
 - `arrangement.ts` checks sections and actions.
 - `sections.ts` draws sections; `script.ts` manages the worker and saved script.
 - `actions.ts` and `hold.ts` handle tag actions and hold menus.
+- `drag.ts` owns desktop agent drop targets and feedback.
 - `agent-folds.ts` remembers, on this device, which agents list their
   subagents (opened with l/Right, folded with h/Left), so the agent list keeps
-  its shape across reloads and server restarts. Storage holds at most 500
+  its shape across reloads and server restarts. A one-time reset discards saved
+  opens from the old format, which included automatic reveals, while preserving
+  the saved h/Left fold. Storage holds at most 500
   agent ids, discarding the oldest opens first and deleted home agents after
-  an authoritative tree read. A selected agent's fold lasts until selection
-  changes. `sections.ts` remembers section folds separately.
+  an authoritative tree read. Selection reveals the agent's children and
+  ancestors only while selected; opening another row with l/Right does not save
+  that reveal. Pressing l/Right on the selected agent keeps its children open
+  after leaving. A selected agent's h/Left fold lasts until selection changes.
+  `sections.ts` remembers section folds separately.
 
 Side conversations are excluded from both script inputs and stay in the Side
 pane. Rows require no extra record, transcript or GitHub reads. Usage is not in the
@@ -53,6 +59,14 @@ Tagging UI is opt-in through a custom sidebar script; the built-in layout has no
 tag actions, tag sections or draft tag control. The project-group example enables
 Tag…, Untag, nested Active, Inbox and Archive sections, and the optional draft
 control.
+
+## Moving agents
+
+Desktop drags onto a row nest under that agent; drags at its top or bottom edge
+choose its parent, including top level. The indented line shows the destination
+level, not a saved position: the script and activity order still sort siblings.
+Section headers are not move targets. Moves keep the subtree together, refuse
+cycles and remain local-only. Phones and keyboard navigation are unchanged.
 
 ## Nested sections
 

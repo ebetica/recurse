@@ -1,6 +1,6 @@
 // Bounded async workdir Git/diff queries; lifecycle stays in tools/worktree.
 // Drain stdout fully, retaining limit+1; timeout kills child without blocking.
-// Fresh summaries prevent working-tree edits hiding behind a HEAD cache.
+// Fresh summaries; default and HEAD include separately capped untracked names.
 // Scrub Git env; metadata caches belong to one WorkdirGit instance.
 import { lstat, readFile, readlink, stat } from "node:fs/promises";
 import { open } from "node:fs/promises";
@@ -389,6 +389,7 @@ export interface DiffState {
   files: DiffFile[];
   moreFiles: number;
   untracked: string[];
+  untrackedTruncated: boolean;
   currentPr: PrValue | null;
   version: string | null;
 }
@@ -415,6 +416,7 @@ export function unavailableDiff(
     files: [],
     moreFiles: 0,
     untracked: [],
+    untrackedTruncated: false,
     currentPr: null,
     version: null,
   };
@@ -1068,8 +1070,8 @@ export class WorkdirGit {
     wt: string,
     num: GitText,
     signal?: AbortSignal,
-    committed = false,
-  ): Promise<[DiffFile[], number, boolean, string[]]> {
+    includeUntracked = false,
+  ): Promise<[DiffFile[], number, string[], boolean]> {
     const files: DiffFile[] = [];
     if (num.text !== null && (num.code === 0 || num.code === 1)) {
       for (const rec of num.text.split("\0")) {
@@ -1086,10 +1088,9 @@ export class WorkdirGit {
         });
       }
     }
-    if (committed) {
-      const more = Math.max(0, files.length - MAX_DIFF_FILES);
-      return [files.slice(0, MAX_DIFF_FILES), more, num.truncated, []];
-    }
+    const more = Math.max(0, files.length - MAX_DIFF_FILES);
+    if (!includeUntracked)
+      return [files.slice(0, MAX_DIFF_FILES), more, [], false];
     const names = await this.gitText(
       ["ls-files", "--others", "--exclude-standard", "-z"],
       wt,
@@ -1097,16 +1098,8 @@ export class WorkdirGit {
       5.0,
       signal,
     );
-    const untracked = (names.text ?? "").split("\0").filter((p) => p);
-    for (const path of untracked)
-      files.push({
-        path,
-        additions: null,
-        deletions: null,
-        status: "untracked",
-      });
-    const more = Math.max(0, files.length - MAX_DIFF_FILES);
-    return [files.slice(0, MAX_DIFF_FILES), more, num.truncated, untracked];
+    const untracked = (names.text ?? "").split("\0").filter(Boolean);
+    return [files.slice(0, MAX_DIFF_FILES), more, untracked, names.truncated];
   }
 
   // Identical requests share one walk; it is killed once every caller that
@@ -1117,8 +1110,10 @@ export class WorkdirGit {
     baseOverride: string | null = null,
     cwdSource = "stored",
     signal?: AbortSignal,
+    includeUntracked = true,
   ): Promise<DiffState> {
-    const key = JSON.stringify([wt, baseOverride, cwdSource]);
+    includeUntracked &&= baseOverride === null || baseOverride === "HEAD";
+    const key = JSON.stringify([wt, baseOverride, cwdSource, includeUntracked]);
     let run = this.diffRuns.get(key);
     if (!run) {
       const controller = new AbortController();
@@ -1130,6 +1125,7 @@ export class WorkdirGit {
           baseOverride,
           cwdSource,
           controller.signal,
+          includeUntracked,
         ).finally(() => {
           if (this.diffRuns.get(key) === fresh) this.diffRuns.delete(key);
         }),
@@ -1161,6 +1157,7 @@ export class WorkdirGit {
     baseOverride: string | null,
     cwdSource: string,
     signal: AbortSignal,
+    includeUntracked: boolean,
   ): Promise<DiffState> {
     const caller = signal;
     const controller = new AbortController();
@@ -1228,20 +1225,18 @@ export class WorkdirGit {
         (df.code !== 0 && df.code !== 1)
       )
         return unavailableDiff("diff-failed", cwd, cwdSource);
-      const [files, more, numstatTruncated, untracked] = await this.diffFiles(
+      const [files, more, untracked, namesTruncated] = await this.diffFiles(
         wt,
         num,
         signal,
-        Boolean(work),
+        includeUntracked,
       );
       if (signal.aborted) return unavailableDiff("diff-failed", cwd, cwdSource);
       const untrackedCapped = untracked.slice(0, MAX_UNTRACKED_NAMES);
+      const untrackedTruncated =
+        namesTruncated || untracked.length > untrackedCapped.length;
       const truncated =
-        st.truncated ||
-        df.truncated ||
-        numstatTruncated ||
-        more > 0 ||
-        untracked.length > untrackedCapped.length;
+        st.truncated || df.truncated || num.truncated || more > 0;
       let statText = st.text;
       let diff = df.text;
       if (st.truncated)
@@ -1253,7 +1248,8 @@ export class WorkdirGit {
         !pyStrip(diff) &&
         !untrackedCapped.length &&
         current === null &&
-        !truncated
+        !truncated &&
+        !untrackedTruncated
       )
         return {
           ...unavailableDiff("clean", cwd, cwdSource),
@@ -1273,6 +1269,7 @@ export class WorkdirGit {
             statText,
             diff,
             untrackedCapped.join("\0"),
+            String(untrackedTruncated),
           ].join("\0"),
           "utf8",
         )
@@ -1296,6 +1293,7 @@ export class WorkdirGit {
         files,
         moreFiles: more,
         untracked: untrackedCapped,
+        untrackedTruncated,
         currentPr: current,
         version,
       };

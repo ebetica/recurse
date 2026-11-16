@@ -49,7 +49,23 @@ including tool arguments and results. It defaults to the calling agent;
 `--tree` includes descendants and `--all` searches all live agents.
 `--deleted` also includes retained deleted and cleared histories.
 `--role user|assistant|agent|tool|tool-result` and `--limit 1-100` narrow results.
-Hits print `path:line: snippet` plus agent/time/role. Read the path with the native
+`--conversation` selects user/assistant/agent roles instead of a single `--role`.
+`--since` (inclusive) and `--until` (exclusive) accept UTC dates or ISO timestamps
+ending `Z`. Repeat `--or TEXT` for up to eight literals (4096 characters total),
+searched in one ripgrep pass. Multi-agent searches cap each agent at five results,
+or half a smaller global limit rounded up; focused searches keep the full limit.
+Start optional pages with `--cursor start`, then repeat the same search/filters
+with the returned cursor. Pages use per-agent entry/role watermarks, not arrival
+order; appends are visible, but replaced transcripts or changed scope/filters
+require restarting. Cursors track at most 200 agents and 32 KiB; a byte-bound page
+with no new hits cannot advance, so narrow the query. Unpaged queries avoid cursor
+metadata reads, sorting and counts. Filtered/paged requests require the bundled
+response's `filters_applied` marker; older backends fail with update guidance
+instead of silently ignoring requested options. API v1 is unchanged.
+Hits print `path:line`, separate agent/role/time/offset metadata, then an excerpt
+with `[… clipped]` boundaries. The caller's current run is excluded; historical
+tools remain searchable. Incomplete coverage names agents and missing/stale
+transcripts; truncation names the hit or byte limit. Read the path with the native
 read tool, or use `read id@label --offset LINE --limit N` for remote hits.
 Direct connected remote targets use `id@label`; these are bundled-tool routes,
 not published API v1 endpoints. Argument parsing and command help live in

@@ -9,9 +9,11 @@ import {
   type Conversation,
   type Harness,
 } from "@earendil-works/pi-durable";
+import { createCompaction } from "../../../../node_modules/@earendil-works/pi-durable/dist/harness/compaction.js";
 import {
   compactionPolicy,
   createDurableCompaction,
+  IdleCompactionDoc,
   type DurableCompactionHost,
 } from "./durable-compaction.ts";
 
@@ -23,6 +25,7 @@ export interface ContextOptions {
     id: Conversation["id"],
   ): { conversation: Conversation; harness: Harness } | null;
   report(event: string, error: unknown): void;
+  idleCompactionCacheMiss?(id: Conversation["id"]): void;
   providerCompaction?: DurableCompactionHost["providerCompaction"];
 }
 
@@ -59,13 +62,30 @@ export function createContext(options: ContextOptions) {
     harness: Harness,
     conversation: Conversation,
     context: Context,
+    idleAllowed?: () => boolean,
   ): Promise<string> => {
     const next = (admissions.get(conversation.id) ?? Promise.resolve()).then(
       async () => {
         const live = await harness.snapshot(LiveDoc, conversation.id, context);
+        if (idleAllowed && !idleAllowed()) return "Compaction cancelled.";
         if (live?.compactions?.length)
           return "Compaction already running; continue.";
-        const taskId = await conversation.compact(undefined, context);
+        const taskId =
+          idleAllowed === undefined
+            ? await conversation.compact(undefined, context)
+            : await conversation.commit(async (tx) => {
+                if (!idleAllowed()) return undefined;
+                const live = await tx.doc(LiveDoc, conversation.id);
+                if (!idleAllowed() || live.run || live.compactions?.length)
+                  return undefined;
+                const taskId = await createCompaction(tx, conversation.id, {
+                  reason: "threshold",
+                });
+                (await tx.doc(IdleCompactionDoc, taskId)).idle = true;
+                return taskId;
+              }, context);
+        if (taskId === undefined) return "Compaction cancelled.";
+        harness.resume();
         void harness
           .waitForTask(taskId, context)
           .then(async ({ state: { outcome } }) => {
@@ -117,6 +137,7 @@ export function createContext(options: ContextOptions) {
     extensions: [
       createDurableCompaction({
         models: options.models,
+        idleCompactionCacheMiss: options.idleCompactionCacheMiss,
         conversation: async (_context, id) => live(id).conversation,
         contextWindow: async () => windowNow(),
         compact: (_context, id) => {

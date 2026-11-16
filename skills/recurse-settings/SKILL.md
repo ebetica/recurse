@@ -5,7 +5,7 @@ description: Manage Recurse effort levels, remotes, themes, app name/icon and si
 
 # Recurse settings
 
-Discover the deferred tool with `searchTools("recurse_settings")`, inspect its schema with `describeTool("recurse_settings")`, then call `tools.recurse_settings({action: ..., ...})` from codemode. Change settings only when the operator asks. File paths resolve against the tool's current cwd; no stdin.
+Call `recurse_settings` directly, or `tools.recurse_settings({action: ..., ...})` from codemode with the same arguments. Change settings only when the operator asks. File paths resolve against the tool's current cwd; no stdin.
 
 ## Models
 
@@ -23,8 +23,15 @@ Discover the deferred tool with `searchTools("recurse_settings")`, inspect its s
 - `set_name` uses `name`; `reset_name` restores the default.
 - `set_icon` imports a PNG or SVG from `path`, at most 1 MiB; `reset_icon` restores the default. Name/icon changes appear after reload.
 - `themes` lists themes; `select_theme` uses `name` (`system` follows the device) and optional `appearance` (`system`, `dark` or `light`). Legacy `dark`/`light` names must be supplied together; mismatched pairs keep dark.
-- `add_theme` imports a Ghostty palette file from `path`, using `name`. It requires `background`, `foreground` and all 16 palette slots; other keys are ignored. `remove_theme` uses `name`.
-- Theme changes reach open pages without a restart.
+- `add_theme` imports a Ghostty palette file from `path`, using `name`. It requires `background`, `foreground` and all 16 palette slots; other keys are ignored. Optional `css_path` attaches a CSS file (at most 50,000 characters). `remove_theme` uses `name`.
+- `select_theme` with `name` and `css_path` replaces the CSS of an existing custom theme and selects it live. An empty CSS file clears its styling. Built-in themes cannot have custom CSS.
+- Theme changes reach open pages without a restart. Exported/imported custom palettes keep their CSS.
+
+### Custom styling
+
+Prefer palette colours before adding CSS. Use stable `[data-theme="…"]` hooks: `sidebar`, `sidebar-row`, `chat-header`, `thread`, `user-message`, `assistant-message`, `composer`, `button`, `input`, `dialog`, `pane`, `background`. Reuse theme variables such as `var(--bg)`, `var(--text)` and `var(--accent)`; avoid fragile internal classes. Respect `prefers-reduced-motion`. Images must be embedded data URLs, not remote resources.
+
+You cannot see the result unless you inspect it in a browser or the operator shares it. Make small changes and ask for feedback. If styling makes the app unusable, open its URL with `?customCss=off`; select a built-in theme to undo custom styling.
 
 ## Tree links
 

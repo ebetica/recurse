@@ -11,6 +11,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fakePiPackage } from "./fake_pi_auth";
 import { ProcessLifecycle } from "../../src/process_lifecycle";
+import {
+  createModels,
+  createProvider,
+  fauxAssistantMessage,
+} from "@earendil-works/pi-ai";
+import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
+import { ReadOnlySignIns } from "../../src/auth/read_only_sign_ins";
 import { ShellRegistry } from "../../src/pi_bg_shell";
 import { procStat } from "../../src/utils/proc_stat";
 import { OAuthStore, parseTokenJson } from "../../src/auth/oauth";
@@ -46,6 +53,79 @@ function lifecycle(root: string): ProcessLifecycle {
     killGraceMs: 500,
   });
 }
+
+// Feature: #3386 external sign-ins must never refresh, execute commands, mutate or disclose their source.
+test("read-only sign-ins authenticate a real provider call without refreshing or changing the source", async () => {
+  const dir = join(WORK, "read-only");
+  mkdirSync(dir);
+  const path = join(dir, "auth.json");
+  const marker = join(dir, "command-executed");
+  const faux = createFauxCore({ tokensPerSecond: 20_000 });
+  const credential = {
+    type: "oauth" as const,
+    access: "fixture-access",
+    refresh: "fixture-refresh",
+    expires: Date.now() + 2 * 60 * 60 * 1000,
+  };
+  let refreshes = 0;
+  const provider = createProvider({
+    id: faux.provider,
+    models: faux.models,
+    api: { stream: faux.stream, streamSimple: faux.streamSimple },
+    auth: {
+      oauth: {
+        name: "Fixture",
+        login: async () => credential,
+        refresh: async () => {
+          refreshes++;
+          return credential;
+        },
+        toAuth: async (value) => ({ apiKey: value.access }),
+      },
+    },
+  });
+  for (const stored of [
+    credential,
+    { ...credential, expires: Date.now() - 60_000 },
+    { ...credential, expires: Date.now() + 5 * 60 * 1000 },
+    { type: "api_key", key: `!touch ${marker}` },
+  ]) {
+    const bytes = JSON.stringify({ [provider.id]: stored });
+    writeFileSync(path, bytes);
+    const models = createModels({ credentials: new ReadOnlySignIns(path) });
+    models.setProvider(provider);
+    if (stored === credential) {
+      faux.setResponses([fauxAssistantMessage("authenticated")]);
+      const response = await models.completeSimple(faux.getModel(), {
+        messages: [{ role: "user", content: "authenticate", timestamp: 0 }],
+      });
+      expect(response.stopReason).toBe("stop");
+      expect(response.content).toEqual([
+        { type: "text", text: "authenticated" },
+      ]);
+    } else {
+      await expect(models.getAuth(faux.getModel())).rejects.toThrow();
+    }
+    expect(readFileSync(path, "utf8")).toBe(bytes);
+    expect(refreshes).toBe(0);
+    expect(readdirSync(dir)).toEqual(["auth.json"]);
+  }
+  expect(faux.state.callCount).toBe(1);
+  const malformed = '{"private-file-canary":';
+  writeFileSync(path, malformed);
+  const status = new OAuthStore({
+    piAgentDir: async () => dir,
+    ambient: { RECURSE_READ_ONLY_SIGN_INS: path },
+    lifecycle: lifecycle(dir),
+  });
+  await expect(status.readAuth()).rejects.toThrow(
+    /^Cannot read the read-only sign-ins$/,
+  );
+  await expect(new ReadOnlySignIns(path).read(provider.id)).rejects.toThrow(
+    /^Cannot read the read-only sign-ins$/,
+  );
+  expect(readFileSync(path, "utf8")).toBe(malformed);
+});
 
 interface FakeServer {
   url: string;

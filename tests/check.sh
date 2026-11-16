@@ -29,64 +29,18 @@ advisory_lint() {
 }
 
 stage_web() {
-  bun src/launcher/dependencies.ts
   bun run format:check
-  bun tests/checks/color_check.ts
-  bun tests/checks/radius_check.ts
-  bun tests/checks/shadow_check.ts
-  bun tests/checks/font_check.ts
-  bun tests/checks/svg_check.ts
-  bun tests/checks/z_check.ts
-  bun tests/checks/motion_check.ts
-  bun tests/checks/space_check.ts
   bun --bun ./node_modules/.bin/oxlint -c .oxlintrc.json --print-config >/dev/null
   advisory_lint "Oxlint" bun run lint
   bun run test
-  bun run typecheck
   bun run build
 }
 
-# Backend and extension formatting/types/tests, docs links, and tracked Markdown (under 15,000 characters) and source size limits.
+# Backend and extension formatting, types and tests.
 stage_ts() {
-  bun tests/checks/docs_check.ts
-  bun -e '
-    import { lstatSync, readFileSync } from "node:fs";
-    const limit = 15000;
-    const tracked = Bun.spawnSync(["git", "ls-files", "-z", "--", ".", ":(glob,exclude)" + ["play", "ground"].join("") + "/**"]);
-    if (tracked.exitCode !== 0) throw new Error(tracked.stderr.toString());
-    for (const file of tracked.stdout.toString().split("\0").filter((file) => file.endsWith(".md"))) {
-      if (lstatSync(file).isSymbolicLink()) continue;
-      const count = Array.from(readFileSync(file, "utf8")).length;
-      if (count >= limit) { console.error(`${file}: ${count} characters (limit: fewer than ${limit})`); process.exitCode = 1; }
-    }
-  '
-  # Exclude web/vendor/** (third-party), web/dist/** (build output),
-  # scripts/patches/** (dependency diffs), **/fixtures/** (recorded/test inputs), and
-  # **/*.lock (generated dependency metadata). Symlinks are not source files.
-  bun -e '
-    import { lstatSync, readFileSync } from "node:fs";
-    const tracked = Bun.spawnSync(["git", "ls-files", "-z", "--", ".", ":(glob,exclude)" + ["play", "ground"].join("") + "/**",
-      ":(glob,exclude)web/vendor/**", ":(glob,exclude)web/dist/**",
-      ":(glob,exclude)scripts/patches/**", ":(glob,exclude)**/fixtures/**", ":(glob,exclude)**/*.lock"]);
-    if (tracked.exitCode !== 0) throw new Error(tracked.stderr.toString());
-    const source = /\.(?:[cm]?[jt]sx?|py|sh|bash|html?|css|scss|sass|less|vue|svelte|c|h|cc|cpp|hpp|rs|go|java|rb)$/i;
-    for (const file of tracked.stdout.toString().split("\0").filter(Boolean)) {
-      if (lstatSync(file).isSymbolicLink()) continue;
-      const text = readFileSync(file, "utf8");
-      if (!source.test(file) && !text.startsWith("#!")) continue;
-      const lines = text.split("\n").length - Number(text.endsWith("\n") || !text);
-      if (lines > 2500) { console.error(`ERROR: ${file}: ${lines} lines (maximum 2500). A file this large usually means bloated code or a concern that should be its own module: simplify from first principles (delete dead, duplicated or parallel code, one job per module); do not mechanically split it.`); process.exitCode = 1; }
-      else if (lines >= 1000) console.warn(`WARNING: ${file}: ${lines} lines (maximum 2500). A file this large often means bloated code or a concern that should be its own module: before adding more, look for dead, duplicated or parallel code to delete.`);
-    }
-  '
-  bun src/launcher/dependencies.ts
-  bun tests/checks/browser_import_check.ts
-  bun tests/checks/operator_send_check.ts
-  bun tests/checks/prompt_budget.ts
-  bun tests/checks/reminder_check.ts
-  bun tests/checks/comment_check.ts --summary --strict
-  bun tests/checks/test_check.ts --strict --summary
   bun run format:backend:check
+  # The static gate checks types with tsgo; tsc stays the reference here.
+  bun run typecheck
   bun run typecheck:backend
   # Compose the whole TypeScript server without listening, against a
   # throwaway state root.
@@ -95,7 +49,6 @@ stage_ts() {
 }
 
 stage_browser() {
-  bun src/launcher/dependencies.ts
   # A dist built at another commit makes the change's own new assertion fail and
   # reads exactly like a real regression.
   bun run build
@@ -110,7 +63,6 @@ stage_browser() {
 }
 
 stage_perf() {
-  bun src/launcher/dependencies.ts
   bun tests/dev/hotpath_gates.ts
 }
 
@@ -120,7 +72,6 @@ stage_tla() {
 
 # Routine reply-path coverage; browser tools must already be installed.
 stage_provider() {
-  bun src/launcher/dependencies.ts
   bun run build
   bun test tests/backend/provider_replay.test.ts tests/backend/provider_websocket.test.ts tests/backend/provider_e2e.test.ts tests/backend/record_provider.test.ts --timeout 15000
   bun tests/mobile_browser/index.ts --workers 1 provider-replay
@@ -149,7 +100,6 @@ macos_step() {
 }
 
 stage_macos() {
-  bun src/launcher/dependencies.ts
   TMPDIR="$(cd "${TMPDIR:-/tmp}" && pwd -P)"
   export TMPDIR
   macos_results=""
@@ -179,8 +129,10 @@ stage_macos() {
   [[ $macos_failures -eq 0 ]]
 }
 
-bun tests/checks/core_boundary_check.ts
-bun --bun ./node_modules/.bin/oxlint -c .oxlintrc.blocking.jsonc --disable-nested-config --report-unused-disable-directives-severity error src
+# Every stage starts with installed dependencies and the fast static gate:
+# docs and Markdown length, source sizes, web style, policy, lint and types.
+bun src/launcher/dependencies.ts
+bun tests/checks/static.ts
 
 case "${1:-all}" in
   web | ts | browser | provider | perf | tla | macos) "stage_$1" ;;

@@ -6,13 +6,17 @@ import type { LoginDeps } from "./login";
 import { jsonDictBody } from "./login";
 import { validBackendKeyName } from "../auth/backend_keys";
 import { keyedLabel } from "../backends/label";
-import { clientIp, LOGIN_PASSWORD_MAX_CHARS } from "./request_auth";
+import {
+  authMethod,
+  clientIp,
+  isOperator,
+  LOGIN_PASSWORD_MAX_CHARS,
+} from "./request_auth";
 import { HttpError, jsonResponse, type Router, type Exchange } from "./router";
 
 /** Refuse anything but an operator session (cookie, Tailscale or local). */
 export function requireOperator(ex: Exchange): void {
-  if (!["cookie", "tailscale", "local"].includes(String(ex.state.auth_method)))
-    throw new HttpError(403, "operator session required");
+  if (!isOperator(ex)) throw new HttpError(403, "operator session required");
 }
 
 export function registerBackendKeyRoutes(
@@ -36,20 +40,37 @@ export function registerBackendKeyRoutes(
         "this backend has no password; connect without a key",
       );
     const ip = clientIp(ex.request.headers, ex.client);
-    const wait = throttle.retryAfter(ip);
-    if (wait > 0)
-      throw new HttpError(429, "too many attempts", {
-        "retry-after": String(Math.trunc(wait) + 1),
-      });
+    const checkThrottle = () => {
+      const wait = throttle.retryAfter(ip);
+      if (wait > 0)
+        throw new HttpError(429, "too many attempts", {
+          "retry-after": String(Math.trunc(wait) + 1),
+        });
+    };
+    checkThrottle();
     await (deps.sleep ?? ((seconds) => Bun.sleep(seconds * 1000)))(0.5);
-    return backendKeys.withPasswordLock(async () => {
+    return operator.withPasswordLock(async () => {
+      checkThrottle();
+      const twoFactor = await operator.twoFactorEnabled();
       if (
         typeof body.password !== "string" ||
         [...body.password].length > LOGIN_PASSWORD_MAX_CHARS ||
-        !(await operator.verifyPassword(body.password))
+        (twoFactor &&
+          body.code !== undefined &&
+          (typeof body.code !== "string" || body.code.length > 64)) ||
+        !(await operator.verifySignIn(
+          body.password as string,
+          twoFactor && typeof body.code === "string" ? body.code : "",
+        ))
       ) {
         throttle.recordFail(ip);
-        throw new HttpError(401, "wrong password");
+        return jsonResponse(
+          {
+            detail: twoFactor ? "wrong password or code" : "wrong password",
+            ...(twoFactor && !body.code ? { code_required: true } : {}),
+          },
+          401,
+        );
       }
       throttle.recordSuccess(ip);
       if (!validBackendKeyName(body.name))
@@ -72,7 +93,7 @@ export function registerBackendKeyRoutes(
   });
   router.delete("/api/backend-keys/self", async (ex) => {
     if (
-      ex.state.auth_method !== "backend-key" ||
+      authMethod(ex) !== "backend-key" ||
       typeof ex.state.backend_key_id !== "string"
     )
       throw new HttpError(403, "backend key required");
@@ -81,7 +102,7 @@ export function registerBackendKeyRoutes(
   });
   router.put("/api/backend-keys/self/callback", async (ex) => {
     if (
-      ex.state.auth_method !== "backend-key" ||
+      authMethod(ex) !== "backend-key" ||
       typeof ex.state.backend_key_id !== "string" ||
       !homeCallbacks
     )

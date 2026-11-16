@@ -56,6 +56,7 @@ export interface DurableDelivery {
       note?: boolean;
       attachmentIds?: readonly string[];
       interrupt?: boolean;
+      onInterrupt?: (interrupted: boolean) => void;
     },
   ): Promise<string | null>;
   // Withdraw queued input by request ID; false once in the transcript.
@@ -131,6 +132,7 @@ export interface DeliveryDeps {
 
 export interface DeliverOptions {
   interrupt?: boolean;
+  onInterrupt?: (interrupted: boolean) => void;
   senderTitle?: string | null;
   start?: boolean;
   source?: string;
@@ -355,6 +357,7 @@ export class SupervisorDelivery {
           note: options.nextTurnOnly === true,
           attachmentIds: options.attachmentIds ?? [],
           interrupt: options.interrupt,
+          onInterrupt: options.onInterrupt,
         },
       );
     }

@@ -2,11 +2,13 @@ import { expect } from "bun:test";
 declare const document: any;
 declare const window: any;
 declare const MutationObserver: any;
+declare const requestAnimationFrame: any;
 import {
   captureErrors,
   gotoRoot,
   mockConversation,
   postFixture,
+  recordJumpHighlight,
   waitForLayout,
   type BrowserTest,
 } from "./common";
@@ -23,7 +25,7 @@ function withThinkingCleanup(
     try {
       await test(...args);
     } finally {
-      await postFixture(args[1], `durable-thinking-cleanup?agent=${agent}`);
+      await postFixture(args[1], "durable-thinking-cleanup", { agent });
     }
   };
   Object.defineProperty(wrapped, "name", { value: test.name });
@@ -33,6 +35,70 @@ function withThinkingCleanup(
 const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
 
 export const tests: BrowserTest[] = [
+  // Feature: #3331 Imported Pi history keeps recorded times and inline tool details.
+  async function test_imported_pi_history(browser, base) {
+    const { agent } = await postFixture(base, "import-recorded-pi");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    const errors = captureErrors(page);
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      const reply =
+        'The bash command printed "one", "two", and "three" (with a 2-second pause before "three"), and notes.txt contains the two lines "alpha" and "beta".';
+      await page.getByText(reply, { exact: true }).waitFor();
+      const view = await page.request.get(
+        `${base}api/conversations/${agent}/view?limit=100`,
+      );
+      expect(view.status()).toBe(200);
+      const { blocks } = await view.json();
+      expect(
+        blocks
+          .filter((row: any) => row.role === "assistant" && row.kind === "text")
+          .map((row: any) => row.model_time_ms),
+      ).toEqual([8068, 8068]);
+      const calls = blocks.filter((row: any) => row.kind === "tool_call");
+      expect(
+        calls.map((row: any) => ({
+          name: row.name,
+          args: row.args,
+          result: row.result,
+          artifact: row.artifact_id,
+        })),
+      ).toEqual([
+        {
+          name: "bash",
+          args: "printf 'one\\ntwo\\n'; sleep 2; echo three",
+          result: "one\ntwo\nthree\n",
+          artifact: undefined,
+        },
+        {
+          name: "read",
+          args: '{"path":"notes.txt"}',
+          result: "alpha\nbeta\n",
+          artifact: undefined,
+        },
+      ]);
+      await page
+        .getByRole("button", { name: "Expand all", exact: true })
+        .click();
+      await page.getByText("Thought for 8s", { exact: false }).waitFor();
+      for (const [input, output] of [
+        ["notes.txt", "alpha\nbeta\n"],
+        ["printf 'one\\ntwo\\n'; sleep 2; echo three", "one\ntwo\nthree\n"],
+      ]) {
+        const tool = page.locator(".turn-tool", { hasText: input });
+        expect(await tool.locator(".turn-tool-detail").innerText()).toBe(input);
+        await tool.locator(".turn-tool-head").click();
+        const detail = tool.locator('.tool-payload[aria-label="Output"] pre');
+        await detail.waitFor();
+        expect(await detail.innerText()).toBe(output);
+      }
+      expect(errors).toEqual([]);
+    } finally {
+      await page.close();
+    }
+  },
   // Regression: #2317 Durable context categories disappeared after #2281/#2299. (also #2515 System and User prompts used near-identical blues.)
   async function test_recorded_durable_context_split(browser, base) {
     const { agent, tokens } = await postFixture(base, "seed-durable-context");
@@ -350,7 +416,7 @@ export const tests: BrowserTest[] = [
     await sample("expanded-live");
     await page.locator(".activity-group-hide").first().click();
     const readsBeforeCommit = offsets.length;
-    await postFixture(base, "durable-thinking-commit");
+    await postFixture(base, "release", { agent, gate: "commit" });
     await page
       .locator(".activity-group-summary .turn-summary")
       .filter({ hasText: /\bRunning\b/ })
@@ -425,7 +491,7 @@ export const tests: BrowserTest[] = [
     );
     expect(await summary.count()).toBe(0);
     expect(await page.locator("#conv-status.running").count()).toBe(1);
-    await postFixture(base, "durable-release");
+    await postFixture(base, "release", { agent, gate: "reply" });
     const secondThought = page.locator(".turn-thinking-toggle").nth(1);
     await secondThought.waitFor();
     expect(await thought.getAttribute("aria-expanded")).toBe("true");
@@ -452,10 +518,9 @@ export const tests: BrowserTest[] = [
   ) {
     const page = await browser.newPage();
     const failing = withThinkingCleanup(async () => {
-      await postFixture(
-        base,
-        "seed-durable-thinking?agent=durable-thinking-failure",
-      );
+      await postFixture(base, "seed-durable-thinking", {
+        agent: "durable-thinking-failure",
+      });
       await page.goto(`${base}#agent=durable-thinking-failure`);
       await page
         .locator("#input")
@@ -515,10 +580,9 @@ export const tests: BrowserTest[] = [
 
   // Regression: #2430 quick Stop must not leave the admitted send looking queued after chrome is idle.
   async function test_quick_stop_clears_thread_with_reads_free(browser, base) {
-    const { agent } = await postFixture(
-      base,
-      "seed-durable-stop?agent=durable-stop-quick",
-    );
+    const { agent } = await postFixture(base, "seed-durable-stop", {
+      agent: "durable-stop-quick",
+    });
     const page = await browser.newPage();
     try {
       await page.goto(`${base}#agent=${agent}`);
@@ -644,10 +708,10 @@ export const tests: BrowserTest[] = [
     base,
   ) {
     for (const kind of ["refusal", "overloaded"]) {
-      const { agent } = await postFixture(
-        base,
-        `seed-durable-rejected?agent=durable-rejected-${kind}&kind=${kind}`,
-      );
+      const { agent } = await postFixture(base, "seed-durable-rejected", {
+        agent: `durable-rejected-${kind}`,
+        kind,
+      });
       const page = await browser.newPage({
         viewport: { width: 1280, height: 800 },
       });
@@ -687,7 +751,7 @@ export const tests: BrowserTest[] = [
           0,
         );
         expect(await note.innerText()).toBe(
-          "Provider fauxfast returned a server error. Try again. (4 attempts)",
+          `Provider ${agent} returned a server error. Try again. (4 attempts)`,
         );
       }
       for (const [name, options] of [
@@ -873,7 +937,7 @@ export const tests: BrowserTest[] = [
     expect(samples).toEqual(
       samples.map(() => ({ controls: true, usage: false, above: true })),
     );
-    await postFixture(base, "durable-release");
+    await postFixture(base, "release", { agent, gate: "reply" });
     await page
       .getByText("Durable answer: the command", { exact: false })
       .first()
@@ -1007,11 +1071,6 @@ export const tests: BrowserTest[] = [
         await page.screenshot({ path: `${shots}/${name}-open.png` });
       };
       await open("durable");
-      const twin = await postFixture(base, "seed-pi-twin");
-      await page.goto(`${base}#agent=${twin.agent}`);
-      await page.reload();
-      await page.getByText("Second durable answer.", { exact: true }).waitFor();
-      await open("pi-twin");
     }
     expect(errors).toEqual([]);
   },
@@ -1060,12 +1119,11 @@ export const tests: BrowserTest[] = [
     const jump = page.locator(".compaction-jump-link");
     await jump.waitFor();
     expect(await page.getByText(kept!.text, { exact: true }).count()).toBe(0);
+    const highlighted = await recordJumpHighlight(page);
     await jump.click();
-    const target = page.locator(".file-jump-target");
-    await target.waitFor();
+    expect(await highlighted()).toBe(`row:${kept!.id}`);
     if (shots)
       await page.screenshot({ path: `${shots}/durable-first-kept.png` });
-    expect(await target.getAttribute("data-row-id")).toBe(`row:${kept!.id}`);
     expect(await page.getByText(kept!.text, { exact: true }).isVisible()).toBe(
       true,
     );
@@ -1074,7 +1132,7 @@ export const tests: BrowserTest[] = [
     await page.close();
   },
 
-  // Regression: #2874 returning restores the reader's row or the bottom.
+  // Regression: #2874 #3348 restore readers and resize after live work settles.
   async function test_durable_jump_pages_past_compaction(browser, base) {
     for (const width of [390, 1280]) {
       const mobile = width === 390;
@@ -1096,10 +1154,9 @@ export const tests: BrowserTest[] = [
       await jump.waitFor();
       if (shots)
         await page.screenshot({ path: `${shots}/durable-notice-${width}.png` });
+      const highlighted = await recordJumpHighlight(page);
       await jump.click();
-      await page
-        .locator(".file-jump-target:not(.compacted-activity)")
-        .waitFor();
+      await highlighted();
       const divider = page.locator(".compacted-activity");
       expect(await divider.locator(".disclosure-body").count()).toBe(0);
       await divider.locator(".compacted-head").click();
@@ -1150,14 +1207,6 @@ export const tests: BrowserTest[] = [
             row.getBoundingClientRect().top -
             document.querySelector("#scroll").getBoundingClientRect().top,
         );
-      const scroll = page.locator("#scroll");
-      await scroll.hover();
-      const beforeWheel = await scroll.evaluate((el) => el.scrollTop);
-      await page.mouse.wheel(0, 40);
-      await page.waitForFunction(
-        (before) => document.querySelector("#scroll").scrollTop !== before,
-        beforeWheel,
-      );
       await waitForLayout(page);
       await reader.evaluate((row) => {
         row.scrollIntoView({ block: "start" });
@@ -1166,6 +1215,25 @@ export const tests: BrowserTest[] = [
       await waitForLayout(page);
       const left = await readerTop();
       expect(left).toBeCloseTo(-4, 0);
+      if (mobile) {
+        await page.getByText("Answer 75", { exact: true }).waitFor();
+        await page.locator("#live-bar[hidden]").waitFor({ state: "attached" });
+        await waitForLayout(page);
+        const viewport = page.viewportSize()!;
+        const paneHeight = await page
+          .locator("#scroll")
+          .evaluate((element) => element.clientHeight);
+        for (const height of [viewport.height + 1, viewport.height]) {
+          await page.setViewportSize({ ...viewport, height });
+          await waitForLayout(page);
+          const after = await readerTop();
+          const resizedHeight = await page
+            .locator("#scroll")
+            .evaluate((element) => element.clientHeight);
+          expect(resizedHeight).toBe(paneHeight + height - viewport.height);
+          expect(after).toBeCloseTo(left, 0);
+        }
+      }
       for (let n = 0; n < 8; n += 1)
         await open(`${agent}-${n}`, `Neighbour ${n}`);
       await postFixture(base, "durable-history-more", {
@@ -1220,6 +1288,7 @@ export const tests: BrowserTest[] = [
     }
   },
 
+  // Regression: #3341 #3313 #3317 keep following after a hidden jump.
   async function test_durable_operator_compact_two_places(browser, base) {
     const { agent } = await postFixture(base, "seed-durable-compactable");
     const page = await browser.newPage({
@@ -1248,7 +1317,7 @@ export const tests: BrowserTest[] = [
     expect(await compacting.count()).toBe(1);
     if (shots)
       await page.screenshot({ path: `${shots}/durable-compacting.png` });
-    await postFixture(base, "durable-summary-release");
+    await postFixture(base, "release", { agent, gate: "reply" });
     const jump = page.locator(".compaction-jump-link");
     await jump.waitFor({ timeout: 15_000 });
     await compacting.waitFor({ state: "detached" });
@@ -1265,8 +1334,16 @@ export const tests: BrowserTest[] = [
     ).toBe(0);
     if (shots)
       await page.screenshot({ path: `${shots}/durable-compact-notice.png` });
+    const highlighted = await recordJumpHighlight(page);
     await jump.click();
-    await page.locator(".file-jump-target:not(.compacted-activity)").waitFor();
+    const kept = page.locator(`[data-row-id="${await highlighted()}"]`);
+    const inView = (row: any) => {
+      const box = row.getBoundingClientRect();
+      const view = document.querySelector("#scroll").getBoundingClientRect();
+      return box.bottom > view.top && box.top < view.bottom;
+    };
+    await waitForLayout(page);
+    expect(await kept.evaluate(inView)).toBe(true);
     const divider = page.locator(".compacted-activity");
     expect(await divider.locator(".disclosure-body").count()).toBe(0);
     await divider.locator(".compacted-head").click();
@@ -1282,6 +1359,74 @@ export const tests: BrowserTest[] = [
       await divider.evaluate((el) => el.scrollIntoView({ block: "center" }));
       await page.screenshot({ path: `${shots}/durable-compact-summary.png` });
     }
+    const scroller = page.locator("#scroll");
+    await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await waitForLayout(page);
+    await scroller.evaluate((el) => {
+      const started = new MutationObserver((changes: any[]) => {
+        if (
+          !changes.some(
+            (change) =>
+              !change.oldValue?.split(" ").includes("file-jump-target") &&
+              change.target.classList.contains("file-jump-target"),
+          )
+        )
+          return;
+        started.disconnect();
+        el.style.display = "none";
+        const show = () => {
+          el.style.display = "";
+          window.__shownAgain = true;
+        };
+        requestAnimationFrame(() => requestAnimationFrame(show));
+      });
+      started.observe(document.querySelector("#messages"), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class"],
+        attributeOldValue: true,
+      });
+    });
+    await jump.click();
+    await page.waitForFunction(() => window.__shownAgain);
+    await waitForLayout(page);
+    await postFixture(base, "durable-history-more", {
+      agent,
+      from: 30,
+      to: 31,
+    });
+    const answer = page.getByText("Answer 30", { exact: true });
+    await answer.waitFor();
+    await waitForLayout(page);
+    expect(await answer.evaluate(inView)).toBe(true);
+    await scroller.evaluate((el) => (el.scrollTop -= el.clientHeight));
+    await waitForLayout(page);
+    const again = await recordJumpHighlight(page);
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    await jump.click();
+    await postFixture(base, "durable-history-more", {
+      agent,
+      from: 31,
+      to: 32,
+    });
+    await page.getByText("Answer 31", { exact: true }).waitFor();
+    await scroller.evaluate((el) => {
+      const start = el.scrollTop;
+      const shift = () => {
+        if (Math.abs(el.scrollTop - start) <= 1) return;
+        el.removeEventListener("scroll", shift);
+        el.style.paddingBottom = "1px";
+      };
+      el.addEventListener("scroll", shift);
+    });
+    await page.clock.resume();
+    const target = page.locator(`[data-row-id="${await again()}"]`);
+    await target.and(page.locator(".file-jump-target")).waitFor({
+      state: "detached",
+    });
+    await waitForLayout(page);
+    expect(await target.evaluate(inView)).toBe(true);
     expect(errors).toEqual([]);
   },
 ];

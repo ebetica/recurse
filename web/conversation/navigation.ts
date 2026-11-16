@@ -19,8 +19,15 @@ import { boundaryHasHiddenActivity } from "../thread-render/activity-boundary.js
 import { turnGroupBlocks } from "../thread-render/turn-groups.js";
 import { revealActivityBoundary } from "./disclosure.js";
 import { paint, releaseBottomFollow } from "./thread.js";
-import { messageDisclosures } from "../thread-render.js";
-import { messageDisclosureIdentity } from "./message-disclosure.js";
+import {
+  jumpThreadScroll,
+  queueThreadJump,
+  threadJumpAwaited,
+} from "./scroll-ledger.js";
+import {
+  messageDisclosures,
+  messageDisclosureIdentity,
+} from "./message-disclosure.js";
 import { isAgentActivityMessage } from "../thread-render/turn-view.js";
 
 export async function loadOlder(fill = true): Promise<void> {
@@ -168,12 +175,21 @@ async function jumpToRowMessage(
   paint(conv);
   // Invariant: Explicit jumps override bottom-follow queued by paint.
   releaseBottomFollow();
-  await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  if (cid !== state.selectedId || generation !== renderedLogGeneration)
-    return false;
-  return settleJumpTarget(
-    msgsEl.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(wanted)}"]`),
-  );
+  queueThreadJump(true);
+  try {
+    await new Promise<void>((resolve) =>
+      requestAnimationFrame(() => resolve()),
+    );
+    if (cid !== state.selectedId || generation !== renderedLogGeneration)
+      return false;
+    return settleJumpTarget(
+      msgsEl.querySelector<HTMLElement>(
+        `[data-row-id="${CSS.escape(wanted)}"]`,
+      ),
+    );
+  } finally {
+    queueThreadJump(false);
+  }
 }
 
 function renderedEntries() {
@@ -215,36 +231,58 @@ export function revealRowMessage(cid: string, wanted: string): boolean {
   return true;
 }
 
-const jumpHighlightTimers = new WeakMap<
-  HTMLElement,
-  ReturnType<typeof setTimeout>
->();
+let endJumpHighlight = (): void => {};
 
+// The highlight lasts 1.8 s from when the smooth scroll settles (scrollend),
+// or from the jump when nothing scrolls or scrollend is unsupported.
 function settleJumpTarget(target: HTMLElement | null, focus = true): boolean {
   if (!target) return false;
-  // Invariant: A repeat jump starts a fresh highlight; the earlier removal must
-  // not win.
-  clearTimeout(jumpHighlightTimers.get(target));
+  // Invariant: A new or repeat jump ends the earlier highlight, its timer and
+  // listener first, so an earlier removal never wins.
+  endJumpHighlight();
   target.tabIndex = -1;
   target.classList.add("file-jump-target");
   const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches
     ? "auto"
     : "smooth";
-  (
-    target.querySelector<HTMLElement>(".compacted-head") ?? target
-  ).scrollIntoView({
-    block: "center",
-    behavior,
+  const head = target.querySelector<HTMLElement>(".compacted-head") ?? target;
+  const aim = () => {
+    const box = head.getBoundingClientRect();
+    const view = scrollEl.getBoundingClientRect();
+    const centred = view.top + (scrollEl.clientHeight - box.height) / 2;
+    return scrollEl.scrollTop + box.top - centred;
+  };
+  let aimed = aim();
+  // Invariant: A hold set before the jump starts (a send queued in its frame)
+  // would be reapplied mid-jump; the jump overrides it.
+  releaseBottomFollow();
+  const moves = jumpThreadScroll(aimed, behavior);
+  // Invariant: Content above the row can resize mid-jump (images loading);
+  // the jump re-aims at the row until it ends.
+  const reaim = new ResizeObserver(() => {
+    if (!threadJumpAwaited()) return reaim.disconnect();
+    if (Math.abs(aim() - aimed) > 1)
+      jumpThreadScroll((aimed = aim()), behavior);
   });
+  if (moves) reaim.observe(msgsEl, { box: "content-box" });
   if (focus) target.focus({ preventScroll: true });
-  jumpHighlightTimers.set(
-    target,
-    setTimeout(() => {
-      jumpHighlightTimers.delete(target);
-      target.classList.remove("file-jump-target");
-      target.removeAttribute("tabindex");
-    }, 1800),
-  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const settled = () => {
+    scrollEl.removeEventListener("scrollend", settled);
+    timer = setTimeout(end, 1800);
+  };
+  const end = () => {
+    reaim.disconnect();
+    scrollEl.removeEventListener("scrollend", settled);
+    clearTimeout(timer);
+    target.classList.remove("file-jump-target");
+    target.removeAttribute("tabindex");
+    if (endJumpHighlight === end) endJumpHighlight = () => {};
+  };
+  endJumpHighlight = end;
+  if (moves && behavior === "smooth" && "onscrollend" in scrollEl)
+    scrollEl.addEventListener("scrollend", settled);
+  else settled();
   return true;
 }
 

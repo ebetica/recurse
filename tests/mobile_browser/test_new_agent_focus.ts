@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -455,7 +456,7 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
-  // Feature: #3162 agent folds survive reloads and forget deleted home agents.
+  // Regression: #3370 #3367 auto-open folds; #3162 saved manual folds.
   async function test_agent_folds_survive_reload(browser, base) {
     const page = await browser.newPage({
       viewport: { width: 1280, height: 800 },
@@ -490,20 +491,60 @@ export const tests: BrowserTest[] = [
           browser.localStorage.getItem("recurse.sidebarAgentFolds") || "{}",
         );
       });
-    await page.goto(`${base}#agent=${opened}`);
+    await page.addInitScript(
+      ({ opened, folded }) => {
+        const browser = globalThis as any;
+        if (browser.localStorage.getItem("recurse.sidebarAgentFolds") === null)
+          browser.localStorage.setItem(
+            "recurse.sidebarAgentFolds",
+            JSON.stringify({ open: [opened], collapsed: folded }),
+          );
+      },
+      { opened, folded },
+    );
+    await page.goto(`${base}#agent=${folded}`);
+    await current(folded).waitFor();
+    await browserExpect(row(openedChild)).toHaveCount(0);
+    await browserExpect(row(foldedChild)).toHaveCount(0);
+    expect(await saved()).toEqual({ version: 2, open: [], collapsed: folded });
+    await row(opened).click();
     await current(opened).waitFor();
+    await browserExpect(row(openedChild)).toBeVisible();
+    await row(folded).click();
+    await current(folded).waitFor();
+    await browserExpect(row(foldedChild)).toBeVisible();
+    await browserExpect(row(openedChild)).toHaveCount(0);
+    const ids = await page
+      .locator("#agent-list .agent[data-id]")
+      .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-id")));
+    const distance = ids.indexOf(opened) - ids.indexOf(folded);
+    await row(folded).focus();
+    for (let step = 0; step < Math.abs(distance); step++)
+      await page.keyboard.press(distance > 0 ? "j" : "k");
+    await browserExpect(row(opened)).toHaveAttribute("aria-selected", "true");
+    await browserExpect(current(folded)).toHaveCount(1);
+    await page.keyboard.press("l");
+    await current(opened).waitFor();
+    await browserExpect(row(openedChild)).toBeVisible();
+    await row(folded).click();
+    await current(folded).waitFor();
+    await browserExpect(row(openedChild)).toHaveCount(0);
     await press(opened, "l");
     await press(folded, "l");
     await press(folded, "h");
     await row(foldedChild).waitFor({ state: "detached" });
-    expect(await row(openedChild).isVisible()).toBe(true);
+    await browserExpect(row(openedChild)).toBeVisible();
     await page.reload();
     await current(folded).waitFor();
     await row(openedChild).waitFor();
     expect(await row(opened).getAttribute("aria-expanded")).toBe("true");
     expect(await row(folded).getAttribute("aria-expanded")).toBe("false");
     expect(await row(foldedChild).count()).toBe(0);
-    expect(await saved()).toEqual({ open: [opened], collapsed: folded });
+    expect(await saved()).toEqual({
+      version: 2,
+      open: [opened],
+      collapsed: folded,
+    });
     expect(
       (await page.request.delete(`${base}api/conversations/${opened}`)).ok(),
     ).toBe(true);
@@ -514,12 +555,13 @@ export const tests: BrowserTest[] = [
         .getItem("recurse.sidebarAgentFolds")
         .includes(id);
     }, opened);
-    expect(await saved()).toEqual({ open: [], collapsed: folded });
+    expect(await saved()).toEqual({ version: 2, open: [], collapsed: folded });
     await page.evaluate(() => {
       const browser = globalThis as any;
       browser.localStorage.setItem(
         "recurse.sidebarAgentFolds",
         JSON.stringify({
+          version: 2,
           open: [
             null,
             "bad/backend/id",

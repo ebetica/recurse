@@ -22,7 +22,11 @@ export interface ConfigActionsDeps {
   node(cid: string): NodeCache;
   config: Pick<
     Config,
-    "chatModel" | "chatSettings" | "resolveEffortLevel" | "ladderHome"
+    | "chatModel"
+    | "chatSettings"
+    | "resolveEffortLevel"
+    | "ladderHome"
+    | "isFileProviderModel"
   >;
 }
 
@@ -217,6 +221,7 @@ export class ConfigActions {
     model: string,
     effort: string | null = null,
     level: number | null = null,
+    operatorSelectedModel = false,
   ): Promise<Record<string, unknown> | null> {
     const { config, store } = this.deps;
     return store.withConfigurationMetadataGuard(cid, async (titleToken) => {
@@ -228,6 +233,12 @@ export class ConfigActions {
       } catch {
         return null;
       }
+      if (
+        config.isFileProviderModel(resolved) &&
+        level === null &&
+        !operatorSelectedModel
+      )
+        return null;
       if (level !== null) {
         if (validLevel(level) === null) return null;
         const [levelModel, levelReasoning] = config.resolveEffortLevel(level);

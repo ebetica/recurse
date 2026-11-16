@@ -401,7 +401,7 @@ export const turnGroupTests: BrowserTest[] = [
           rows = next;
           await gotoRoot(page, base);
           if (!mobile && !dockHeld) {
-            await page.locator("#dock #main").waitFor();
+            await waitForLayout(page);
             await page.route("**/static/dockview.css", async (route) => {
               dockRequested();
               await dockStyle;
@@ -414,8 +414,6 @@ export const turnGroupTests: BrowserTest[] = [
             await requested;
           } else await reloadConversation(page);
           await page.getByText(rows.at(-1).text, { exact: true }).waitFor();
-          if (!mobile && dockReleased)
-            await page.locator("#dock #main").waitFor();
           const block = (text: string) =>
             page
               .locator("#messages > .activity-boundary")
@@ -423,8 +421,9 @@ export const turnGroupTests: BrowserTest[] = [
           const top = async (locator: any) =>
             (await locator.boundingBox())!.y as number;
           const press = async (locator: any) => {
+            const chatWindow = mobile || dockReleased;
             await locator.scrollIntoViewIfNeeded();
-            await waitForLayout(page);
+            await waitForLayout(page, { chatWindow });
             const before = await top(locator);
             const expanded = await locator.getAttribute("aria-expanded");
             if (mobile) await locator.tap();
@@ -434,11 +433,10 @@ export const turnGroupTests: BrowserTest[] = [
                 node.getAttribute("aria-expanded") !== expanded,
               { node: await locator.elementHandle(), expanded },
             );
-            await waitForLayout(page);
-            if (!mobile && !dockReleased) {
+            await waitForLayout(page, { chatWindow });
+            if (!chatWindow) {
               dockReleased = true;
               releaseDock();
-              await page.locator("#dock #main").waitFor();
               await waitForLayout(page);
             }
             if (shape !== "short")
@@ -602,12 +600,7 @@ export const turnGroupTests: BrowserTest[] = [
           const firstReply = text("First reply stays visible.");
           const finalReply = text(rows.at(-1)!.text);
           await finalReply.waitFor();
-          if (!mobile) {
-            await page
-              .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
-              .waitFor();
-            await waitForLayout(page);
-          }
+          await waitForLayout(page);
           const group = page.locator(".activity-group").last();
           const summary = group.locator(":scope > .activity-group-summary");
           const toggle = summary.locator(".activity-group-toggle");
@@ -753,10 +746,6 @@ export const turnGroupTests: BrowserTest[] = [
               : page.locator(".activity-group").last();
             const summary = group.locator(":scope > .activity-group-summary");
             const eye = summary.locator(".activity-group-toggle");
-            if (!mobile)
-              await page
-                .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
-                .waitFor();
             await eye.scrollIntoViewIfNeeded();
             await waitForLayout(page);
             expect(await summary.locator(".turn-tokens").count()).toBe(0);

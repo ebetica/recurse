@@ -1,10 +1,9 @@
 /**
  * Icon policy: SVG markup lives only in web/icons.ts.
- * Usage: bun tests/checks/svg_check.ts; exits 1 on SVG tags outside it.
+ * tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { trackedFiles, tsCode } from "./color_check.ts";
+import { tsCode } from "./color_check.ts";
 
 export type Finding = { line: number; markup: string };
 
@@ -80,12 +79,4 @@ export function checkFiles(
           `${file}:${line}: inline SVG ${markup} belongs in ${ICONS}`,
       ),
     );
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles().map((file) => ({ file, text: readFileSync(file, "utf8") })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

@@ -1,11 +1,58 @@
-// Image-local zoom for the Files gallery. The frame, including box marks,
-// transforms as one unit, so normalized comment coordinates remain unchanged.
-// Drag pans when zoomed; touch and pen hold before drawing a box, while
-// mouse comments require the platform modifier. Wheel and pinch zoom.
+// Shared image gestures transform the frame and comment marks together.
+// Modifier-wheel zooms about the pointer; plain wheel pans when zoomed,
+// zooms vertically at fit, and navigates horizontally at fit.
+// Touch gestures are unchanged.
 export function imageCommentHint(pointer?: string): string {
   if (pointer ? pointer !== "mouse" : matchMedia("(pointer: coarse)").matches)
     return "Hold to comment";
   return `${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"}-drag to comment`;
+}
+
+function wheelPixels(event: WheelEvent, viewport: HTMLElement) {
+  const unit = event.deltaMode === 1 ? 16 : 1;
+  return {
+    x: event.deltaX * (event.deltaMode === 2 ? viewport.clientWidth : unit),
+    y: event.deltaY * (event.deltaMode === 2 ? viewport.clientHeight : unit),
+  };
+}
+
+let wheelDistance = 0;
+let wheelNavigated = false;
+let wheelIdle: ReturnType<typeof setTimeout> | undefined;
+
+/** Share the wheel stream's latch across image replacements and file tabs. */
+export function installImageWheelNavigation(
+  gallery: HTMLElement,
+  step: (delta: -1 | 1) => void,
+): void {
+  gallery.addEventListener(
+    "wheel",
+    (event) => {
+      clearTimeout(wheelIdle);
+      wheelIdle = setTimeout(() => {
+        wheelDistance = 0;
+        wheelNavigated = false;
+      }, 250);
+      const viewport = (event.target as Element).closest<HTMLElement>(
+        ".image-zoom-viewport",
+      );
+      if (!viewport) return;
+      const { x, y } = wheelPixels(event, viewport);
+      if (
+        wheelNavigated ||
+        viewport.dataset.zoomed === "true" ||
+        event.ctrlKey ||
+        event.metaKey ||
+        Math.abs(x) <= Math.abs(y)
+      )
+        return;
+      wheelDistance += x;
+      if (Math.abs(wheelDistance) < 60) return;
+      wheelNavigated = true;
+      step(wheelDistance > 0 ? 1 : -1);
+    },
+    { passive: true },
+  );
 }
 
 export function installImageZoom(image: HTMLImageElement): void {
@@ -65,11 +112,20 @@ export function installImageZoom(image: HTMLImageElement): void {
     "wheel",
     (event) => {
       event.preventDefault();
-      zoom(
-        scale * Math.exp(-event.deltaY * 0.01),
-        event.clientX,
-        event.clientY,
-      );
+      const delta = wheelPixels(event, viewport);
+      if (event.ctrlKey || event.metaKey || scale === 1) {
+        if (
+          !event.ctrlKey &&
+          !event.metaKey &&
+          Math.abs(delta.x) > Math.abs(delta.y)
+        )
+          return;
+        zoom(scale * Math.exp(-delta.y * 0.01), event.clientX, event.clientY);
+      } else {
+        x -= delta.x;
+        y -= delta.y;
+        paint();
+      }
     },
     { passive: false },
   );
@@ -135,7 +191,9 @@ export function installImageZoom(image: HTMLImageElement): void {
       !pinched &&
       !frame.hasPointerCapture(event.pointerId)
     ) {
-      const now = performance.now();
+      // Invariant: Taps are timed by when they happened, so a busy page
+      // still sees a quick double tap as one.
+      const now = event.timeStamp;
       if (
         now - tap.time < 300 &&
         Math.hypot(event.clientX - tap.x, event.clientY - tap.y) < 24

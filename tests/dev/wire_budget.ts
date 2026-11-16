@@ -22,9 +22,9 @@
  * images (ten large), a 600 KB Markdown Artifact and a 500 KB HTML app each
  * opened from its conversation, closed and reopened (the Markdown one's
  * conversation also links a copy of the app), switching between five
- * conversations twice, an idle tab, a 20 KB reply streamed over about ten
- * seconds after five tool calls, and a turn in another conversation while 60
- * agents are in the tree. Each case first prepares its starting page
+ * conversations twice with Artifacts closed, an idle tab, a 20 KB reply
+ * streamed over about ten seconds after five tool calls, and a turn in another
+ * conversation while 60 agents are in the tree. Each case first prepares its starting page
  * unmeasured, so `--cases` can run one alone.
  *
  * Budgets live in `tests/dev/wire_budget.json`: received `bytes` and
@@ -1122,7 +1122,15 @@ async function main(): Promise<void> {
       {
         name: "switch",
         focused: null,
-        setup: open(),
+        setup: async () => {
+          await open()();
+          for (const owner of world.peers.slice(0, 2)) {
+            await show(tab, owner);
+            await meter.settle();
+            const close = page.getByRole("button", { name: "Close Artifacts" });
+            if (await close.isVisible()) await closeArtifacts();
+          }
+        },
         run: async () => {
           for (let round = 0; round < 2; round++)
             for (const cid of world.peers) {

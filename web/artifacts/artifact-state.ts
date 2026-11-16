@@ -5,6 +5,7 @@
 import { ArtifactContentCache } from "./content-cache.js";
 import type { ArtifactInfo, ArtifactVersion } from "./model.js";
 import type { PreparedCrop } from "./comment-crops.js";
+import type { DocumentChanges } from "../document-review.js";
 
 export interface ListCache {
   list: ArtifactInfo[];
@@ -74,6 +75,8 @@ export interface ArtifactState {
   versionMenuOpen: boolean;
   imageAbort: AbortController | null;
   refreshKey?: number;
+  /** Set while the shown document highlights what is new. */
+  changes?: DocumentChanges | null;
 }
 export interface CommentDoc {
   id: string;

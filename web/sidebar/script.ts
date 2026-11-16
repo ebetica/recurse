@@ -15,6 +15,7 @@ import {
   type ScriptSection,
   type Section,
 } from "./arrangement.js";
+import { runRetryingTimeout } from "./retry.js";
 import type { SidebarRow } from "./rows.js";
 import type { ScriptResult } from "./sandbox.js";
 
@@ -163,8 +164,14 @@ async function drain(): Promise<void> {
   while (next) {
     const input: Input = next;
     next = null;
-    const result = await runInWorker(input);
+    const result = await runRetryingTimeout(
+      () => runInWorker(input),
+      () => !next,
+    );
     if (next || input.script !== current?.script) continue;
+    // Invariant: a timeout depends on the device's load, not the input, so
+    // the next sidebar update runs the same input again.
+    if ("timeout" in result) lastKey = "";
     const before = JSON.stringify([output, failure]);
     let addedRows = false;
     try {
@@ -243,7 +250,11 @@ function runInWorker(input: Input): Promise<ScriptResult> {
         const timer = setTimeout(() => {
           if (worker === w) worker = null;
           w.terminate();
-          resolve({ error: `It ran longer than ${ANSWER_MS} ms`, line: null });
+          resolve({
+            error: `It ran longer than ${ANSWER_MS} ms`,
+            line: null,
+            timeout: true,
+          });
         }, ANSWER_MS);
         w.onmessage = ({ data }) => {
           clearTimeout(timer);

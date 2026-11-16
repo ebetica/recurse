@@ -46,7 +46,8 @@ as the web app, with optional `interrupt` and `client_message_id`. The optional
 is sent by the operator. A backend key's authenticated agent marker instead
 identifies a relayed sender as `id@key-name` without a title. Backend keys cannot
 claim a local sender with `x-recurse-agent`. The response acknowledges admission,
-not completion.
+not completion. Retrying an admitted `client_message_id` does not repeat an
+explicit interrupt; `interrupted` is false when that attempt stops no run.
 
 Since revision 6, `POST /api/v1/agents/<id>/compact` requests compaction through
 [the operator lifecycle](../compact.ts), retaining stored history. It returns

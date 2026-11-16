@@ -222,7 +222,7 @@ export const tests: BrowserTest[] = [
           { data: { content: "Arrived while parked" } },
         );
         expect(delivered.ok()).toBe(true);
-        await postFixture(base, `newer-pr-link?agent=${id}`);
+        await postFixture(base, "newer-pr-link", { agent: id });
       }
     }
     await parentTicks(4);

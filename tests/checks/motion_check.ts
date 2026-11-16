@@ -1,9 +1,7 @@
 /**
  * Motion policy: transition and animation durations use --motion-* tokens.
- * Usage: bun tests/checks/motion_check.ts; exits 1 on non-zero time literals.
+ * tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
-import { trackedFiles } from "./color_check.ts";
 import { cssView } from "./radius_check.ts";
 
 export type Finding = { line: number; value: string };
@@ -69,15 +67,4 @@ export function checkFiles(
         `${file}:${line}: motion ${value} must use --motion-fast, --motion-move or --motion-enter`,
     ),
   );
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles().map((file) => ({
-      file,
-      text: readFileSync(file, "utf8"),
-    })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

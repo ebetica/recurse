@@ -1,9 +1,7 @@
 /**
  * Spacing policy: padding, margin and gap use the --space-N tokens.
- * Usage: bun tests/checks/space_check.ts; exits 1 on off-scale px lengths.
+ * tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
-import { trackedFiles } from "./color_check.ts";
 import { cssView } from "./radius_check.ts";
 
 export type Finding = { line: number; value: string };
@@ -65,12 +63,4 @@ export function checkFiles(
       `${file}: ${found.length} raw spacing lengths, PENDING expects ${expected}; ${found.length > expected ? "use --space-1 to --space-6" : "lower its PENDING count"}`,
     ];
   });
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles().map((file) => ({ file, text: readFileSync(file, "utf8") })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

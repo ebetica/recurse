@@ -1,4 +1,4 @@
-// Deferred Artifact discovery and creation reuse the Git-backed Artifact store.
+// Native Artifact discovery and creation reuse the Git-backed Artifact store.
 import { Type } from "typebox";
 import { resolve } from "node:path";
 import {} from "@earendil-works/pi-ai";
@@ -13,9 +13,8 @@ export function createArtifact(context: ArtifactContext, owner: string) {
     tools: [
       defineTool({
         name: "artifact",
-        deferred: true,
         description:
-          "Create only on explicit operator request; update requested Artifacts instead of duplicating them. List or rename existing Artifacts. " +
+          "Create only on explicit operator request; update requested Artifacts instead of duplicating them. Create/list/rename return ids, titles and working paths. " +
           "Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. " +
           "File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. " +
           "Apps have no network/browser storage; use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). " +

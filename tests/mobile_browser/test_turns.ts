@@ -9,6 +9,7 @@ import {
   rootAgentId,
   themeColors,
   runBrowserTests,
+  shellSurfaceBounds,
   waitForLayout,
   type BrowserTest,
 } from "./common";
@@ -374,22 +375,7 @@ async function test_background_shells_inline_details_and_scoped(
     expect(await surface.innerText()).toContain(
       "Showing 3 of 4 active background shells",
     );
-    const bounds = await page.waitForFunction(() => {
-      const { document } = globalThis as any;
-      const box = (selector: string) =>
-        document.querySelector(selector)?.getBoundingClientRect().toJSON();
-      const sb = box(".shell-surface"),
-        tb = box("#topbar"),
-        cb = box("#composer-wrap");
-      return sb &&
-        tb &&
-        cb &&
-        sb.y >= tb.y + tb.height &&
-        sb.y + sb.height <= cb.y + 1
-        ? { sb, tb, cb }
-        : null;
-    });
-    const { sb, tb, cb } = (await bounds.jsonValue())!;
+    const { sb, tb, cb } = await shellSurfaceBounds(page);
     expect(sb!.width).toBeLessThanOrEqual(mobile ? 390 : 1280);
     expect(sb!.y).toBeGreaterThanOrEqual(tb!.y + tb!.height);
     expect(sb!.y + sb!.height).toBeLessThanOrEqual(cb!.y + 1);
@@ -1194,12 +1180,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
       if (running) await page.locator("#live-bar .live-panel").waitFor();
       if (shape === "short" || shape === "running")
         await target.locator(".content > p").last().waitFor();
-      if (width === 1280) {
-        await page
-          .locator('#dock .dock-panel[data-dock-panel="chat"] #main')
-          .waitFor();
-        await waitForLayout(page);
-      }
+      await waitForLayout(page);
       const measure = () =>
         target.evaluate((block: any) => {
           const foot = block.querySelector(".turn-foot")!;

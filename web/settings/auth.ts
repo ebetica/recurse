@@ -34,6 +34,7 @@ function providerDetail(body: HTMLElement, name: string): void {
       row.prepend(tile.cloneNode(true));
   }
   body.classList.add("auth-detail");
+  body.dataset.themeProtected = "provider-sign-in";
 }
 function markAuth(
   body: HTMLElement,
@@ -430,6 +431,7 @@ export function buildOpenRouterSection(body: HTMLElement): void {
   });
 }
 export function buildCustomKeysSection(body: HTMLElement): void {
+  body.dataset.themeProtected = "provider-sign-in";
   const { api, jpost } = settingsClient();
   body.innerHTML = '<div class="customkeys group"></div><p class="msg"></p>';
   const list = body.querySelector<HTMLElement>(".customkeys")!;

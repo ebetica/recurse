@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import {
   type BrowserTest,
   captureErrors,
@@ -8,13 +9,239 @@ import {
 declare const requestAnimationFrame: any;
 
 export const tests: BrowserTest[] = [
-  // Regression: #2742 revisiting images after a large gallery never requires reloading previews.
+  // Regression: #3327 desktop images fill and center in docked and fullscreen panes.
+  async function test_desktop_image_fills_pane_and_fullscreen(browser, base) {
+    const context = await browser.newContext();
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    const fixtures: Array<{ demo: string; shape: string }> = [];
+    for (const [shape, width, height] of [
+      ["landscape", 2400, 1500],
+      ["portrait", 1500, 2400],
+      ["small", 40, 25],
+    ] as const) {
+      const png = await page.evaluate(
+        ({ width, height, shape }) => {
+          const canvas = (globalThis as any).document.createElement("canvas");
+          canvas.width = width;
+          canvas.height = height;
+          const context = canvas.getContext("2d");
+          context.fillStyle = "#ffffff";
+          context.fillRect(0, 0, width, height);
+          context.fillStyle = "#2680a0";
+          context.fillRect(
+            width * 0.1,
+            height * 0.2,
+            width * 0.35,
+            height * 0.6,
+          );
+          context.fillStyle = "#50a060";
+          context.fillRect(
+            width * 0.55,
+            height * 0.35,
+            width * 0.35,
+            height * 0.45,
+          );
+          context.font = `${height * 0.06}px sans-serif`;
+          context.fillText(
+            `${shape}: ${width} × ${height}`,
+            width * 0.1,
+            height * 0.13,
+          );
+          return canvas.toDataURL("image/png").split(",")[1];
+        },
+        { width, height, shape },
+      );
+      const seeded = await page.request.post(
+        `${base}__browser-test/seed-posted-quadrants`,
+        {
+          headers: { "Content-Type": "image/png" },
+          data: Buffer.from(png, "base64"),
+        },
+      );
+      expect(seeded.ok()).toBeTrue();
+      fixtures.push({ ...(await seeded.json()), shape });
+    }
+    const measurements: Array<{ name: string; error: number }> = [];
+    for (const size of [
+      { width: 2000, height: 1193 },
+      { width: 1280, height: 800 },
+    ]) {
+      await page.setViewportSize(size);
+      for (const { demo, shape } of fixtures) {
+        await page.goto(`${base}#agent=${demo}`, {
+          waitUntil: "domcontentloaded",
+        });
+        const listTab = page.locator('.dv-tab[data-dock-panel="files"]');
+        if (await listTab.count()) await listTab.click();
+        else await page.locator('.rail-btn[data-pane="files"]').click();
+        await page
+          .locator(".files-card")
+          .getByRole("button", { name: "Open quadrants.png", exact: true })
+          .click();
+        const pane = page.locator(".pane-col.file-tab:visible");
+        const image = pane.locator(".files-image");
+        await image.evaluate((image: any) => image.decode());
+        for (const fullscreen of [false, true]) {
+          if (fullscreen) {
+            await pane.locator(".pane-body").focus();
+            await page.keyboard.press("z");
+            await browserExpect(pane).toHaveClass(/fullscreen/);
+          }
+          const error = await image.evaluate((image: any) => {
+            const rect = image.getBoundingClientRect();
+            const frame = image.parentElement.getBoundingClientRect();
+            const viewport = image.closest(".image-zoom-viewport");
+            const area = viewport.getBoundingClientRect();
+            const body = image.closest(".pane-body").getBoundingClientRect();
+            const header = image
+              .closest(".files-detail")
+              .querySelector(".files-detail-bar")
+              .getBoundingClientRect();
+            const scale = Math.min(
+              area.width / image.naturalWidth,
+              (body.bottom - header.bottom) / image.naturalHeight,
+            );
+            return Math.max(
+              Math.abs(rect.left - frame.left),
+              Math.abs(rect.top - frame.top),
+              Math.abs(rect.width - frame.width),
+              Math.abs(rect.height - frame.height),
+              Math.abs(area.top - header.bottom),
+              Math.abs(area.bottom - body.bottom),
+              Math.abs(rect.width - image.naturalWidth * scale),
+              Math.abs(rect.height - image.naturalHeight * scale),
+              Math.abs(rect.left + rect.width / 2 - area.left - area.width / 2),
+              Math.abs(
+                rect.top + rect.height / 2 - (header.bottom + body.bottom) / 2,
+              ),
+            );
+          });
+          measurements.push({
+            name: `${size.width} ${shape} ${fullscreen}`,
+            error,
+          });
+          if (
+            shape === "landscape" &&
+            process.env.RECURSE_BROWSER_SCREENSHOT_DIR
+          )
+            await page.screenshot({
+              path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/image-fit-${size.width}-${fullscreen ? "fullscreen" : "docked"}.png`,
+            });
+          if (fullscreen) {
+            await pane
+              .getByRole("button", { name: "Exit fullscreen", exact: true })
+              .click();
+            await browserExpect(pane).not.toHaveClass(/fullscreen/);
+          }
+        }
+      }
+    }
+    for (const { name, error } of measurements)
+      expect(error, name).toBeLessThanOrEqual(1);
+    const pane = page.locator(".pane-col.file-tab:visible");
+    const image = pane.locator(".files-image");
+    const fitted = (await image.boundingBox())!;
+    const drawBox = async () => {
+      const rect = (await image.boundingBox())!;
+      await page.mouse.move(
+        rect.x + rect.width * 0.2,
+        rect.y + rect.height * 0.2,
+      );
+      await page.keyboard.down("Control");
+      await page.mouse.down();
+      await page.mouse.move(
+        rect.x + rect.width * 0.4,
+        rect.y + rect.height * 0.4,
+        { steps: 4 },
+      );
+      await page.mouse.up();
+      await page.keyboard.up("Control");
+    };
+    await drawBox();
+    const draft = page.locator(".report-comment-popover");
+    await draft.locator("textarea").waitFor();
+    for (const scale of [1, 2, 1]) {
+      if (scale === 2)
+        await pane
+          .locator(".image-zoom-viewport")
+          .dblclick({ position: { x: fitted.width * 0.8, y: 30 } });
+      else if (await pane.locator(".image-zoom-reset").isVisible())
+        await pane.locator(".image-zoom-reset").click();
+      const alignment = await image.evaluate((image: any) => {
+        const rect = image.getBoundingClientRect();
+        const mark = image.parentElement
+          .querySelector("mark.report-cbox")
+          .getBoundingClientRect();
+        return {
+          x: (mark.left - rect.left) / rect.width,
+          y: (mark.top - rect.top) / rect.height,
+          w: mark.width / rect.width,
+          h: mark.height / rect.height,
+        };
+      });
+      expect(alignment.x).toBeCloseTo(0.2, 2);
+      expect(alignment.y).toBeCloseTo(0.2, 2);
+      expect(alignment.w).toBeCloseTo(0.2, 2);
+      expect(alignment.h).toBeCloseTo(0.2, 2);
+      const zoom = await image.evaluate(
+        (image: any) => image.getBoundingClientRect().width,
+      );
+      expect(zoom).toBeCloseTo(fitted.width * scale, 0);
+    }
+    for (let index = 0; index < 6; index++) {
+      if (index) await drawBox();
+      await draft.locator("textarea").fill(`Region ${index + 1}`);
+      await draft.locator("textarea").press("Control+Enter");
+      await draft.waitFor({ state: "hidden" });
+    }
+    const comments = pane.locator(".report-comments");
+    expect(
+      await comments.evaluate(
+        (list: any) => list.scrollHeight > list.clientHeight,
+      ),
+    ).toBeTrue();
+    await comments.locator("textarea").last().scrollIntoViewIfNeeded();
+    expect(
+      await comments.evaluate((list: any) => list.scrollTop),
+    ).toBeGreaterThan(0);
+    const imageBox = (await image.boundingBox())!;
+    const commentBox = (await comments.boundingBox())!;
+    expect(imageBox.height).toBeGreaterThan(0);
+    expect(imageBox.y + imageBox.height).toBeLessThanOrEqual(commentBox.y + 1);
+    const send = pane.locator(".report-sendbar-send");
+    if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+      await page.screenshot({
+        path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/image-comments-docked.png`,
+      });
+    expect(
+      await send.evaluate((button: any) => {
+        const rect = button.getBoundingClientRect();
+        return [rect.left + 8, rect.right - 8].every((x) =>
+          [rect.top + 8, rect.bottom - 8].every((y) =>
+            button.contains(
+              (globalThis as any).document.elementFromPoint(x, y),
+            ),
+          ),
+        );
+      }),
+    ).toBeTrue();
+    await send.click();
+    await page
+      .locator(".msg.assistant")
+      .filter({ hasText: "Acknowledged. Images: 6" })
+      .waitFor();
+    expect(errors).toEqual([]);
+    await context.close();
+  },
+  // Feature: #3364 wheel zoom, pan and single-step gallery gestures preserve #2742 cached previews.
   async function test_large_image_gallery_keeps_previews(browser, base) {
     const fixture = (await postFixture(base, "seed-large-image-gallery")) as {
       demo: string;
     };
     const context = await browser.newContext();
     const page = await context.newPage();
+    await page.clock.install();
     const errors = captureErrors(page);
     await page.goto(`${base}#agent=${fixture.demo}`, {
       waitUntil: "domcontentloaded",
@@ -30,6 +257,13 @@ export const tests: BrowserTest[] = [
     const firstName = await viewer
       .locator(".files-detail")
       .getAttribute("aria-label");
+    await viewer
+      .getByRole("button", { name: "Next image", exact: true })
+      .click();
+    const secondName = await viewer
+      .locator(".files-detail")
+      .getAttribute("aria-label");
+    await previous.click();
     for (const direction of ["Next image", "Previous image"]) {
       const button = viewer.getByRole("button", {
         name: direction,
@@ -50,7 +284,76 @@ export const tests: BrowserTest[] = [
     expect(
       await viewer.locator(".files-detail").getAttribute("aria-label"),
     ).toBe(firstName);
-    await viewer.locator("img[src]").evaluate((image: any) => image.decode());
+    const image = viewer.locator(".files-image");
+    await image.evaluate((image: any) => image.decode());
+    const fitted = (await image.boundingBox())!;
+    const pointer = {
+      x: fitted.x + fitted.width * 0.6,
+      y: fitted.y + fitted.height * 0.4,
+    };
+    await page.mouse.move(pointer.x, pointer.y);
+    await page.mouse.wheel(0, 70);
+    await page.clock.runFor(16);
+    expect(await image.boundingBox()).toEqual(fitted);
+    await browserExpect(viewer.locator(".files-detail")).toHaveAttribute(
+      "aria-label",
+      firstName!,
+    );
+    await page.mouse.wheel(0, -70);
+    await browserExpect
+      .poll(async () => (await image.boundingBox())!.width)
+      .toBeGreaterThan(fitted.width * 2);
+    const zoomed = (await image.boundingBox())!;
+    expect((pointer.x - zoomed.x) / zoomed.width).toBeCloseTo(0.6, 2);
+    expect((pointer.y - zoomed.y) / zoomed.height).toBeCloseTo(0.4, 2);
+    await page.mouse.wheel(35, 25);
+    await browserExpect
+      .poll(async () => (await image.boundingBox())!.x)
+      .toBeCloseTo(zoomed.x - 35, 0);
+    const panned = (await image.boundingBox())!;
+    expect(panned.y).toBeCloseTo(zoomed.y - 25, 0);
+    expect(panned.width).toBeCloseTo(zoomed.width, 0);
+    await page.mouse.wheel(10000, 0);
+    await browserExpect
+      .poll(async () => (await image.boundingBox())!.x)
+      .toBeLessThan(panned.x);
+    const edge = (await image.boundingBox())!;
+    await page.mouse.wheel(10000, 0);
+    expect((await image.boundingBox())!.x).toBeCloseTo(edge.x, 0);
+    await browserExpect(viewer.locator(".files-detail")).toHaveAttribute(
+      "aria-label",
+      firstName!,
+    );
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, -30);
+    await page.keyboard.up("Control");
+    await browserExpect
+      .poll(async () => (await image.boundingBox())!.width)
+      .toBeGreaterThan(zoomed.width);
+    await page.keyboard.down("Control");
+    await page.mouse.wheel(0, 1000);
+    await page.keyboard.up("Control");
+    await browserExpect
+      .poll(async () => (await image.boundingBox())!.width)
+      .toBeCloseTo(fitted.width, 0);
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    for (const [delta, name] of [
+      [80, secondName],
+      [-80, firstName],
+    ] as const) {
+      await page.clock.fastForward(300);
+      for (let event = 0; event < 3; event++) {
+        await page.mouse.wheel(delta, 0);
+        await page.clock.runFor(16);
+      }
+      await browserExpect(viewer.locator(".files-detail")).toHaveAttribute(
+        "aria-label",
+        name!,
+      );
+      await image.evaluate((image: any) => image.decode());
+      expect((await image.boundingBox())!.width).toBeCloseTo(fitted.width, 0);
+    }
+    await page.clock.resume();
     const pane = page.locator('.pane-col[data-pane="files"]');
     await viewer
       .getByRole("button", { name: "Open in Files", exact: true })
@@ -61,6 +364,30 @@ export const tests: BrowserTest[] = [
       await page.locator('.rail-btn[data-pane="files"]').click();
     await pane.locator(".files-thumb").first().click();
     await file.locator(".files-image").evaluate((image: any) => image.decode());
+    await file
+      .getByRole("button", { name: "Previous file", exact: true })
+      .click();
+    const previousFile = await file
+      .locator(".files-detail")
+      .getAttribute("aria-label");
+    await file.getByRole("button", { name: "Next file", exact: true }).click();
+    const tabViewport = (await file
+      .locator(".image-zoom-viewport")
+      .boundingBox())!;
+    await page.mouse.move(
+      tabViewport.x + tabViewport.width / 2,
+      tabViewport.y + tabViewport.height / 2,
+    );
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    for (let event = 0; event < 3; event++) {
+      await page.mouse.wheel(-80, 0);
+      await page.clock.runFor(16);
+    }
+    await browserExpect(file.locator(".files-detail")).toHaveAttribute(
+      "aria-label",
+      previousFile!,
+    );
+    await page.clock.resume();
     await page.locator('.dv-tab[data-dock-panel="chat"]').click();
     await page.locator("#messages .agent-attachment-preview").first().click();
     await viewer
@@ -225,6 +552,20 @@ export const tests: BrowserTest[] = [
         touchPoints: [],
       });
     };
+    const doubleTap = async (at: { x: number; y: number }) => {
+      const start = Date.now() / 1000;
+      for (const [type, offset] of [
+        ["touchStart", 0],
+        ["touchEnd", 0.05],
+        ["touchStart", 0.15],
+        ["touchEnd", 0.2],
+      ] as const)
+        await touch.send("Input.dispatchTouchEvent", {
+          type,
+          touchPoints: type === "touchStart" ? [at] : [],
+          timestamp: start + offset,
+        });
+    };
     const swipe = async (dx: number, dy = 0) => {
       await page.waitForFunction(
         "document.querySelector('.files-detail img')?.naturalWidth > 0",
@@ -337,12 +678,10 @@ export const tests: BrowserTest[] = [
       await page.screenshot({
         path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/image-zoom-mobile.png`,
       });
-    await page.touchscreen.tap(center.x, center.y);
-    await page.touchscreen.tap(center.x, center.y);
-    expect(await scale()).toBe(1);
-    await page.touchscreen.tap(center.x, center.y);
-    await page.touchscreen.tap(center.x, center.y);
-    expect(await scale()).toBe(2);
+    await doubleTap(center);
+    await browserExpect.poll(scale).toBe(1);
+    await doubleTap(center);
+    await browserExpect.poll(scale).toBe(2);
     const beforeOneFinger = await transform();
     await dragBox(center);
     expect(await transform()).not.toBe(beforeOneFinger);
@@ -561,9 +900,10 @@ export const tests: BrowserTest[] = [
     expect(await count.isDisabled()).toBeTrue();
     expect((await bar.boundingBox())!.height).toBeLessThanOrEqual(60);
     expect(await geometry()).toEqual(fittedGeometry);
-    await page.touchscreen.tap(sendFrom.x, sendFrom.y);
-    await page.touchscreen.tap(sendFrom.x, sendFrom.y);
-    expect(await scale()).toBe(2);
+    await touch.send("Emulation.setCPUThrottlingRate", { rate: 40 });
+    await doubleTap(sendFrom);
+    await browserExpect.poll(scale).toBe(2);
+    await touch.send("Emulation.setCPUThrottlingRate", { rate: 1 });
     const zoomedGeometry = await geometry();
     await dragBox(sendFrom, true);
     await input.fill("Zoomed mobile image note");

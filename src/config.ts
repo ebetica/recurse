@@ -1,9 +1,11 @@
-// Bounded atomic Settings; injected auth snapshots.
-// Pi built-ins first; unlisted stored ids fail turns, never fall back.
-// Server snapshots refresh asynchronously; writes publish only after commit.
-// Zero-window CLI reads stay synchronous; no refusal before the first list.
+// Bounded atomic Settings with auth snapshots and Pi-first model catalogs.
+// Unlisted stored ids fail turns; no refusal before the first list.
+// Async server snapshots/committed writes; synchronous zero-window CLI.
+// Endpoint identity and safety eligibility never derive from cached lists.
+import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createHash } from "node:crypto";
 import { ConfigFiles } from "./config_files";
+import { recordMessage } from "./observability/runtime_logging";
 import fs from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { readFile, stat } from "node:fs/promises";
@@ -56,6 +58,7 @@ export interface ConfigOptions {
   /** Monotonic milliseconds for that window; defaults to performance.now. */
   readonly now?: () => number;
   readonly storedCustomProviders?: () => Iterable<string>;
+  readonly warn?: (event: string, fields: Record<string, number>) => void;
 }
 export interface StatePaths {
   DATA_DIR: string;
@@ -253,6 +256,7 @@ export interface PiModel {
   id: string;
   name: string;
   context_window: number;
+  file_provider?: true;
   // Supported reasoning; absent worker result offers every level.
   reasoning_levels?: Thinking[];
 }
@@ -311,6 +315,8 @@ const policy = (
 });
 
 // Built-in routes follow Pi's list; custom providers follow them.
+const DEFAULT_CHAT_MODEL = "anthropic/claude-opus-5-5";
+const PI_BUILTIN_PROVIDERS = new Set<string>(getBuiltinProviders());
 export const PI_MODEL_ROUTES: readonly (readonly [string, string])[] = [
   ["anthropic", "Claude"],
   ["openai-codex", "ChatGPT subscription"],
@@ -319,6 +325,8 @@ export const PI_MODEL_ROUTES: readonly (readonly [string, string])[] = [
 ];
 // Schema version; unknown stored lists permit all until relisted.
 export const PI_MODEL_LIST_VERSION = 1;
+// Bound agent-writable catalogs before validating or grouping their rows.
+const MAX_PI_MODELS = 2_000;
 
 /** Recurse's suggested conversation reasoning for model families. */
 const SUGGESTED_EFFORTS: readonly [RegExp, Thinking][] = [
@@ -726,11 +734,15 @@ export class Config {
   private readonly settingsFiles: ConfigFiles;
   private readonly now: () => number;
   private readonly settingsRecheckMs: number;
+  private readonly warn: NonNullable<ConfigOptions["warn"]>;
 
   constructor(options: ConfigOptions = {}) {
     this.env = options.env ?? process.env;
     this.now = options.now ?? (() => performance.now());
     this.settingsRecheckMs = options.settingsRecheckMs ?? 0;
+    this.warn =
+      options.warn ??
+      ((event, fields) => console.warn(recordMessage(event, fields)));
     const cwd = resolve(options.cwd ?? process.cwd());
     const resolved = buildPaths(this.env, cwd, options.toolsDir);
     this.paths = resolved.paths;
@@ -748,7 +760,7 @@ export class Config {
     this.storedCustomProviderSource =
       options.storedCustomProviders ?? (() => []);
     this.CHAT_MODEL = this.canonicalModelId(
-      this.env.CHAT_MODEL ?? "anthropic/claude-opus-5-5",
+      this.env.CHAT_MODEL ?? DEFAULT_CHAT_MODEL,
     );
     this.chatEffortOverride = this.env.CHAT_EFFORT;
     if (this.chatEffortOverride !== undefined)
@@ -771,6 +783,7 @@ export class Config {
         this.paths.DELETED_AGENT_HISTORY_FILE,
         this.paths.MAXIMUM_CONTEXT_WINDOW_FILE,
         join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
+        join(this.paths.CONFIG_DIR, "idle-compaction.json"),
       ].map((path) => this.settingsFiles.refresh(path)),
     );
   }
@@ -890,9 +903,18 @@ export class Config {
     );
   }
 
-  trustedModelPolicy(model: string): string {
-    const [provider, modelId] = this.modelParts(model);
-    const selected = this.pinLadderReviewer(this.modelPolicy(model));
+  async trustedModelPolicy(
+    model: string | { provider: string; id: string },
+  ): Promise<string> {
+    const [provider, modelId] =
+      typeof model === "string"
+        ? this.modelParts(model)
+        : [model.provider, model.id];
+    const pin = await this.ladderReviewer();
+    const selected = this.pinLadderReviewer(
+      this.routePolicy(provider, modelId, modelId, provider, "high"),
+      pin,
+    );
     const routeValue = (value: ModelRoute): Dict => ({
       provider: value.provider,
       model: value.model,
@@ -905,6 +927,7 @@ export class Config {
       {
         version: 1,
         active: { provider, model: modelId },
+        reviewer_pin: { provider: pin.provider, model: pin.model },
         reviewer,
         summary: routeValue(selected.summary),
       },
@@ -927,14 +950,47 @@ export class Config {
     return [{ ...CODEX_LUNA_ROUTE }, [{ ...SONNET_ROUTE }]];
   }
 
-  private ladderReviewer(): ModelRoute {
-    const [model] = this.resolveEffortLevel(EFFORT_MIN_LEVEL);
+  private async ladderReviewer(): Promise<ModelRoute> {
+    const document = this.readEffortLevelsDoc();
+    const pin = isObject(document.levels) ? document.levels["1"] : undefined;
+    let model: string;
+    if (pin !== undefined) {
+      model = isObject(pin) && typeof pin.model === "string" ? pin.model : "";
+    } else {
+      const authed = this.authedModelProviders();
+      if (authed.has("anthropic") || authed.has("openai-codex")) {
+        model = this.defaultLadder(authed)[EFFORT_MIN_LEVEL]!.model;
+      } else {
+        const { getBuiltinModels } =
+          await import("@earendil-works/pi-ai/providers/all");
+        const native = PI_MODEL_ROUTES.filter(([provider]) =>
+          authed.has(provider),
+        )
+          .flatMap(([provider]) =>
+            getBuiltinModels(
+              provider as Parameters<typeof getBuiltinModels>[0],
+            ),
+          )
+          .find((entry) => validModelScopeKey(`${entry.provider}/${entry.id}`));
+        const custom = this.catalogInputs().providerEntries.flatMap(
+          ([provider, spec]) =>
+            authed.has(provider)
+              ? spec.models.map((entry) => `${provider}/${entry.id}`)
+              : [],
+        )[0];
+        model = native
+          ? `${native.provider}/${native.id}`
+          : (custom ?? this.CHAT_MODEL);
+      }
+    }
     const [provider, modelId] = this.modelParts(model);
     return route(provider, modelId, "low");
   }
 
-  private pinLadderReviewer(value: ModelPolicy): ModelPolicy {
-    const reviewer = this.ladderReviewer();
+  private pinLadderReviewer(
+    value: ModelPolicy,
+    reviewer: ModelRoute,
+  ): ModelPolicy {
     const seen = new Set([routeKey(reviewer)]);
     const fallbacks: ModelRoute[] = [];
     for (const candidate of [value.reviewer, ...value.reviewer_fallbacks]) {
@@ -1129,13 +1185,20 @@ export class Config {
   }
 
   private checkPiModels(entries: unknown[]): Record<string, PiModel[]> {
-    const routes = new Set(PI_MODEL_ROUTES.map(([provider]) => provider));
+    const routes = [...PI_BUILTIN_PROVIDERS];
     const out: Record<string, PiModel[]> = Object.create(null);
-    for (const entry of entries) {
+    if (entries.length > MAX_PI_MODELS)
+      this.warn("pi_model_list_truncated", {
+        accepted: MAX_PI_MODELS,
+        ignored: entries.length - MAX_PI_MODELS,
+      });
+    for (const entry of entries.slice(0, MAX_PI_MODELS)) {
       if (
         !isObject(entry) ||
         typeof entry.provider !== "string" ||
-        !routes.has(entry.provider) ||
+        entry.provider.includes("/") ||
+        !validModelScopeKey(entry.provider) ||
+        (!routes.includes(entry.provider) && entry.file_provider !== true) ||
         typeof entry.id !== "string" ||
         typeof entry.name !== "string" ||
         !entry.name ||
@@ -1158,6 +1221,9 @@ export class Config {
         id: entry.id,
         name: entry.name,
         context_window: entry.context_window,
+        ...(!routes.includes(entry.provider)
+          ? { file_provider: true as const }
+          : {}),
         ...(entry.reasoning_levels === undefined
           ? {}
           : {
@@ -1174,8 +1240,8 @@ export class Config {
   async setPiModelList(entries: unknown, updatedAt?: number): Promise<number> {
     if (!Array.isArray(entries)) throw valueError("invalid Pi model list");
     const listed = this.checkPiModels(entries);
-    const models = PI_MODEL_ROUTES.flatMap(([provider]) =>
-      (listed[provider] ?? []).map((model) => ({ provider, ...model })),
+    const models = Object.entries(listed).flatMap(([provider, entries]) =>
+      entries.map((model) => ({ provider, ...model })),
     );
     // Invariant: A plain relist keeps the time of the last update from pi.dev.
     await this.writePrivateJson(
@@ -1327,14 +1393,18 @@ export class Config {
     const inputs = this.catalogInputs();
     if (inputs.policies) return inputs.policies;
     const out: Record<string, ModelPolicy> = Object.create(null);
-    for (const [provider, label] of PI_MODEL_ROUTES)
+    const providers = new Set([
+      ...PI_MODEL_ROUTES.map(([id]) => id),
+      ...Object.keys(inputs.pi ?? {}),
+    ]);
+    for (const provider of providers)
       for (const model of inputs.pi?.[provider] ?? []) {
         const id = `${provider}/${model.id}`;
         out[id] = this.routePolicy(
           provider,
           model.id,
           model.name,
-          label,
+          PI_MODEL_ROUTES.find(([id]) => id === provider)?.[1] ?? provider,
           patternEffort(id) ?? "high",
           model.context_window,
         );
@@ -1384,14 +1454,17 @@ export class Config {
           : { context_window: value.context_window }),
       }),
     );
-    const model = this.CHAT_MODEL;
-    if (!Object.hasOwn(policies, model))
-      options.unshift({
-        id: model,
-        label: model,
-        provider: "Custom",
-        effort: effort(model, undefined),
-      });
+    const defaults = [this.CHAT_MODEL];
+    if (this.isFileProviderModel(this.CHAT_MODEL))
+      defaults.push(DEFAULT_CHAT_MODEL);
+    for (const model of defaults)
+      if (!Object.hasOwn(policies, model))
+        options.unshift({
+          id: model,
+          label: model,
+          provider: "Custom",
+          effort: effort(model, undefined),
+        });
     inputs.options = options;
     inputs.ids = new Set(options.map((option) => option.id));
     return { options, ids: inputs.ids };
@@ -1408,8 +1481,8 @@ export class Config {
     const inputs = this.catalogInputs();
     if (!inputs.reasoningLevels) {
       const levels = new Map<string, Thinking[]>();
-      for (const [provider] of PI_MODEL_ROUTES)
-        for (const entry of inputs.pi?.[provider] ?? [])
+      for (const [provider, entries] of Object.entries(inputs.pi ?? {}))
+        for (const entry of entries)
           if (entry.reasoning_levels)
             levels.set(`${provider}/${entry.id}`, entry.reasoning_levels);
       inputs.reasoningLevels = levels;
@@ -1419,7 +1492,10 @@ export class Config {
   }
 
   defaultChatModel(): string {
-    const want = this.customDefaultModel() || this.CHAT_MODEL;
+    const configured = this.customDefaultModel() || this.CHAT_MODEL;
+    const want = this.isFileProviderModel(configured)
+      ? DEFAULT_CHAT_MODEL
+      : configured;
     let authedCatalog: string[];
     try {
       const providers = this.authedModelProviders();
@@ -1480,6 +1556,46 @@ export class Config {
     await this.writePrivateJson(
       join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
       { enabled: value },
+    );
+    return value;
+  }
+
+  compactIdleConversations(): boolean {
+    const data = this.settingsJson(
+      join(this.paths.CONFIG_DIR, "idle-compaction.json"),
+    );
+    return isObject(data) && data.enabled === true;
+  }
+
+  idleCompactionMinimumTokens(): number {
+    const data = this.settingsJson(
+      join(this.paths.CONFIG_DIR, "idle-compaction.json"),
+    );
+    const value = isObject(data) ? data.minimum_tokens : undefined;
+    return typeof value === "number" &&
+      Number.isSafeInteger(value) &&
+      value >= 32000
+      ? value
+      : 120000;
+  }
+
+  async setCompactIdleConversations(
+    value: unknown,
+    minimum: unknown = this.idleCompactionMinimumTokens(),
+  ): Promise<boolean> {
+    if (typeof value !== "boolean")
+      throw valueError("Compact idle conversations must be a boolean");
+    if (
+      typeof minimum !== "number" ||
+      !Number.isSafeInteger(minimum) ||
+      minimum < 32000
+    )
+      throw valueError(
+        "Minimum conversation length must be an integer of at least 32000 tokens",
+      );
+    await this.writePrivateJson(
+      join(this.paths.CONFIG_DIR, "idle-compaction.json"),
+      { enabled: value, minimum_tokens: minimum },
     );
     return value;
   }
@@ -1564,6 +1680,16 @@ export class Config {
     return slash < 0 ? "" : this.canonicalModelId(modelId).slice(0, slash);
   }
 
+  /** File endpoints require a saved choice, never automatic selection. */
+  isFileProviderModel(model: string): boolean {
+    const provider = this.providerOf(model);
+    return (
+      provider !== "" &&
+      !PI_BUILTIN_PROVIDERS.has(provider) &&
+      !Object.hasOwn(this.customModelProviders(), provider)
+    );
+  }
+
   configuredCustomProviders(): Set<string> {
     let providers: Record<string, ProviderSpec>;
     try {
@@ -1583,21 +1709,29 @@ export class Config {
   }
 
   authedModelProviders(): Set<string> {
-    let authed: Set<string>;
     try {
-      authed = new Set(this.authenticatedProviderSource());
+      const custom = this.customModelProviders();
+      return new Set(
+        [
+          ...this.authenticatedProviderSource(),
+          ...this.configuredCustomProviders(),
+        ].filter(
+          (provider) =>
+            PI_BUILTIN_PROVIDERS.has(provider) ||
+            Object.hasOwn(custom, provider),
+        ),
+      );
     } catch {
       return new Set();
     }
-    for (const provider of this.configuredCustomProviders())
-      authed.add(provider);
-    return authed;
   }
 
   authedChatModels(): ModelOption[] {
     const authed = this.authedModelProviders();
-    return this.chatModels().filter((option) =>
-      authed.has(this.providerOf(option.id)),
+    return this.chatModels().filter(
+      (option) =>
+        authed.has(this.providerOf(option.id)) ||
+        this.isFileProviderModel(option.id),
     );
   }
 
@@ -1661,7 +1795,11 @@ export class Config {
       } catch {
         catalog = [];
       }
-      const best = catalog[0] ?? this.CHAT_MODEL;
+      const best =
+        catalog[0] ??
+        (this.isFileProviderModel(this.CHAT_MODEL)
+          ? DEFAULT_CHAT_MODEL
+          : this.CHAT_MODEL);
       entries = [
         [best, "low"],
         [best, "medium"],
@@ -2064,7 +2202,10 @@ export class Config {
       if (ids !== null && !ids.has(model)) {
         reason = `level ${level} model ${model} is not in Pi's model list`;
         reachable = false;
-      } else if (!authed.has(this.providerOf(model))) {
+      } else if (
+        !authed.has(this.providerOf(model)) &&
+        !this.isFileProviderModel(model)
+      ) {
         reason = `level ${level} model ${model} needs provider '${this.providerOf(model)}', which is not logged in`;
         reachable = false;
       } else if (marks[String(level)]?.model === model) {

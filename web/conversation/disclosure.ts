@@ -26,8 +26,10 @@ import {
 } from "../row-thread-state.js";
 import { pruneCaches, threadHasLive } from "../row-thread-state/row-thread.js";
 import { loadOlder } from "./navigation.js";
-import { enrich, messageDisclosures } from "../thread-render.js";
-import { messageDisclosureIdentity } from "./message-disclosure.js";
+import {
+  messageDisclosures,
+  messageDisclosureIdentity,
+} from "./message-disclosure.js";
 import type { ScrollAnchorRow } from "./scroll-anchor.js";
 import {
   advanceStreamReveal,
@@ -425,9 +427,7 @@ interface RevealSlot {
 }
 const revealSlots = new Map<string, RevealSlot>();
 const revealTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const chunkHtmlCache = new Map<string, string>();
 const MAX_REVEAL_SLOTS = 100;
-const MAX_CHUNK_HTML = 128;
 export let liveRevealEntry: MessageEntry | null = null;
 export let liveRevealChunks: string[] = [];
 export let liveRevealFast = false;
@@ -474,20 +474,6 @@ function revealSlot(cid: string): RevealSlot {
     pruneCaches([revealSlots], MAX_REVEAL_SLOTS, cid);
   }
   return slot;
-}
-
-export function enrichChunk(chunk: string): string {
-  const key = `${state.currentConv?.id}\0${state.currentConv?.github_repo_url ?? ""}\0${chunk}`;
-  let html = chunkHtmlCache.get(key);
-  if (html === undefined) {
-    html = enrich(chunk, state.currentConv?.github_repo_url ?? null, true);
-    if (chunkHtmlCache.size >= MAX_CHUNK_HTML) {
-      const oldest = chunkHtmlCache.keys().next().value;
-      if (oldest !== undefined) chunkHtmlCache.delete(oldest);
-    }
-    chunkHtmlCache.set(key, html);
-  }
-  return html;
 }
 
 // Decide what this paint shows for the live tail. Runs before every render;

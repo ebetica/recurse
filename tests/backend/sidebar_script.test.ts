@@ -279,6 +279,15 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
       { title: "research", rows: 0 },
       { title: "Other agents", rows: 1 },
     ]);
+    expect(
+      await app.instance.sidebarScript.set(
+        `export default (rows, now) => { while (Date.now() < now * 1000 + 300); return [{ title: "Slow start", rows: rows.filter((r) => r.id === "${agent}") }]; }`,
+        "operator",
+      ),
+    ).toEqual([
+      { title: "Slow start", rows: 1 },
+      { title: "Unsorted", rows: 1 },
+    ]);
   } finally {
     await running.close();
     await app.instance.shutdown();

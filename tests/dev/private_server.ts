@@ -92,8 +92,8 @@ export async function scriptedModel(
 }
 
 /**
- * Start `src/server.ts` on 127.0.0.1:`port` (0: any free port) and sign in;
- * `owned` gets the pid at spawn, and aborting `signal` ends wait and spawn.
+ * Start and sign in on 127.0.0.1:`port` (0: any port); `signal` aborts startup.
+ * `owned` records pid; `lifetimeSeconds` bounds orphan servers.
  */
 export async function startPrivateServer(options: {
   env: Record<string, string>;
@@ -102,13 +102,27 @@ export async function startPrivateServer(options: {
   owned: (pid: number, exited: Promise<number>) => void;
   signal: AbortSignal;
   bunArgs?: readonly string[];
+  lifetimeSeconds?: number;
 }): Promise<PrivateServer> {
-  const { signal } = options;
+  const { signal, lifetimeSeconds } = options;
+  if (
+    lifetimeSeconds !== undefined &&
+    (!Number.isFinite(lifetimeSeconds) || lifetimeSeconds <= 0)
+  )
+    throw new Error("server lifetime must be positive and finite");
   await writeFile(options.logFile, "");
   signal.throwIfAborted();
   const started = performance.now();
   const proc = Bun.spawn(
     [
+      ...(lifetimeSeconds === undefined
+        ? []
+        : [
+            "timeout",
+            "--signal=TERM",
+            "--kill-after=5s",
+            `${lifetimeSeconds}s`,
+          ]),
       process.execPath,
       ...(options.bunArgs ?? []),
       join(ROOT, "src", "server.ts"),

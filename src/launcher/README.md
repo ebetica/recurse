@@ -43,6 +43,15 @@ Settings and project state do not live in the build directory. Managed Recurse
 worktrees have private dependency installs; deployment images can serve a
 prebuilt checkout with settings and data mounted separately.
 
+## Read-only sign-ins
+
+`RECURSE_READ_ONLY_SIGN_INS` selects an external `auth.json` through
+[Pi's read-only credential store](../auth/read_only_sign_ins.ts), without file
+writes or OAuth refresh. Tokens need at least one hour remaining; otherwise
+refresh credentials on the live instance first. Other Pi files stay under the
+private `PI_CODING_AGENT_DIR`; native auth workers never receive the external path
+as their writable auth file.
+
 ## Rules for changes
 
 - Keep launch, settings and project data lifetimes separate.

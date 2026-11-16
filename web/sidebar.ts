@@ -93,7 +93,8 @@ import {
   resolveLAction,
   type TreeRelationship,
 } from "./tree_projection.js";
-import { canDrop, isValidDropTarget, reparentValidity } from "./reparent.js";
+import { canDrop } from "./reparent.js";
+import { initAgentDrag, isDraggingAgent } from "./sidebar/drag.js";
 import type { TreeNode } from "./types.js";
 import type { Action, Section } from "./sidebar/arrangement.js";
 import { SIDEBAR_CHANGE, shownTags } from "./sidebar/actions.js";
@@ -145,10 +146,6 @@ const RELATIONSHIP_DESCRIPTION: Record<TreeRelationship, string> = {
   sibling: "Sibling agent",
   child: "Child agent",
 };
-
-// Live row dragging highlights imperatively and freezes repaint.
-let dragSourceId: string | null = null;
-let dragActive = false;
 
 export const isArmed = (): boolean => deleteArmed;
 
@@ -321,6 +318,7 @@ const TAKEN_OVER_TAG = html`<span
 >`;
 const SAFETY_OFF_TAG = html`<span
   class="safety-off-tag"
+  data-theme-protected="safety-warning"
   role="img"
   title="DANGEROUSLY SKIPPING PERMISSIONS — per-action safety review off"
   aria-label="Dangerously skipping permissions: per-action safety review off"
@@ -378,6 +376,7 @@ function rowT(
   if (e.draftRow) {
     return html`<div
       class="agent cursor draft-row"
+      data-theme="sidebar-row"
       style=${pad}
       role="treeitem"
       aria-label="New agent draft"
@@ -433,6 +432,7 @@ function rowT(
   const tag = unsafeStatic(open ? "button" : "div");
   return staticHtml`<${tag}
     class=${cls}
+    data-theme="sidebar-row"
     type=${open ? "button" : nothing}
     style=${pad}
     data-id=${n.id}
@@ -515,7 +515,7 @@ export function activeAgentRowT(
 export function renderSidebar(): void {
   // Invariant: Repainting during imperative rename/swipe would destroy input or
   // overwrite live gesture classes. Freeze until the interaction completes.
-  if (renaming || (swipe && swipe.active) || dragActive) return;
+  if (renaming || (swipe && swipe.active) || isDraggingAgent()) return;
   if (
     !state.nodes[state.cursorId] &&
     state.nodes[state.selectedId] &&
@@ -1227,7 +1227,7 @@ export function killAgent(dying: string | null | undefined): void {
 }
 
 interface PendingReparent {
-  to: string;
+  to: string | null;
 }
 const pendingReparents = new Map<string, PendingReparent>();
 
@@ -1244,7 +1244,7 @@ export function applyPendingReparentMasks(nodes: TreeNode[]): TreeNode[] {
       pendingReparents.delete(source);
       continue;
     }
-    if (!nodes.some((n) => n.id === op.to)) {
+    if (op.to !== null && !nodes.some((n) => n.id === op.to)) {
       pendingReparents.delete(source);
       continue;
     }
@@ -1253,20 +1253,27 @@ export function applyPendingReparentMasks(nodes: TreeNode[]): TreeNode[] {
   return nodes;
 }
 
-export function reparentAgent(source: string, target: string): void {
+export function reparentAgent(source: string, target: string | null): void {
   // Invariant: Agents never move between backends or within a remote.
-  if (parseConversationId(source).label || parseConversationId(target).label)
+  if (
+    parseConversationId(source).label ||
+    (target !== null && parseConversationId(target).label)
+  )
     return;
   const node = state.nodes[source];
   if (!node || !canDrop(state.nodes, source, target)) return;
   if (node.parent === target) return;
   const from = node.parent;
-  const targetTitle = state.nodes[target]?.title || target;
+  const targetTitle = target ? state.nodes[target]?.title || target : null;
   const op: PendingReparent = { to: target };
   pendingReparents.set(source, op);
   node.parent = target;
   selectAgent(source);
-  announceMove(`Moved ${node.title} under ${targetTitle}`);
+  announceMove(
+    targetTitle
+      ? `Moved ${node.title} under ${targetTitle}`
+      : `Moved ${node.title} to top level`,
+  );
   backendFor(source)
     .jpost(`/api/conversations/${source}/reparent`, {
       parent: target ? parseConversationId(target).cid : target,
@@ -1494,8 +1501,6 @@ export function startRename(id: string): void {
   input.addEventListener("mousedown", (e) => e.stopPropagation());
 }
 
-const rowOf = (e: Event): HTMLElement | null =>
-  (e.target as HTMLElement | null)?.closest<HTMLElement>(".agent") || null;
 let touchActionHandled = false;
 let longPressTimer = 0;
 // Hold opens the action menu; left swipe deletes; native scrolling keeps pan-y.
@@ -1660,74 +1665,4 @@ listEl.addEventListener("touchcancel", () => {
   swipe = null;
 });
 
-// ---------------- pointer drag to re-parent (desktop mouse). A row is dragged
-// onto another agent to move it there. Delegated on the persistent list so it
-// survives every keyed re-render; highlights are imperative and re-render is
-// frozen (dragActive) for the brief gesture, then repainted on drop/end.
-function clearDropHighlight(): void {
-  for (const el of listEl.querySelectorAll(".agent.drop-ok, .agent.drop-bad"))
-    el.classList.remove("drop-ok", "drop-bad");
-}
-function endDrag(): void {
-  clearDropHighlight();
-  if (dragSourceId) {
-    listEl
-      .querySelector(`.agent[data-id="${CSS.escape(dragSourceId)}"]`)
-      ?.classList.remove("drag-source");
-  }
-  dragSourceId = null;
-  if (dragActive) {
-    dragActive = false;
-    renderSidebar();
-  }
-}
-
-listEl.addEventListener("dragstart", (e: DragEvent) => {
-  const row = rowOf(e);
-  const id = row?.dataset.id;
-  // Invariant: A draft is not a saved agent and cannot be moved. Touch holds
-  // open the action menu instead of dragging.
-  if (!id || id === DRAFT || !state.nodes[id] || holdOpen() || swipe) {
-    e.preventDefault();
-    return;
-  }
-  dragSourceId = id;
-  dragActive = true;
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = "move";
-    try {
-      e.dataTransfer.setData("text/plain", id);
-    } catch {}
-  }
-  row!.classList.add("drag-source");
-});
-
-listEl.addEventListener("dragover", (e: DragEvent) => {
-  if (!dragSourceId) return;
-  const id = rowOf(e)?.dataset.id;
-  if (id && isValidDropTarget(state.nodes, dragSourceId, id)) {
-    e.preventDefault();
-    if (e.dataTransfer) e.dataTransfer.dropEffect = "move";
-  }
-});
-
-listEl.addEventListener("dragenter", (e: DragEvent) => {
-  if (!dragSourceId) return;
-  const row = rowOf(e);
-  const id = row?.dataset.id;
-  clearDropHighlight();
-  if (!row || !id || id === dragSourceId) return;
-  const reason = reparentValidity(state.nodes, dragSourceId, id);
-  if (reason === "ok") row.classList.add("drop-ok");
-  else if (reason !== "noop") row.classList.add("drop-bad");
-});
-
-listEl.addEventListener("drop", (e: DragEvent) => {
-  e.preventDefault();
-  const source = dragSourceId;
-  const target = rowOf(e)?.dataset.id;
-  endDrag();
-  if (source && target) reparentAgent(source, target);
-});
-
-listEl.addEventListener("dragend", endDrag);
+initAgentDrag(() => holdOpen() || !!swipe, renderSidebar, reparentAgent);

@@ -54,21 +54,6 @@ const shots =
     "recurse-comments-shots",
   );
 
-async function runningTree(
-  route: import("playwright").Route,
-  id: string,
-): Promise<void> {
-  const response = await route.fetch();
-  const rows = (await response.json()) as Array<Record<string, unknown>>;
-  for (const row of rows) if (row.id === id) row.status = "running";
-  await route.fulfill({ response, json: rows });
-}
-async function runningView(route: import("playwright").Route): Promise<void> {
-  const response = await route.fetch();
-  const payload = (await response.json()) as Record<string, unknown>;
-  payload.status = "running";
-  await route.fulfill({ response, json: payload });
-}
 const MOBILE_COMMENT_MESSAGE = [
   "Comments from user:",
   "Selected change target: current worktree",
@@ -186,11 +171,6 @@ export const tests: BrowserTest[] = [
       demo: string;
     };
     const demo = fixture.demo;
-    await page.route("**/api/tree", (route) => runningTree(route, demo));
-    await page.route(
-      new RegExp(`/api/conversations/${demo}\\?[^/]*$`),
-      runningView,
-    );
     const delivered: string[] = [];
     await page.route("**/api/conversations/**", (route) => {
       const path = new URL(route.request().url()).pathname;
@@ -393,11 +373,6 @@ export const tests: BrowserTest[] = [
     };
     const demo = fixture.demo;
     let mobileDelivered = false;
-    await page.route("**/api/tree", (route) => runningTree(route, demo));
-    await page.route(
-      new RegExp(`/api/conversations/${demo}\\?[^/]*$`),
-      runningView,
-    );
     await page.route("**/api/conversations/**", (route) => {
       const path = new URL(route.request().url()).pathname;
       if (path === `/api/conversations/${demo}/events`) {
@@ -421,7 +396,7 @@ export const tests: BrowserTest[] = [
           status: 200,
           contentType: "text/event-stream",
           body:
-            "retry: 3000\n\n" +
+            "retry: 100\n\n" +
             "id: mobile-comments:1\n" +
             "event: snapshot\n" +
             `data: ${JSON.stringify({ status: "ready", instance_id: "mobile-comments", revision: mobileDelivered ? 2 : 1, blocks, older: false, newer: false })}\n\n`,

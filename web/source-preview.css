@@ -1,0 +1,56 @@
+/* Read-only source uses the same theme variables as Changes. */
+.source-syntax :is(.hljs-comment, .hljs-quote) {
+  color: var(--syntax-comment);
+  font-style: italic;
+}
+.source-syntax
+  :is(.hljs-keyword, .hljs-selector-tag, .hljs-literal, .hljs-section) {
+  color: var(--syntax-keyword);
+}
+.source-syntax :is(.hljs-string, .hljs-regexp, .hljs-symbol, .hljs-addition) {
+  color: var(--syntax-string);
+}
+.source-syntax :is(.hljs-number, .hljs-bullet) {
+  color: var(--syntax-number);
+}
+.source-syntax :is(.hljs-title, .hljs-name, .hljs-attr, .hljs-attribute) {
+  color: var(--syntax-name);
+}
+.source-syntax :is(.hljs-built_in, .hljs-type, .hljs-title.class_) {
+  color: var(--syntax-type);
+}
+.source-syntax
+  :is(.hljs-variable, .hljs-template-variable, .hljs-property, .hljs-params) {
+  color: var(--text);
+}
+.source-syntax
+  :is(
+    .hljs-tag,
+    .hljs-doctag,
+    .hljs-selector-id,
+    .hljs-selector-class,
+    .hljs-selector-pseudo
+  ) {
+  color: var(--syntax-tag);
+}
+.source-syntax .hljs-meta {
+  color: var(--muted);
+}
+.source-syntax .hljs-meta .hljs-keyword {
+  color: var(--muted);
+}
+.source-syntax .hljs-meta .hljs-string {
+  color: var(--syntax-string);
+}
+.source-syntax .hljs-deletion {
+  color: var(--danger);
+}
+.source-syntax .hljs-emphasis {
+  font-style: italic;
+}
+.source-syntax .hljs-strong {
+  font-weight: 600;
+}
+.source-syntax .hljs-link {
+  text-decoration: underline;
+}

@@ -54,6 +54,26 @@ type LadderEntry = { model: string; reasoning: string };
 const fontSize = (el: unknown) =>
   (globalThis as any).getComputedStyle(el).fontSize;
 
+async function expectHitCorners(control: Locator, size = 44) {
+  await control.scrollIntoViewIfNeeded();
+  expect(
+    await control.evaluate((el, size) => {
+      const r = el.getBoundingClientRect();
+      const offset = (size - 2) / 2;
+      return [-offset, offset].every((x) =>
+        [-offset, offset].every((y) =>
+          el.contains(
+            el.ownerDocument.elementFromPoint(
+              r.left + r.width / 2 + x,
+              r.top + r.height / 2 + y,
+            ),
+          ),
+        ),
+      );
+    }, size),
+  ).toBe(true);
+}
+
 async function routeLadder(
   page: Page,
   base: string,
@@ -80,9 +100,11 @@ async function routeLadder(
             },
       ]),
     ),
-    models: [...new Set(options.levels.map((entry) => entry.model))].map(
-      (id) => ({ id, label: id, context_window: null }),
-    ),
+    get models() {
+      return [
+        ...new Set(Object.values(levels).map((entry) => entry.model)),
+      ].map((id) => ({ id, label: id, context_window: null }));
+    },
     reasoning: ALL_LEVELS,
   };
   let ladderReads = 0;
@@ -422,22 +444,7 @@ export const tests: BrowserTest[] = [
         exact: true,
       });
       for (const control of await editor.locator("input,button").all()) {
-        await control.scrollIntoViewIfNeeded();
-        expect(
-          await control.evaluate((element) => {
-            const box = element.getBoundingClientRect();
-            return [-21, 21].every((x) =>
-              [-21, 21].every((y) =>
-                element.contains(
-                  element.ownerDocument.elementFromPoint(
-                    box.x + box.width / 2 + x,
-                    box.y + box.height / 2 + y,
-                  ),
-                ),
-              ),
-            );
-          }),
-        ).toBe(true);
+        await expectHitCorners(control);
       }
       await section.locator('[name="reset-name"]').tap();
       await section.getByRole("status").filter({ hasText: "Saved." }).waitFor();
@@ -531,7 +538,7 @@ export const tests: BrowserTest[] = [
     await visibleAndUncovered(page, ".update-now");
     await closeDetails(page);
     expect(await page.locator("#settings-nav button").count()).toBe(5);
-    expect(await page.locator("#settings-modal .signout").count()).toBe(3);
+    expect(await page.locator("#settings-modal .signout").count()).toBe(0);
     expect(
       await page
         .getByRole("heading", {
@@ -670,11 +677,37 @@ export const tests: BrowserTest[] = [
       });
       await browserExpect(warming).toBeEnabled();
       await browserExpect(warming).toBeChecked();
+      const compacting = page.getByRole("switch", {
+        name: "Compact long idle conversations before their cache expires",
+      });
+      await browserExpect(compacting).toBeEnabled();
+      await browserExpect(compacting).not.toBeChecked();
+      const minimum = page.getByRole("spinbutton", {
+        name: "Minimum conversation length for idle compaction (tokens)",
+      });
+      await browserExpect(minimum).not.toBeVisible();
+      await expectHitCorners(compacting.locator("xpath=.."));
+      await compacting.check();
+      await browserExpect(compacting).toBeEnabled();
+      await browserExpect(minimum).toBeVisible();
+      await browserExpect(minimum).toHaveValue("120000");
+      await expectHitCorners(minimum, width === 412 ? 44 : 36);
+      await minimum.fill("140000");
+      await minimum.press("Tab");
+      await browserExpect(minimum).toBeEnabled();
       await warming.uncheck();
       await browserExpect(warming).toBeEnabled();
       await page.reload({ waitUntil: "domcontentloaded" });
       await open();
       await browserExpect(warming).not.toBeChecked();
+      await browserExpect(compacting).toBeChecked();
+      await browserExpect(minimum).toHaveValue("140000");
+      await minimum.fill("120000");
+      await minimum.press("Tab");
+      await browserExpect(minimum).toBeEnabled();
+      await compacting.uncheck();
+      await browserExpect(compacting).toBeEnabled();
+      await browserExpect(minimum).not.toBeVisible();
       await warming.check();
       await browserExpect(warming).toBeEnabled();
       await openDetail(page, /^Maximum context window /);
@@ -692,7 +725,7 @@ export const tests: BrowserTest[] = [
       expect(await slider.inputValue()).toBe(original);
       for (const control of [slider, maximum]) {
         const bounds = (await control.boundingBox())!;
-        expect(bounds.height).toBeGreaterThanOrEqual(width === 412 ? 44 : 36);
+        await expectHitCorners(control, width === 412 ? 44 : 36);
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
       }
       await slider.fill("500000");
@@ -774,6 +807,7 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Regression: #3344 Keep ladder metadata aligned with changed levels.
   async function test_settings_model_list_update_keeps_unsaved_ladder_picks(
     browser,
     base,

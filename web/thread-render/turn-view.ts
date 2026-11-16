@@ -496,7 +496,13 @@ export function toolHeader(entry: ToolEntry): ToolHeaderView {
   }
   const stat = entry.stat;
   const name = (entry.name || "").trim();
-  const label = KIND_LABEL[stat.kind] || (name ? upperFirst(name) : "Tool");
+  const label =
+    KIND_LABEL[stat.kind] ||
+    (name === "recurse_settings"
+      ? "Recurse settings"
+      : name
+        ? upperFirst(name)
+        : "Tool");
   const full = entry.input_full || entry.input || "";
   const stale = entry.status === "stale";
   let note = statNote(stat);
@@ -797,21 +803,32 @@ const emptyListedSummary = (): TurnSummary => ({
 
 /** Replace script wrappers with their server-classified nested calls. */
 function summaryTools(tools: readonly ToolEntry[] | undefined): ToolEntry[] {
-  return (tools || []).flatMap((entry) =>
-    entry.name === "codemode" && entry.calls?.length
-      ? entry.calls.flatMap((call) =>
-          (call.summary ?? [{ ...call, count: call.omitted ?? 1 }]).map(
-            (nested) => ({
-              ...entry,
-              name: nested.name,
-              stat: nested.stat ?? { kind: "other" as const },
-              count: nested.count,
-              calls: null,
-            }),
-          ),
-        )
-      : [entry],
-  );
+  return (tools || []).flatMap((entry) => {
+    if (entry.name !== "codemode" || !entry.calls?.length) return [entry];
+    const nested = entry.calls.flatMap((call) =>
+      (call.summary ?? [{ ...call, count: call.omitted ?? 1 }]).map(
+        (nested) => ({
+          ...entry,
+          name: nested.name,
+          stat: nested.stat ?? { kind: "other" as const },
+          count: nested.count,
+          calls: null,
+        }),
+      ),
+    );
+    const publications = nested.filter((tool) => tool.name === "publish");
+    const publication = publications[0];
+    if (publication) {
+      publication.count = publications.reduce(
+        (count, tool) => count + tool.count,
+        0,
+      );
+      return nested.filter(
+        (tool) => tool.name !== "publish" || tool === publication,
+      );
+    }
+    return nested;
+  });
 }
 
 // Classifies listed calls when a recorded summary is absent, matching backend

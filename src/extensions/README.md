@@ -12,7 +12,7 @@ Tests mirror this layout in `tests/extensions/`, and `tests/check.sh ts` runs th
 | [core/safety/](core/safety/README.md)                     | Reviews every side-effecting tool call with a reviewer model before it runs                                        |
 | [core/shells/](core/shells/README.md)                     | The `bash` and `wait` tools: detached shells, background commands and monitors                                     |
 | [core/context/](core/context/context.ts)                  | Context limits, compaction ([durable-compaction.ts](core/context/durable-compaction.ts)) and bounded search output |
-| [core/environment/](core/environment/managed_tools.ts)    | Persistent cwd/env, operator file publication and deferred Artifacts (`env`, `chdir`, `publish`, `artifact`)       |
+| [core/environment/](core/environment/managed_tools.ts)    | Persistent cwd/env, operator file publication and Artifacts (`env`, `chdir`, `publish`, `artifact`)                |
 | [extra/fff/](extra/fff/fff.ts)                            | Fast file search (`grep`, `find`) in one shared child process                                                      |
 | [extra/mcp/](extra/mcp/mcp.ts)                            | MCP servers configured in Settings; agents call them from code-mode scripts                                        |
 | [extra/rtk/](extra/rtk/rtk.ts)                            | Rewrites an approved shell command through RTK to shorten its output                                               |
@@ -22,18 +22,15 @@ Tests mirror this layout in `tests/extensions/`, and `tests/check.sh ts` runs th
 | [extra/usage-limits/](extra/usage-limits/usage-limits.ts) | Records the Claude and ChatGPT subscription usage limits that model responses report, for Settings                 |
 
 The native [recurse_settings tool](core/settings/settings.ts) and
-[artifact tool](core/environment/artifact.ts) use Pi Durable's `deferred` flag.
-Their descriptions and schemas are absent from initial model requests; the
-codemode prompt section names them. Agents discover settings
-after reading the bundled [recurse-settings skill](../../skills/recurse-settings/SKILL.md),
-using `searchTools("recurse_settings")`, `describeTool("recurse_settings")`, and
-`tools.recurse_settings(...)`. The skill is available regardless of cwd; only its
-name, description and location are injected. Discovery, skill reads and calls
-remain in the transcript and captured provider requests. `add_remote` and
-`list_remotes` call the same in-process connection operations as the Settings
-routes; the native tool has no HTTP or credential access. Remote sign-in
-remains operator-only. Artifacts
-use the same discovery path, searching for `"create Artifact"`.
+[artifact tool](core/environment/artifact.ts) send their descriptions and full
+schemas on every model route. They remain callable from codemode with the same
+arguments and safety review. MCP discovery and deferred tools are unchanged.
+Agents read the bundled [recurse-settings skill](../../skills/recurse-settings/SKILL.md)
+before using settings. The skill is available regardless of cwd; only its name,
+description and location are injected. Skill reads and calls remain in the
+transcript and captured provider requests. `add_remote` and `list_remotes` call
+the same in-process connection operations as the Settings routes; the native
+tool has no HTTP or credential access. Remote sign-in remains operator-only.
 
 The settings tool changes the app's name with `set_name`/`reset_name` and its
 PNG/SVG icon with `set_icon`/`reset_icon`, only when the operator asks. Icon

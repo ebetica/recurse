@@ -1,7 +1,8 @@
 import { expect, test } from "bun:test";
 import { rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { Config } from "../../src/config";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { ReportDoc } from "../../src/agents/durable/report";
 import { buildApp, WebLogSink } from "../../src/web/app";
@@ -196,7 +197,7 @@ test("local agents cannot change operator settings or authentication", async () 
   }
 });
 
-// Feature: #2805 Live agents manage remote agents through a credential-free, restricted home gateway.
+// Regression: #2805 #3390 remote agent reads preserve operator-only reviewer captures.
 test("agent CLI creates and manages a connected remote agent", async () => {
   const worlds = [appWorld(), appWorld({ password: true })];
   const apps = await Promise.all(
@@ -613,6 +614,103 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       );
       expect(toggled.status).toBe(status);
       expect(remote.durable.safetyReviewOff(cid)).toBe(reviewOff);
+    }
+    const reviewModel = provider.models!.getModel("faux", "faux-1")!;
+    const reviewConfig = new Config({
+      env: worlds[1]!.env,
+      authenticatedProviders: () => [reviewModel.provider],
+      storedCustomProviders: () => [reviewModel.provider],
+    });
+    await reviewConfig.setPiModelList([
+      {
+        provider: reviewModel.provider,
+        id: reviewModel.id,
+        name: reviewModel.name,
+        context_window: reviewModel.contextWindow,
+        file_provider: true,
+      },
+    ]);
+    await reviewConfig.setEffortLevel(
+      1,
+      `${reviewModel.provider}/${reviewModel.id}`,
+      "low",
+    );
+    Object.assign(
+      (remote.durable as unknown as { deps: DurableHostDeps }).deps,
+      {
+        config: reviewConfig,
+      },
+    );
+    fixture.faux.setResponses([
+      fauxAssistantMessage(
+        [
+          fauxToolCall("bash", {
+            command: "printf reviewed > review-proof.txt",
+          }),
+        ],
+        { stopReason: "toolUse" },
+      ),
+      fauxAssistantMessage("OK"),
+      fauxAssistantMessage("Review capture ready"),
+    ]);
+    await remote.delivery.deliver(cid, "Create review-proof.txt.", {
+      origin: "operator",
+    });
+    await until(() => remote.durable.runningCount() === 0);
+    const promptPath = `conversations/${cid}/prompt`;
+    const operatorPrompt = await fetch(
+      `${homeUrl}/api/backends/B/${promptPath}`,
+    );
+    expect(operatorPrompt.status).toBe(200);
+    const fullPrompt = (await operatorPrompt.json()) as {
+      request: unknown;
+      safety_review: { context: unknown; reply: { content: unknown } };
+    };
+    expect(JSON.stringify(fullPrompt.safety_review.context)).toContain(
+      "review-proof.txt",
+    );
+    expect(fullPrompt.safety_review.reply.content).toEqual([
+      { type: "text", text: "OK" },
+    ]);
+    const remoteLogin = await fetch(`${servers[1]!.url}/login`, {
+      method: "POST",
+      redirect: "manual",
+      body: new URLSearchParams({ password: PASSWORD }),
+    });
+    expect(remoteLogin.status).toBe(303);
+    const remoteCookie = remoteLogin.headers.get("set-cookie")!.split(";")[0]!;
+    const keyedPrompt = await fetch(`${servers[1]!.url}/api/${promptPath}`, {
+      headers: { authorization: `Bearer ${remoteKey.key}` },
+    });
+    expect(keyedPrompt.status).toBe(200);
+    expect(
+      ((await keyedPrompt.json()) as { safety_review: unknown }).safety_review,
+    ).toEqual(fullPrompt.safety_review);
+    for (const response of [
+      await gateway(promptPath),
+      await fetch(`${homeUrl}/api/backends/B/${promptPath}`, {
+        headers: { "x-recurse-agent": "" },
+      }),
+      await fetch(`${servers[1]!.url}/api/${promptPath}`, {
+        headers: { cookie: remoteCookie, "x-recurse-agent": cid },
+      }),
+      await fetch(`${servers[1]!.url}/api/${promptPath}`, {
+        headers: {
+          authorization: `Bearer ${remoteKey.key}`,
+          "x-recurse-agent-caller": caller,
+        },
+      }),
+      await fetch(`${servers[1]!.url}/api/${promptPath}`, {
+        headers: {
+          authorization: `Bearer ${remoteKey.key}`,
+          "x-recurse-agent": "",
+        },
+      }),
+    ]) {
+      expect(response.status).toBe(200);
+      const visible = (await response.json()) as Record<string, unknown>;
+      expect(visible).not.toHaveProperty("safety_review");
+      expect(visible.request).toEqual(fullPrompt.request);
     }
     const streams: {
       controller: AbortController;

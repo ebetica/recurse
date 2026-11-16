@@ -1,8 +1,7 @@
 /**
  * Colour policy: web UI colours come from theme tokens (var(--...)).
- * Usage: bun tests/checks/color_check.ts; exits 1 on literal colours.
+ * tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
 import ts from "typescript";
 
 export type Finding = { line: number; literal: string };
@@ -190,30 +189,4 @@ export function checkFiles(
       );
   }
   return errors;
-}
-
-/** Tracked web UI files; withServer adds src/ TypeScript but not themes. */
-export function trackedFiles(withServer = false): string[] {
-  const roots = withServer
-    ? ["web/index.html", "web", "src"]
-    : ["web/index.html", "web"];
-  const listed = Bun.spawnSync(["git", "ls-files", "-z", ...roots]);
-  if (listed.exitCode !== 0) throw new Error(listed.stderr.toString());
-  return listed.stdout
-    .toString()
-    .split("\0")
-    .filter((file) => /\.(?:css|html|ts)$/.test(file))
-    .filter((file) => !/^web\/(?:dist|vendor)\//.test(file))
-    .filter((file) => file !== "src/themes.ts");
-}
-
-if (import.meta.main) {
-  const files = trackedFiles(true);
-  const texts = files.map((file) => ({
-    file,
-    text: readFileSync(file, "utf8"),
-  }));
-  const errors = checkFiles(texts);
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

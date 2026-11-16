@@ -126,7 +126,7 @@ async function latest(host: DurableHost, kind: string, callId?: string) {
 
 describe("codemode on Durable", () => {
   // Regression: #2856 native read images must reach the next model request from scripts.
-  test("all native tools remain callable from scripts, the codemode section names deferred tools, and image results", async () => {
+  test("all native tools remain callable from scripts, no script-only section without MCP, and image results", async () => {
     const { host, faux, root, work } = setup("cm-read-image");
     await mkdir(host.collection("c1", {}), { recursive: true });
     writeFileSync(join(root, "mcp.json"), JSON.stringify({ mcpServers: {} }));
@@ -140,7 +140,7 @@ describe("codemode on Durable", () => {
     );
     const { requests } = script(faux, [
       codemode(
-        "await tools.write({path:'created.txt',content:'original'}); await tools.edit({path:'created.txt',edits:[{oldText:'original',newText:'updated'}]}); text(await tools.env({action:'set',name:'PROMPT_TOOL_CHECK',value:'available'})); text(await tools.bash({command:'printf \"%s\" \"$PROMPT_TOOL_CHECK\"'})); text(await tools.publish({paths:['created.txt']})); text(await tools.find({pattern:'note.txt'})); text(await tools.grep({pattern:'unchanged',path:'note.txt'})); const note = await tools.read({path:'note.txt',offset:2,limit:1}); text({kind:typeof note,note}); image(await tools.read({path:'pixel.png'}));",
+        "await tools.write({path:'created.txt',content:'original'}); await tools.edit({path:'created.txt',edits:[{oldText:'original',newText:'updated'}]}); text(await tools.env({action:'set',name:'PROMPT_TOOL_CHECK',value:'available'})); text(await tools.bash({command:'printf \"%s\" \"$PROMPT_TOOL_CHECK\"'})); text(await tools.publish({paths:['created.txt']})); text(await tools.artifact({action:'list'})); text(await tools.recurse_settings({action:'levels'})); text(await tools.find({pattern:'note.txt'})); text(await tools.grep({pattern:'unchanged',path:'note.txt'})); const note = await tools.read({path:'note.txt',offset:2,limit:1}); text({kind:typeof note,note}); image(await tools.read({path:'pixel.png'}));",
       ),
       fauxAssistantMessage("saw image and text"),
     ]);
@@ -160,12 +160,8 @@ describe("codemode on Durable", () => {
       );
       const agent = await (await host.open("c1")).conversation.agent(context);
       const deferred = agent.deferred.map((tool) => tool.name);
-      expect(deferred).toEqual(
-        expect.arrayContaining(["artifact", "recurse_settings"]),
-      );
-      expect(sections).toEqual([
-        `<codemode>\nOther tools scripts can call: ${deferred.join(", ")}. Use describeTool for arguments.\n</codemode>`,
-      ]);
+      expect(deferred).toEqual([]);
+      expect(sections).toEqual([]);
       expect(
         capture.context.messages
           .flatMap((message: Rec) => message.toolsAdded ?? [])
@@ -843,11 +839,14 @@ describe("codemode on Durable", () => {
       expect(existsSync(join(work, "direct.txt"))).toBe(true);
       const evidence = (review: string) =>
         /CONVERSATION EVIDENCE START([\s\S]*)CONVERSATION EVIDENCE END/.exec(
-          review,
+          JSON.parse(review)[0].text,
         )![1];
       expect(reviews).toHaveLength(2);
       expect(reviews[0]).not.toContain("calledBy");
       expect(evidence(reviews[1]!)).toBe(evidence(reviews[0]!));
+      expect(JSON.parse(reviews[1]!).at(-1).text).toContain(
+        "(no new evidence)",
+      );
       expect(evidence(reviews[0]!)).toContain("first done");
       expect(evidence(reviews[0]!)).toContain("echo earlier");
     } finally {

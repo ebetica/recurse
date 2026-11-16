@@ -1,10 +1,11 @@
+// @tla specs/tla/send/OperatorSend.tla: Save/Reload retain the client key.
 // Saved-agent sends persist before the composer clears. Per-message keys avoid
 // cross-tab lost updates; the shared browser lock fences delivery and removal.
 // Retries retain the server's idempotency key and serialize each recipient.
 import { html } from "lit";
 import { parseConversationId } from "../backends/backend.js";
 import { withCommentLock } from "../artifacts/comment-lock.js";
-import { userBubble } from "../thread-render.js";
+import { userBubble } from "../thread-render/user-bubble.js";
 import { pendingMessageRemoveButton } from "../pending-queue/pending-message.js";
 
 export interface SavedSend {

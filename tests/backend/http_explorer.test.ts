@@ -1,8 +1,11 @@
 import { expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
+  chmod,
+  lstat,
   mkdir,
   mkdtemp,
+  readFile,
   readdir,
   readlink,
   stat,
@@ -10,7 +13,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { BackendKeys } from "../../src/auth/backend_keys";
@@ -22,6 +25,7 @@ import { composeApp, startServer } from "../../src/server";
 import { registerExplorerRoutes } from "../../src/web/explorer";
 import {
   EXPLORER_CHUNK_BYTES,
+  EXPLORER_EDIT_BYTES,
   EXPLORER_PAGE_SIZE,
   type ExplorerListing,
   type ExplorerPreview,
@@ -103,6 +107,20 @@ test("operator Explorer reads only the current folder with bounded pages and pre
     cid = "c1",
     headers: Record<string, string> = {},
   ) => fetch(`${base}/${cid}/tree${suffix}`, { headers });
+  const put = (
+    query: string,
+    body: string | Uint8Array,
+    headers: Record<string, string> = {},
+  ) => {
+    const params = new URLSearchParams(query);
+    if (!params.has("canonicalPath"))
+      params.set("canonicalPath", resolve(work, params.get("path") ?? ""));
+    return fetch(`${base}/c1/tree/file?${params}`, {
+      method: "PUT",
+      body,
+      headers,
+    });
+  };
   const json = async <T>(suffix: string, cid = "c1"): Promise<T> => {
     const response = await get(suffix, cid);
     expect(response.status).toBe(200);
@@ -165,6 +183,8 @@ test("operator Explorer reads only the current folder with bounded pages and pre
     await writeFile(join(dir, "outside.txt"), "outside\n");
     await symlink(join(dir, "outside.txt"), join(work, "linked-file"));
     await symlink(dir, join(work, "linked-parent"));
+    await symlink(work, join(work, "loop"));
+    await symlink("self", join(work, "self"));
     expect(
       (await captureFixture(["mkfifo", join(work, "pipe")], { cwd: work }))
         .exitCode,
@@ -183,8 +203,21 @@ test("operator Explorer reads only the current folder with bounded pages and pre
       "file",
     );
     expect(
-      root.entries.find((entry) => entry.name === "linked-file")?.type,
-    ).toBe("symlink");
+      Object.fromEntries(
+        root.entries
+          .filter((entry) =>
+            ["linked-file", "linked-parent", "loop", "self"].includes(
+              entry.name,
+            ),
+          )
+          .map((entry) => [entry.name, entry.type]),
+      ),
+    ).toEqual({
+      "linked-file": "file",
+      "linked-parent": "directory",
+      loop: "directory",
+      self: "symlink",
+    });
     const page = await json<ExplorerListing>("?path=many");
     expect(page.entries).toHaveLength(EXPLORER_PAGE_SIZE);
     expect(page.cursor).toBeString();
@@ -209,19 +242,134 @@ test("operator Explorer reads only the current folder with bounded pages and pre
       "src//application.ts",
       "./notes.md",
       "src/\0",
-    ]) {
+    ])
       expect((await get(`?path=${encodeURIComponent(path)}`)).status).toBe(422);
-      expect((await get(`/file?path=${encodeURIComponent(path)}`)).status).toBe(
-        422,
+    for (const [path, root, text] of [
+      [relative(work, join(dir, "outside.txt")), dir, "outside\n"],
+      [join(dir, "outside.txt"), dir, "outside\n"],
+      ["src//application.ts", work, "export const application = true;\n"],
+      ["./notes.md", work, "# Notes\n\nhello\n"],
+    ]) {
+      const opened = await json<ExplorerPreview>(
+        `/file?path=${encodeURIComponent(path!)}`,
       );
+      expect([opened.root, opened.text]).toEqual([root, text]);
     }
-    for (const path of ["linked-file", "linked-parent/outside.txt", "pipe"])
+    expect((await get(`/file?path=..`)).status).toBe(422);
+    expect(
+      (await get(`/file?path=${encodeURIComponent("src/\0")}`)).status,
+    ).toBe(422);
+    expect(await json<ExplorerPreview>("/file?path=saved.env")).toMatchObject({
+      root: work,
+      path: "saved.env",
+      kind: "missing",
+    });
+    expect((await get("/file?path=absent/new.env")).status).toBe(404);
+    const created = await put("path=saved.env", "API_KEY=one\n");
+    expect(created.status).toBe(200);
+    expect(await readFile(join(work, "saved.env"), "utf8")).toBe(
+      "API_KEY=one\n",
+    );
+    expect((await stat(join(work, "saved.env"))).mode & 0o777).toBe(0o600);
+    const first = (await created.json()) as ExplorerPreview;
+    expect((await put("path=saved.env", "again")).status).toBe(409);
+    const racedCreates = await Promise.all(
+      ["one", "two"].map((text) => put("path=raced.env", text)),
+    );
+    expect(racedCreates.map((response) => response.status).sort()).toEqual([
+      200, 409,
+    ]);
+    const racedVersion = encodeURIComponent(
+      (await json<ExplorerPreview>("/file?path=raced.env")).version,
+    );
+    const racedEdits = await Promise.all(
+      ["three", "four"].map((text) =>
+        put(`path=raced.env&version=${racedVersion}`, text),
+      ),
+    );
+    expect(racedEdits.map((response) => response.status).sort()).toEqual([
+      200, 409,
+    ]);
+    await chmod(join(work, "saved.env"), 0o640);
+    const stale = `path=saved.env&version=${encodeURIComponent(first.version)}`;
+    expect((await put(stale, "stale")).status).toBe(409);
+    const changed = await json<ExplorerPreview>("/file?path=saved.env");
+    const edited = await put(
+      `path=${encodeURIComponent(join(work, "saved.env"))}&version=${encodeURIComponent(changed.version)}`,
+      "API_KEY=two\n",
+    );
+    expect(edited.status).toBe(200);
+    expect(((await edited.json()) as ExplorerPreview).text).toBe(
+      "API_KEY=two\n",
+    );
+    expect((await stat(join(work, "saved.env"))).mode & 0o777).toBe(0o640);
+    expect((await put(stale + "&overwrite=true", "forced\n")).status).toBe(200);
+    expect(await readFile(join(work, "saved.env"), "utf8")).toBe("forced\n");
+    expect(
+      (
+        await put(
+          "path=saved.env&overwrite=true",
+          "x".repeat(EXPLORER_EDIT_BYTES + 1),
+        )
+      ).status,
+    ).toBe(413);
+    expect(
+      (await put("path=saved.env&overwrite=true", new Uint8Array([0xff, 0xfe])))
+        .status,
+    ).toBe(422);
+    expect(await readFile(join(work, "saved.env"), "utf8")).toBe("forced\n");
+    expect((await put("path=absent/new.env", "x")).status).toBe(409);
+    expect((await put("path=src", "x")).status).toBe(422);
+    expect(
+      (
+        await put(
+          `path=linked-file&canonicalPath=${encodeURIComponent(join(dir, "outside.txt"))}&overwrite=true`,
+          "linked edit\n",
+        )
+      ).status,
+    ).toBe(200);
+    expect((await lstat(join(work, "linked-file"))).isSymbolicLink()).toBe(
+      true,
+    );
+    expect(await readFile(join(dir, "outside.txt"), "utf8")).toBe(
+      "linked edit\n",
+    );
+    await writeFile(join(dir, "outside.txt"), "outside\n");
+    expect(
+      (
+        await put("path=saved.env&overwrite=true", "x", {
+          origin: "https://attacker.invalid",
+          "sec-fetch-site": "cross-site",
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (await readdir(join(work, "src"))).filter((name) =>
+        name.endsWith(".tmp"),
+      ),
+    ).toEqual([]);
+    for (const path of ["self", "pipe", "loop"])
       for (const suffix of ["file", "raw"])
         expect(
           (await get(`/${suffix}?path=${path}`)).status,
           `${suffix}: ${path}`,
         ).toBe(422);
-    expect((await get("?path=linked-parent")).status).toBe(422);
+    for (const path of ["linked-file", "linked-parent/outside.txt"]) {
+      expect((await json<ExplorerPreview>(`/file?path=${path}`)).text).toBe(
+        "outside\n",
+      );
+      expect(await (await get(`/raw?path=${path}`)).text()).toBe("outside\n");
+    }
+    expect(
+      (await json<ExplorerListing>("?path=linked-parent")).entries.map(
+        (entry) => entry.name,
+      ),
+    ).toContain("outside.txt");
+    expect(
+      (await json<ExplorerListing>("?path=loop/loop/loop")).entries.map(
+        (entry) => entry.name,
+      ),
+    ).toContain("loop");
     expect((await json<ExplorerPreview>("/file?path=.env")).text).toBe(
       "fixture only\n",
     );
@@ -260,12 +408,19 @@ test("operator Explorer reads only the current folder with bounded pages and pre
           "x-recurse-agent-caller": "c1",
         },
         { authorization: `Bearer recurse_test_${serviceToken}` },
-      ] as Record<string, string>[])
+      ] as Record<string, string>[]) {
         expect(
           (await get(suffix, "c1", headers)).status,
           `${suffix}: ${Object.keys(headers).join(",")}`,
         ).toBe(403);
+        if (suffix.startsWith("/file"))
+          expect(
+            (await put("path=saved.env&overwrite=true", "agent", headers))
+              .status,
+          ).toBe(403);
+      }
     }
+    expect(await readFile(join(work, "saved.env"), "utf8")).toBe("forced\n");
     for (const suffix of [
       "",
       "/file?path=notes.md",
@@ -278,6 +433,13 @@ test("operator Explorer reads only the current folder with bounded pages and pre
       expect(response.status).toBe(200);
       await response.body?.cancel();
     }
+    expect(
+      (
+        await put("path=saved.env&overwrite=true", "from home\n", {
+          authorization: `Bearer ${remote.key}`,
+        })
+      ).status,
+    ).toBe(200);
     expect((await get("", "missing")).status).toBe(404);
     const preview = await json<ExplorerPreview>("/file?path=big.txt");
     expect(preview.text).toBe(big.slice(0, EXPLORER_CHUNK_BYTES));
@@ -377,7 +539,9 @@ test("operator Explorer reads only the current folder with bounded pages and pre
     expect(moved.entries.map((entry) => entry.name)).toEqual([
       "application.ts",
     ]);
-    expect((await get("/file?path=../notes.md")).status).toBe(422);
+    expect((await json<ExplorerPreview>("/file?path=../notes.md")).root).toBe(
+      work,
+    );
     expect((await get(`?path=many&cursor=${next.cursor}`)).status).toBe(409);
     expect(
       (await json<{ results: string[] }>("/search?q=application")).results,

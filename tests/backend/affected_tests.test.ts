@@ -85,6 +85,10 @@ test("a theme change reaches tests that import it through another module", async
   );
   expect(backend?.split(" ")).toContain("./tests/backend/themes.test.ts");
   expect(lines).toContain("bun run test:browser");
+  const route = lines.find((line) => / backend tests start with: /.test(line));
+  expect(route?.split(": ")[1]).toBe(
+    "src/themes.ts <- src/web/static.ts <- src/web/app.ts",
+  );
 });
 
 test("a change to one browser test file runs only its group", async () => {
@@ -140,6 +144,23 @@ test("blame names only the commit whose changes the failing group ran", async ()
   ).toEqual([
     "pr2370-full",
     "# ruled out 2 of 3: artifact-check ran none of their changes",
+  ]);
+});
+
+// Regression: #3273 frontend READMEs and fixtures no test names planned every suite.
+test("a frontend README runs no tests and an unnamed fixture runs the tests that name its directory", async () => {
+  const readme = await affected("pr3269-readme.diff.gz", "coverage_map.json");
+  expect(readme.slice(1)).toEqual(["# no tests reach this change"]);
+  const revision = await affected(
+    "pr3227-fixture.diff.gz",
+    "coverage_map.json",
+  );
+  expect(revision.slice(1)).toEqual([
+    "bun test --timeout 30000 ./tests/backend/affected_tests.test.ts ./tests/backend/api_v1.test.ts ./tests/backend/api_v1_messages.test.ts ./tests/backend/connected_backends.test.ts ./tests/backend/durable_reply_times.test.ts ./tests/backend/durable_uploads.test.ts ./tests/backend/http_static.test.ts ./tests/backend/remote_send.test.ts",
+  ]);
+  const image = await affected("pr2637-pixel.diff", "coverage_map.json");
+  expect(image.slice(1)).toEqual([
+    "bun test --timeout 30000 ./tests/backend/durable_tools.test.ts",
   ]);
 });
 
@@ -257,5 +278,36 @@ test("without a map a frontend change runs the whole browser suite and says so",
   expect(lines).toContain("bun run test:browser");
   expect(lines.some((line) => line.includes("no browser coverage map"))).toBe(
     true,
+  );
+});
+
+// Feature: #3290 TLA+ changes run the model checks; web edits skip server tests.
+test("TLA+ changes run the model checks and a web module change skips unrelated server tests", async () => {
+  expect(
+    (await affected("pr3284-tla.diff.gz", "coverage_map.json")).slice(1),
+  ).toEqual([
+    "bun test --timeout 30000 ./tests/backend/affected_tests.test.ts",
+    "specs/tla/check.sh",
+  ]);
+  expect(
+    (await affected("pr3284-tla-v0.3.2.diff.gz", "coverage_map.json")).slice(1),
+  ).toEqual([
+    "# everything: package.json: a build input, or no test reaches it",
+    "bun run test:backend",
+    "bun run test",
+    "bun run test:browser",
+    "specs/tla/check.sh",
+  ]);
+  const files = await affected("pr3225-files.diff.gz", "coverage_map.json");
+  expect(files.find((line) => line.startsWith("bun test --timeout"))).toBe(
+    "bun test --timeout 30000 ./tests/backend/affected_tests.test.ts ./tests/backend/http_explorer.test.ts ./tests/backend/local_supervisor.test.ts ./tests/backend/supervisor_lifecycle.test.ts ./tests/backend/svg_check.test.ts ./tests/backend/test_check_cli.test.ts",
+  );
+});
+
+// Feature: #3294 pane stylesheets map to the groups that used their rules.
+test("a pane stylesheet change reaches the groups that used its rules", async () => {
+  const lines = await affected("pr3240-dock.diff.gz", "coverage_map-css.json");
+  expect(lines).toContain(
+    "# web/dock/style.css: groups that used the changed rules -> pane-chrome panes-files",
   );
 });

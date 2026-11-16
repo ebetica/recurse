@@ -79,6 +79,21 @@ Start with the least powerful mechanism that meets your need.
 | An external service                           | Its MCP server, added in Settings. Agents call it from code                                                                |
 | A new tool, or any change to Recurse          | A Pi extension, or ask an agent                                                                                            |
 
+### Theme CSS
+
+Prefer a theme's palette for colours. A custom theme can also include up to
+50,000 characters of CSS: open Settings → Appearance → Theme, select the custom
+theme and edit **Custom CSS**. Changes preview immediately; choose **Save** to
+keep them or **Cancel** to restore the saved version. You can ask an agent to
+create a palette and attach CSS from a file through the settings tool.
+
+Images must be embedded as `data:` URLs; themes cannot load remote resources.
+Animations should honour `prefers-reduced-motion`. Custom CSS pauses while
+file destinations, model-file warnings, safety warnings or sign-in are shown.
+If a theme hides the controls, add `?customCss=off` before the URL's `#` fragment
+(or `&customCss=off` if it already has a query). This disables custom CSS for that
+page, including previews. Select a built-in theme to undo it on every page.
+
 For an MCP server with many or rarely used tools, add `"loadToolsOnDemand": true`
 to that server's JSON entry in Settings > MCPs. Its tool schemas then stay out of
 the agent's inline tool list; the agent finds and inspects them from code when

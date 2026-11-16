@@ -107,6 +107,13 @@ export async function remoteStream(
     headers.set("authorization", `Bearer ${backend.key}`);
     if (agent) headers.set("x-recurse-agent-caller", agent);
   }
+  // Invariant: Raw prompt markers restrict reads, never assert identity.
+  if (
+    /^\/api\/conversations\/[^/?]+\/prompt\/?(?:\?|$)/.test(path) &&
+    (request.headers.has("x-recurse-agent") ||
+      request.headers.has("x-recurse-agent-caller"))
+  )
+    headers.set("x-recurse-agent", "");
   const source = request.body?.getReader();
   const cancelInput = () => void source?.cancel().catch(() => {});
   controller.signal.addEventListener("abort", cancelInput, { once: true });
@@ -162,6 +169,10 @@ export async function remoteStream(
       )
         outgoing.set(name, value);
     }
+    // Invariant: Proxied streams also close their browser connection (see
+    // src/web/conversation_events.ts), so a viewer who left stops counting.
+    if (outgoing.get("content-type")?.startsWith("text/event-stream"))
+      outgoing.set("connection", "close");
     const policy = response.headers.get("content-security-policy");
     const safePolicy =
       policy &&

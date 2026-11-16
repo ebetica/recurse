@@ -1,13 +1,12 @@
 # Agent transcripts and search
 
-Search is a CLI operation, not a model tool. `subagent.ts search QUERY [AGENT]`
-searches the caller by default. `--tree` includes descendants, `--all` selects
-all live agents, and `--deleted` also includes retained deleted agents. Queries
-are case-insensitive literal text; `--role user|assistant|agent|tool|tool-result`
-and `--limit 1–100` filter results. Each hit prints `path:line: snippet` followed
-by its agent, UTC time and role. Read that path with the normal read tool at the
-reported 1-based line, or search the file directly with ripgrep. The CLI no longer
-has a `messages` command.
+`subagent.ts search QUERY [AGENT]` defaults to you. Scope: `--tree`
+(descendants), `--all` (live), `--deleted` (retained). Case-insensitive literals
+accept `--role user|assistant|agent|tool|tool-result` and `--limit 1–100`.
+Hits print `path:line`, agent/role/UTC time/offset metadata, then excerpts
+with `[… clipped]` boundaries. Read uses the 1-based offset.
+Local callers exclude their active run via Pi's cached first entry.
+Narrow with `--conversation`, `--or`, `--since`/`--until`; page with `--cursor start`.
 
 ## Source files
 
@@ -138,27 +137,31 @@ state remains incomplete until synchronization. Aborted catch-up retains those
 warnings, not a blanket warning for every unvisited archive. Queries never repair
 files. A bounded per-hit header lookup decodes matches.
 
-Search has no service, ripgrep, HTTP or CLI deadline. A streamed live-only
-ripgrep pass finishes before a retained-archive pass starts. Archives are supplied
-newest-first; parallel completion order within a pass is not stable. A Worker
-checks the pass's filesystem type with `statfs`: recognized NFS, 9p, FUSE,
-SMB/CIFS, Ceph, AFS and Coda filesystems use 8 threads. This is the conservative
-network default: larger fan-out has not demonstrated a cold-scan improvement.
-Local disks and unknown types retain ripgrep's default. Missing paths probe their
-nearest existing ancestor. Exhaustive, cache-controlled cold comparisons must
-accompany future tuning. Either child is killed as soon as the combined requested
-hit limit or shared 8 MiB output bound is reached.
-Disconnecting or interrupting the CLI cancels either pass. Cancelled queries release
-their admission slot only after their child has exited; descriptors are always
-closed. Plain-text read ranges retain their separate fifteen-second deadline.
-Ripgrep output and header lookups are decoded in an independent Worker, not on
-the server event loop. A process-wide, abortable queue runs at most four
-searches/ripgrep children and retains at most six waiting requests, including
-searches from different service instances. Excess requests fail immediately with
-`Search busy; retry after current searches finish` (HTTP 429), rather than waiting
-behind a large scan. Ten concurrent readers remain admitted.
-Unicode matching uses case-insensitive literal Unicode simple folding. Output is bounded to 8 MiB and 200 hits; a limit
-returns `truncated`. Search does not log queries or message text.
+No search/ripgrep/HTTP/CLI deadlines apply. Live ripgrep precedes archives;
+archive paths are newest-first, but parallel arrival order is unstable.
+Worker `statfs` selects 8 threads for NFS, 9p, FUSE, SMB/CIFS, Ceph, AFS and Coda;
+local/unknown types retain ripgrep's default. Missing paths probe their nearest
+existing ancestor. Larger fan-out lacks demonstrated cold-scan gains; future
+tuning requires exhaustive cache-controlled cold comparisons.
+
+Multi-agent caps are five hits/agent or half the global limit (rounded up),
+whichever is smaller; focused limits are unchanged.
+Children stop at global hits, shared 8 MiB, or all pass-local agent caps;
+skipped excess hits also mark `truncation: agent_limit`. Other stops report
+`hit_limit` or `byte_limit`. No ranking/count prepass runs.
+Optional cursors track entry/role watermarks and file identities, not arrival
+order. Appends remain searchable; replaced files or new filters/scope need a restart.
+State caps at 200 agents/32 KiB; unpaged queries read no cursor metadata.
+
+Disconnect/interrupt cancels either pass; admission releases after child exit,
+and descriptors always close. Plain-text ranges retain a fifteen-second deadline.
+An independent Worker decodes output/headers. A process-wide abortable queue admits
+four active and six waiting searches across service instances; excess requests
+fail with `Search busy; retry after current searches finish` (HTTP 429).
+Matching uses case-insensitive literal Unicode simple folding; output caps at
+8 MiB/200 hits and returns `truncated` on a limit. `incomplete` names agent/path/
+reason (`missing` transcript or `stale`, possibly missing new entries).
+`not_indexed` and API v1 are unchanged. Queries/text are not logged.
 
 INFO events define the performance metrics:
 

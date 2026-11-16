@@ -239,20 +239,9 @@ test("real host tools and safety retain trusted scope even with a poisoned store
     await host.send("c1", "exercise baseline", "baseline");
     await opened.conversation.waitForIdle(context);
     expect(baselineDenied).toBe(true);
-    await opened.conversation.configure(
-      {
-        modelTools: {
-          add: [
-            (await opened.conversation.agent(context)).callable.find(
-              (tool) => tool.name === "recurse_settings",
-            )!,
-          ],
-        },
-      },
-      context,
-    );
     await writeFile(join(workspace, "report.txt"), "private report");
     const nativeCalls = [
+      { name: "artifact", args: { action: "create", title: "Unrequested" } },
       { name: "publish", args: { paths: ["report.txt"] } },
       {
         name: "env",
@@ -305,7 +294,7 @@ test("real host tools and safety retain trusted scope even with a poisoned store
       );
       await opened.conversation.waitForIdle(context);
     }
-    expect(deniedNative).toHaveLength(3);
+    expect(deniedNative).toHaveLength(4);
     expect(
       deniedNative.every((result) =>
         JSON.stringify(result.content).includes("Tool call blocked"),

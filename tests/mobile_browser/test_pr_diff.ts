@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Browser, Page } from "playwright";
 import captured from "../backend/fixtures/pull_request_diff.json";
@@ -26,9 +26,20 @@ async function shoot(page: Page, name: string) {
   await page.screenshot({ path: join(dir, `${name}.png`) });
 }
 
-// Feature: #3183 Changes says what it compares and switches bases by name.
+// Feature: #3183 #3342 Changes names its base, switches by name, flags caps.
 async function test_changes_base(browser: Browser, base: string) {
   const { cid, branch, start } = await postFixture(base, "seed-changes-base");
+  const { cwd } = (await (
+    await fetch(`${base}api/conversations/${cid}/diff`)
+  ).json()) as { cwd: string };
+  const createdUntracked = Array.from(
+    { length: 501 },
+    (_, i) => `untracked-${i}.txt`,
+  );
+  await Promise.all(
+    createdUntracked.map((name) => writeFile(join(cwd, name), "local only\n")),
+  );
+  const untrackedNames = createdUntracked.sort().slice(0, 500);
   const short = String(branch).slice(0, 7);
   const page = await browser.newPage({
     viewport: { width: 1280, height: 844 },
@@ -42,10 +53,41 @@ async function test_changes_base(browser: Browser, base: string) {
     pane.locator(".diff-row.add", { hasText: text });
   await since("main");
   await added("branch line").waitFor();
-  expect(await pane.locator(".diff-path").allTextContents()).toEqual(["a.txt"]);
+  await added("uncommitted line").waitFor();
+  expect(
+    await pane.locator(".diff-file-toggle .diff-path").allTextContents(),
+  ).toEqual(["a.txt"]);
+  const untracked = pane.locator("details.diff-untracked");
+  await untracked.locator("summary", { hasText: "500" }).waitFor();
+  expect(
+    (await pane.locator(".diff-trunc").allTextContents()).map((text) =>
+      text.replace(/\s+/gu, " ").trim(),
+    ),
+  ).toEqual(["The untracked file list is capped — showing 500 names."]);
+  expect(await untracked.getAttribute("open")).toBeNull();
+  expect(await untracked.locator(".diff-path").allTextContents()).toEqual(
+    untrackedNames,
+  );
+  expect(await pane.locator(".diff-path").allTextContents()).toEqual([
+    "a.txt",
+    ...untrackedNames,
+  ]);
+  expect(await pane.locator(".diff-group-label").allTextContents()).toEqual([
+    "Changed files",
+    "Untracked",
+  ]);
   const defaultTip = await label.getAttribute("title");
   expect(defaultTip).toContain(String(start).slice(0, 7));
-  await shoot(page, "changes-since-main-desktop");
+  await shoot(page, "changes-default-untracked-desktop");
+  await untracked.locator("summary").click();
+  expect(
+    await untracked.locator(".diff-path:visible").allTextContents(),
+  ).toEqual(untrackedNames);
+  expect(await pane.locator(".diff-path:visible").allTextContents()).toEqual([
+    "a.txt",
+    ...untrackedNames,
+  ]);
+  await untracked.locator("summary").click();
   await label.click();
   const input = pane.getByRole("combobox", { name: "Show the changes of" });
   const [inputBox, applyBox, cancelBox] = await Promise.all(
@@ -94,6 +136,7 @@ async function test_changes_base(browser: Browser, base: string) {
   await label.filter({ hasText: `${short} since main` }).waitFor();
   await added("branch line").waitFor();
   await added("uncommitted line").waitFor({ state: "detached" });
+  expect(await pane.locator(".diff-untracked-note").count()).toBe(0);
   await shoot(page, "changes-since-commit-desktop");
   const commitTip = await label.getAttribute("title");
   expect(commitTip).toBe(`Commits after main up to ${short} (1 commit).`);
@@ -128,6 +171,12 @@ async function test_changes_base(browser: Browser, base: string) {
   await input.press("Enter");
   await label.filter({ hasText: "Uncommitted changes" }).waitFor();
   await added("branch line").waitFor({ state: "detached" });
+  await untracked.locator("summary", { hasText: "500" }).waitFor();
+  expect(await untracked.getAttribute("open")).toBeNull();
+  expect(await pane.locator(".diff-group-label").allTextContents()).toEqual([
+    "Changed files",
+    "Untracked",
+  ]);
   await label.click();
   await pane
     .getByRole("option", { name: "Changes on this branch (default)" })
@@ -144,6 +193,28 @@ async function test_changes_base(browser: Browser, base: string) {
     .locator(".diff-base-btn", { hasText: "Changes since main" })
     .waitFor();
   await phonePane.locator(".diff-row.add").first().waitFor();
+  const defaultDisclosure = phonePane.locator(".diff-untracked > summary");
+  await defaultDisclosure.filter({ hasText: "500" }).waitFor();
+  expect(
+    await phonePane.locator(".diff-untracked").getAttribute("open"),
+  ).toBeNull();
+  expect(
+    await phonePane.locator(".diff-group-label").allTextContents(),
+  ).toEqual(["Changed files", "Untracked"]);
+  expect(
+    await phonePane.locator(".diff-file-toggle .diff-path").allTextContents(),
+  ).toEqual(["a.txt"]);
+  expect(
+    await phonePane.locator(".diff-untracked .diff-path").allTextContents(),
+  ).toEqual(untrackedNames);
+  await shoot(phone, "changes-default-untracked-phone");
+  await defaultDisclosure.tap();
+  expect(
+    await phonePane
+      .locator(".diff-untracked .diff-path:visible")
+      .allTextContents(),
+  ).toEqual(untrackedNames);
+  await defaultDisclosure.tap();
   await phonePane.locator(".diff-base-btn").click();
   const phoneInput = phonePane.getByRole("combobox", {
     name: "Show the changes of",
@@ -157,9 +228,36 @@ async function test_changes_base(browser: Browser, base: string) {
     .locator(".diff-row.add", { hasText: "branch line" })
     .waitFor();
   await shoot(phone, "changes-in-commit-phone");
+  expect(await phonePane.locator(".diff-untracked-note").count()).toBe(0);
+  await phonePane.locator(".diff-base-btn").click();
+  await phoneInput.fill("HEAD");
+  await phoneInput.press("Enter");
+  const disclosure = phonePane.locator(".diff-untracked > summary");
+  await disclosure.waitFor();
+  await disclosure.scrollIntoViewIfNeeded();
+  expect(
+    await disclosure.evaluate((control) => {
+      const rect = control.getBoundingClientRect();
+      return [rect.left + 2, rect.right - 2].every((x) =>
+        [rect.top + 2, rect.bottom - 2].every((y) =>
+          control.contains(control.ownerDocument.elementFromPoint(x, y)),
+        ),
+      );
+    }),
+  ).toBe(true);
+  expect(
+    await phonePane.locator(".diff-untracked").getAttribute("open"),
+  ).toBeNull();
+  await shoot(phone, "changes-untracked-collapsed-phone");
+  await disclosure.tap();
+  expect(
+    await phonePane
+      .locator(".diff-untracked .diff-path:visible")
+      .allTextContents(),
+  ).toEqual(untrackedNames);
   await phonePane.locator(".diff-base-btn").click();
   await phonePane
-    .getByRole("option", { name: "Changes since main (default)" })
+    .getByRole("option", { name: "Changes on this branch (default)" })
     .click();
   expect(errors).toEqual([]);
   await phone.close();

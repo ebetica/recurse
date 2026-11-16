@@ -28,7 +28,7 @@ import { closeAgentSurface, closeShellSurface } from "./shell-surface.js";
 import { DRAFT, state } from "../state.js";
 import { resetVEye, takeToolDetailConversation } from "./thread.js";
 import { paintStopControl, selectedCanStop } from "./stop.js";
-import { userBubble } from "../thread-render.js";
+import { userBubble } from "../thread-render/user-bubble.js";
 import { toolDetailStore } from "../tool_details.js";
 import { type Conversation } from "../types.js";
 import { kidsBadge } from "../util.js";

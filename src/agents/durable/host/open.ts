@@ -1,7 +1,7 @@
-// Open a conversation's Harness in steps: settings and environment, extensions,
-// storage, root, side forks, live row, interrupted commands, held clear input,
-// then resume. A failed open closes everything it allocated. Side conversations
-// open as forks followed in their parent's Harness.
+// @tla specs/tla/send/OperatorSend.tla: Boundary/Promote select all/one steer.
+// Open settings/environment, extensions, storage, root, side forks, live row,
+// interrupted commands and held clear input, then resume; close on failure.
+// Side conversations open as forks followed in their parent's Harness.
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -49,6 +49,7 @@ export interface Opened {
   close(options?: { shellStop?: Promise<void> }): Promise<void>;
   shells: ReturnType<Runtime["createShells"]>;
   captures: RequestCaptures;
+  reviewCaptures: RequestCaptures;
   transforms: ReturnType<Runtime["createModelClock"]>;
   storage: SqliteStorage;
   reporter: Reporter | null;
@@ -377,6 +378,7 @@ function closer(
     }
     attached.clear();
     await tools.captures.close();
+    await tools.reviewCaptures.close();
     try {
       if (target.harness) await target.harness.close(context);
       else await target.storage?.close(context);
@@ -596,6 +598,7 @@ function handle(
     close,
     shells: tools.shells,
     captures: tools.captures,
+    reviewCaptures: tools.reviewCaptures,
     transforms: hooks.transforms,
     storage,
     reporter,

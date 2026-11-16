@@ -53,9 +53,11 @@ Each retry replaces the previous deferral note without dropping its earlier
 status context. Startup gates actions
 until the collection is ready; maintenance is separate from request handling.
 Shutdown closes admission and waits for owned tasks and process cleanup.
-Slow lease-file preparation does not refuse an uncontended lifecycle lock:
-[admission](mutation_guard.ts) still tries once after its deadline, without
-waiting for another holder past that deadline.
+[Admission](mutation_guard.ts) tries the in-process reservation before deadline
+refusal and attempts the kernel lock even after slow file preparation. An expired
+budget permits an uncontended lease, not waiting on another holder. The bounded
+[admission model](../../specs/tla/LifecycleAdmission.tla) checks both boundaries,
+nested tokens and close-before-release ordering.
 Reaped-history publication uses asynchronous hard links and renames, never copying
 live stores. Publications serialize per conversation and day, recovering only that
 conversation's temporary record; unrelated residue expires with its partition.
@@ -71,6 +73,9 @@ attempts/releases; promise completion and guard/retry waits remain excluded. See
 [supervisor/lifecycle.ts](supervisor/lifecycle.ts),
 [supervisor/reap.ts](supervisor/reap.ts) and
 [../process_lifecycle.ts](../process_lifecycle.ts).
+
+File-defined provider models require an operator-selected model or a saved
+Settings effort level. Child defaults never inherit a file-provider model pin.
 
 Taking or returning operator control stores a platform note for the agent and
 its parent without waking idle recipients. Setting the same control state again

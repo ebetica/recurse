@@ -1,6 +1,15 @@
-// Ripgrep and bounded transcript-header lookups stay off the server event loop.
-// Live files finish before the archive pass; cancellation reaps either child.
-import { closeSync, constants, openSync, readSync } from "node:fs";
+// Ripgrep and bounded header lookups stay off the server event loop.
+// Per-agent caps diversify hits without sorting; live precedes archived files.
+// Optional cursors track entry/role watermarks and projection identities.
+// Unpaged requests avoid cursor metadata; cancellation reaps either child.
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  openSync,
+  readSync,
+  statSync,
+} from "node:fs";
 import { statfs } from "node:fs/promises";
 import { dirname } from "node:path";
 import { projectionCurrent } from "./projection_state.worker";
@@ -10,7 +19,9 @@ import {
   HEADER_BYTES,
   parseHeader,
   type TranscriptHeader,
+  type TranscriptRole,
 } from "./transcript";
+import { SearchInputError } from "./index";
 import type {
   Log,
   QueryResult,
@@ -50,6 +61,82 @@ async function threadArguments(path: string): Promise<string[]> {
   }
 }
 
+type Position = { entry: number; roles: number; identity: string };
+const roleBits: Record<TranscriptRole, number> = {
+  user: 1,
+  assistant: 2,
+  agent: 4,
+  tool: 8,
+  "tool-result": 16,
+};
+
+function fileIdentity(path: string, fd?: number): string {
+  const info =
+    fd === undefined
+      ? statSync(path, { bigint: true })
+      : fstatSync(fd, { bigint: true });
+  return `${info.dev}:${info.ino}`;
+}
+
+function cursorPositions(
+  cursor: string,
+  fingerprint: string,
+  files: SearchFile[],
+): Map<string, Position> {
+  const positions = new Map<string, Position>();
+  if (cursor === "start") return positions;
+  const invalid = () =>
+    new SearchInputError("Invalid search cursor; restart with --cursor start");
+  let value: unknown;
+  try {
+    if (cursor.length > 32768 || !/^[A-Za-z0-9_-]+$/.test(cursor))
+      throw invalid();
+    value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {
+    throw invalid();
+  }
+  if (
+    !Array.isArray(value) ||
+    value.length !== 2 ||
+    value[0] !== fingerprint ||
+    !Array.isArray(value[1]) ||
+    value[1].length > 200
+  )
+    throw invalid();
+  const byAgent = new Map(
+    files.map((file) => [file.target.agent ?? file.target.cid, file.path]),
+  );
+  for (const row of value[1]) {
+    if (
+      !Array.isArray(row) ||
+      row.length !== 4 ||
+      typeof row[0] !== "string" ||
+      row[0].length > 256 ||
+      !Number.isSafeInteger(row[1]) ||
+      row[1] < 1 ||
+      !Number.isInteger(row[2]) ||
+      row[2] < 1 ||
+      row[2] > 31 ||
+      typeof row[3] !== "string" ||
+      row[3].length > 80 ||
+      !/^\d+:\d+$/.test(row[3]) ||
+      positions.has(row[0])
+    )
+      throw invalid();
+    const path = byAgent.get(row[0]);
+    if (!path) throw invalid();
+    try {
+      if (fileIdentity(path) !== row[3]) throw invalid();
+    } catch {
+      throw new SearchInputError(
+        "A cursor transcript changed; restart with --cursor start",
+      );
+    }
+    positions.set(row[0], { entry: row[1], roles: row[2], identity: row[3] });
+  }
+  return positions;
+}
+
 export async function runRipgrep(
   files: SearchFile[],
   options: SearchOptions,
@@ -57,6 +144,25 @@ export async function runRipgrep(
   log: Log,
 ): Promise<QueryResult> {
   const limit = Math.min(200, Math.max(1, options.limit ?? 20));
+  const agents = new Set(files.map(({ target }) => target.agent ?? target.cid));
+  const perAgentLimit =
+    agents.size > 1 ? Math.min(5, Math.ceil(limit / 2)) : limit;
+  const fingerprint = options.cursor
+    ? Bun.hash(
+        JSON.stringify([
+          options.query,
+          options.alternatives ?? [],
+          options.role,
+          options.conversationOnly ?? false,
+          options.since,
+          options.until,
+          files.map(({ target }) => target.agent ?? target.cid),
+        ]),
+      ).toString(16)
+    : "";
+  const positions = options.cursor
+    ? cursorPositions(options.cursor, fingerprint, files)
+    : new Map<string, Position>();
   const result: QueryResult = {
     hits: [],
     truncated: false,
@@ -83,16 +189,54 @@ export async function runRipgrep(
       signal,
       log,
       outputRemaining,
+      perAgentLimit,
+      positions,
     );
+    if (options.cursor)
+      for (const hit of pass.hits) {
+        const before = positions.get(hit.agent);
+        positions.set(hit.agent, {
+          entry: hit.entry,
+          roles:
+            roleBits[hit.role] |
+            (before?.entry === hit.entry ? before.roles : 0),
+          identity: pass.identities.get(hit.agent)!,
+        });
+      }
     result.hits.push(...pass.hits);
     result.missing!.push(...(pass.missing ?? []));
     outputRemaining -= pass.output_bytes;
     if (pass.bytes_scanned === undefined) scannedKnown = false;
     else scanned += pass.bytes_scanned;
-    result.truncated = pass.truncated;
-    if (pass.truncated || result.hits.length >= limit) break;
+    result.truncated ||= pass.truncated;
+    if (pass.truncation) result.truncation = pass.truncation;
+    if (
+      pass.truncation === "hit_limit" ||
+      pass.truncation === "byte_limit" ||
+      result.hits.length >= limit
+    )
+      break;
   }
   if (scannedKnown) result.bytes_scanned = scanned;
+  if (
+    options.cursor &&
+    result.truncated &&
+    result.hits.length &&
+    positions.size <= 200
+  ) {
+    const cursor = Buffer.from(
+      JSON.stringify([
+        fingerprint,
+        [...positions].map(([agent, position]) => [
+          agent,
+          position.entry,
+          position.roles,
+          position.identity,
+        ]),
+      ]),
+    ).toString("base64url");
+    if (cursor.length <= 32768) result.next_cursor = cursor;
+  }
   return result;
 }
 
@@ -102,14 +246,25 @@ async function runPass(
   signal: AbortSignal,
   log: Log,
   outputLimit: number,
-): Promise<QueryResult & { output_bytes: number }> {
+  perAgentLimit: number,
+  positions: Map<string, Position>,
+): Promise<
+  QueryResult & { output_bytes: number; identities: Map<string, string> }
+> {
   const limit = Math.min(200, Math.max(1, options.limit ?? 20));
   const hits: SearchHit[] = [];
   const seen = new Set<string>();
+  const terms = [options.query, ...(options.alternatives ?? [])];
   const matcher = new RegExp(
-    options.query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"),
+    terms.map((term) => term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|"),
     "iu",
   );
+  const counts = new Map<string, number>();
+  const remainingAgents = new Set(
+    files.map(({ target }) => target.agent ?? target.cid),
+  );
+  const identities = new Map<string, string>();
+  let capped = false;
   const missing = new Set<string>();
   const descriptors = new Map<string, number>();
   const ranges = new Map<
@@ -185,7 +340,7 @@ async function runPass(
     }
     return undefined;
   };
-  let truncated = false;
+  let truncation: QueryResult["truncation"];
   let bytesScanned: number | undefined;
   const byPath = new Map<string, SearchTarget[]>();
   for (const file of files)
@@ -207,8 +362,8 @@ async function runPass(
       "--stats",
       "--color=never",
       ...threads,
+      ...terms.flatMap((term) => ["-e", term]),
       "--",
-      options.query,
       ...byPath.keys(),
     ],
     { stdout: "pipe", stderr: "pipe" },
@@ -279,7 +434,7 @@ async function runPass(
       if (chunk.done) break;
       bytes += chunk.value.byteLength;
       if (bytes > outputLimit) {
-        truncated = true;
+        truncation = "byte_limit";
         stop();
         break;
       }
@@ -314,35 +469,68 @@ async function runPass(
         if (
           !header ||
           header.role === "checkpoint" ||
-          (options.role && options.role !== header.role)
+          (options.role && options.role !== header.role) ||
+          (options.conversationOnly &&
+            (header.role === "tool" || header.role === "tool-result")) ||
+          (options.since !== undefined && header.time < options.since) ||
+          (options.until !== undefined && header.time >= options.until)
         )
           continue;
         const at = text.search(matcher);
         for (const target of targets) {
-          if (header.conversation !== (target.conversation ?? 1)) continue;
-          const key = `${target.agent ?? target.cid}:${path}:${header.entry}:${header.role}`;
+          if (
+            header.conversation !== (target.conversation ?? 1) ||
+            (!target.archived &&
+              target.cid === options.exclude?.cid &&
+              header.entry >= options.exclude.fromEntry)
+          )
+            continue;
+          const agent = target.agent ?? target.cid;
+          const position = positions.get(agent);
+          if (
+            position &&
+            (header.entry < position.entry ||
+              (header.entry === position.entry &&
+                position.roles & roleBits[header.role]))
+          )
+            continue;
+          const key = `${agent}:${path}:${header.entry}:${header.role}`;
           if (seen.has(key)) continue;
           seen.add(key);
+          if ((counts.get(agent) ?? 0) >= perAgentLimit) {
+            capped = true;
+            continue;
+          }
+          const count = (counts.get(agent) ?? 0) + 1;
+          counts.set(agent, count);
+          if (count >= perAgentLimit) remainingAgents.delete(agent);
+          if (options.cursor && !identities.has(agent))
+            identities.set(agent, fileIdentity(path, descriptors.get(path)));
+          const start = Math.max(0, at - 120);
+          const end = Math.max(0, at) + 400;
           hits.push({
-            agent: target.agent ?? target.cid,
+            agent,
             cid: target.cid,
             entry: header.entry,
             time: header.time,
             role: header.role,
-            snippet: text.slice(Math.max(0, at - 120), Math.max(0, at) + 400),
+            snippet:
+              (start > 0 ? "[… clipped] " : "") +
+              text.slice(start, end) +
+              (end < text.length ? " [… clipped]" : ""),
             path,
             line,
           });
-          if (hits.length >= limit) {
-            truncated = true;
+          if (hits.length >= limit || !remainingAgents.size) {
+            truncation = hits.length >= limit ? "hit_limit" : "agent_limit";
             stop();
             break;
           }
         }
-        if (truncated) break;
+        if (truncation) break;
       }
       pending = pending.slice(consumed);
-      if (truncated) break;
+      if (truncation) break;
     }
     await reader.cancel();
     const code = await process.exited;
@@ -350,14 +538,20 @@ async function runPass(
     signal.throwIfAborted();
     if (
       failed ||
-      (!truncated && code !== 0 && code !== 1 && !(code === 2 && missing.size))
+      (!truncation && code !== 0 && code !== 1 && !(code === 2 && missing.size))
     )
       throw new Error(
         "ripgrep search failed; check that rg is installed and agent files are readable",
       );
     return {
       hits,
-      truncated,
+      identities,
+      truncated: truncation !== undefined || capped,
+      ...(truncation
+        ? { truncation }
+        : capped
+          ? { truncation: "agent_limit" as const }
+          : {}),
       missing: [...missing],
       bytes_scanned: bytesScanned,
       output_bytes: bytes,

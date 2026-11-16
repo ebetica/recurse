@@ -1,6 +1,6 @@
-// Centralizes fetch/auth and connection health. Only core unavailable traffic
-// begins outages; authenticated successes recover. Deliberate aborts, 4xx and
-// optional failures are neutral. Health is per-client; only home 401 reloads.
+// Fetch/auth and per-client health: only core failures start outages.
+// Authenticated successes recover; aborts/optional failures are neutral.
+// Home 401s reload; stale-cookie failures first verify a renewed session.
 // Caller cancellation owns streamed bodies even after headers settle health.
 import { ConnectionHealth, type RequestOutcome } from "./connection/health.js";
 import { interactionTrace } from "./interaction-timing.js";
@@ -8,6 +8,27 @@ import { interactionTrace } from "./interaction-timing.js";
 export interface ApiHealthOptions {
   availability?: "core" | "optional";
   timeoutMs?: number;
+  renewsSession?: boolean;
+}
+
+let sessionGeneration = 0;
+const sessionChanges = new Set<Promise<void>>();
+let sessionCheck: Promise<boolean> | null = null;
+
+function currentSessionWorks(): Promise<boolean> {
+  return (sessionCheck ??= fetch("/api/status?session-check", {
+    cache: "no-store",
+    credentials: "same-origin",
+    redirect: "error",
+    signal: AbortSignal.timeout(10_000),
+  })
+    .then(
+      (response) => response.status === 200,
+      () => false,
+    )
+    .finally(() => {
+      sessionCheck = null;
+    }));
 }
 
 const monotonicNow = (): number =>
@@ -37,6 +58,15 @@ async function apiRequest<T>(
 ): Promise<{ response: Response; data: T | undefined }> {
   const availability = healthOptions.availability || "optional";
   const request = health.begin(availability);
+  const generation = sessionGeneration;
+  let finishSessionChange: (() => void) | undefined;
+  const sessionChange =
+    home && healthOptions.renewsSession
+      ? new Promise<void>((resolve) => {
+          finishSessionChange = resolve;
+        })
+      : null;
+  if (sessionChange) sessionChanges.add(sessionChange);
   const controller = new AbortController();
   const callerSignal = opts.signal;
   let callerAborted = callerSignal?.aborted || false;
@@ -51,7 +81,8 @@ async function apiRequest<T>(
   // escape. Optional uploads/provider exchanges keep their existing
   // browser-managed lifetime unless a caller explicitly supplies a timeout.
   const timeoutMs =
-    healthOptions.timeoutMs ?? (availability === "core" ? 10_000 : 0);
+    healthOptions.timeoutMs ??
+    (availability === "core" || sessionChange ? 10_000 : 0);
   const timeout =
     timeoutMs > 0
       ? setTimeout(() => {
@@ -73,13 +104,21 @@ async function apiRequest<T>(
     });
     // Invariant: Keep timeout/abort ownership through body consumption. Headers
     // cannot settle health or release a probe whose body is stuck.
+    if (sessionChange && response.ok) sessionGeneration++;
     const data = consume ? await consume(response) : undefined;
-    const outcome =
+    let outcome =
       !home && response.status === 424
         ? "auth-expired"
         : !home && response.status === 401
           ? "neutral"
           : responseOutcome(response.status);
+    if (home && outcome === "auth-expired" && !sessionChange) {
+      await Promise.all(sessionChanges);
+      // Invariant: Old-cookie reads may finish after a credential write. Only
+      // a fresh authenticated response can suppress their expired-session UI.
+      if (generation !== sessionGeneration && (await currentSessionWorks()))
+        outcome = "neutral";
+    }
     const authWasExpired = health.snapshot().phase === "auth-expired";
     health.settle(
       !home && response.status === 502
@@ -110,6 +149,10 @@ async function apiRequest<T>(
     else health.settle(request, "unavailable");
     throw error;
   } finally {
+    if (sessionChange) {
+      sessionChanges.delete(sessionChange);
+      finishSessionChange?.();
+    }
     if (timeout) clearTimeout(timeout);
     callerSignal?.removeEventListener("abort", onCallerAbort);
   }

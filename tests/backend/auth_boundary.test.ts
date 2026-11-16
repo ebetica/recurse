@@ -9,7 +9,24 @@ import { loopbackAudience } from "../../src/web/route_audience";
 import { appWorld, PASSWORD } from "./web_app_support";
 import audiences from "./fixtures/loopback_routes.json";
 
-const PUBLIC = new Set(["POST /login"]);
+const PUBLIC = new Map([
+  ["POST /login", 401],
+  ["GET /app-icon", 404],
+  ["HEAD /app-icon", 404],
+  ["GET /manifest.webmanifest", 200],
+  ["HEAD /manifest.webmanifest", 200],
+  ...[
+    "app-icon-192.png",
+    "app-icon-512.png",
+    "app-icon-maskable-192.png",
+    "app-icon-maskable-512.png",
+    "app-icon.svg",
+    "apple-touch-icon.png",
+    "favicon-32.png",
+    "favicon-dark-32.png",
+    "favicon.svg",
+  ].map((name) => [`HEAD /static/brand/${name}`, 200] as const),
+]);
 const MUTATING = new Set(["POST", "PUT", "DELETE", "PATCH"]);
 
 let root = "";
@@ -197,8 +214,8 @@ test("every route without a credential is refused, except PUBLIC", async () => {
       });
       const text = await response.text();
       if (PUBLIC.has(key)) {
-        expect([key, response.status]).toEqual([key, 401]);
-        expect(text).toContain("Wrong password");
+        expect([key, response.status]).toEqual([key, PUBLIC.get(key)!]);
+        if (key === "POST /login") expect(text).toContain("Wrong password");
         continue;
       }
       expect(text).not.toContain("Wrong password");

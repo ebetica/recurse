@@ -132,7 +132,7 @@ describe("owner scoping", () => {
     await writeFile(source, png);
     await writeFile(join(documents, "picture.png"), png);
     await writeFile(join(dir, "not-image.png"), "private text");
-    await symlink(join(dir, "not-image.png"), join(dir, "linked.png"));
+    await symlink(source, join(dir, "linked.png"));
     await writeFile(
       join(dir, "chart.svg"),
       '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
@@ -153,6 +153,7 @@ describe("owner scoping", () => {
     for (const [path, query] of [
       [source, {}],
       ["path-image.png", {}],
+      ["linked.png", {}],
       [`~/${relative(homedir(), source)}`, {}],
       ["picture.png", { document: "documents/report.md" }],
       ["picture.png", { document: join(documents, "report.md") }],
@@ -196,7 +197,7 @@ describe("owner scoping", () => {
         expect(await refused.text()).not.toContain("private text");
       }
     }
-    for (const path of ["missing.png", "linked.png", "documents", "/dev/null"])
+    for (const path of ["missing.png", "documents", "/dev/null"])
       expect((await fetch(url(path))).status).toBe(404);
     const fifo = join(dir, "path-image.fifo");
     expect(await Bun.spawn(["mkfifo", fifo]).exited).toBe(0);

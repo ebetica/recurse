@@ -1,7 +1,7 @@
 // Changes shell uses keyed Lit rows and persistent imperative file bodies.
 // Comments hold the reviewed snapshot; repaints preserve editors and focus.
-// Lazy patches/contents expose truncation honestly; mutation-driven summary
-// reads cache during ordinary UI polls. diff/comments.ts owns staged notes.
+// Lazy patches/contents expose truncation honestly; summary reads are cached.
+// Default/HEAD list untracked names; folded lists report their own cap.
 import { sendOperatorMessage } from "./conversation/operator-send.js";
 import { backendFor } from "./backends/backend.js";
 import { html, render, nothing, type TemplateResult } from "lit";
@@ -14,7 +14,7 @@ import {
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { repeat } from "lit/directives/repeat.js";
 import { ref } from "lit/directives/ref.js";
-import { safeMarkdown } from "./thread-render.js";
+import { safeMarkdown } from "./thread-render/reply-html.js";
 import {
   fetchPaneData,
   focusPaneControl,
@@ -125,6 +125,7 @@ interface DiffSummary {
   files?: ChangedFile[];
   moreFiles?: number;
   untracked?: string[];
+  untrackedTruncated?: boolean;
   currentPr?: CurrentPr | null;
   version?: string | null;
   target?: DiffTarget;
@@ -492,7 +493,7 @@ function loadLocal(id: string): void {
   const e = entry(id);
   const generation = ++e.localGeneration;
   void backendFor(id)
-    .api("/api/conversations/" + id + "/diff?base=HEAD")
+    .api("/api/conversations/" + id + "/diff?base=HEAD&untracked=0")
     .then(async (r) => (r.ok ? ((await r.json()) as DiffSummary) : null))
     .catch(() => null)
     .then((s) => {
@@ -1542,7 +1543,7 @@ function prSummaryTemplate(agentId: string): TemplateResult | typeof nothing {
                   repaintShell();
                 }
               });
-              observer.observe(element);
+              observer.observe(element, { box: "content-box" });
             })}
           >
             ${unsafeHTML(safeMarkdown(body))}
@@ -1799,12 +1800,19 @@ function fileGroupsTemplate(
           : nothing}
       </div>`
     : nothing}
-  ${untracked.length
-    ? html`<div class="diff-group">
-        <div class="diff-group-head">
+  ${!isLocal(agentId) &&
+  target.kind === "worktree" &&
+  !s.selectedWork &&
+  untracked.length
+    ? html`<details
+        class="diff-group diff-untracked"
+        ?open=${untracked.length <= 20}
+      >
+        <summary class="diff-group-head">
+          ${unsafeHTML(DISCLOSURE_ICON)}
           <span class="diff-group-label">Untracked</span>
           <span class="badge diff-group-count">${untracked.length}</span>
-        </div>
+        </summary>
         ${repeat(
           untracked,
           (p) => p,
@@ -1819,7 +1827,7 @@ function fileGroupsTemplate(
               </div>
             </div>`,
         )}
-      </div>`
+      </details>`
     : nothing}`;
 }
 
@@ -1864,6 +1872,12 @@ function shellTemplate(
       ${s.truncated
         ? html`<div class="diff-trunc" role="status">
             The diff hit the server’s size cap — some content below is partial.
+          </div>`
+        : nothing}
+      ${s.untrackedTruncated
+        ? html`<div class="diff-trunc" role="status">
+            The untracked file list is capped — showing
+            ${s.untracked?.length || 0} names.
           </div>`
         : nothing}
       ${local

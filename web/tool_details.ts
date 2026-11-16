@@ -208,16 +208,6 @@ export interface ToolRowRef {
   artifact_unavailable?: ToolCall["artifact_unavailable"];
 }
 
-export function unavailableText(call: ToolRowRef): string {
-  if (call.artifact_unavailable === "quota")
-    return "Full details storage is full for this conversation.";
-  if (call.artifact_unavailable === "capture_failed")
-    return "Full details couldn't be stored for this call.";
-  if (call.artifact_unavailable === "copied")
-    return "Full details stay with the source conversation.";
-  return "Full details aren't available for this message.";
-}
-
 function legacyCopy(text: string): boolean {
   try {
     const area = document.createElement("textarea");
@@ -284,14 +274,6 @@ export function shouldToggleToolRow(
   fromControl: boolean,
 ): boolean {
   return !selectionText && !fromControl;
-}
-
-// What a collapsed row says the call did: the whole command when this
-// conversation's own record carries it, else the safe summary. The backend has
-// already made it a single bounded line, so the row clips it with CSS rather
-// than slicing text — hover and screen readers still get all of it.
-export function toolRowDetail(call: ToolCall): string {
-  return call.input_full || call.input || "";
 }
 
 function durationText(ms: number): string {
@@ -455,6 +437,7 @@ export function detailSections(artifact: ToolArtifact): DetailSection[] {
 function sectionBlock(section: DetailSection): TemplateResult {
   return html`<section
     class="tool-payload"
+    data-theme-protected=${section.label === "Error" ? "tool-error" : nothing}
     aria-label=${`${section.label} payload`}
   >
     ${copyControl(section.text, section.label)}
@@ -532,92 +515,6 @@ export function toolRowOpen(cid: string, call: ToolRowRef): boolean {
   );
 }
 
-const TRUNCATED_NOTE =
-  "[\u2026 live payload truncated by the poll limit \u2026]";
-
-// A live poll's inline full payloads as the artifact shape the detail sections
-// already render. Delta polls carry bounded input/result text directly, so an
-// open live row reads them with no second fetch; the cold artifact route stays
-// the backing store for settled history.
-export function inlineToolArtifact(call: ToolCall): ToolArtifact | null {
-  const args = typeof call.args === "string" && call.args ? call.args : null;
-  const result =
-    typeof call.result === "string" && call.result ? call.result : null;
-  const output =
-    call.active && typeof call.output === "string" && call.output
-      ? call.output
-      : null;
-  if (!args && !result && !output) return null;
-  const withNote = (text: string, truncated?: boolean): string =>
-    truncated ? `${text}\n\n${TRUNCATED_NOTE}` : text;
-  const inputEvent: ToolArtifactEvent | null = args
-    ? {
-        version: 1,
-        kind: "input",
-        timestamp: 0,
-        payload: {
-          format: "json",
-          bytes: args.length,
-          omitted_bytes: 0,
-          value: (() => {
-            if (call.args_truncated) return withNote(args, true);
-            try {
-              return JSON.parse(args);
-            } catch {
-              return args;
-            }
-          })(),
-        },
-      }
-    : null;
-  const textEvent = (
-    kind: string,
-    text: string,
-    truncated?: boolean,
-  ): ToolArtifactEvent => ({
-    version: 1,
-    kind,
-    timestamp: 0,
-    payload: {
-      format: "json",
-      bytes: text.length,
-      omitted_bytes: 0,
-      value: { content: withNote(text, truncated) },
-    },
-  });
-  return {
-    version: 1,
-    artifact_id:
-      call.artifact_id ?? `live:${call.call_id ?? `seq:${call.seq ?? "anon"}`}`,
-    message_id: "",
-    tool_name: call.name,
-    status: call.active ? "running" : "finished",
-    input_source: "rpc_start",
-    created_at: 0,
-    updated_at: 0,
-    input: inputEvent,
-    latest_update:
-      !result && output ? textEvent("update", output, false) : null,
-    result: result ? textEvent("result", result, call.result_truncated) : null,
-    background_latest: null,
-    update_count: 0,
-    background_count: 0,
-    background_active: false,
-    ...(call.timing ? { timing: call.timing } : {}),
-    capture: {},
-    raw_url: "",
-  };
-}
-
-// The key for one inline-only live row's disclosure, shared with the store.
-export function inlineRowKey(
-  cid: string,
-  call: ToolCall,
-  index: number,
-): string {
-  return `${cid}:live:${call.call_id ?? `seq:${call.seq ?? index}`}`;
-}
-
 // The fetched input/output for one row. Rendering the header stays with the
 // caller; ownership of the payload stays here. A row with no stored payload has
 // no panel at all — the caller renders it as a plain, unopenable row.
@@ -632,110 +529,4 @@ export function toolDetailPanel(
   const entry = toolDetailStore.get(cid, artifactId);
   if (!entry?.open) return nothing;
   return detailBody(cid, artifactId, entry, changed, modelTimeMs);
-}
-
-export function toolCallsList(
-  cid: string,
-  calls: ToolCall[],
-  changed: () => void,
-): TemplateResult {
-  return html`<ol class="tool-calls">
-    ${calls.map((call, index) => {
-      const artifactId = call.artifact_id;
-      const entry = artifactId
-        ? toolDetailStore.get(cid, artifactId)
-        : undefined;
-      const open = Boolean(entry?.open);
-      // Invariant: Delta polls carry bounded full payloads inline: an open live
-      // row reads them with no fetch. The cold artifact route stays the settled
-      // history.
-      const inline = !artifactId ? inlineToolArtifact(call) : null;
-      const inlineOpen = inline
-        ? toolDetailStore.isInlineOpen(inlineRowKey(cid, call, index))
-        : false;
-      const openable = Boolean(artifactId || inline);
-      const detailsId = artifactId
-        ? `tool-detail-${artifactId}`
-        : inline
-          ? `tool-detail-inline-${index}`
-          : `tool-detail-unavailable-${index}`;
-      const toggle = () => {
-        if (artifactId) toolDetailStore.toggle(cid, artifactId, changed);
-        else if (inline)
-          toolDetailStore.toggleInline(inlineRowKey(cid, call, index), changed);
-      };
-      const click = (event: MouseEvent) => {
-        const selection = window.getSelection()?.toString() || "";
-        const target = event.target as Element | null;
-        if (
-          shouldToggleToolRow(selection, Boolean(target?.closest("a,button")))
-        )
-          toggle();
-      };
-      const key = (event: KeyboardEvent) => {
-        if (
-          (event.key === "Enter" || event.key === " ") &&
-          !event.ctrlKey &&
-          !event.metaKey &&
-          !event.altKey &&
-          !event.shiftKey
-        ) {
-          event.preventDefault();
-          toggle();
-        }
-        // Invariant: In particular, Cmd/Ctrl-C is neither prevented nor handled
-        // here. The inspector's capture listener only stops global shortcuts,
-        // preserving the browser's native copy action for selected text.
-      };
-      const detail = toolRowDetail(call);
-      const detailText = detail
-        ? html`<span class="tc-input" title=${detail} aria-label=${detail}
-            >${detail}</span
-          >`
-        : nothing;
-      return html`<li class="tool-call">
-        ${openable
-          ? html`<div
-              class="tc-call-head"
-              role="button"
-              tabindex="0"
-              aria-expanded=${open || inlineOpen ? "true" : "false"}
-              aria-controls=${detailsId}
-              @click=${click}
-              @keydown=${key}
-            >
-              <span class="tc-name">${call.name}</span>
-              ${detailText}
-            </div>`
-          : html`<div class="tc-call-head">
-              <span class="tc-name">${call.name}</span>
-              ${detailText}
-            </div>`}
-        ${call.active && call.output
-          ? html`<div class="tool-detail-body live-tool-output">
-              ${sectionBlock({
-                label: "Live output",
-                text: call.output,
-                omitted: 0,
-              })}
-            </div>`
-          : nothing}
-        ${artifactId
-          ? html`<div id=${detailsId} ?hidden=${!open}>
-              ${open ? detailBody(cid, artifactId, entry!, changed) : nothing}
-            </div>`
-          : nothing}
-        ${inline
-          ? html`<div id=${detailsId} ?hidden=${!inlineOpen}>
-              ${inlineOpen ? detailSections(inline).map(sectionBlock) : nothing}
-            </div>`
-          : nothing}
-        ${!openable && !call.active
-          ? html`<p id=${detailsId} class="tool-unavailable">
-              ${unavailableText(call)}
-            </p>`
-          : nothing}
-      </li>`;
-    })}
-  </ol>`;
 }

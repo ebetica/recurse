@@ -1,5 +1,4 @@
 import { expect } from "bun:test";
-import { tests as remoteExplorer } from "./test_remote_explorer";
 import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { retire } from "../../src/utils/trash";
 import type { Page, Route } from "playwright";
@@ -27,7 +26,6 @@ async function openExplorer(page: Page, width: number): Promise<void> {
 }
 
 export const tests: BrowserTest[] = [
-  ...remoteExplorer,
   async function explorer_pages_previews_and_fuzzy_search(browser, base, data) {
     const temporary = await mkdtemp(join(data, "data", "browser-explorer-"));
     const root = join(
@@ -361,8 +359,8 @@ export const tests: BrowserTest[] = [
             await page.keyboard.press("g");
             await page.keyboard.press("g");
             expect(await body.evaluate((node) => node.scrollTop)).toBe(0);
-            expect(await pane.locator(".explorer-filename").textContent()).toBe(
-              "src/application.ts",
+            await browserExpect(pane.locator(".explorer-filename")).toHaveText(
+              join(root, "src/application.ts"),
             );
             expect(requests).toHaveLength(before);
             await context.clearPermissions();
@@ -406,8 +404,8 @@ export const tests: BrowserTest[] = [
             expect(await next.locator(".explorer-source").textContent()).toBe(
               nextText,
             );
-            expect(await next.locator(".explorer-filename").textContent()).toBe(
-              nextFile,
+            await browserExpect(next.locator(".explorer-filename")).toHaveText(
+              join(root, nextFile),
             );
             expect(
               await page

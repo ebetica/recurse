@@ -1,6 +1,7 @@
 // Android selection handles cannot scroll nested thread viewports natively.
 // After touch press, an endpoint leaving #scroll scrolls one step and clamps
 // the selection at the visible edge, never into title/composer chrome.
+import { scrollThreadForReader } from "../conversation/scroll-ledger.js";
 import { msgsEl, scrollEl } from "../dom.js";
 
 const EDGE_STEP_PX = 24;
@@ -13,7 +14,7 @@ function followSelectionEdge(): void {
   thread.selectNodeContents(scrollEl);
   const side = thread.comparePoint(selection.focusNode, selection.focusOffset);
   if (side === 0) return;
-  scrollEl.scrollTop += side * EDGE_STEP_PX;
+  scrollThreadForReader(scrollEl.scrollTop + side * EDGE_STEP_PX);
   const view = scrollEl.getBoundingClientRect();
   const content = msgsEl.getBoundingClientRect();
   const x =

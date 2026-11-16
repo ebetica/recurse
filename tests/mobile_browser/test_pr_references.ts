@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import type { Browser, Page } from "playwright";
 import { mkdir, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { postFixture, runBrowserTests, type BrowserTest } from "./common";
 
 export const tests: BrowserTest[] = [
@@ -41,11 +42,16 @@ export const tests: BrowserTest[] = [
       await page.close();
     }
   },
-  // Feature: #2929 branch PRs; #2941 created PRs; Changes opens newest PR.
+  // Regression: #3332 #2929 #2941 PR links; PR diffs skip untracked, HEAD caps.
   async function test_pr_links(browser, base) {
     const { root, notes, links, calls, createdCalls } = await postFixture(
       base,
       "seed-pr-links",
+    );
+    await Promise.all(
+      Array.from({ length: 501 }, (_, i) =>
+        writeFile(join(dirname(notes), `untracked-${i}.txt`), "local only\n"),
+      ),
     );
     expect(links).toEqual({
       "pr-branch": [
@@ -132,6 +138,11 @@ export const tests: BrowserTest[] = [
       await changes
         .locator(".diff-row.add", { hasText: "created link" })
         .waitFor();
+      const localFile = changes
+        .locator(".diff-file", { hasText: "notes.txt" })
+        .locator(".diff-file-toggle");
+      if ((await localFile.getAttribute("aria-expanded")) === "false")
+        await localFile.click();
       await changes
         .locator(".diff-row.add", { hasText: "uncommitted note" })
         .waitFor();
@@ -150,12 +161,26 @@ export const tests: BrowserTest[] = [
       }
       if (phone) await view.close();
     }
+    expect(await pane.locator(".diff-untracked-note").count()).toBe(0);
+    const overlay = await page.request.get(
+      `${base}api/conversations/pr-branch/diff?base=HEAD&untracked=0`,
+    );
+    expect((await overlay.json()).untracked).toEqual([]);
+    const head = await page.request.get(
+      `${base}api/conversations/pr-branch/diff?base=HEAD`,
+    );
+    const working = await head.json();
+    expect(working.untracked).toHaveLength(500);
+    expect(working.files.map((file: { path: string }) => file.path)).toEqual([
+      "notes.txt",
+    ]);
+    expect(working.moreFiles).toBe(0);
     const note = pane.locator(".diff-row.add", { hasText: "uncommitted note" });
     await note.locator(".diff-num").click();
     await pane.locator(".diff-line-input").fill("Keep this note.");
     await writeFile(notes, "edited note\n");
     const reread = page.waitForResponse((response) =>
-      response.url().endsWith("/pr-branch/diff?base=HEAD"),
+      response.url().endsWith("/pr-branch/diff?base=HEAD&untracked=0"),
     );
     await page.evaluate(() => {
       const browser = globalThis as any;

@@ -11,32 +11,40 @@ export const tests: BrowserTest[] = [
     await page.setContent(
       '<div id="scroll"><button id="probe" style="width:40px;transition:width 800ms linear">Probe</button></div>',
     );
-    await page.evaluate(() => {
-      const probe = (globalThis as any).document.querySelector("#probe");
-      probe.getBoundingClientRect();
-      probe.style.width = "240px";
-    });
-    await page.waitForFunction(() =>
-      (globalThis as any).document
-        .querySelector("#probe")
-        .getAnimations()
-        .some((animation: any) => animation.playState === "running"),
-    );
-    await waitForLayout(page);
-    expect(
-      await page
-        .locator("#probe")
-        .evaluate((node) => node.getBoundingClientRect().width),
-    ).toBe(240);
-    expect(
-      await page
-        .locator("#probe")
-        .evaluate((node) =>
-          node
-            .getAnimations()
-            .some((animation: any) => animation.playState === "running"),
-        ),
-    ).toBeFalse();
+    for (const width of [240, 40, 240]) {
+      await page.evaluate((width) => {
+        const probe = (globalThis as any).document.querySelector("#probe");
+        probe.getBoundingClientRect();
+        probe.style.width = `${width}px`;
+      }, width);
+      await page.waitForFunction(() =>
+        (globalThis as any).document
+          .querySelector("#probe")
+          .getAnimations()
+          .some((animation: any) => animation.playState === "running"),
+      );
+      const blocked = page.evaluate(() => {
+        const { performance } = globalThis as any;
+        const end = performance.now() + 50;
+        while (performance.now() < end);
+      });
+      await waitForLayout(page);
+      await blocked;
+      expect(
+        await page
+          .locator("#probe")
+          .evaluate((node) => node.getBoundingClientRect().width),
+      ).toBe(width);
+      expect(
+        await page
+          .locator("#probe")
+          .evaluate((node) =>
+            node
+              .getAnimations()
+              .some((animation: any) => animation.playState === "running"),
+          ),
+      ).toBeFalse();
+    }
   },
 ];
 

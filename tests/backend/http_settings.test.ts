@@ -331,6 +331,51 @@ describe("corpus", () => {
         detail: "Updates are unavailable in test installations.",
       });
       expect(existsSync(join(root, "update-check.json"))).toBe(false);
+      const idleUrl = `http://127.0.0.1:${running.port}/api/settings/idle-compaction`;
+      expect(await (await fetch(idleUrl)).json()).toEqual({
+        enabled: false,
+        minimum_tokens: 120000,
+      });
+      const setIdle = (body: unknown) =>
+        fetch(idleUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+      const enabled = await setIdle({ enabled: true, minimum_tokens: 140000 });
+      expect(enabled.status).toBe(200);
+      expect(await enabled.json()).toEqual({
+        enabled: true,
+        minimum_tokens: 140000,
+      });
+      for (const minimum_tokens of [
+        0,
+        -1,
+        31999,
+        120000.5,
+        "120000",
+        null,
+        Number.MAX_SAFE_INTEGER + 1,
+      ]) {
+        expect((await setIdle({ enabled: true, minimum_tokens })).status).toBe(
+          422,
+        );
+      }
+      expect(
+        (await setIdle({ enabled: "yes", minimum_tokens: 120000 })).status,
+      ).toBe(422);
+      expect(
+        readJson(join(config.paths.CONFIG_DIR, "idle-compaction.json")),
+      ).toEqual({ enabled: true, minimum_tokens: 140000 });
+      const disabled = await setIdle({ enabled: false });
+      expect(await disabled.json()).toEqual({
+        enabled: false,
+        minimum_tokens: 140000,
+      });
+      const reloaded = new Config({ env });
+      expect(reloaded.compactIdleConversations()).toBe(false);
+      expect(reloaded.idleCompactionMinimumTokens()).toBe(140000);
+      await reloaded.close();
     } finally {
       await running.close();
       fake.server.stop(true);

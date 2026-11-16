@@ -18,6 +18,7 @@ import {
   opendir,
   readdir,
   rename,
+  stat,
   unlink,
   type FileHandle,
 } from "node:fs/promises";
@@ -104,10 +105,11 @@ function macOpen(fd: number, name: string, flags: number, mode = 0o666) {
 
 let BigIntStatsClass: (new (...values: bigint[]) => BigIntStats) | undefined;
 
-function macLstat(fd: number, name: string, bigint: boolean) {
+function macLstat(fd: number, name: string, bigint: boolean, follow = false) {
   const buffer = new Uint8Array(STAT_SIZE);
-  if (mac!.fstatat(fd, ptr(cName(name)), ptr(buffer), AT_SYMLINK_NOFOLLOW) < 0)
-    throw failed("lstat", name);
+  const flags = follow ? 0 : AT_SYMLINK_NOFOLLOW;
+  if (mac!.fstatat(fd, ptr(cName(name)), ptr(buffer), flags) < 0)
+    throw failed(follow ? "stat" : "lstat", name);
   const view = new DataView(buffer.buffer);
   const u64 = (at: number) => view.getBigUint64(at, true);
   const ns = (at: number) =>
@@ -194,6 +196,12 @@ export async function lstatAt(
   return options
     ? lstat(descriptorPath(fd, name), options)
     : lstat(descriptorPath(fd, name));
+}
+
+/** stat(2) of `name` in directory `fd`, following a final symbolic link. */
+export async function statAt(fd: number, name: string): Promise<Stats> {
+  if (mac) return macLstat(fd, name, false, true) as Stats;
+  return stat(descriptorPath(fd, name));
 }
 
 export function lstatAtSync(fd: number, name: string): Stats {

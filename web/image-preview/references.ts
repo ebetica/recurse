@@ -7,6 +7,28 @@ import type { SessionFile } from "../files/model.js";
 const PATH_IMAGE_ROUTE =
   /^\/api(?:\/backends\/[A-Za-z0-9._-]{1,32})?\/conversations\/[^/]+\/path-image$/;
 const DATA_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i;
+const documentImages = new WeakMap<
+  HTMLElement,
+  {
+    agentId: string;
+    signal: AbortSignal;
+  }
+>();
+
+/** Register only shared-renderer Markdown, never sealed preview frames. */
+export function registerDocumentImages(
+  section: HTMLElement,
+  agentId: string,
+  signal: AbortSignal,
+): void {
+  documentImages.set(section, { agentId, signal });
+}
+
+function documentImageOwner(image: HTMLImageElement): string | null {
+  const section = image.closest<HTMLElement>(".artifact-markdown");
+  const owner = section && documentImages.get(section);
+  return owner && !owner.signal.aborted ? owner.agentId : null;
+}
 
 export function imageHost(source: string | null): string | null {
   try {
@@ -79,12 +101,40 @@ export function imageFailure(source: string): HTMLElement {
   return failed;
 }
 
-/** Share the Files viewer for validated local references and thread uploads. */
+/** Share the Files viewer for document images, local references and uploads. */
 export function installReferenceImageViewer(
   selected: () => string | null,
   open: (cid: string, file: SessionFile) => void,
   attachment: (cid: string, id: string) => unknown,
 ): void {
+  const desktopMouse = matchMedia("(min-width: 701px) and (pointer: fine)");
+  document.addEventListener("dblclick", (event) => {
+    const image = (event.target as Element).closest?.("img");
+    if (!desktopMouse.matches || !image || image.hidden || !image.naturalWidth)
+      return;
+    const cid = documentImageOwner(image);
+    if (!cid) return;
+    const url = new URL(image.currentSrc || image.src, location.href);
+    if (
+      url.origin === location.origin &&
+      /\/attachments\/[^/]+\/thumbnail$/.test(url.pathname)
+    )
+      url.pathname = url.pathname.replace(/\/thumbnail$/, "/preview");
+    const source = originalPathImage(url.href) || url.href;
+    const name = image.alt || url.pathname.split("/").pop() || "Image";
+    event.preventDefault();
+    open(cid, {
+      key: source,
+      image_url: source,
+      storage: "published",
+      name,
+      size: 0,
+      media_type: "application/octet-stream",
+      preview: "image",
+      references: 1,
+      sources: [],
+    });
+  });
   document.addEventListener("click", (event) => {
     const image = (event.target as Element).closest?.("img");
     const cid = selected();

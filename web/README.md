@@ -1,16 +1,16 @@
 # Browser app
 
-[app.ts](app.ts) and [sidebar-worker.ts](sidebar-worker.ts) are separate
-TypeScript bundles loaded by [index.html](index.html). The server owns durable
-conversations; the browser owns view state and unsent drafts.
-[conversation/poll.ts](conversation/poll.ts) reads and subscribes to live state.
+[index.html](index.html) loads [app.ts](app.ts) and [sidebar-worker.ts](sidebar-worker.ts).
+[conversation/poll.ts](conversation/poll.ts) subscribes to conversations;
+drafts and view state live in the browser.
 
 **Source files:**
 
-- [conversation/](conversation/), [thread-render.ts](thread-render.ts),
-  [composer/](composer/) and [attachments.ts](attachments.ts): rendering,
-  input and uploads. [conversation/draft-tags.ts](conversation/draft-tags.ts)
-  shares the sidebar's tag picker and defaults.
+- [Chat](conversation/), [thread](thread-render.ts),
+  [composer](composer/), [uploads](attachments.ts),
+  [tags](conversation/draft-tags.ts), [bubbles](thread-render/user-bubble.ts),
+  [disclosures](conversation/message-disclosure.ts),
+  [reply HTML](thread-render/reply-html.ts).
 - [sidebar/](sidebar/), [sidebar.ts](sidebar.ts), [deep-link.ts](deep-link.ts)
   and [agent-finder.ts](agent-finder.ts): tree navigation. Sections use the
   instance's [script](sidebar/script.ts) or the [default](sidebar/default_sidebar.js)
@@ -21,15 +21,14 @@ conversations; the browser owns view state and unsent drafts.
 - [models.ts](models.ts), [settings/](settings/) and [keymap.ts](keymap.ts):
   settings and keys. [pane-finder.ts](pane-finder.ts) fuzzy-searches offered panes.
 - [api.ts](api.ts), [backends/](backends/) and [connection.ts](connection.ts):
-  requests and connections. [prompt.ts](prompt.ts) shows captured model requests.
+  requests. [prompt.ts](prompt.ts), [prompt/banner.ts](prompt/banner.ts): prompts.
 
 ## Views and connections
 
 Conversation views page server projections. Live polls retain loaded history;
 resetting the resident view/session replaces its served range but keeps earlier
 settled rows. Navigation preserves reading position and fences departed reads
-from the new conversation or draft. Deletes cancel reads. Loading the open
-conversation takes priority over background work and caching. Departed work is canceled before registering
+from the new conversation or draft. Deletes cancel reads. Loading the open conversation takes priority over background work. Departed work is canceled before registering
 new pane probes or warming the parked Side frame.
 The composer's `/rename <title>` shares the sidebar's ordered optimistic rename
 for local and remote conversations, without sending a message. Bare `/rename`
@@ -42,21 +41,21 @@ thread's scroll policy before foreground enqueue/delivery. Composer jobs and
 persisted comments reuse its transport without scrolling on retry/restoration.
 Stops have a separate typed transport without message content.
 `tests/checks/operator_send_check.ts` confines delivery and foreground enqueueing
-to their owners. Sends to idle agents, including image/Artifact comments, follow
-the reply bottom until the sent message reaches the viewport top, then hold until
-reader movement. Short replies add no blank space or scrolling. After a reader
-scrolls away, repaints hold the visible row even if a live reply shortens the
-thread; layout clamps never resume following. Disclosure controls stay fixed
-through delayed layout until reader movement. Hidden scrolls retain position
-and following until visible. Jump to latest resumes following through repaints.
-The live panel above the composer, outside the thread
-([conversation/thread.ts](conversation/thread.ts)), retains the turn's latest
-thinking title and expandable text through tools, model calls and reloads. Newer
-thinking replaces it, even if encrypted/redacted. Its header says Thinking only
+to their owners. Sends to idle agents follow the reply bottom until the sent
+message reaches the viewport top, then hold. Short replies never add scrolling. Repaints keep the reader's row as replies shrink; layout clamps never
+resume following. Disclosure controls stay fixed through delayed layout. Hidden
+threads retain position and following until visible. Following spans paints
+before a scroll frame. [conversation/scroll-ledger.ts](conversation/scroll-ledger.ts)
+alone moves the thread; offsets it did not record (scrollbar, find-in-page,
+scripts) release every hold.
+The [live panel](conversation/live-panel.ts) above the composer, outside the thread,
+retains the turn's latest
+[thinking](conversation/thinking.ts) title and expandable text through tools, model calls and reloads. Newer
+thinking replaces it, even encrypted/redacted. Its header says Thinking only
 while live, then Waiting with the last readable title. Expanded prose omits the
-repeated title and bold delimiters. Compacted history uses a plain marker;
+repeated title and bold markers. Compacted history uses a plain marker;
 earlier messages and the jump-to-first-kept link remain available.
-Prompt-cache refresh adds cost/tokens to the turn, not another reply.
+`publish` counts files. Prompt-cache refresh adds turn usage, not replies.
 The context footer stays blank while Clear rotates history. Tree usage must
 match loaded history, or it reads selected usage. Details load on opening.
 Usage names the served model; a downgraded latest reply shows a ! button.
@@ -85,13 +84,13 @@ but does not grant access.
 Artifact and image comments persist for background sending and retry; crop
 storage preserves the original pixels. Comment send controls stay outside native
 text selections, including when they appear after a paragraph is selected.
-Scroll events queued before a selection gesture do not cancel its comment offer.
+Earlier queued scrolls do not cancel selection comment offers.
 Adding a selection comment focuses its card immediately, without overriding a
 later reader focus change. The send bar updates when a selection draft opens or closes, without waiting for
 a pane refresh. Cmd/Ctrl+Enter in a comment popover stages the draft without
 opening the comment list and returns focus to the viewer; the next shortcut
-submits the staged batch. Submitting comments closes the pane; reopening preserves the
-reading position on desktop and phones without reloading unchanged documents. See
+submits the batch. Artifact submission keeps its pane/tab open; other viewers close.
+Reopening retains position without reloading unchanged documents. See
 [artifacts/comment-outbox.ts](artifacts/comment-outbox.ts) and
 [artifacts/crop-store.ts](artifacts/crop-store.ts).
 [image-preview/README.md](image-preview/README.md) describes preview gestures.
@@ -99,28 +98,29 @@ Thread images keep compact filename footers, full-name tooltips and reserved spa
 for lazy loading. Diagrams stage outside the flex row.
 Inline captions read the filename from cached metadata, never Markdown alt text.
 Artifact raster previews live in the Artifacts pane, not inline in the thread.
-Closed Artifact list reads update availability on completion for the visible conversation.
+Artifact discovery never opens its pane; clicks and saved layouts do.
+[Sibling links](artifacts/file-links.ts) reuse viewers and phone Back at the
+selected version; Files shares link handling.
 [Files](files/README.md) opens desktop file tabs beside Chat; phones keep in-place previews.
 
 Phones use the full-screen agent list as root, with New agent and Settings.
 Opening adds one conversation history entry; switching replaces it. Back/title
 arrow return to the list, including after direct links/reloads; root Back belongs
 to the browser. Headers keep New agent/More. More opens at Delete above the fade,
-with counts and Artifacts attention. The composer is full width. Artifact links
+with counts and Artifacts attention. Composer is full width. Artifact links
 open above the conversation; Files from an image closes the viewer's history step.
-Pane drafts consume its history step once; replay preserves text. Tablet/embedded
-navigation is unchanged. Vertical thread touch drags dismiss the keyboard without
-changing draft/caret; composer, mouse and automatic movement retain focus.
+Pane drafts use its history step once; replay preserves text. Tablet/embedded
+navigation is unchanged. Vertical thread touch drags dismiss the keyboard,
+keeping draft/caret; composer, mouse and automatic movement keep focus.
 
-Desktop Settings is a gear beside Delete; the icon rail is on the right.
-Shift+H toggles the list. No Dialog badge.
+Desktop Settings is a gear by Delete; the icon rail is right.
+Shift+H toggles the list. No Dialog badge. Body blur keeps `g`/`w`.
 
 ## Changes
 
-By default Changes shows the folder's changes, uncommitted edits included. A
-typed branch, tag or commit shows that committed work: a merged commit's own
-change, or unmerged work since main or the nearest ancestor branch. HEAD means
-uncommitted changes; pull requests keep their GitHub diff.
+Default compares the working tree to the merge-base; HEAD shows local edits.
+Both cap untracked names at 500 (folded above 20) and report that cap.
+Typed refs show committed work; PRs add tracked local edits to GitHub's diff. Neither lists untracked names. See [ref rules](../src/workdir_git_work.ts).
 
 ## Working-folder Explorer
 
@@ -137,10 +137,10 @@ definitions; descriptors use the existing window-layout store. Restoration reads
 named tabs after the conversation paints. Unavailable files are skipped for the
 visit without changing the saved layout. Phones keep in-place previews.
 
-Read-only UTF-8 previews offer Download and chunked Load more, capped at 256K
-characters; remaining or non-text content is download-only. Readable files,
-including dotfiles, can open. Symlinks and special files stay unavailable.
-HTML Preview uses the [offline viewer](document-preview.ts).
+[Reply paths](file-path-links.ts) share [syntax](source-preview.ts) and a 256 KB UTF-8 editor with full, escaped
+canonical paths. Changed destinations refuse saves; Markdown files warn. Saves
+send only paths, not contents (tools can still read them). HTML uses the
+[offline viewer](document-preview.ts).
 
 Selecting text stages the same quote-and-line comments as Files and Artifacts.
 Comments include the opened file's absolute path and go through the shared
@@ -172,7 +172,7 @@ Push notifications require a secure context;
 [settings/notifications.ts](settings/notifications.ts) disables the setting on HTTP
 and explains that HTTPS is required. Loopback origins that browsers consider
 trustworthy retain secure-context capabilities. [index.html](index.html) links
-the authenticated web manifest served by [../src/web/notifications.ts](../src/web/notifications.ts);
+the web manifest served by [../src/web/notifications.ts](../src/web/notifications.ts);
 there is no app-owned install button or install-prompt hook. The browser controls
 whether installation is available on the current origin.
 
@@ -195,15 +195,14 @@ awaits, and server idempotency handles crash recovery.
 
 ## Settings
 
-Settings uses a desktop category sidebar and phone category list, with rounded
-value/switch rows. Editors, provider sign-in, usage and model pickers stay inline
-on desktop; phones use labelled sheets with Escape/Done returning to the row.
-Resizing preserves edits and closes desktop sheets. Nested model pickers retain
-unsaved effort edits until the ladder is saved. Safe preferences autosave;
-credentials, passwords and model policy require confirmation. Prompt-cache
-warming saves directly in Models. Unsent work blocking an update marks the gear
-with an upper-right dot and accessible label. Its message and Retry action sit
-below categories, not the composer, with a 44px phone target.
+Only the open Settings category is mounted; closing removes its controls.
+Desktop uses a sidebar and inline editors; phones use a category list and
+labelled sheets (Escape/Done returns to the row). Resizing preserves open edits.
+Nested model pickers retain unsaved effort edits until Save. Safe preferences
+autosave; credentials, passwords, two-factor and model policy need confirmation.
+Prompt-cache warming saves directly in Models. Updates cover empty/draft pages;
+unsent work marks the gear with a dot and accessible label. Its message and Retry sit below
+categories, not the composer, with a 44px phone target.
 
 ## Document previews
 
@@ -216,15 +215,16 @@ access. Failures retain Download.
 
 ## Styles and assets
 
-[theme.css](theme.css) defines design tokens and [icons.ts](icons.ts) provides
-inline icons. Sidebar action overlays fade into the current row surface, sharing
-its background token and leaving selection outlines visible. Installed Android
-apps use fullscreen display; mobile chrome and Settings keep controls clear of
-display cutouts using safe-area insets.
-[brand/](brand/) holds the default ouroboros mark; its SVGs and PNG icons come
-from one outline traced from [logo.png](brand/logo.png).
-[../src/branding.ts](../src/branding.ts) owns instance branding: a custom icon
-replaces the mark, favicons and manifest icons.
+[settings/theme-css.ts](settings/theme-css.ts) rejects network URLs and pauses for
+protected UI/Side chats. Safety-off needs confirmation; parked frames are inert.
+`?customCss=off` follows Side URLs. See [CSS hooks](../docs/examples.md#theme-css).
+
+[theme.css](theme.css) defines tokens; [icons.ts](icons.ts) supplies inline icons.
+Sidebar overlays fade into their row surface, preserving selection outlines.
+Installed Android apps use fullscreen; mobile controls respect safe-area insets.
+[brand/](brand/) holds ouroboros SVGs/PNGs traced from [logo.png](brand/logo.png).
+[../src/branding.ts](../src/branding.ts) replaces marks, favicons and manifest
+icons with the custom icon.
 
 ## Rules for changes
 

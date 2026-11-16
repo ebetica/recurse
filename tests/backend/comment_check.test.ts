@@ -144,51 +144,6 @@ describe("comment policy", () => {
     ]);
   });
 
-  // Feature: #2722 Python policy checks tracked fixtures independently of JS warnings.
-  test("CLI checks recorded .py files, including tracked fixtures, independently of JS warnings", async () => {
-    const cwd = mkdtempSync(join(tmpdir(), "python-comment-check-"));
-    const run = (...flags: string[]) =>
-      captureFixture(
-        [
-          process.execPath,
-          new URL("../checks/comment_check.ts", import.meta.url).pathname,
-          ...flags,
-        ],
-        { cwd },
-      );
-    try {
-      expect(
-        (await captureFixture(["git", "init", "-q"], { cwd })).exitCode,
-      ).toBe(0);
-      mkdirSync(join(cwd, "tests/fixtures"), { recursive: true });
-      const path = join(cwd, "tests/fixtures/wrapper.py");
-      writeFileSync(path, fixture("python-recorded"));
-      expect(
-        (await captureFixture(["git", "add", "."], { cwd })).exitCode,
-      ).toBe(0);
-      const result = await run("--strict-python");
-      expect(result.exitCode).toBe(1);
-      expect(result.stdout.toString()).toContain("wrapper.py:1 comment-lines");
-      expect(result.stdout.toString()).toContain("wrapper.py:8 comment-width");
-      expect(result.stdout.toString()).toContain("wrapper.py:15 comment-lines");
-      expect(result.stdout.toString()).toContain(
-        "wrapper.py:35 unexpected-comment",
-      );
-      expect((await run()).exitCode).toBe(0);
-      writeFileSync(path, fixture("python-correct"));
-      writeFileSync(join(cwd, "a.ts"), fixture("violations"));
-      expect(
-        (await captureFixture(["git", "add", "."], { cwd })).exitCode,
-      ).toBe(0);
-      expect((await run("--strict-python")).exitCode).toBe(0);
-      const tsResult = await run("--strict");
-      expect(tsResult.stdout.toString()).toContain("a.ts:1 comment-lines");
-      expect(tsResult.exitCode).toBe(1);
-    } finally {
-      rmSync(cwd, { recursive: true, force: true });
-    }
-  });
-
   test("CLI tracks JS/TS, skips guard exclusions, and supports warnings/strict", async () => {
     const cwd = mkdtempSync(join(tmpdir(), "comment-check-"));
     const run = (...flags: string[]) =>

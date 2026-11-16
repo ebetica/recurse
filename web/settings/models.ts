@@ -29,38 +29,79 @@ export function buildPromptCacheSection(body: HTMLElement): void {
   const { api, jpost } = settingsClient();
   body.innerHTML = `
     <div class="group"><label class="item check"><span>Keep prompt cache warm while agents work</span>
-      <input type="checkbox" class="switch" role="switch" disabled></label></div>
+      <input type="checkbox" class="switch" role="switch" data-setting="prompt-cache-warming" disabled></label>
+    <label class="item check"><span>Compact long idle conversations before their cache expires</span>
+      <input type="checkbox" class="switch" role="switch" data-setting="idle-compaction" disabled></label></div>
+    <p>Older messages are summarized for the model; the thread keeps them.</p>
+    <div class="idle-compaction-threshold" hidden><div class="group"><label class="item field">
+      <span>Compact when the conversation is at least (tokens)</span>
+      <input type="number" aria-label="Minimum conversation length for idle compaction (tokens)"
+        min="32000" step="1" required disabled></label></div></div>
     <p class="msg"></p>`;
-  const box = body.querySelector<HTMLInputElement>("input")!;
   const msg = body.querySelector<HTMLElement>(".msg")!;
-  api("/api/settings/prompt-cache-warming")
-    .then(async (r) => {
-      if (!r.ok) throw new Error(await errDetail(r, "Couldn't load."));
-      box.checked = (await r.json()).enabled;
-      box.disabled = false;
-    })
-    .catch(() => {
-      msg.textContent = "Couldn't load.";
-      msg.className = "msg err";
-    });
-  box.addEventListener("change", async () => {
-    box.disabled = true;
-    try {
-      const r = await jpost("/api/settings/prompt-cache-warming", {
-        enabled: box.checked,
+  const thresholdRow = body.querySelector<HTMLElement>(
+    ".idle-compaction-threshold",
+  )!;
+  const threshold = thresholdRow.querySelector<HTMLInputElement>("input")!;
+  for (const box of body.querySelectorAll<HTMLInputElement>(
+    'input[role="switch"]',
+  )) {
+    const idle = box.dataset.setting === "idle-compaction";
+    const endpoint = `/api/settings/${box.dataset.setting}`;
+    let saved: { enabled: boolean; minimum_tokens?: number };
+    const apply = (state: typeof saved) => {
+      saved = state;
+      box.checked = state.enabled;
+      if (idle) {
+        threshold.value = String(state.minimum_tokens);
+        thresholdRow.hidden = !state.enabled;
+      }
+    };
+    api(endpoint)
+      .then(async (r) => {
+        if (!r.ok) throw new Error(await errDetail(r, "Couldn't load."));
+        apply(await r.json());
+        box.disabled = false;
+        if (idle) threshold.disabled = false;
+      })
+      .catch(() => {
+        msg.textContent = "Couldn't load.";
+        msg.className = "msg err";
       });
-      if (!r.ok) throw new Error(await errDetail(r, "Couldn't save."));
-      box.checked = (await r.json()).enabled;
-      msg.textContent = "";
-    } catch (error) {
-      box.checked = !box.checked;
-      msg.textContent =
-        error instanceof Error ? error.message : "Couldn't save.";
-      msg.className = "msg err";
-    } finally {
-      box.disabled = false;
-    }
-  });
+    const save = async () => {
+      if (idle) {
+        thresholdRow.hidden = !box.checked;
+        if (box.checked && !threshold.reportValidity()) return;
+        threshold.disabled = true;
+      }
+      box.disabled = true;
+      try {
+        const r = await jpost(endpoint, {
+          enabled: box.checked,
+          ...(idle
+            ? {
+                minimum_tokens: box.checked
+                  ? threshold.valueAsNumber
+                  : saved.minimum_tokens,
+              }
+            : {}),
+        });
+        if (!r.ok) throw new Error(await errDetail(r, "Couldn't save."));
+        apply(await r.json());
+        msg.textContent = "";
+      } catch (error) {
+        apply(saved);
+        msg.textContent =
+          error instanceof Error ? error.message : "Couldn't save.";
+        msg.className = "msg err";
+      } finally {
+        box.disabled = false;
+        if (idle) threshold.disabled = false;
+      }
+    };
+    box.addEventListener("change", save);
+    if (idle) threshold.addEventListener("change", save);
+  }
 }
 
 export function buildMaximumContextSection(body: HTMLElement): void {

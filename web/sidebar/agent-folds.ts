@@ -1,6 +1,7 @@
 // Browser-local agent folds survive reloads and server restarts.
-// l/Right keeps children open; h/Left folds the selection until it changes.
-// Restore validates and caps saved ids; authoritative home reads prune them.
+// l/Right keeps selected children open; opening another row is temporary.
+// Restore drops unversioned opens once, keeping the saved h/Left fold.
+// Saved ids are capped; authoritative home reads prune deleted agents.
 import { parseConversationId } from "../backends/backend.js";
 import { sharedTrees } from "../shared-trees.js";
 import { embedded, state } from "../state.js";
@@ -24,13 +25,14 @@ function load(): { open: string[]; collapsed: string | null } {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(KEY) || "null");
     if (saved && typeof saved === "object") {
-      const { open, collapsed } = saved as Record<string, unknown>;
+      const { version, open, collapsed } = saved as Record<string, unknown>;
       return {
-        open: Array.isArray(open)
-          ? [...new Set(open.filter(isId))]
-              .filter((id) => id !== collapsed)
-              .slice(-(MAX_ENTRIES - Number(isId(collapsed))))
-          : [],
+        open:
+          version === 2 && Array.isArray(open)
+            ? [...new Set(open.filter(isId))]
+                .filter((id) => id !== collapsed)
+                .slice(-(MAX_ENTRIES - Number(isId(collapsed))))
+            : [],
         collapsed: isId(collapsed) ? collapsed : null,
       };
     }
@@ -52,7 +54,10 @@ function save(): void {
     kept.delete(old);
   }
   try {
-    localStorage.setItem(KEY, JSON.stringify({ open: [...kept], collapsed }));
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({ version: 2, open: [...kept], collapsed }),
+    );
   } catch {}
 }
 save();
@@ -66,7 +71,11 @@ export function foldedAgents(): Set<string> | undefined {
 }
 
 export function keepSubagentsOpen(id: string): void {
-  if (!Object.values(state.nodes).some((node) => node.parent === id)) return;
+  if (
+    id !== state.selectedId ||
+    !Object.values(state.nodes).some((node) => node.parent === id)
+  )
+    return;
   kept.delete(id);
   kept.add(id);
   save();

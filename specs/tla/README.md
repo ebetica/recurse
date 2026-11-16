@@ -1,13 +1,18 @@
 # Lifecycle models
 
-Bounded TLA+ safety models check store (#3055) and shell protocols, not full
-implementation refinement. Guard-removal controls reproduce historical/possible
-failures; production behavior is unchanged.
+Bounded models, not refinement. Controls restore failures.
 
 ## Source files
 
 - [StoreLifecycle.tla](StoreLifecycle.tla), [cfg](StoreLifecycle.cfg): store protocol.
 - [ShellHandoff.tla](ShellHandoff.tla), [cfg](ShellHandoff.cfg): shell handoff/eviction.
+- [LifecycleAdmission.tla](LifecycleAdmission.tla), [cfg](LifecycleAdmission.cfg): reservation, flock and deadline ordering.
+- [ViewportHolds.tla](ViewportHolds.tla), [cfg](ViewportHolds.cfg): target design
+  for thread scroll holds; its header lists bounds and controls.
+- [Remote relay](relay/README.md): delivery, sleep/wake, revocation.
+- [Operator sends](send/README.md): queue, steer, Stop and reload.
+- [UnreadSeen.tla](UnreadSeen.tla), [cfg](UnreadSeen.cfg): the unread dot.
+- [Idle compaction](idle/README.md).
 - [RotationTrace.tla](RotationTrace.tla): replayed rotation safety, not full store refinement.
 - [rotation_trace.ts](../../tests/dev/rotation_trace.ts): real-test recording/replay and marker checks.
 - [rotation_preload.ts](../../tests/dev/rotation_preload.ts),
@@ -23,30 +28,18 @@ specs/tla/check.sh                # standalone: all models and negative controls
 specs/tla/check.sh cache          # independent store prepare-cache race
 specs/tla/check.sh shell          # fixed shell model only
 specs/tla/check.sh shell-pins     # deliberately remove output-retention guard
+specs/tla/check.sh admission      # fixed lifecycle-admission model
+specs/tla/check.sh viewport       # scroll-hold design and its controls
+specs/tla/check.sh unread         # unread-dot design and its controls
 specs/tla/check.sh trace          # existing real tests + rotation trace replay
 ```
 
-Bulk-only (`all`, not `ts`): requires Bash, curl, tar, sha256sum, GNU timeout
-and Linux x64; trace recording also needs Bun and installed repo dependencies.
-Tools, generated configs, JVM files, states and full trace logs
-use `RECURSE_AGENT_TMPDIR` or a private `TMPDIR`; no system installation or
-preinstalled Java is needed. Downloads are cached and hash-checked before use.
-Each TLC case has a 110-second deadline and 1 GiB heap. Negative cases must exit
-12 naming the expected invariant; parser errors/timeouts/unexpected results fail.
-
-Pinned tooling, checked on 2026-11-06:
-
-- Azul Zulu JRE Zulu21.40+17-CA, OpenJDK 21.0.6+7-LTS:
-  <https://cdn.azul.com/zulu/bin/zulu21.40.17-ca-jre21.0.6-linux_x64.tar.gz>
-- TLC reports `2.19 of 08 August 2024 (rev: 5a47802)` from:
-  <https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar>
-
-Hashes pin the downloaded bytes:
-
-```text
-JRE SHA-256 8524ef3c76ae1e00bb020044557c5ae1a59d985eee0394d71fc9b2414d083d33
-JAR SHA-256 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
-```
+Needs Bash, curl, tar, sha256sum, GNU timeout, Linux x64;
+trace recording also needs Bun/repo dependencies. [check.sh](check.sh) pins and
+hash-checks cached Zulu OpenJDK21/TLC2.19 downloads. Tools, configs, JVM files,
+states and logs stay in `RECURSE_AGENT_TMPDIR` or private `TMPDIR`; no system
+Java needed. Each case gets 110s/1 GiB. Controls must exit 12 with the expected
+invariant; other failures fail.
 
 ## Store correspondence
 
@@ -55,15 +48,21 @@ historical failures, not current dev behavior. The owner is a native connection,
 not a Harness or a logical handle. Function names, not line numbers, identify
 implementation sites.
 
-| Actions                                     | Implementation sites                                                                                                                  |
-| ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `OpenOwner`, `OpenRead`, `CloseOwner`       | [worker] `SqliteWorker.openDatabase/start/release`, `WorkerSqliteDatabase.close`; [native] `execute/close`.                           |
-| `BeginWrite`, `Commit`, `ReadOwner`         | [worker] `WorkerSqliteDatabase.transaction/serial/direct`, `SqliteWorker.enqueue`; [native] `execute`.                                |
-| `AdmitRead`, `Read`, `ReleaseRead` (page)   | [view] `storageView`; [host] `DurableHost.waitStorageReads`.                                                                          |
-| `AdmitRead`, `Sync`, `ReleaseRead` (search) | [search] `MessageSearch.request/syncTarget`, `withFiles`; [worker] `syncSearch`; [native] `execute`; [sync] `sync`.                   |
-| `Prepare`                                   | Historical query-time preparation; removed from current queries.                                                                      |
-| `BeginRotation`, `Rename`                   | [host] `maybeRotate/keepStore`; [delete] `retire`; [clear] `retireCleared`; [search] `rotate/withStores`; [archive] `keep/moveStore`. |
-| `Restart`                                   | Environmental process-crash assumption, not an application function.                                                                  |
+- `OpenOwner`, `OpenRead`, `CloseOwner`: [worker]
+  `SqliteWorker.openDatabase/start/release`, `WorkerSqliteDatabase.close`;
+  [native] `execute/close`.
+- `BeginWrite`, `Commit`, `ReadOwner`: [worker]
+  `WorkerSqliteDatabase.transaction/serial/direct`, `SqliteWorker.enqueue`;
+  [native] `execute`.
+- Page `AdmitRead`, `Read`, `ReleaseRead`: [view] `storageView`;
+  [host] `DurableHost.waitStorageReads`.
+- Search `AdmitRead`, `Sync`, `ReleaseRead`: [search]
+  `MessageSearch.request/syncTarget`, `withFiles`; [worker] `syncSearch`;
+  [native] `execute`; [sync] `sync`.
+- `Prepare`: historical query-time preparation, removed from current queries.
+- `BeginRotation`, `Rename`: [host] `maybeRotate/keepStore`; [delete] `retire`;
+  [clear] `retireCleared`; [search] `rotate/withStores`; [archive] `keep/moveStore`.
+- `Restart`: environmental process-crash assumption, not an application function.
 
 [worker]: ../../src/agents/durable/sqlite_worker.ts
 [native]: ../../src/agents/durable/sqlite_thread.worker.ts
@@ -75,8 +74,8 @@ implementation sites.
 [clear]: ../../src/agents/durable/host/clear.ts
 [archive]: ../../src/agents/durable/archive.ts
 
-Path-keyed workers share one native connection; last-close/replacement await
-exit. Transactions hold the queue. Pages lease before awaits and release after
+Path-keyed workers share one native connection; last close and replacement
+await exit. Transactions hold the queue. Pages lease before awaits and release after
 session close; search synchronizes between transactions and closes in `finally`.
 Rotation fences/drains readers and closes the Harness. Final `Sync` collapses its
 temporary owner open/sync/close after draining old handles. Queries trust derived
@@ -84,33 +83,31 @@ files as-is. `Prepare` is a historical cache control, not query-freshness proof.
 
 ### Store bounds and assumptions
 
-Bounds: two stores/worker slots/generations, one lease/rotation and **two commits
-total**, on either generation of one file or across two files. Larger histories
-are excluded. `(store, generation)` denotes an inode; commit counts model
-verification/data versions. Retained clear/archive preserve commits; service/
-unretained deletion is excluded. `ColdViewBug` permits independent connections
-and stale owner reuse.
+Bounds: two stores/worker slots/generations, one lease/rotation, **two commits
+total** across either generation/file. `(store, generation)` is an inode;
+commits are verification/data versions. Retained clear/archive preserve commits;
+service/unretained deletion is excluded. `ColdViewBug`: independent connections,
+stale owner reuse.
 
-`AdmitRead` precedes native open, including without an owner or during a
-transaction. `OpenRead` may finish behind a fence: rename drains pending leases.
-Leases span writes; individual read/sync/close operations wait for transactions.
-Thread reservation/exit collapse into native open/close boundaries.
+`AdmitRead` precedes native open without owners or during transactions too.
+`OpenRead` may finish behind a fence; rename drains pending leases. Leases span
+writes; read/sync/close wait for transactions. Reservation/exit collapse into
+native open/close.
 
-`Sync` atomically publishes projection/verification identity; prepare's cache
-is independent. Two stale stores and one catch-up slot structurally reduce the
-five-store/production-limit-four race, without proving every five-store behavior.
-Only already-synced live stores at prepare's snapshot count; incomplete indexing,
-text matching, later commits, archive-path queries and non-atomic publication
-are excluded.
+`Sync` atomically publishes projection/verification identity, independent of
+prepare's cache. Two stale stores plus one catch-up slot reduce the five-store,
+limit-four race, not every five-store behavior. Only already-synced live stores
+at prepare's snapshot count; incomplete indexing, text matching, later commits,
+archive-path queries and non-atomic publication are excluded.
 
 Invariants check moved reads, retained commits, single/current owners, synced
 store inclusion and closed connections at rename. `Exclusive` changes only the
 native-reader crash prerequisite, not SQLite's `walFindFrame` mechanism. Normal
 mode is a comparison, not a production setting.
 
-Filesystem power loss, torn multi-file moves, archive expiry/revival, external
-processes, SQLite locking/WAL internals, multiple simultaneous readers, native
-read-only fallback and IPC/open/close failures are excluded. The launcher lock
+Power loss, torn multi-file moves, archive expiry/revival, external processes,
+SQLite locking/WAL internals, simultaneous readers, native read-only fallback
+and IPC/open/close failures are excluded. The launcher lock
 excludes a second server. Commits are atomic and survive process restart by
 assumption, matching WAL/NORMAL's process-crash contract, not power-loss durability.
 
@@ -128,22 +125,28 @@ The runner prints counts and durations (one worker, seed 1, fingerprint polynomi
 
 ## Shell correspondence
 
-Reviewed against dev `a250b950d`. Start: detached launch, durable launch memo,
-registered Watch, accepted initial snapshot. One registry/shell is modeled, not
-competing registries. Cleanup responsibility moves from tool/memo to durable
-conversation task, not exclusive possession of the in-memory Shell.
+Reviewed against dev `a250b950d`. Start: detached launch, durable memo, registered
+Watch, accepted snapshot. One registry/shell. Cleanup responsibility, not
+exclusive Shell possession, transfers from tool/memo to durable task.
 
-| Actions                            | Implementation sites                                                                                                             |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `StoreStep`, `FlushHandoff`        | [persist] `RegistryStore.enqueue/drain/flush`; [registry] `ShellRegistry.flushPersistence`.                                      |
-| `Handoff`                          | [shells] `bash.execute`'s `detach`: flush snapshots, then `api.createTask` with conversation ownership.                          |
-| `BeginRead`, `EndRead`             | [registry] `retainOutput/trimmedOutput/stillRunningText`; [shells] `bash.execute` output pin.                                    |
-| `BeginMonitor`, `EndMonitor`       | [registry] `flushMonitor/readMonitor`: one pending read; completion holds an output pin while draining it.                       |
-| `Exit`, `Format`, `Notify`         | [registry] `finishExit/queueCompletion/notify`: mark terminal, pin, drain, format, persist, notify.                              |
-| `RequestAck`, `FinishAck`          | [shells] `createShells` notifier transfers `Watch.exit`; [registry] `completionPersistence`; [persist] `acknowledgeCompletions`. |
-| `Checkpoint`, `Post`, `FinishTask` | [shells] `ShellTask.watch/notify`, `post`: checkpoint, submit/queue fixed `shell:<id>:exit` request, unwatch, commit terminal.   |
-| `Evict`                            | [registry] `ShellRegistry.evict`: completed, over cap, no output readers or pending stored completion.                           |
-| `Crash`, `RecoverStop`             | [shells] `recoverInterruptedCommands`, resumed `ShellTask.watch`: stop groups, remove records, report restart/lost.              |
+- `StoreStep`, `FlushHandoff`: [persist] `RegistryStore.enqueue/drain/flush`;
+  [registry] `ShellRegistry.flushPersistence`.
+- `Handoff`: [shells] `bash.execute`'s `detach` flushes snapshots, then
+  `api.createTask` with conversation ownership.
+- `BeginRead`, `EndRead`: [registry] `retainOutput/trimmedOutput/stillRunningText`;
+  [shells] `bash.execute` output pin.
+- `BeginMonitor`, `EndMonitor`: [registry] `flushMonitor/readMonitor` has one
+  pending read; completion holds an output pin while draining it.
+- `Exit`, `Format`, `Notify`: [registry] `finishExit/queueCompletion/notify`
+  marks terminal, pins, drains, formats, persists and notifies.
+- `RequestAck`, `FinishAck`: [shells] `createShells` transfers `Watch.exit`;
+  [registry] `completionPersistence`; [persist] `acknowledgeCompletions`.
+- `Checkpoint`, `Post`, `FinishTask`: [shells] `ShellTask.watch/notify`, `post`
+  checkpoints, submits/queues `shell:<id>:exit`, unwatches and commits terminal.
+- `Evict`: [registry] `ShellRegistry.evict` requires completed, over cap,
+  no output readers or pending stored completion.
+- `Crash`, `RecoverStop`: [shells] `recoverInterruptedCommands`, resumed
+  `ShellTask.watch` stops groups, removes records and reports restart/lost.
 
 [persist]: ../../src/extensions/core/shells/persist.ts
 [registry]: ../../src/extensions/core/shells/registry.ts
@@ -160,16 +163,16 @@ coalescing are omitted; writes cannot overtake removal. `FlushHandoff` is distin
 from task creation: later completion writes do not invalidate the barrier.
 Disk failures, directory replacement, corruption and power loss are excluded.
 
-Terminal marking/pinning precedes monitor drain; eviction pressure can interleave
-with formatting/persistence/notification. Ack is **before submission**: Watch/task
-takes responsibility. Before its notify checkpoint, crash may replace exit text
-with a restart notice. Checkpoints survive restart; Pi deduplicates stable post
-request ids by assumption. Before task creation, the tool memo/recovery scan owns
-cleanup. Stop/submission failures stutter; no eventual-delivery claim.
+Terminal marking/pinning precedes monitor drain; eviction may interleave with
+formatting/persistence/notification. Ack is **before submission**: Watch/task owns
+cleanup. Crash before notify checkpoint may replace exit text with a restart
+notice. Checkpoints survive restart; Pi deduplicates stable post ids by assumption.
+Until task creation, memo/recovery owns cleanup. Stop/submission failures stutter;
+no eventual-delivery claim.
 
 Only notified detached shells and acknowledged terminal record removal are
-covered. Numeric caps/TTLs, foreground-only records, abort-successor creation,
-text/redaction, monitor batching/cooldowns and identity discovery are excluded.
+covered; caps/TTLs, foreground-only records, abort successors, text/redaction,
+monitor batching/cooldowns and identity discovery are excluded.
 Retaining every terminal store record until submission is not the real protocol.
 
 ### Shell controls
@@ -184,19 +187,55 @@ they are sensitivity controls, not claims of unfixed production races:
 Other invariants retain running shells and tool/task/recovery group ownership.
 No current-code race is identified within these bounds.
 
+## Admission correspondence
+
+[TreeLifecycle](../../src/agents/mutation_guard.ts) maps `Reserve`, `Wake` and
+`Expire` to `awaitReservation/reserve/nextRelease`; `Prepare`, `Flock` and `Poll`
+to `openLease` and [flockExclusive](../../src/utils/flock.ts). Nested entry/exit
+and spent-token refusal map to `reserve/release/checkToken`; body completion,
+unlock, descriptor close and final release map to `body/closeLease/release`.
+
+Bounds: two fresh callers in one process, nested depth two, one external holder
+and one data-root inode. Wakes are unordered. Expiry crosses awaits; bodies and
+nested calls are untimed. Refusals snapshot that layer's blocker; kernel poll
+expiry uses its last failed attempt. Stable inodes and successful close/unlock
+are assumed; filesystem failures/replacement, crashes and cancellation excluded.
+
+`MutualExclusion`, `BusyOnlyIfHeld`, `CloseBeforeRelease` and `TokenOwnership`
+check exclusive bodies, justified refusal, close-before-release and token
+ownership. They replace injected-clock cases; a real-flock check remains.
+The bulk stage runs:
+
+- `admission`: exhaust all invariants.
+- `admission-reservation`: restore deadline-before-reservation; the released
+  holder's expired waiter must violate `BusyOnlyIfHeld`.
+- `admission-preparation`: restore the pre-#3259 deadline-before-flock check;
+  uncontended expiry must violate `BusyOnlyIfHeld`.
+
+## Viewport correspondence
+
+[Thread](../../web/conversation/thread.ts): `paint` → `Repaint`, `anchoredPaint`
+→ `Press`, `releaseBottomFollow` → `Release`. [Controls](../../web/conversation/controls.ts):
+`ToBottom`/`OnFrame`. `Repaint` latches natural bottom. `NaturalFollow` checks
+settled bottom; `PendingBottom` excludes viewport holds during a batch.
+`Press` paints/relatches, then releases before anchoring.
+
+`viewport-` controls: `natural-follow`/`natural-bottom` omit the latch
+(`PendingBottom`/`NaturalFollow`); `disclosure-follow` keeps the partial clear
+(`OneHold`). Run `check.sh viewport`.
+
 ## Rotation trace pilot
 
-Existing cold-view/clear, retained/service/unkeyed reap and archive-expiry/search
-tests produce traces. A Bun preload rewrites `Spec: @tla` comments, including in
-Workers; ordinary production has no tracing calls. Marker counts/loaded modules
-fail closed, without fingerprints or full semantic drift detection.
+Cold-view/clear, retained/service/unkeyed reap and archive-expiry/search tests
+record traces. A Bun preload rewrites `Spec: @tla` comments, including Workers;
+production has no tracing calls. Marker counts/loaded modules fail closed, without
+fingerprints/full semantic drift detection.
 
-Each bounded NDJSON event uses one synchronous O_APPEND write (at most 4 KiB).
-Linux atomic append order, not worker timestamps, supplies the replay order.
-Main-thread connection admission precedes queued native open; close follows
-acknowledgement or proven Worker exit. Standalone search-worker native handles
-are recorded too. IPC dispatch/receive/reply carry explicit per-worker request ids;
-async context retains correlation across producer synchronization.
+NDJSON events are synchronous O_APPEND writes of at most 4 KiB; Linux append
+order, not worker timestamps, orders replay. Main-thread admission precedes native
+open; close follows acknowledgement or proven Worker exit. Search-worker native
+handles are recorded too. IPC dispatch/receive/reply carry per-worker request ids;
+async context preserves correlation across producer synchronization.
 
 The replay asserts **no rename with any connection or page/search lease held**,
 **no new external lease after its page/search fence**, and balanced/correlated
@@ -217,9 +256,10 @@ stay private; keep added warm execution below 30 seconds.
 ## Rules for changes
 
 Update actions, assumptions and correspondence when await/queue/pin/lease/
-identity/ownership/rotation boundaries change. Keep controls failing by name and
-exhaust under a minute for shells, two per store mode. No fairness/liveness claim;
-deadlock checks are disabled because failure/restart/stuttering can defer progress.
+identity/ownership/rotation boundaries change. Controls must fail by name.
+Exhaust shells under a minute, each store mode under two. Relay and operator sends assume
+fairness for liveness. Deadlock checks are off: failure/restart/stuttering
+can defer progress.
 
 Review against owning headers and real-path tests:
 [store workers](../../tests/backend/durable_sqlite_worker.test.ts),
@@ -230,4 +270,3 @@ Review against owning headers and real-path tests:
 [persistence](../../tests/extensions/core/shells/persist.test.ts),
 [recovery](../../tests/extensions/core/shells/recovery.test.ts) and
 [Durable shell tasks](../../tests/extensions/core/shells/durable.test.ts).
-Models do not replace implementation tests or correspondence review.

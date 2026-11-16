@@ -12,7 +12,12 @@ export function refusedNoteT(
   full: string,
 ): TemplateResult {
   const text = entry.refused_text?.replace(/^\[recurse-origin: [^\]]*\]\n/, "");
-  return html`<div class="error-note refused-note" role="note" title=${full}>
+  return html`<div
+    class="error-note refused-note"
+    data-theme-protected="reply-refusal"
+    role="note"
+    title=${full}
+  >
     <span>${sentence(entry.error || "The provider refused this turn")}</span>
     ${text
       ? html`<button

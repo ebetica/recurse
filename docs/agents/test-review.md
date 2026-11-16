@@ -10,7 +10,9 @@ proves behaviour on a real path, and whether its evidence holds.
 ## How to review
 
 1. Read the PR body and the test diff (`gh pr diff N`, or the diff you were
-   given). Judge the code as it was at the PR's base commit: search with
+   given). Use `git merge-base BASE_REF HEAD` as the PR's base commit, matching
+   `test_check.ts --diff BASE_REF`; `--diff-exact BASE` skips that resolution.
+   Both modes print the base SHA. Judge the code at that commit: search with
    `git grep -n PATTERN BASE -- tests/` and read files with
    `git show BASE:PATH`, never the working tree or later history.
 2. For each added or changed test, test-check allowance, fixture and tag, check
@@ -152,7 +154,7 @@ already adds or has a browser or integration test of the same behaviour.
 - After an independent reviewer returns `VERDICT: PASS`, the Coordinator
   records the reviewer id and verdict in the PR evidence and adds this exact
   standalone line to the PR body: `Test-review: PASS <full head SHA>`.
-  `tests/checks/test_check.ts --diff BASE --pr-body FILE` requires that line for new
+  `tests/checks/test_check.ts --diff REF --pr-body FILE` requires that line for new
   or changed allowance comments and JSON entries, including moved or renamed
   comments. It compares the full SHA with `git HEAD`; stale or abbreviated
   SHAs and old `Operator-approved-test-allowance:` lines do not qualify.

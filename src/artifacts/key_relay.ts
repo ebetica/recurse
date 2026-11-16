@@ -1,9 +1,16 @@
 // Relay sandbox keys after page handlers; keep editing/modified keys native.
+import {
+  isNativeActivationKey,
+  isTextEditorTarget,
+} from "../keyboard_target.js";
+
 export const ARTIFACT_KEY_RELAY = `<script id="recurse-pane-keys">(()=>{
   if(parent===window)return;
+  const textEntry=${isTextEditorTarget.toString()};
+  const nativeActivation=${isNativeActivationKey.toString()};
   addEventListener('keydown',(event)=>{
     if(event.ctrlKey||event.metaKey||event.altKey||(event.shiftKey&&!['G','P','H','J','K','L'].includes(event.key))||event.isComposing||event.keyCode===229||(event.repeat&&!['j','k','d','u'].includes(event.key)))return;
-    if(event.composedPath().some(node=>node instanceof Element&&(node.matches('input,textarea,select')||node.isContentEditable)))return;
+    if(event.composedPath().some(textEntry)||nativeActivation(event.key,event.target))return;
     setTimeout(()=>{
       if(!event.defaultPrevented)parent.postMessage({recurseArtifactKey:event.key},'*');
     },0);

@@ -1,12 +1,13 @@
 // Shows captured system prompts and role-aware input: stored Durable text
-// before request hooks, or legacy delivered text. Each open refetches;
-// banners refresh while assembling. Assistant inspection shows provider
-// usage without duplicating visible replies; tools remain inline.
+// before request hooks, or legacy delivered text. Each open refetches.
+// Assistant inspection shows provider usage without duplicating visible
+// replies; tools remain inline.
 import { backendFor } from "./backends/backend.js";
 import { html, render, nothing, type TemplateResult } from "lit";
 import { responseDetails, responseSelectorName } from "./model-response.js";
 import { $ } from "./dom.js";
-import { copyText, toolDetailStore } from "./tool_details.js";
+import { toolDetailStore } from "./tool_details.js";
+import { copyButtonT } from "./conversation/copy.js";
 import { requestKeyboardMode } from "./modal-mode.js";
 import {
   activityTotalCostLabel,
@@ -21,20 +22,7 @@ import {
   turnUsageCaption,
   turnUsageModel,
 } from "./thread-render/turn-usage.js";
-import type {
-  ModelResponse,
-  PromptView,
-  TurnPromptView,
-  TurnUsage,
-} from "./types.js";
-
-// The system prompt for the banner. A missing agent (404) -> null.
-export function fetchPrompt(cid: string): Promise<PromptView | null> {
-  return backendFor(cid)
-    .api(`/api/conversations/${cid}/prompt`)
-    .then((r) => (r.ok ? (r.json() as Promise<PromptView>) : null))
-    .catch(() => null);
-}
+import type { ModelResponse, TurnPromptView, TurnUsage } from "./types.js";
 
 const overlay = $("#prompt-overlay")!;
 const modal = $("#prompt-modal")!;
@@ -45,33 +33,10 @@ const titleEl = $("#prompt-title")!;
 // A labelled prompt section: a header with a Copy control and the raw text in a
 // scrollable <pre>, so the operator can read AND lift the exact bytes.
 function block(label: string, text: string): TemplateResult {
-  const copy = async (e: Event) => {
-    const btn = e.currentTarget as HTMLButtonElement;
-    const copied = await copyText(text);
-    btn.textContent = copied ? "Copied" : "Copy failed";
-    btn.classList.toggle("copied", copied);
-    btn.setAttribute(
-      "aria-label",
-      copied ? `${label} copied` : `Couldn't copy ${label.toLowerCase()}`,
-    );
-    setTimeout(() => {
-      btn.textContent = "Copy";
-      btn.classList.remove("copied");
-      btn.setAttribute("aria-label", `Copy ${label.toLowerCase()}`);
-    }, 1200);
-  };
   return html`<section class="prompt-block">
     <div class="prompt-block-head">
       <span>${label}</span>
-      <button
-        class="prompt-copy"
-        type="button"
-        aria-live="polite"
-        aria-label=${`Copy ${label.toLowerCase()}`}
-        @click=${copy}
-      >
-        Copy
-      </button>
+      ${copyButtonT(text, label.toLowerCase(), label)}
     </div>
     <pre>${text}</pre>
   </section>`;

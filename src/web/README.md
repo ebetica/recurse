@@ -46,9 +46,17 @@ from same-user code. A valid operator cookie still admits web requests. In open
 mode, requests without a loopback token retain operator access.
 Forwarded agent provenance requires a backend key and narrows its routes;
 a qualified requester remains available for remote lifecycle authorization.
+Prompt reads include safety reviewer data only for authenticated, unmarked
+operators, including unmarked backend keys. Any raw agent marker suppresses only
+that part; other prompt reads retain their existing authentication and content.
+The backend proxy preserves this restriction without asserting caller identity.
 Settings (including MCP), provider authentication and login/password routes
 refuse all agent markers, including empty and joined duplicate values.
 Agent settings tools use Config/theme files directly instead of these routes.
+Raw file-provider model selections on create, spawn and model changes require
+operator authentication and reject agent markers. Agents use these models only
+through a saved Settings effort level. Spawn receipts retain server-owned model
+authorization; request bodies cannot grant it.
 The sidebar's `/api/sidebar/*` tag route (`tags.ts`) refuses all agent markers
 the same way; agents change their own tags through the bundled-tool
 `/api/conversations/{cid}/tags` route.
@@ -58,6 +66,10 @@ Authentication and agent-marker refusal still precede revalidation.
 Agent-finished notification devices are saved through
 `/api/settings/notifications/*` (`notifications.ts`), so the same refusal
 applies; sending lives in [../push_notifications.ts](../push_notifications.ts).
+The manifest and named brand icons are public GET/HEAD resources, including the
+custom icon and name. Other static files remain authenticated. Default icon URLs
+carry a hash of their bytes; icon and manifest responses revalidate, while custom
+icon responses are no-store.
 
 `deliver_message.ts` shares content delivery between conversation and API v1
 routes, including sender provenance and interruption. API v1 uses the authenticated
@@ -95,17 +107,18 @@ Plain HTTP does not encrypt passwords or sessions; use HTTPS on untrusted networ
 ## Working-folder Explorer
 
 [explorer.ts](explorer.ts) serves operator-only `/api/conversations/{cid}/tree`
-reads. It uses the same persisted Durable cwd as image reads and the
-agent's `find` tool; relative paths cannot ascend above that folder. Agent
+listing, previews and text saves. Listings use the persisted Durable cwd;
+file previews and saves also accept absolute, home and parent-relative paths. Agent
 markers, loopback tokens and service principals cannot use these routes.
-Connected homes forward operator reads through the existing backend proxy;
-the remote resolves the cwd and enforces the same filesystem checks.
+Connected homes forward operator reads and saves through the existing backend
+proxy. Backend keys have instance-operator authority; no browser-provenance marker
+exists on forwarded requests. Agent-marked keys remain refused.
 API revision 8 admits unmarked backend operator keys. Older remotes show
 “Update this remote to browse its files” without attempting filesystem reads.
 
 **Source files:** [explorer_io.ts](explorer_io.ts) owns Worker admission and
 shutdown; [explorer.worker.ts](explorer.worker.ts) owns directory cursors,
-previews and streamed downloads; [explorer_paths.worker.ts](explorer_paths.worker.ts)
+previews, saves and streamed downloads; [explorer_paths.worker.ts](explorer_paths.worker.ts)
 owns pinned-descriptor path validation.
 
 Directory expansion reads one lazy page of 48 entries plus one lookahead, and
@@ -128,18 +141,31 @@ HTTP ranges. Their handles stay owned by the response until completion or
 cancellation, without expiring during a slow transfer. All responses are private/no-store; raw files are sandboxed
 attachments, never active same-origin content.
 
-Every descendant is checked with no-follow metadata and matched to the opened
-inode, including directory components. Symlinks, FIFOs and other special files
-are refused. All readable regular files and folders beneath the conversation's
+Every descendant is opened under its retained parent and matched to the inode
+checked before opening, including directory components. Symbolic links are
+followed wherever they point; listing stays lazy, one folder per request, so a
+link cycle never recurses. A link must be unchanged after its target opens.
+Broken links, FIFOs and other special files are refused. All readable regular files and folders beneath the conversation's
 working folder are available, including dotfiles and folders in the data directory.
 Names and managed-worktree markers do not restrict operator reads.
+
+Preview metadata names the canonical destination after directory and file
+symlinks. The editor wraps the whole destination, visibly escaping controls,
+line/paragraph separators and default-ignorables while retaining the real filesystem path. Saves require that
+destination and refuse a changed resolution even when overwriting. New files use mode 0600; replacements preserve their mode.
+The 256 KiB save limit applies to wire and decoded bodies before buffering.
+Version checks are best-effort against external writers, not an atomic CAS.
+Saves never add file contents to the conversation; agents can still read files
+with tools. Requested or canonical Markdown names (.md/.markdown/.mdx,
+case-insensitive, ignoring trailing dots), including missing files, and every
+file identified by the prompt-resource loader's resolver show a warning.
 
 Filename search runs the existing agent `find` tool in the shared fff child,
 borrowing the conversation's connection without opening an index ahead of a
 search. Its waiting/indexing policy is unchanged. After admitting the current
 root, it returns the finder's 50-result page unchanged, without opening the
-candidates or truncating their names. Symlink checks apply when
-opening a file. No independent indexer, watcher, refresh policy or search cache
+candidates or truncating their names. The same link and
+inode checks apply when opening a file. No independent indexer, watcher, refresh policy or search cache
 is added. Superseded requests are cancelled.
 
 ## Message search

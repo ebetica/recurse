@@ -96,6 +96,7 @@ export interface CreateDeps {
     | "resolveEffortLevel"
     | "ladderHome"
     | "defaultEffortLevel"
+    | "isFileProviderModel"
   >;
   /** store_import.import_finalized(). */
   importFinalized(): boolean | null;
@@ -134,6 +135,8 @@ export interface CreateOptions {
   title?: string | null;
   parent?: string | null;
   model?: string | null;
+  /** Only HTTP authentication may authorize a raw file-endpoint selection. */
+  operatorSelectedModel?: boolean;
   /** undefined inherits; null or "" records the default. */
   workdir?: string | null;
   attachmentDraft?: string | null;
@@ -347,7 +350,8 @@ export class SupervisorCreate {
     const parentModel = (parent ?? {}).model;
     if (!parentModel) return null;
     try {
-      return this.deps.config.chatModel(parentModel as string).id;
+      const model = this.deps.config.chatModel(parentModel as string).id;
+      return this.deps.config.isFileProviderModel(model) ? null : model;
     } catch (error) {
       if ((error as Error)?.name === "ValueError") return null;
       throw error;
@@ -360,6 +364,7 @@ export class SupervisorCreate {
     effort: string | null,
     level: number | null,
     parentConv: ConversationRecord | null,
+    operatorSelectedModel = false,
   ): Selection {
     const { config } = this.deps;
     if (level !== null && model !== null)
@@ -379,6 +384,10 @@ export class SupervisorCreate {
       }
     }
     if (model !== null) {
+      if (config.isFileProviderModel(model) && !operatorSelectedModel)
+        throw new ValueError(
+          "unsupported raw file-defined model selection; choose an effort level saved in Settings",
+        );
       const selected = config.chatModel(model).id;
       const home = config.ladderHome(selected, want);
       if (home === null) return this.pinLegacy(selected, want);
@@ -463,6 +472,7 @@ export class SupervisorCreate {
       o.effort ?? null,
       o.level ?? null,
       parentConv,
+      o.operatorSelectedModel === true,
     );
     if (o.allowedModels != null && !o.allowedModels.includes(selectedModel))
       throw new ValueError("model_not_allowed");

@@ -1,7 +1,7 @@
-// Persist salt/PBKDF2 hash only, never plaintext. PBKDF2 runs off-loop.
-// Valid auth.json wins over env salt/hash; only neither enables open mode.
-// Read credentials per call; HMAC cookies use the current hash, so password
-// rotation revokes earlier cookies.
+// Atomic 0600 auth.json holds password hashes and optional two_factor state.
+// Off-loop PBKDF2; flock serializes code use; malformed factors fail closed.
+// Factor changes revoke cookies, not backend keys. Recovery: stop, remove
+// DATA_DIR/auth.json, restart. Restores env password (else open); clears 2FA.
 
 import {
   createHash,
@@ -10,14 +10,23 @@ import {
   randomBytes,
   timingSafeEqual,
 } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname } from "node:path";
 import { promisify } from "node:util";
 
 import { FONT_SANS } from "../themes/fonts";
-import { brandingFile, readBrand } from "../branding";
+import { brandingFile, brandResponse, readBrand } from "../branding";
 import { readTheme } from "../themes";
 import { parsePythonJson } from "../utils/py_compact_json";
+
+import { flockExclusive } from "../utils/flock";
+import {
+  acceptedStep,
+  equalDigest,
+  newTotpSecret,
+  recoveryCodes,
+  recoveryHash,
+} from "./totp";
 
 const pbkdf2 = promisify(pbkdf2Callback);
 
@@ -26,6 +35,24 @@ export const COOKIE_DAYS = 30;
 export const PBKDF2_ITERS = 600_000;
 
 export type Creds = readonly [salt: string, hash: string];
+
+interface CredentialRecord {
+  salt: string;
+  hash: string;
+  session_key?: string;
+  two_factor?: {
+    secret: string;
+    last_step: number;
+    recovery_hashes: string[];
+  };
+}
+
+interface PendingSetup {
+  secret: string;
+  binding: string;
+  version: string;
+  expires: number;
+}
 
 const pyError = (name: string, message: string) =>
   Object.assign(new Error(message), { name });
@@ -92,6 +119,7 @@ export interface OperatorAuthOptions {
   readonly displayName: string;
   /** config THEMES_FILE; the login page takes the selected theme's colours. */
   readonly themesFile?: string;
+  readonly defaultIconUrl?: () => Promise<string>;
   /** Epoch seconds. */
   readonly now?: () => number;
 }
@@ -101,18 +129,28 @@ export class OperatorAuth {
   private readonly env: OperatorAuthOptions["env"];
   private readonly displayName: string;
   private readonly themesFile: string | undefined;
+  private readonly defaultIconUrl: OperatorAuthOptions["defaultIconUrl"];
   private readonly now: () => number;
+  private pending: PendingSetup | null = null;
+  private passwords: Promise<unknown> = Promise.resolve();
+
+  /** Serialize password/code attempts and session-changing handlers. */
+  withPasswordLock<T>(work: () => Promise<T>): Promise<T> {
+    const task = this.passwords.then(work);
+    this.passwords = task.catch(() => {});
+    return task;
+  }
 
   constructor(options: OperatorAuthOptions) {
     this.authFile = options.authFile;
     this.env = options.env;
     this.displayName = options.displayName;
     this.themesFile = options.themesFile;
+    this.defaultIconUrl = options.defaultIconUrl;
     this.now = options.now ?? (() => Date.now() / 1000);
   }
 
-  // (salt, hash) from the file, or null when missing, unreadable or malformed.
-  async fileCreds(): Promise<Creds | null> {
+  private async fileRecord(): Promise<CredentialRecord | null> {
     let data: unknown;
     try {
       const raw = await readFile(this.authFile);
@@ -135,7 +173,28 @@ export class OperatorAuth {
     } catch {
       return null;
     }
-    return [salt, hash];
+    if (
+      (record.session_key !== undefined &&
+        (typeof record.session_key !== "string" ||
+          !/^[a-f0-9]{64}$/.test(record.session_key))) ||
+      (record.two_factor !== undefined && !validFactor(record.two_factor))
+    )
+      throw new Error(
+        "invalid sign-in configuration; reset sign-in on the server",
+      );
+    return record as unknown as CredentialRecord;
+  }
+
+  async fileCreds(): Promise<Creds | null> {
+    const record = await this.fileRecord();
+    return record ? [record.salt, record.hash] : null;
+  }
+
+  private async currentRecord(): Promise<CredentialRecord | null> {
+    const record = await this.fileRecord();
+    if (record) return record;
+    const creds = this.envCreds();
+    return creds ? { salt: creds[0], hash: creds[1] } : null;
   }
 
   envCreds(): Creds | null {
@@ -154,10 +213,15 @@ export class OperatorAuth {
   }
 
   async verifyPassword(password: string): Promise<boolean> {
-    const creds = await this.currentCreds();
-    // Invariant: No hash means validation fails closed.
-    if (!creds) return false;
-    const [salt, want] = creds;
+    const record = await this.currentRecord();
+    return record !== null && this.passwordMatches(password, record);
+  }
+
+  private async passwordMatches(
+    password: string,
+    record: CredentialRecord,
+  ): Promise<boolean> {
+    const { salt, hash: want } = record;
     const digest = await pbkdf2(
       utf8(password),
       pyFromHex(salt),
@@ -178,24 +242,173 @@ export class OperatorAuth {
       32,
       "sha256",
     );
+    await this.withLock(async () => {
+      const previous = await this.currentRecord();
+      await this.persist({
+        ...previous,
+        salt: Buffer.from(salt).toString("hex"),
+        hash: digest.toString("hex"),
+      });
+      this.pending = null;
+    });
+  }
+
+  private async withLock<T>(action: () => Promise<T>): Promise<T> {
     await mkdir(dirname(this.authFile), { recursive: true });
-    const tmp = `${this.authFile}.tmp`;
-    await writeFile(
-      tmp,
-      `{"salt": "${Buffer.from(salt).toString("hex")}", "hash": "${digest.toString("hex")}"}`,
+    const path = `${this.authFile}.lock`;
+    const handle = await open(path, "a", 0o600);
+    try {
+      const unlock = await flockExclusive(handle.fd, path);
+      try {
+        return await action();
+      } finally {
+        unlock();
+      }
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private async persist(record: CredentialRecord): Promise<void> {
+    const tmp = `${this.authFile}.${randomBytes(8).toString("hex")}.tmp`;
+    const handle = await open(tmp, "wx", 0o600);
+    try {
+      await handle.writeFile(JSON.stringify(record));
+      await handle.close();
+      await rename(tmp, this.authFile);
+    } finally {
+      await handle.close();
+      await unlink(tmp).catch(() => {});
+    }
+  }
+
+  async twoFactorEnabled(): Promise<boolean> {
+    return !!(await this.currentRecord())?.two_factor;
+  }
+
+  async verifySignIn(password: string, code = ""): Promise<boolean> {
+    return this.withLock(() => this.acceptSignIn(password, code));
+  }
+
+  async signIn(password: string, code = ""): Promise<string | null> {
+    return this.withLock(async () =>
+      (await this.acceptSignIn(password, code)) ? this.makeToken() : null,
     );
-    await rename(tmp, this.authFile);
+  }
+
+  private async acceptSignIn(password: string, code: string): Promise<boolean> {
+    const record = await this.currentRecord();
+    if (!record || !(await this.passwordMatches(password, record)))
+      return false;
+    if (!record.two_factor) return true;
+    if (!this.consumeCode(record, code)) return false;
+    await this.persist(record);
+    return true;
+  }
+
+  private consumeCode(record: CredentialRecord, code: string): boolean {
+    const factor = record.two_factor!;
+    const step = acceptedStep(
+      factor.secret,
+      code,
+      this.now(),
+      factor.last_step,
+    );
+    const hash = recoveryHash(code);
+    let index = -1;
+    factor.recovery_hashes.forEach((stored, candidate) => {
+      if (equalDigest(stored, hash)) index = candidate;
+    });
+    if (step !== null) factor.last_step = step;
+    else if (index !== -1) factor.recovery_hashes.splice(index, 1);
+    else return false;
+    return true;
+  }
+
+  async beginTwoFactor(
+    password: string,
+    binding: string,
+  ): Promise<{ secret: string; url: string } | null> {
+    return this.withLock(async () => {
+      const record = await this.currentRecord();
+      if (
+        !record ||
+        record.two_factor ||
+        !(await this.passwordMatches(password, record))
+      )
+        return null;
+      const secret = newTotpSecret();
+      this.pending = {
+        secret,
+        binding,
+        version: recoveryHash(JSON.stringify(record)),
+        expires: this.now() + 600,
+      };
+      return {
+        secret: secret.match(/.{4}/g)!.join(" "),
+        url: `otpauth://totp/${encodeURIComponent(this.displayName)}?secret=${secret}&issuer=${encodeURIComponent(this.displayName)}&algorithm=SHA1&digits=6&period=30`,
+      };
+    });
+  }
+
+  async enableTwoFactor(
+    password: string,
+    code: string,
+    binding: string,
+  ): Promise<string[] | null> {
+    return this.withLock(async () => {
+      const record = await this.currentRecord();
+      const pending = this.pending;
+      if (
+        !record ||
+        record.two_factor ||
+        !pending ||
+        pending.expires < this.now() ||
+        !equalDigest(pending.binding, binding) ||
+        !equalDigest(pending.version, recoveryHash(JSON.stringify(record))) ||
+        !(await this.passwordMatches(password, record))
+      )
+        return null;
+      const step = acceptedStep(pending.secret, code, this.now(), -1);
+      if (step === null) return null;
+      const codes = recoveryCodes();
+      record.two_factor = {
+        secret: pending.secret,
+        last_step: step,
+        recovery_hashes: codes.map(recoveryHash),
+      };
+      record.session_key = randomBytes(32).toString("hex");
+      await this.persist(record);
+      this.pending = null;
+      return codes;
+    });
+  }
+
+  async disableTwoFactor(password: string, code: string): Promise<boolean> {
+    return this.withLock(async () => {
+      const record = await this.currentRecord();
+      if (
+        !record?.two_factor ||
+        !(await this.passwordMatches(password, record)) ||
+        !this.consumeCode(record, code)
+      )
+        return false;
+      delete record.two_factor;
+      record.session_key = randomBytes(32).toString("hex");
+      await this.persist(record);
+      this.pending = null;
+      return true;
+    });
   }
 
   private async signingKey(): Promise<Uint8Array> {
-    const creds = await this.currentCreds();
-    if (!creds) throw new Error("no auth credential configured");
-    return new Uint8Array(
-      createHash("sha256")
-        .update(pyFromHex(creds[1]))
-        .update(":cookie-signing")
-        .digest(),
-    );
+    const record = await this.currentRecord();
+    if (!record) throw new Error("no auth credential configured");
+    const hash = createHash("sha256")
+      .update(pyFromHex(record.hash))
+      .update(":cookie-signing");
+    if (record.session_key) hash.update(record.session_key);
+    return new Uint8Array(hash.digest());
   }
 
   /** A cookie value `<exp>.<hmac>` valid for COOKIE_DAYS. */
@@ -229,15 +442,19 @@ export class OperatorAuth {
     value = "",
     themeCss = "",
     name = this.displayName,
+    twoFactor = false,
   ): string {
     const tokens: Record<string, string> = {
       __APP__: htmlEscape(name),
       __ERROR__: htmlEscape(error),
       __VALUE__: htmlEscape(value),
       __THEME__: themeCss,
+      __CODE__: twoFactor
+        ? '<label>Authenticator or recovery code<input name="code" autocomplete="one-time-code" autocapitalize="off" spellcheck="false" required maxlength="64"></label>'
+        : "",
     };
     return LOGIN_HTML.replace(
-      /__APP__|__ERROR__|__VALUE__|__THEME__/gu,
+      /__APP__|__ERROR__|__VALUE__|__THEME__|__CODE__/gu,
       (token) => tokens[token]!,
     );
   }
@@ -248,8 +465,40 @@ export class OperatorAuth {
     const brand = this.themesFile
       ? await readBrand(brandingFile(dirname(this.themesFile)))
       : null;
-    return this.loginHtml(error, value, css, brand?.name ?? this.displayName);
+    const html = this.loginHtml(
+      error,
+      value,
+      css,
+      brand?.name ?? this.displayName,
+      await this.twoFactorEnabled(),
+    );
+    const icon =
+      (brand && brandResponse(brand, this.displayName).icon) ??
+      (await this.defaultIconUrl?.());
+    return icon
+      ? html.replace(
+          "</head>",
+          `<link rel="icon" href="${htmlEscape(icon)}"></head>`,
+        )
+      : html;
   }
+}
+
+function validFactor(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const factor = value as Record<string, unknown>;
+  return (
+    typeof factor.secret === "string" &&
+    /^[A-Z2-7]{32}$/.test(factor.secret) &&
+    Number.isSafeInteger(factor.last_step) &&
+    Number(factor.last_step) >= -1 &&
+    Array.isArray(factor.recovery_hashes) &&
+    factor.recovery_hashes.length <= 10 &&
+    factor.recovery_hashes.every(
+      (hash: unknown) =>
+        typeof hash === "string" && /^[a-f0-9]{64}$/.test(hash),
+    )
+  );
 }
 
 /** A fixed-size, content-free identity for a session cookie. */
@@ -268,12 +517,13 @@ export const LOGIN_HTML = `<!doctype html><html><head><meta charset="utf-8">
     background:var(--bg, Canvas); color:var(--text, CanvasText);
     font:15px/1.6 ${FONT_SANS}; }
   form { background:var(--panel, Canvas); border:1px solid var(--border, GrayText); border-radius:14px;
-    padding:32px 36px; width:320px; display:flex; flex-direction:column; gap:14px; }
+    box-sizing:border-box; padding:24px; width:min(392px, calc(100vw - 32px)); display:flex; flex-direction:column; gap:14px; }
   .dot { width:36px; height:36px; border-radius:10px; margin:0 auto 2px;
     background:linear-gradient(135deg, var(--accent, AccentColor), var(--accent-deep, AccentColor));
     box-shadow:0 0 30px color-mix(in srgb, var(--accent, AccentColor) 30%, transparent); }
   h1 { font-size:16px; font-weight:600; text-align:center; margin:0 0 6px; }
-  input { background:var(--panel-2, Field); border:1px solid var(--border, GrayText); border-radius:10px;
+  label { display:flex; flex-direction:column; gap:4px; }
+  input { min-width:0; background:var(--panel-2, Field); border:1px solid var(--border, GrayText); border-radius:10px;
     padding:10px 14px; color:var(--text, FieldText); font:inherit; outline:none; }
   input:focus { border-color:var(--accent-dim, AccentColor);
     box-shadow:0 0 0 3px color-mix(in srgb, var(--accent, AccentColor) 9%, transparent); }
@@ -284,7 +534,8 @@ export const LOGIN_HTML = `<!doctype html><html><head><meta charset="utf-8">
 </style><style id="theme">__THEME__</style></head><body>
 <form method="post" action="/login">
   <div class="dot"></div><h1>__APP__</h1>
-  <input type="password" name="password" value="__VALUE__" placeholder="Password" autofocus autocomplete="current-password">
+  <label>Password<input type="password" name="password" value="__VALUE__" placeholder="Password" autofocus autocomplete="current-password"></label>
+  __CODE__
   <button>Sign in</button>
   <p class="err">__ERROR__</p>
 </form>

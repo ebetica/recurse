@@ -6,6 +6,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -29,7 +30,11 @@ const EVERYTHING = [
   /^tests\/check\.sh$/,
   /^scripts\/patches\//,
 ];
-const NO_TESTS = [/^docs\//, /^tests\/live/, /^\.github\//, /\.md$/];
+/** Paths no test observes, and the checks that cover them instead. */
+const NO_TESTS: Array<{ path: RegExp; checks: string[] }> = [
+  { path: /^docs\/|^tests\/live|^\.github\/|\.md$/, checks: [] },
+  { path: /^specs\/tla\//, checks: ["specs/tla/check.sh"] },
+];
 const ALL_BROWSER = [/^web\//];
 const SCANNED = /\.(?:[cm]?[jt]sx?|sh)$/;
 const TEST = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
@@ -58,6 +63,8 @@ export type Plan = {
   groups: string[];
   /** Why the map cannot place the change; empty when it can. */
   uncertain: string[];
+  /** Commands that check changed paths no test observes. */
+  checks: string[];
 };
 
 /** Reverse dependency edges: path -> files whose text names that path. */
@@ -84,17 +91,18 @@ export function dependents(
     const test =
       file.startsWith("tests/") && !/^tests\/(?:checks|dev)\//.test(file);
     const tokens = test
-      ? [...text.matchAll(TOKEN)].map((match) => [match[0], false] as const)
+      ? [...text.matchAll(TOKEN)].map(
+          (match) => [match[0], false, true] as const,
+        )
       : [...text.matchAll(QUOTED)].map((match) => {
           const start = text.lastIndexOf("\n", match.index) + 1;
           const line = text.slice(start, text.indexOf("\n", match.index) >>> 0);
-          return [
-            match[1]!,
-            !IMPORT_LINE.test(line) && LAUNCH_LINE.test(line),
-          ] as const;
+          const imported = IMPORT_LINE.test(line);
+          const launch = !imported && LAUNCH_LINE.test(line);
+          return [match[1]!, launch, imported || launch] as const;
         });
     const targets = new Set<string>();
-    for (const [token, launch] of tokens) {
+    for (const [token, launch, module] of tokens) {
       const before = targets.size;
       const candidates = [posix.join(dir, token), token.replace(/^\/+/, "")];
       if (!token.startsWith("."))
@@ -104,7 +112,8 @@ export function dependents(
         if (/^(?:\.\.?)?$|^\.\.\//.test(candidate)) continue;
         if (`${dir}/`.startsWith(`${candidate}/`)) continue;
         const stem = candidate.replace(/\.js$/, "");
-        for (const path of [candidate, ...SUFFIXES.map((s) => stem + s)])
+        const suffixes = module ? SUFFIXES : [""];
+        for (const path of [candidate, ...suffixes.map((s) => stem + s)])
           if (known.has(path)) targets.add(path);
         if (test)
           for (const path of byDir.get(candidate) ?? []) targets.add(path);
@@ -150,6 +159,14 @@ export function browserGroups(index: string): Map<string, string[]> {
   return groups;
 }
 
+/** Build code that lists web files as bundle inputs, not as imports. */
+const BUNDLE = new Set([
+  "src/build_stamp.cli.ts",
+  "src/launcher/build.cli.ts",
+  "src/local.ts",
+]);
+/** Plans over this many backend tests name the route most of them share. */
+const WIDE = 50;
 const SERVER_ENTRIES = [
   "tests/mobile_browser/common.ts",
   "tests/mobile_browser/browser_test_app.ts",
@@ -184,13 +201,18 @@ export function plan(
   }
   const groups = browserGroups(read(BROWSER_INDEX));
   const browserFiles = new Set([...groups.values()].flat());
+  const via = new Map<string, string>();
   const reach = (path: string, stop = new Set<string>()) => {
     const seen = new Set([path]);
     const queue = [path];
     for (let next = queue.pop(); next !== undefined; next = queue.pop())
       if (!stop.has(next))
         for (const user of reverse.get(next) ?? [])
-          if (!seen.has(user)) (seen.add(user), queue.push(user));
+          if (!seen.has(user)) {
+            seen.add(user);
+            queue.push(user);
+            if (!via.has(user)) via.set(user, next);
+          }
     return seen;
   };
   const members = (users: Set<string>) =>
@@ -203,19 +225,39 @@ export function plan(
   const labels = new Set<string>();
   const notes: string[] = [];
   const frontend: FileChange[] = [];
+  const testsReach = (users: Set<string>) =>
+    [...users].some((user) => TEST.test(user) || browserFiles.has(user));
+  const fixtureUsers = (path: string, users: Set<string>) => {
+    const dirs = path.match(/^tests\/(?:.+\/)?fixtures\/(.+)\/[^/]+$/)?.[1];
+    if (!dirs || testsReach(users)) return users;
+    const owners = files.filter(
+      (file) =>
+        file.startsWith("tests/") &&
+        SCANNED.test(file) &&
+        dirs.split("/").some((dir) => read(file).includes(dir)),
+    );
+    const found = new Set(owners.flatMap((owner) => [...reach(owner)]));
+    return testsReach(found) ? found : users;
+  };
   for (const path of changed) {
-    const users = reach(path);
+    const users = fixtureUsers(
+      path,
+      reach(path, path.startsWith("web/") ? BUNDLE : undefined),
+    );
     for (const user of users) reached.add(user);
     if (path === BROWSER_INDEX) whole.push(`${path} changed`);
-    else if (ALL_BROWSER.some((rule) => rule.test(path))) {
+    else if (
+      ALL_BROWSER.some((rule) => rule.test(path)) &&
+      !NO_TESTS.some((rule) => rule.path.test(path))
+    ) {
       if (map)
         frontend.push(...changes.filter((change) => change.path === path));
       else whole.push(`${path} changed and there is no browser coverage map`);
     } else if (
       EVERYTHING.some((rule) => rule.test(path)) ||
       (present.has(path) &&
-        !NO_TESTS.some((rule) => rule.test(path)) &&
-        ![...users].some((user) => TEST.test(user) || browserFiles.has(user)))
+        !NO_TESTS.some((rule) => rule.path.test(path)) &&
+        !testsReach(users))
     )
       everything.push(path);
     else if (!map || path.startsWith("tests/mobile_browser/"))
@@ -266,6 +308,21 @@ export function plan(
   const tests = [...reached]
     .filter((path) => TEST.test(path) && present.has(path))
     .sort();
+  const backend = tests.filter((path) => BACKEND_TESTS.test(path));
+  if (!everything.length && backend.length > WIDE) {
+    const routes = new Map<string, number>();
+    for (const test of backend) {
+      const chain = [test];
+      for (let next = via.get(test); next && !chain.includes(next); )
+        (chain.unshift(next), (next = via.get(next)));
+      const route = chain.slice(0, 3).join(" <- ");
+      routes.set(route, (routes.get(route) ?? 0) + 1);
+    }
+    const [route, count] = [...routes].sort((a, b) => b[1] - a[1])[0]!;
+    notes.push(
+      `${count} of ${backend.length} backend tests start with: ${route}`,
+    );
+  }
   const ordered = [...groups.keys()].filter((label) => labels.has(label));
   const reason = everything.length
     ? `${everything.join(", ")}: a build input, or no test reaches it`
@@ -276,7 +333,7 @@ export function plan(
         : "";
   return {
     everything,
-    backend: tests.filter((path) => BACKEND_TESTS.test(path)),
+    backend,
     web: tests.filter((path) => WEB_TESTS.test(path)),
     browser: reason ? null : ordered,
     browserReason: reason,
@@ -285,6 +342,9 @@ export function plan(
     uncertain: everything.length
       ? [`${everything.join(", ")}: a build input, or no test reaches it`]
       : whole,
+    checks: NO_TESTS.filter((rule) =>
+      changed.some((path) => rule.path.test(path)),
+    ).flatMap((rule) => rule.checks),
   };
 }
 
@@ -296,6 +356,7 @@ export function commands(result: Plan): string[] {
       "bun run test:backend",
       "bun run test",
       "bun run test:browser",
+      ...result.checks,
     ];
   const lines: string[] = [];
   if (
@@ -311,6 +372,7 @@ export function commands(result: Plan): string[] {
     lines.push(`# browser: ${result.browserReason}`, "bun run test:browser");
   else if (result.browser.length)
     lines.push(`bun ${BROWSER_INDEX} ${result.browser.join(" ")}`);
+  lines.push(...result.checks);
   if (!lines.length) lines.push("# no tests reach this change");
   return lines;
 }
@@ -367,7 +429,7 @@ function mapPath(args: string[]): string | null {
   return data ? posix.join(data, "test-maps/coverage_map.json") : null;
 }
 
-/** Run the browser suite with coverage on and write the map. */
+/** Run the browser suite with coverage on; map the groups that passed. */
 function record(target: string): number {
   const scripts = JSON.parse(
     readFileSync(posix.join(ROOT, "package.json"), "utf8"),
@@ -382,31 +444,35 @@ function record(target: string): number {
   );
   if (build.exitCode !== 0) return build.exitCode ?? 1;
   const out = mkdtempSync(posix.join(tmpdir(), "coverage-record-"));
-  const run = Bun.spawnSync(["bun", BROWSER_INDEX], {
+  // Invariant: Eight recording workers starve each other's pages past the
+  // suite's 5 s waits; four run at about the normal suite's group speed.
+  const run = Bun.spawnSync(["bun", BROWSER_INDEX, "--workers", "4"], {
     cwd: ROOT,
     env: { ...process.env, RECURSE_BROWSER_COVERAGE: out },
     stdout: "inherit",
     stderr: "inherit",
   });
-  if (run.exitCode !== 0) {
-    console.error(
-      `record: the browser suite failed; no map written (records in ${out})`,
-    );
-    return run.exitCode ?? 1;
+  if (!readdirSync(out).some((name) => name.endsWith(".json"))) {
+    console.error(`record: no browser group passed; no map written`);
+    return run.exitCode || 1;
   }
   merge(out, target);
   rmSync(out, { recursive: true, force: true });
-  return 0;
+  return run.exitCode ?? 1;
 }
 
 /** Merge per-group records from a recording run into one map. */
 function merge(out: string, target: string): void {
   const files = git("ls-files").split("\n").filter(Boolean);
-  const groups = [
+  let groups = [
     ...browserGroups(
       readFileSync(posix.join(ROOT, BROWSER_INDEX), "utf8"),
     ).keys(),
-  ].filter((label) => existsSync(posix.join(out, `${label}.json`)));
+  ];
+  const failed = groups.filter(
+    (label) => !existsSync(posix.join(out, `${label}.json`)),
+  );
+  groups = groups.filter((label) => !failed.includes(label));
   const map: CoverageMap = {
     commit: git("describe", "--always", "--dirty", "--abbrev=12").trim(),
     date: new Date().toISOString(),
@@ -440,6 +506,10 @@ function merge(out: string, target: string): void {
   console.log(
     `record: wrote ${target} (${map.commit}, ${groups.length} groups)`,
   );
+  if (failed.length)
+    console.error(
+      `record: left out failed groups; plans that use the map run them: ${failed.join(" ")}`,
+    );
 }
 
 if (import.meta.main) {

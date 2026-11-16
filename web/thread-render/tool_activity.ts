@@ -23,6 +23,8 @@ const SETTLED_TOOL_PHRASES: Record<string, string> = {
   clear: "cleared context",
   compact: "compacted context",
   wait: "waited",
+  artifact: "used Artifacts",
+  recurse_settings: "used Recurse settings",
 };
 
 /** Describe safe, named tools not represented by the aggregate stat fields. */
@@ -31,20 +33,26 @@ export function namedToolSummary(tools: readonly ToolEntry[] | undefined): {
   count: number;
 } {
   const counts = new Map<string, number>();
+  let count = 0;
   for (const tool of tools || []) {
     if (tool.status === "truncated" || tool.stat.kind !== "other") continue;
-    const name = tool.name?.toLowerCase().replaceAll("-", "_");
-    if (name && (name === "publish_attachment" || SETTLED_TOOL_PHRASES[name]))
-      counts.set(name, (counts.get(name) || 0) + (tool.count ?? 1));
+    const rawName = tool.name?.toLowerCase().replaceAll("-", "_");
+    const name = rawName === "publish_attachment" ? "publish" : rawName;
+    if (!name || (name !== "publish" && !SETTLED_TOOL_PHRASES[name])) continue;
+    const calls = tool.count ?? 1;
+    const items = name === "publish" ? (tool.published_files ?? calls) : calls;
+    if (!items) continue;
+    counts.set(name, (counts.get(name) || 0) + items);
+    count += calls;
   }
   const parts = [...counts].map(([name, count]) =>
-    name === "publish_attachment"
+    name === "publish"
       ? `published ${count} file${count === 1 ? "" : "s"}`
       : count === 1
         ? SETTLED_TOOL_PHRASES[name]
         : `${SETTLED_TOOL_PHRASES[name]} ${count} times`,
   );
-  return { parts, count: [...counts.values()].reduce((sum, n) => sum + n, 0) };
+  return { parts, count };
 }
 
 const MAX_ACTIVITY_CHARS = 30;
@@ -260,6 +268,26 @@ export function liveActivityState(
     title: "Starting agent…",
     key: "starting",
   };
+}
+
+export type LiveTitleState = {
+  turnKey: string;
+  title: string;
+  shownAt: number;
+};
+
+/** Hold a thinking title long enough to read; leave prior state untouched. */
+export function holdLiveTitle(
+  previous: LiveTitleState | undefined,
+  turnKey: string,
+  title: string,
+  now: number,
+): { state: LiveTitleState; changed: boolean } {
+  if (!previous || previous.turnKey !== turnKey)
+    return { state: { turnKey, title, shownAt: now }, changed: false };
+  if (previous.title === title || now - previous.shownAt < 1500)
+    return { state: previous, changed: false };
+  return { state: { turnKey, title, shownAt: now }, changed: true };
 }
 
 export type ActivityStatusKind = "panel" | "summary" | "waiting";

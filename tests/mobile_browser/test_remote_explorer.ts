@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect as browserExpect } from "playwright/test";
@@ -25,18 +25,14 @@ export const tests: BrowserTest[] = [
       process.env.RECURSE_AGENT_TMPDIR || tmpdir(),
       "remote-explorer-shots",
     );
-    const source =
-      "export const location = 'Connected remote working folder';\n";
+    let source = "export const location = 'Connected remote working folder';\n";
     const setup = await browser.newContext();
     try {
       await mkdir(root);
       await mkdir(homeRoot);
       await mkdir(shots, { recursive: true });
       await writeFile(join(root, "remote-only.ts"), source);
-      await writeFile(
-        join(homeRoot, "home-only.ts"),
-        "Home folder must not be read\n",
-      );
+      await writeFile(join(homeRoot, "home-only.ts"), "Sibling folder file\n");
       expect(await Bun.spawn(["git", "init", "-q", root]).exited).toBe(0);
       const login = await fetch(remote.base + "login", {
         method: "POST",
@@ -93,13 +89,26 @@ export const tests: BrowserTest[] = [
         ).ok(),
       ).toBeTrue();
       const proxy = `${base}api/backends/ExplorerRemote/conversations/${agent}/tree`;
-      for (const suffix of [
-        "/file?path=../home/home-only.ts",
-        "/raw?path=../home/home-only.ts",
-      ]) {
-        const refused = await setup.request.get(proxy + suffix);
-        expect(refused.status()).toBe(422);
-      }
+      const sibling = await setup.request.get(
+        proxy + "/raw?path=../home/home-only.ts",
+      );
+      expect(sibling.status()).toBe(200);
+      expect(await sibling.text()).toBe("Sibling folder file\n");
+      const preview = await setup.request.get(
+        proxy + "/file?path=../home/home-only.ts",
+      );
+      expect(preview.status()).toBe(200);
+      expect(await preview.json()).toEqual({
+        root: homeRoot,
+        path: "home-only.ts",
+        canonicalPath: join(homeRoot, "home-only.ts"),
+        promptResource: false,
+        size: Buffer.byteLength("Sibling folder file\n"),
+        version: expect.any(String),
+        kind: "text",
+        text: "Sibling folder file\n",
+        next: null,
+      });
       const range = await setup.request.get(
         proxy + "/raw?path=remote-only.ts",
         {
@@ -165,6 +174,23 @@ export const tests: BrowserTest[] = [
           let file = width === 1280 ? page.locator(".pane-col.file-tab") : tree;
           await browserExpect(file.locator(".explorer-source")).toHaveText(
             source,
+          );
+          await file.getByRole("button", { name: "Edit", exact: true }).click();
+          source += `export const savedAt${width} = true;\n`;
+          await file.getByRole("textbox", { name: "File text" }).fill(source);
+          const saved = page.waitForResponse(
+            (response) =>
+              response.request().method() === "PUT" &&
+              response.url().startsWith(proxy + "/file?"),
+          );
+          await file.getByRole("button", { name: "Save", exact: true }).click();
+          expect((await saved).status()).toBe(200);
+          await file.getByText("Saved.", { exact: true }).waitFor();
+          expect(await readFile(join(root, "remote-only.ts"), "utf8")).toBe(
+            source,
+          );
+          expect(await readFile(join(homeRoot, "home-only.ts"), "utf8")).toBe(
+            "Sibling folder file\n",
           );
           const download = page.waitForEvent("download");
           await file

@@ -45,6 +45,7 @@ export interface Tools {
   mcp: InstanceType<Runtime["McpServers"]>;
   sandbox: InstanceType<Runtime["CodemodeSandbox"]>;
   captures: RequestCaptures;
+  reviewCaptures: RequestCaptures;
   warmer: ReturnType<Runtime["createCacheWarm"]>;
   /** Model-bound copies of messages: the clock, then Codex replay cleanup. */
   transforms: ReturnType<Runtime["createModelClock"]>;
@@ -52,6 +53,12 @@ export interface Tools {
   scope(): Promise<{ cwd: string; env: Record<string, string> }>;
   /** Close the shells, search, codemode workers and MCP servers. */
   release(shellStop?: Promise<void>): Promise<void>;
+}
+
+function reviewCaptureFailed(host: DurableHost, cid: string): void {
+  try {
+    host.deps.log("safety_review_capture_failed", { cid }, WARNING);
+  } catch {}
 }
 
 /** Log a failure as `event`, with the conversation and the error's message. */
@@ -131,6 +138,11 @@ export async function installTools(
     });
   const contextExtension = rt.createContext({
     models: target.models,
+    idleCompactionCacheMiss: (id) =>
+      host.deps.log("durable_idle_compaction_cache_miss", {
+        cid: owner(target, id),
+        cache_read_tokens: 0,
+      }),
     maximumContextWindow: () => host.deps.maximumContextWindow?.() ?? Infinity,
     currentModel: () =>
       modelRef(
@@ -250,7 +262,21 @@ export async function installTools(
   const warmer = rt.createCacheWarm({
     models: () => target.requestModels!,
     enabled: () => settingsConfig.keepPromptCacheWarm(),
-    busy: (id) => host.cacheWarmBusy(id),
+    compactIdle: () => settingsConfig.compactIdleConversations(),
+    minimumTokens: () => settingsConfig.idleCompactionMinimumTokens(),
+    compact: async (id, allowed) => {
+      const conversation = [...target.followed.values()].find(
+        (conversation) => owner(target, conversation.id) === id,
+      );
+      if (conversation && target.harness && allowed())
+        await contextExtension.compact(
+          target.harness,
+          conversation,
+          context,
+          allowed,
+        );
+    },
+    busy: (id, includeBackground) => host.cacheWarmBusy(id, includeBackground),
     current: (id, model) => {
       const record = host.deps.load(id);
       if (host.closing || host.deleting(id) || !record) return false;
@@ -272,29 +298,34 @@ export async function installTools(
   });
   host.cacheWarmers.add(warmer);
   registry.install(warmer.extension);
-  const captures = new rt.RequestCaptures(
-    (sessionId) => target.sessions.get(sessionId) ?? cid,
-    {
-      // Invariant: A side conversation has no durable directory of its own;
-      // its capture file lives in its parent's, which a clear retires.
-      path: (id) =>
-        join(
-          path,
-          "..",
-          id === cid ? "last-request.json" : `last-request-${id}.json`,
-        ),
-      idleMs: host.deps.captureIdleMs ?? CONTEXT_RETENTION_MS,
-      failed: (id, error) =>
-        host.deps.log(
-          "durable_capture_write_failed",
-          { cid: id, error: String(error) },
-          WARNING,
-        ),
-    },
-    (id, capture, model, requestContext, requestOptions) =>
-      warmer.capture(id, capture, model, requestContext, requestOptions),
-    host.captureWorker,
-  );
+  const createCaptures = (review: boolean) =>
+    new rt.RequestCaptures(
+      (sessionId) => target.sessions.get(sessionId) ?? cid,
+      {
+        // Invariant: A side conversation has no durable directory of its own;
+        // its capture file lives in its parent's, which a clear retires.
+        path: (id) =>
+          join(
+            path,
+            "..",
+            `${review ? "last-review-request" : "last-request"}${id === cid ? "" : `-${id}`}.json`,
+          ),
+        idleMs: host.deps.captureIdleMs ?? CONTEXT_RETENTION_MS,
+        failed: (id, error) =>
+          review
+            ? reviewCaptureFailed(host, id)
+            : host.deps.log(
+                "durable_capture_write_failed",
+                { cid: id, error: String(error) },
+                WARNING,
+              ),
+      },
+      review
+        ? undefined
+        : (id, capture, model, requestContext, requestOptions) =>
+            warmer.capture(id, capture, model, requestContext, requestOptions),
+      host.captureWorker,
+    );
   return {
     registry,
     context: contextExtension,
@@ -303,7 +334,8 @@ export async function installTools(
     search,
     mcp,
     sandbox,
-    captures,
+    captures: createCaptures(false),
+    reviewCaptures: createCaptures(true),
     warmer,
     transforms,
     scope,
@@ -342,11 +374,27 @@ export function installHooks(
     statsRoot: baseEnv.RECURSE_SAFETY_DIR,
   });
   const mcpServers = new Map<string, string>();
+  const catalog = rt.trustedModelCatalog(target.models);
+  const reviewModels =
+    host.deps.usageLimits && catalog !== target.models
+      ? rt.observeUsageLimits(catalog, host.deps.usageLimits)
+      : catalog;
   const review = rt.createDurableSafety({
     mcpServer: (name) => mcpServers.get(name),
     models: target.models,
+    reviewModels: (id) =>
+      rt.captureRequests(reviewModels, tools.reviewCaptures, id, (failedId) =>
+        reviewCaptureFailed(host, failedId),
+      ),
     configDir: host.deps.piAgentDir,
+    log: (event, fields) => host.deps.log(event, fields, WARNING),
     trusted: () => trusted,
+    ...(host.deps.config
+      ? {
+          modelPolicy: (acting: { provider: string; id: string }) =>
+            host.deps.config!.trustedModelPolicy(acting),
+        }
+      : {}),
     shells: () => host.shells(cid).items,
     agent: async (api?: { conversationId: Conversation["id"] }) => {
       const id = owner(target, api?.conversationId);

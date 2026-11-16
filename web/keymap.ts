@@ -84,8 +84,6 @@ export type KeyTarget =
   | "rename"
   | "dialog"
   | "editor"
-  | "control"
-  | "window-control"
   | "finder"
   | "pane";
 
@@ -97,6 +95,7 @@ export interface KeyContext {
   interruptible: boolean;
   deletable: boolean;
   paneAvailable: boolean;
+  chatFullscreen?: boolean;
   textSelected: boolean;
   commentAvailable?: boolean;
 }
@@ -506,10 +505,7 @@ export function reduceKeymap(
       false,
     );
 
-  const windowTarget =
-    context.target === "pane" ||
-    context.target === "chrome" ||
-    context.target === "window-control";
+  const windowTarget = context.target === "pane" || context.target === "chrome";
   if (state.mode === "resize" && windowTarget) {
     if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
       return result(state, null, false);
@@ -583,13 +579,6 @@ export function reduceKeymap(
         null,
         true,
       );
-    if (context.target === "window-control") {
-      const binding = normalBinding(event.key);
-      if (binding?.command === "window-fullscreen")
-        return event.repeat
-          ? result(initialKeymapState(windowMode), null, true)
-          : action(binding.command, windowMode);
-    }
   }
 
   if (context.target === "pane") {
@@ -641,8 +630,6 @@ export function reduceKeymap(
     if (event.key === "Escape") return action("cancel-local");
     if (context.target === "rename" && event.key === "Enter")
       return action("commit-rename");
-    if (context.target === "control" || context.target === "window-control")
-      return result(initialKeymapState(), null, false);
     return result(
       initialKeymapState(context.target === "rename" ? "rename" : "dialog"),
       null,
@@ -723,7 +710,10 @@ export function reduceKeymap(
 
   // Invariant: Escape is cancellation/navigation only. Interrupt is
   // deliberately harder: qq while already in Normal on the open running agent.
-  if (event.key === "Escape") return result(initialKeymapState(), null, true);
+  if (event.key === "Escape")
+    return context.chatFullscreen
+      ? action("cancel-local")
+      : result(initialKeymapState(), null, true);
   if (event.key === "q") {
     if (event.repeat) return result(state, null, true);
     if (!context.interruptible) return action("unavailable-stop");

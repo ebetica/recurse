@@ -16,9 +16,10 @@ export type ReparentReason =
 export function reparentValidity(
   nodes: Record<string, TreeNode>,
   sourceId: string,
-  targetId: string,
+  targetId: string | null,
 ): ReparentReason {
   if (!sourceId || !nodes[sourceId]) return "missing-source";
+  if (targetId === null) return nodes[sourceId].parent === null ? "noop" : "ok";
   if (!targetId || !nodes[targetId]) return "missing-target";
   if (targetId === sourceId) return "self";
   if (descendantIds(nodes, sourceId).includes(targetId)) return "descendant";
@@ -41,7 +42,7 @@ export function isValidDropTarget(
 export function canDrop(
   nodes: Record<string, TreeNode>,
   sourceId: string,
-  targetId: string,
+  targetId: string | null,
 ): boolean {
   const reason = reparentValidity(nodes, sourceId, targetId);
   return reason === "ok" || reason === "noop";

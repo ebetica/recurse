@@ -1,5 +1,5 @@
-// Project bounded Durable entries/documents into ConversationView rows.
-// Hold the oldest entry for its predecessor; retries are page-stable.
+// Project bounded Durable entries/documents; hold oldest for its predecessor.
+// Retries are page-stable; successful tasks fence captured live generations.
 // Storage generation identifies sessions across clear, not cache eviction.
 // Keep provenance and model text; artifact IDs name real tasks or entries.
 import type {
@@ -117,12 +117,15 @@ export interface RowState {
   calls: Map<string, string>;
   /** The current turn's newest reply that thought, as a live overlay. */
   thinking: ProjectionEntry | null;
+  /** Highest successfully completed generation task id. */
+  completedGeneration: number;
 }
 
 export const rowState = (): RowState => ({
   tokens: null,
   calls: new Map(),
   thinking: null,
+  completedGeneration: 0,
 });
 
 const importedEntry = (entry: EntryRecord): Rec | null =>
@@ -174,6 +177,14 @@ export function projectionEntries(
     ) {
       if (message.role === "user") state.thinking = null;
       if (entry.kind === "pi.assistant") {
+        if (
+          entry.byTaskId !== undefined &&
+          ["stop", "length", "toolUse"].includes(String(message.stopReason))
+        )
+          state.completedGeneration = Math.max(
+            state.completedGeneration,
+            Number(entry.byTaskId),
+          );
         // Invariant: Only the newest tool round can still be running.
         const calls = toolCalls(message);
         if (calls.length) state.calls.clear();
@@ -297,7 +308,11 @@ export function liveEntries(
   const out: ProjectionEntry[] = [];
   if (live?.run && state.thinking) out.push(state.thinking);
   const message = live?.generation?.message as Rec | undefined;
-  if (message && live?.run) {
+  if (
+    message &&
+    live?.run &&
+    Number(live.run.taskId) > state.completedGeneration
+  ) {
     // Invariant: Thinking text may arrive only when the step ends: a thinking
     // block marks the step as started, as Pi's live thinking_start does.
     const thinking =

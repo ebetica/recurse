@@ -35,14 +35,18 @@ startMainThreadTiming(
 );
 startBackendDiscovery();
 import { openEffortMenu } from "./models.js";
+import { closeSafetyConfirmation, safetyConfirmationOpen } from "./safety.js";
 import { closePowerbarOverflow } from "./panes/powerbar.js";
 import type { PaneNavigation, TreeNode } from "./types.js";
 import type { WindowCommand } from "./dock/commands.js";
-import { $, inputEl } from "./dom.js";
+import { $, inputEl, scrollEl } from "./dom.js";
+import {
+  isNativeActivationKey,
+  isTextEditorTarget,
+} from "../src/keyboard_target.js";
 import {
   insertTextAtSelection,
   isDialogTarget,
-  isTextEditorTarget,
   shouldTypeToCompose,
 } from "./type_to_compose.js";
 import {
@@ -111,8 +115,9 @@ import {
   preserveUnsentForLogin,
 } from "./composer.js";
 import { startConnectionMonitoring } from "./connection.js";
-installPhonePaneHistory(() =>
-  closeFocusedPaneFromKeyboard(undefined, true, true),
+installPhonePaneHistory(
+  () => closeFocusedPaneFromKeyboard(undefined, true, true),
+  restorePhonePane,
 );
 import { guardLeaveComments, pendingCommentCount } from "./comments.js";
 import { closeSettings, settingsOpen } from "./settings.js";
@@ -129,6 +134,7 @@ import {
   closeFocusedPaneFromKeyboard,
   navigateFocusedPane,
   toggleFocusedPaneFullscreen,
+  restorePhonePane,
 } from "./panes.js";
 import {
   closeSkillAutocomplete,
@@ -258,6 +264,7 @@ function paintKeyState(): void {
     keyState.mode === "interrupt-pending",
   );
   topActionsEl.classList.toggle("prefix-on", keyState.mode === "t-prefix");
+  $("#pane-rail")?.classList.toggle("prefix-on", keyState.mode === "t-prefix");
   topActionsEl.setAttribute("aria-label", "Agent actions");
   const bindings =
     keyState.mode === "g-prefix"
@@ -317,6 +324,7 @@ function flashCancelled(): void {
 function localLayerOpen(): boolean {
   return (
     isRenaming() ||
+    safetyConfirmationOpen() ||
     settingsOpen() ||
     promptOpen() ||
     artifactVersionMenuOpen() ||
@@ -333,6 +341,7 @@ function localLayerOpen(): boolean {
 function closeLocalLayer(): void {
   const activeBefore = document.activeElement;
   let closed =
+    closeSafetyConfirmation() ||
     closeDrawingFromKeyboard() ||
     closeImageFromKeyboard() ||
     closeArtifactVersionMenuKeyboardLayer() ||
@@ -358,30 +367,28 @@ function keyTarget(target: EventTarget | null): KeyTarget {
   const textEditor =
     isTextEditorTarget(target) || isTextEditorTarget(document.activeElement);
   const insidePane = !!paneForTarget(target);
-  const kind = classifyKeyTarget({
+  return classifyKeyTarget({
     composer: element === inputEl,
     rename: !!element?.closest?.(".rename-input"),
     finder: !!element?.closest?.("[data-agent-finder], [data-pane-finder]"),
     insidePane,
     textEditor,
-    interactiveControl: !!element?.closest?.(
-      "button, a[href], summary, [role='button']",
-    ),
     // Invariant: Phone overlays change ARIA, not the pane keyboard contract;
     // desktop fullscreen is only a layout. Pane editors retain native input.
     // The pane menu remains a local dialog because it is outside #panes.
     modalLayer:
+      safetyConfirmationOpen() ||
       settingsOpen() ||
       promptOpen() ||
       artifactVersionMenuOpen() ||
+      drawingEditorOpen() ||
       (paneKeyboardLayerOpen() &&
         !insidePane &&
         !element?.closest?.("#scroll, #sidebar")) ||
-      (!insidePane && isDialogTarget(target)),
+      (!insidePane &&
+        isDialogTarget(target) &&
+        !element?.closest?.("dialog.image-popout")),
   });
-  return kind === "control" && element?.closest?.("#main, [data-dock-panel]")
-    ? "window-control"
-    : kind;
 }
 
 function hasTextSelection(target: EventTarget | null): boolean {
@@ -402,17 +409,6 @@ function keyContext(
   event: KeyboardEvent,
   target = keyTarget(event.target),
 ): KeyContext {
-  // Invariant: Activity buttons keep focus after a tap without blocking thread
-  // shortcuts. Enter and Space still activate the focused button natively.
-  if (
-    (target === "control" || target === "window-control") &&
-    event.key !== "Enter" &&
-    event.key !== " " &&
-    (event.target as HTMLElement | null)?.closest?.(
-      "#messages .activity-group-toggle, #messages .turn-expand",
-    )
-  )
-    target = "chrome";
   return {
     now: Date.now(),
     desktop: !primaryPointerIsCoarse(),
@@ -421,6 +417,9 @@ function keyContext(
     interruptible: state.selectedRunning && !localLayerOpen(),
     deletable: !!state.nodes[state.cursorId],
     paneAvailable: paneActionable(),
+    chatFullscreen: document
+      .getElementById("main")
+      ?.classList.contains("fullscreen"),
     textSelected: hasTextSelection(event.target),
     commentAvailable:
       event.key === "c" &&
@@ -554,19 +553,16 @@ function execute(command: KeyCommand | null): void {
       scrollFocusedPane("bottom");
       break;
     case "focus-thread": {
-      const thread = $("#scroll");
-      if (thread) {
-        const focus = () => {
-          thread.tabIndex = -1;
-          thread.focus({ preventScroll: true });
-        };
-        const show = new CustomEvent("recurse:show-chat", {
-          cancelable: true,
-          detail: focus,
-        });
-        dispatchEvent(show);
-        if (!show.defaultPrevented) focus();
-      }
+      const focus = () => {
+        scrollEl.tabIndex = -1;
+        scrollEl.focus({ preventScroll: true });
+      };
+      const show = new CustomEvent("recurse:show-chat", {
+        cancelable: true,
+        detail: focus,
+      });
+      dispatchEvent(show);
+      if (!show.defaultPrevented) focus();
       break;
     }
     case "focus-agents":
@@ -636,11 +632,13 @@ function dispatchKey(event: KeyboardEvent, target?: KeyTarget): boolean {
     },
     keyContext(event, target),
   );
-  setKeyState(result.state);
   if (result.handled) {
     event.preventDefault();
     event.stopPropagation();
+    if (result.command !== "comment" && result.command !== "cancel-local")
+      closeImageFromKeyboard();
   }
+  setKeyState(result.state);
   execute(result.command);
   return result.handled;
 }
@@ -724,15 +722,12 @@ document.addEventListener(
       const element = event.target as HTMLElement | null;
       if (
         !localLayerOpen() &&
-        ["chrome", "control", "window-control"].includes(target) &&
+        target === "chrome" &&
         !element?.closest?.("#model-menu") &&
         !element
           ?.closest?.(".model-box")
           ?.querySelector('[aria-expanded="true"]') &&
-        !(
-          ["Enter", " "].includes(event.key) &&
-          element?.closest?.("button, a[href], summary, select, [role=button]")
-        )
+        !isNativeActivationKey(event.key, event.target)
       )
         relaySideKey(event);
       return;
@@ -766,6 +761,7 @@ document.addEventListener(
       return;
     }
     const higherLayerOpen =
+      safetyConfirmationOpen() ||
       settingsOpen() ||
       promptOpen() ||
       artifactVersionMenuOpen() ||
@@ -888,13 +884,15 @@ document.addEventListener(
       return;
     }
 
-    // Invariant: Enter activates native pane controls, not an unrelated item.
+    // Invariant: Native activation and image arrows keep their local actions.
     if (
-      target === "pane" &&
-      event.key === "Enter" &&
-      eventElement?.closest("button,a,summary,select")
-    )
+      isNativeActivationKey(event.key, event.target) ||
+      (eventElement?.closest("dialog.image-popout") &&
+        ["ArrowLeft", "ArrowRight"].includes(event.key))
+    ) {
+      cancelKeyPrefix();
       return;
+    }
     if (dispatchKey(event, target)) return;
 
     // Invariant: Insert's send/newline behavior stays native on touch. IME
@@ -916,9 +914,7 @@ document.addEventListener(
       }
       return;
     }
-    // Invariant: Native buttons/links and any excluded editor/dialog keep
-    // unclaimed keys — especially Enter activation — rather than falling into
-    // type-to-compose.
+    // Invariant: Editors and dialogs never fall into type-to-compose.
     if (target !== "chrome") return;
 
     // Invariant: Ordinary printable keys may retain #307's desktop
@@ -977,16 +973,21 @@ document.addEventListener("focusin", (event: FocusEvent) => {
     setKeyState(initialKeymapState("pane"));
   else if (target === "dialog" || target === "editor")
     setKeyState(initialKeymapState("dialog"));
-  else if (target === "control" || target === "window-control")
-    setKeyState(initialKeymapState());
+  else if (target === "chrome") setKeyState(initialKeymapState());
 });
 document.addEventListener("focusout", () => {
-  // Invariant: Blur captures the old key-state identity. A later key replaces
-  // it, so deferred reset cannot clear a newer destructive-chord arm.
+  // Invariant: Deferred blur cannot clear newer key state or a window prefix
+  // when hidden or removed content drops focus to the document body.
   const before = keyState;
   setTimeout(() => {
-    if (keyState === before && keyTarget(document.activeElement) === "chrome")
-      setKeyState(initialKeymapState());
+    const active = document.activeElement;
+    if (keyState !== before || keyTarget(active) !== "chrome") return;
+    if (
+      (before.mode === "g-prefix" || before.mode === "w-prefix") &&
+      (!active || active === document.body)
+    )
+      return;
+    setKeyState(initialKeymapState());
   }, 0);
 });
 function cancelKeyPrefix(): void {

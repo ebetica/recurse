@@ -4,6 +4,7 @@
 import { $ } from "./dom.js";
 import { BACK_ICON, MENU_ICON, NEW_ICON } from "./icons.js";
 import { embedded } from "./state.js";
+import type { FileTabDescriptor } from "./panes/file-tabs.js";
 import { sharedTrees } from "./shared-trees.js";
 import {
   agentLinkUrl,
@@ -81,8 +82,7 @@ export function syncPhoneSelection(
   if (!phoneNavigation()) return false;
   seed();
   if (pendingSelection || (phoneListEntry() && correction)) return true;
-  const layers =
-    Number(history.state?.settings || 0) + Number(!!history.state?.phonePane);
+  const layers = Number(history.state?.settings || 0) + paneDepth();
   if (!correction && layers) {
     pendingSelection = { view, url };
     history.go(-layers - Number(!phoneListEntry()));
@@ -107,8 +107,49 @@ export function syncPhoneSelection(
 $("#new-list")!.innerHTML = NEW_ICON;
 $("#new-list")!.hidden = sharedTrees !== null;
 $("#new-list")!.onclick = () => $("#new-top")!.click();
+function paneDepth(): number {
+  const pane = history.state?.phonePane;
+  return pane &&
+    typeof pane === "object" &&
+    Number.isSafeInteger(pane.depth) &&
+    pane.depth > 0
+    ? pane.depth
+    : Number(!!pane);
+}
+
+/** Linked files add a Back step above the currently open phone pane. */
+export function openLinkedPhonePane(
+  id: string,
+  previous: string | null,
+  open: () => boolean,
+  describe: (id: string) => FileTabDescriptor | undefined,
+): boolean {
+  const nested = phoneNavigation() && previous && history.state?.phonePane;
+  const depth = paneDepth();
+  const prior = {
+    ...history.state,
+    phonePane: {
+      id: previous,
+      depth,
+      file: previous ? describe(previous) : undefined,
+    },
+  };
+  if (!open()) return false;
+  if (nested && previous !== id) {
+    history.replaceState(prior, "");
+    history.pushState(
+      { ...prior, phonePane: { id, depth: depth + 1, file: describe(id) } },
+      "",
+    );
+  }
+  return true;
+}
+
 /** A phone pane closes before the conversation's Back step. */
-export function installPhonePaneHistory(close: () => void): void {
+export function installPhonePaneHistory(
+  close: () => void,
+  restore: (id: string, file?: unknown) => boolean | null,
+): void {
   const panes = $("#panes")!;
   let wasOpen = false;
   let paneUrl = "";
@@ -118,6 +159,8 @@ export function installPhonePaneHistory(close: () => void): void {
     if (open === wasOpen) return;
     wasOpen = open;
     if (open) paneUrl = location.href;
+    const saved = history.state?.phonePane;
+    if (open && saved?.file) restore(saved.id, saved.file);
     if (open && !history.state?.phonePane)
       history.pushState({ ...history.state, phonePane: true }, "");
     else if (
@@ -137,6 +180,18 @@ export function installPhonePaneHistory(close: () => void): void {
     attributeFilter: ["class"],
   });
   addEventListener("popstate", () => {
+    const pane = history.state?.phonePane;
+    if (
+      phoneNavigation() &&
+      pane &&
+      typeof pane === "object" &&
+      typeof pane.id === "string"
+    ) {
+      const restored = restore(pane.id, pane.file);
+      if (restored === null) history.back();
+      else if (!restored) history.forward();
+      return;
+    }
     if (wasOpen && !history.state?.phonePane) {
       wasOpen = false;
       if (location.href !== paneUrl && readArtifactLink(location.hash))

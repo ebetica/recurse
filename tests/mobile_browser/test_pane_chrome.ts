@@ -1,18 +1,25 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import { waitForPaneScroll, waitForPaneTransition } from "./pane_layout";
 import { mkdir } from "node:fs/promises";
 import {
   gotoRoot,
   postFixture,
   runBrowserTests,
+  themeColors,
   waitForLayout,
   type BrowserTest,
 } from "./common";
+import { filePage, type Fixture } from "./files_support";
+import { tests as dockZoom } from "./test_dock_zoom";
 
 export const tests: BrowserTest[] = [
+  ...dockZoom,
   // Regression: #3207 Artifact wheel input waits for a sized, scrollable preview
   async function test_pane_chrome(browser, base) {
-    const app = await postFixture(base, "seed-artifact-app?reader=long");
+    const app = await postFixture(base, "seed-artifact-app", {
+      reader: "long",
+    });
     const observations: Array<{
       width: number;
       pane: string;
@@ -285,7 +292,9 @@ export const tests: BrowserTest[] = [
     }
   },
   async function test_viewport_artifact_size_is_bounded(browser, base) {
-    const app = await postFixture(base, "seed-artifact-app?reader=viewport");
+    const app = await postFixture(base, "seed-artifact-app", {
+      reader: "viewport",
+    });
     const context = await browser.newContext({
       viewport: { width: 412, height: 915 },
     });
@@ -475,14 +484,12 @@ export const tests: BrowserTest[] = [
     await page.keyboard.press("k");
     expect(await cursor.getAttribute("data-tip")).toBe(ids[0]);
     await page.keyboard.press("d");
-    const down = await pane
-      .locator(".pane-body")
-      .evaluate((node) => node.scrollTop);
-    expect(down).toBeGreaterThan(0);
+    const scrollTop = () =>
+      pane.locator(".pane-body").evaluate((node) => node.scrollTop);
+    await browserExpect.poll(scrollTop).toBeGreaterThan(0);
+    const down = await scrollTop();
     await page.keyboard.press("u");
-    expect(
-      await pane.locator(".pane-body").evaluate((node) => node.scrollTop),
-    ).toBeLessThan(down);
+    await browserExpect.poll(scrollTop).toBeLessThan(down);
     expect(
       await page.evaluate(
         () =>
@@ -662,6 +669,93 @@ export const tests: BrowserTest[] = [
       "Whenever you're blocked waiting on me, tag yourself needs-you, and remove the tag once I've answered.",
     );
     await phone.close();
+  },
+
+  async function test_files_rail_order_and_badge(browser, base) {
+    const { context, page, errors } = await filePage(browser, 1280, 800);
+    const fixture = (await postFixture(base, "seed-files-pane")) as Fixture;
+    await page.route(`**/api/conversations/${fixture.demo}/diff*`, (route) =>
+      route.fulfill({
+        json: {
+          available: true,
+          base: "origin/main",
+          version: "files-fixture",
+          diff: "diff --git a/fixture.txt b/fixture.txt\nindex 111..222 100644\n--- a/fixture.txt\n+++ b/fixture.txt\n@@ -1 +1 @@\n-old\n+new\n",
+          truncated: false,
+          untracked: [],
+          currentPr: null,
+        },
+      }),
+    );
+    await page.goto(`${base}#agent=${fixture.demo}`, {
+      waitUntil: "domcontentloaded",
+    });
+    const filesButton = page.locator('.rail-btn[data-pane="files"]');
+    await page.locator('.rail-btn[data-pane="files"]').waitFor();
+    await page.locator('.rail-btn[data-pane="diff"]').waitFor();
+    const railIds = await page
+      .locator("#pane-rail .rail-btn")
+      .evaluateAll((buttons) =>
+        buttons.map(
+          (button) => (button as { dataset?: { pane?: string } }).dataset?.pane,
+        ),
+      );
+    expect(railIds).toContain("diff");
+    expect(railIds).toContain("files");
+    expect(railIds.indexOf("diff")).toBe(railIds.indexOf("files") + 1);
+    await filesButton.click();
+    const badgeStyle = (await page
+      .waitForFunction(
+        `(() => {
+        const button = document.querySelector(
+          '.rail-btn[data-pane="files"].active',
+        );
+        const badge = button?.querySelector('.rail-count');
+        if (!button?.isConnected || !badge?.isConnected) return null;
+        const s = getComputedStyle(badge);
+        const badgeBox = badge.getBoundingClientRect();
+        const buttonBox = button.getBoundingClientRect();
+        if (!s.backgroundColor || !s.color) return null;
+        return {
+          bg: s.backgroundColor,
+          color: s.color,
+          shadow: s.boxShadow,
+          font: s.fontSize,
+          badgeWidth: badgeBox.width,
+          badgeHeight: badgeBox.height,
+          badgeRight: badgeBox.x + badgeBox.width,
+          buttonRight: buttonBox.x + buttonBox.width,
+        };
+      })()`,
+      )
+      .then((handle) => handle.jsonValue())) as {
+      bg: string;
+      color: string;
+      shadow: string;
+      font: string;
+      badgeWidth: number;
+      badgeHeight: number;
+      badgeRight: number;
+      buttonRight: number;
+    };
+    const [bg, activeBg, text, activeText, accent] = await themeColors(
+      page,
+      "var(--count-bg)",
+      "var(--count-bg-active)",
+      "var(--count-text)",
+      "var(--count-text-active)",
+      "var(--accent)",
+    );
+    expect([bg, activeBg]).toContain(badgeStyle.bg);
+    expect([text, activeText]).toContain(badgeStyle.color);
+    expect(badgeStyle.bg + badgeStyle.color + badgeStyle.shadow).not.toContain(
+      accent.slice(4, -1),
+    );
+    expect(badgeStyle.badgeWidth >= 15).toBeTrue();
+    expect(badgeStyle.badgeHeight >= 14).toBeTrue();
+    expect(badgeStyle.badgeRight <= badgeStyle.buttonRight + 6).toBeTrue();
+    expect(errors).toEqual([]);
+    await context.close();
   },
 ];
 if (import.meta.main) await runBrowserTests([["pane-chrome", tests]]);

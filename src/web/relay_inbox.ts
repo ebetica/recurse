@@ -2,6 +2,7 @@
 // name: polls and callbacks are presence; claims expire after 10s; sends
 // settle within 90s, and with a queue idle pollers sleep and unclaimed sends
 // queue. A plain label shared by homes is refused, listing each one's address.
+import { authMethod, isOperator } from "./request_auth";
 import { validBackendKeyName } from "../auth/backend_keys";
 import type { HomeCallbacks, KeyInfo } from "../backends/home_callbacks";
 import { keyedLabel } from "../backends/label";
@@ -81,6 +82,8 @@ export class RelayInbox {
     }
   >();
   private readonly wakes = new Set<() => void>();
+  /** Confirmation deadline; tests shorten it without changing claims. */
+  deliveryTimeoutMs = 90_000;
   constructor(
     private readonly callbacks?: HomeCallbacks,
     private readonly queue?: RelayQueue,
@@ -250,7 +253,7 @@ export class RelayInbox {
       const check = () => {
         if (outcome.state !== "pending") finish();
       };
-      const timer = setTimeout(finish, 90_000);
+      const timer = setTimeout(finish, this.deliveryTimeoutMs);
       this.wakes.add(check);
       signal.addEventListener("abort", finish, { once: true });
       if (signal.aborted) finish();
@@ -282,8 +285,8 @@ export class RelayInbox {
   }
   register(router: Router): void {
     const caller = (ex: Exchange) => {
-      const method = String(ex.state.auth_method);
-      if (!["backend-key", "cookie", "tailscale", "local"].includes(method))
+      const method = String(authMethod(ex));
+      if (!isOperator(ex, { allowBackendKey: true }))
         throw new HttpError(403, "connected home required");
       const homeId = ex.request.headers.get("x-recurse-home");
       const homeName = ex.request.headers.get("x-recurse-home-name");

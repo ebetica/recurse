@@ -35,6 +35,14 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
   await writeFile(join(target, "legacy.txt"), "legacy publication\n");
   await writeFile(join(target, "artifact.md"), "# Requested Artifact\n");
   const palette = themePalettes[0]!;
+  const importedCss = '[data-theme="sidebar"] { opacity: .95; }';
+  const selectedCss = '[data-theme="composer"] { border-radius: 12px; }';
+  await writeFile(join(target, "import.css"), importedCss);
+  await writeFile(join(target, "select.css"), selectedCss);
+  await writeFile(join(target, "oversized.css"), "x".repeat(50_001));
+  const themesFile = new Config({
+    env: { ...process.env, CHAT_DATA_DIR: root },
+  }).paths.THEMES_FILE;
   await writeFile(
     join(target, "palette.ghostty"),
     [
@@ -108,14 +116,31 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     ["recurse_settings", { action: "themes" }, "themes"],
     [
       "recurse_settings",
-      { action: "add_theme", name: "Imported", path: "palette.ghostty" },
+      {
+        action: "add_theme",
+        name: "Imported",
+        path: "palette.ghostty",
+        css_path: "import.css",
+      },
       "add-theme",
+    ],
+    ["read", { path: themesFile }, "imported-css"],
+    [
+      "recurse_settings",
+      { action: "select_theme", name: "Imported", css_path: "select.css" },
+      "select-theme",
     ],
     [
       "recurse_settings",
-      { action: "select_theme", name: "Imported" },
-      "select-theme",
+      { action: "select_theme", name: "Imported", css_path: "oversized.css" },
+      "theme-oversized",
     ],
+    [
+      "recurse_settings",
+      { action: "select_theme", name: "Nord", css_path: "select.css" },
+      "theme-builtin",
+    ],
+    ["read", { path: themesFile }, "selected-css"],
     [
       "recurse_settings",
       { action: "remove_theme", name: "Imported" },
@@ -160,16 +185,6 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
   ]);
   try {
     const opened = await host.open("c1");
-    await opened.conversation.configure(
-      {
-        modelTools: {
-          add: (await opened.conversation.agent(context)).callable.filter(
-            (tool) => ["recurse_settings", "artifact"].includes(tool.name),
-          ),
-        },
-      },
-      context,
-    );
     const safety = await import(
       new URL(
         "../../../../src/extensions/core/safety/durable.ts",
@@ -208,6 +223,24 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     expect(
       followup.find((result) => result.toolCallId === "find")!.content[0].text,
     ).toContain("fixture.txt");
+    expect(
+      (await opened.conversation.agent(context)).tools.map((tool) => tool.name),
+    ).toEqual([
+      "read",
+      "write",
+      "edit",
+      "compact",
+      "bash",
+      "wait",
+      "env",
+      "chdir",
+      "publish",
+      "artifact",
+      "recurse_settings",
+      "grep",
+      "find",
+      "codemode",
+    ]);
     const capture = await opened.captures.latest("c1");
     const request = JSON.parse(capture!.json);
     expect(
@@ -287,6 +320,21 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     )!;
     expect(selected.isError).not.toBe(true);
     expect(JSON.parse(selected.content[0].text).theme).toBe("Imported");
+    for (const [id, css] of [
+      ["imported-css", importedCss],
+      ["selected-css", selectedCss],
+    ])
+      expect(
+        followup.find((result) => result.toolCallId === id)!.content[0].text,
+      ).toContain(JSON.stringify(css));
+    expect(
+      followup.find((result) => result.toolCallId === "theme-oversized")!
+        .content[0].text,
+    ).toContain("50000 characters");
+    expect(
+      followup.find((result) => result.toolCallId === "theme-builtin")!
+        .content[0].text,
+    ).toContain("only be attached to a custom theme");
     expect(
       JSON.parse(
         followup.find((result) => result.toolCallId === "levels")!.content[0]
@@ -303,7 +351,9 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     for (const [index, block] of tools.entries()) {
       const detail = await host.toolDetails("c1", block.artifact_id);
       expect(detail!.status).toBe(
-        /#share-(missing|remote)$/.test(block.id) ? "error" : "finished",
+        /#(share-(missing|remote)|theme-(oversized|builtin))$/.test(block.id)
+          ? "error"
+          : "finished",
       );
       expect((detail!.input as Rec).payload.value).toEqual(
         [["env", environmentArgs], ...calls, ...laterCalls][index]![1],

@@ -1,4 +1,6 @@
 import { expect } from "bun:test";
+import { assertSchemeLinks } from "./document_links";
+import { SCHEME_LINKS } from "./fixtures/reference_links";
 import { expect as browserExpect } from "playwright/test";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -61,7 +63,7 @@ export const tests: BrowserTest[] = [
       `![vetted](${safeImage} '&quot; onerror=alert(3)') ` +
       "![attribute text](https://example.invalid/attribute.png onerror=alert(4)) " +
       "<https://example.invalid/autolink> <img src=https://example.invalid/raw.png onerror=alert(5)> " +
-      "Final **word**";
+      `${SCHEME_LINKS.replace(/\n/g, " ")} Final **word**`;
     await page.request.post(
       `${base}__browser-test/seed-model-selection-error`,
       {
@@ -124,6 +126,7 @@ export const tests: BrowserTest[] = [
     ).toBe(0);
     expect(await content.locator('a[href^="javascript:"]').count()).toBe(0);
     expect(await content.innerText()).toContain("script link");
+    await assertSchemeLinks(content);
     expect(await content.innerText()).toContain(
       "![attribute text](https://example.invalid/attribute.png onerror=alert(4))",
     );

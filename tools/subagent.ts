@@ -21,10 +21,11 @@
  * tail <id|id@label>
  * read <id@label> [--offset N] [--limit N]
  *     A remote agent's transcript. For local agents, read their transcript.txt.
- * search <query> [target] [--tree | --all] [--deleted] [--role <role>] [--limit N]
- *     Literal, case-insensitive search of full transcripts; defaults to yours.
- *     Runs until complete or the limit; interrupt to cancel. --deleted is slow
- *     across all deleted agents; prefer a target.
+ * search <query> [target] [--tree | --all] [--deleted] [--conversation | --role <role>] [--limit N]
+ *     Literal history search; current run excluded. --since/--until use UTC dates.
+ *     --or TEXT repeats; --cursor start enables pages, then use the returned cursor.
+ *     Scope first, filter roles, vary wording; read around hit offsets (read id@label
+ *     for remotes). --deleted is slow; prefer a target. Interrupt to cancel.
  * compact <id|id@label>
  * move <id> (--to <parent-id> | --top-level)
  * tag <id> [--add a,b] [--remove a,b]
@@ -1128,11 +1129,13 @@ async function cmdSearch(parsed: Parsed): Promise<Output> {
   const backend = target ? backendFor(target, true) : null;
   const query = new URLSearchParams({ q: parsed.positional[0]! });
   if (target) query.set("target", backend!.id);
-  for (const flag of ["--tree", "--all", "--deleted"])
+  for (const flag of ["--tree", "--all", "--deleted", "--conversation"])
     if (parsed.options.has(flag)) query.set(flag.slice(2), "true");
-  for (const flag of ["--role", "--limit"])
+  for (const flag of ["--role", "--limit", "--since", "--until", "--cursor"])
     if (parsed.options.has(flag))
       query.set(flag.slice(2), String(parsed.options.get(flag)));
+  for (const alternative of parsed.alternatives ?? [])
+    query.append("or", alternative);
   const path = `/api/subagent-tool/search?${query}`;
   const result = await api(
     "GET",
@@ -1143,6 +1146,16 @@ async function cmdSearch(parsed: Parsed): Promise<Output> {
   );
   if (!Array.isArray(result.hits))
     systemFailure("The running instance returned invalid search results.");
+  if (
+    (parsed.alternatives?.length ||
+      ["--conversation", "--since", "--until", "--cursor"].some((flag) =>
+        parsed.options.has(flag),
+      )) &&
+    result.filters_applied !== true
+  )
+    systemFailure(
+      "This backend cannot apply these search options; update it or use a plain literal search.",
+    );
   return {
     code: 0,
     stdout: result.hits
@@ -1169,16 +1182,32 @@ async function cmdSearch(parsed: Parsed): Promise<Output> {
           hit.time < 8640000000000000
             ? new Date(hit.time).toISOString()
             : "-";
-        return `${oneLine(hit.path, hit.path.length)}:${hit.line}: ${oneLine(hit.snippet, hit.snippet.length)} [${oneLine(agent, agent.length)} ${time} ${oneLine(hit.role, hit.role.length)}]\n`;
+        return `${oneLine(hit.path, hit.path.length)}:${hit.line}\n  agent=${oneLine(agent, agent.length)} role=${oneLine(hit.role, hit.role.length)} time=${time} offset=${hit.line}\n${oneLine(hit.snippet, hit.snippet.length)}\n`;
       })
       .join(""),
     stderr:
       (result.truncated
-        ? "Search truncated; narrow the query or scope.\n"
+        ? `Search cut at ${result.truncation === "byte_limit" ? "the byte limit" : result.truncation === "hit_limit" ? "the hit limit" : result.truncation === "agent_limit" ? "the per-agent limit" : "a result limit"}; narrow the query or scope.\n`
         : "") +
-      (Number(result.not_indexed) > 0
-        ? `${result.not_indexed} ${result.not_indexed === 1 ? "agent is" : "agents are"} not indexed yet; results are incomplete.\n`
-        : ""),
+      (typeof result.next_cursor === "string"
+        ? `Next page: repeat this search with --cursor ${oneLine(result.next_cursor, result.next_cursor.length)}\n`
+        : "") +
+      (Array.isArray(result.incomplete)
+        ? result.incomplete
+            .map((item) => {
+              if (!isObject(item) || typeof item.agent !== "string")
+                systemFailure(
+                  "The running instance returned invalid search coverage.",
+                );
+              const agent = backend?.remote
+                ? `${item.agent}${target!.slice(target!.lastIndexOf("@"))}`
+                : item.agent;
+              return `Incomplete: ${oneLine(agent, agent.length)} — ${item.reason === "missing" ? "transcript missing (not indexed)" : "transcript may be stale (catch-up pending)"}.\n`;
+            })
+            .join("")
+        : Number(result.not_indexed) > 0
+          ? `${result.not_indexed} agents not indexed yet; results are incomplete.\n`
+          : ""),
   };
 }
 

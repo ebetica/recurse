@@ -1,7 +1,7 @@
 // Desktop windows use dockview for tabs, drag/drop and split sizing. DOM focus
 // belongs to the content, never dockview's synthetic tabs or render wrappers.
-// Content moves preserve focus, native editing selection and scroll position,
-// including atomic moves and full-grid restores through hidden parking.
+// Content moves preserve focus, editing selection and scroll through parking.
+// Pointer drags stay in their source until release or interruption.
 import {
   createDockview,
   themeAbyssSpaced,
@@ -17,6 +17,24 @@ export interface DockPanelSpec {
   icon: string;
   file?: FileTabDescriptor;
 }
+
+export interface DockPlace {
+  before: SerializedDockview;
+  after: string;
+}
+
+/** Which tabs share which windows in which splits, ignoring sizes. */
+const arrangement = (layout: SerializedDockview): string =>
+  JSON.stringify([layout.grid.orientation, layout.grid.root], (key, value) =>
+    key === "size" || key === "activeView" ? undefined : value,
+  );
+
+type GridNode =
+  | { type: "branch"; data: GridNode[] }
+  | {
+      type: "leaf";
+      data: { id: string; views: string[]; activeView?: string };
+    };
 
 export interface DockCallbacks {
   element(id: string): HTMLElement | null;
@@ -304,7 +322,7 @@ export function createDockHost(
     place();
   };
   const sizer = new ResizeObserver(layout);
-  sizer.observe(container);
+  sizer.observe(container, { box: "content-box" });
   const tabElement = (panel: IDockviewPanel): HTMLElement =>
     panel.view.tab.element.closest<HTMLElement>(".dv-tab") ||
     panel.view.tab.element;
@@ -378,6 +396,95 @@ export function createDockHost(
     return group?.activePanel;
   };
   const gestures = new AbortController();
+  let selectionScope: Element | null = null;
+  let selectionEvents: AbortController | null = null;
+  const finishSelection = (): void => {
+    selectionEvents?.abort();
+    selectionEvents = null;
+    const scope = selectionScope;
+    const selection = document.getSelection();
+    if (
+      scope?.isConnected &&
+      selection?.rangeCount === 1 &&
+      !selection.isCollapsed &&
+      selection.getRangeAt(0).intersectsNode(scope)
+    ) {
+      const range = selection.getRangeAt(0).cloneRange();
+      const backward =
+        selection.anchorNode === range.endContainer &&
+        selection.anchorOffset === range.endOffset;
+      const bounds = document.createRange();
+      bounds.selectNodeContents(scope);
+      let clipped = false;
+      if (range.compareBoundaryPoints(Range.START_TO_START, bounds) < 0) {
+        range.setStart(bounds.startContainer, bounds.startOffset);
+        clipped = true;
+      }
+      if (range.compareBoundaryPoints(Range.END_TO_END, bounds) > 0) {
+        range.setEnd(bounds.endContainer, bounds.endOffset);
+        clipped = true;
+      }
+      if (clipped)
+        selection.setBaseAndExtent(
+          backward ? range.endContainer : range.startContainer,
+          backward ? range.endOffset : range.startOffset,
+          backward ? range.startContainer : range.endContainer,
+          backward ? range.startOffset : range.endOffset,
+        );
+    }
+    scope?.classList.remove("dock-selection-scope");
+    selectionScope = null;
+    document.body.classList.remove("dock-selection-scoped");
+  };
+  document.addEventListener(
+    "pointerdown",
+    (event) => {
+      if (event.button !== 0 || !event.isPrimary) return;
+      finishSelection();
+      const target = event.target as Element;
+      if (target.closest("input, textarea, [contenteditable]")) return;
+      selectionScope = target.closest(".dock-panel, #sidebar");
+      if (!selectionScope) return;
+      selectionScope.classList.add("dock-selection-scope");
+      document.body.classList.add("dock-selection-scoped");
+      selectionEvents = new AbortController();
+      const options = { capture: true, signal: selectionEvents.signal };
+      for (const type of ["pointerup", "pointercancel"])
+        window.addEventListener(
+          type,
+          (release) => {
+            if ((release as PointerEvent).pointerId === event.pointerId)
+              finishSelection();
+          },
+          options,
+        );
+      for (const type of [
+        "pointermove",
+        "pointerover",
+        "pointerout",
+        "mousemove",
+        "mouseover",
+        "mouseout",
+        "mouseenter",
+        "mouseleave",
+        "mouseup",
+      ])
+        window.addEventListener(
+          type,
+          (move) => {
+            if ((move as MouseEvent).buttons === 0) finishSelection();
+          },
+          options,
+        );
+      for (const type of ["contextmenu", "dragstart", "dragend", "keydown"])
+        window.addEventListener(type, finishSelection, options);
+      document.addEventListener("visibilitychange", finishSelection, options);
+      window.addEventListener("blur", finishSelection, {
+        signal: selectionEvents.signal,
+      });
+    },
+    { capture: true, signal: gestures.signal },
+  );
   let resizeFrom: { x: number; y: number; layout: string } | null = null;
   document.addEventListener(
     "pointerdown",
@@ -535,6 +642,32 @@ export function createDockHost(
     changed: refreshActions,
     arranged: callbacks.arranged,
   });
+  const reopen = (
+    id: string,
+    layout: SerializedDockview,
+    background: boolean,
+  ): void => {
+    const next = structuredClone(layout);
+    const shown = new Map(
+      api.groups.map((group) => [group.id, group.activePanel?.id]),
+    );
+    if (background) next.activeGroup = api.activeGroup?.id;
+    const visit = (node: GridNode): void => {
+      if (node.type === "branch") return node.data.forEach(visit);
+      const leaf = node.data;
+      const current = shown.get(leaf.id);
+      if (!background && leaf.views.includes(id)) {
+        leaf.activeView = id;
+        next.activeGroup = leaf.id;
+      } else if (current && leaf.views.includes(current))
+        leaf.activeView = current;
+    };
+    visit(next.grid.root as GridNode);
+    const history = recent;
+    commands.restore(next);
+    recent = history.filter((entry) => entry !== id && api.getPanel(entry));
+    if (!background) recent.push(id);
+  };
   const reset = (): void => {
     resizeFrom = null;
     recent = [];
@@ -564,7 +697,7 @@ export function createDockHost(
         restoreFocus();
       }
     },
-    show(spec: DockPanelSpec, background = false) {
+    show(spec: DockPanelSpec, background = false, closed?: DockPlace) {
       const existing = api.getPanel(spec.id);
       if (existing) {
         if (!background) {
@@ -588,36 +721,40 @@ export function createDockHost(
           : null;
       quiet = background;
       try {
-        const added = api.addPanel({
-          id: spec.id,
-          title: spec.title,
-          component: "panel",
-          tabComponent: "tab",
-          ...(spec.file ? { params: { file: spec.file } } : {}),
-          inactive: background && !!near,
-          ...(reference
-            ? {
-                position: {
-                  referenceGroup: reference.group,
-                  ...(opening
-                    ? {
-                        direction:
-                          opening.direction === "right"
-                            ? ("right" as const)
-                            : ("below" as const),
-                      }
-                    : near
-                      ? {}
-                      : {
+        if (!opening && closed?.after === arrangement(api.toJSON()))
+          reopen(spec.id, closed.before, background);
+        else
+          api.addPanel({
+            id: spec.id,
+            title: spec.title,
+            component: "panel",
+            tabComponent: "tab",
+            ...(spec.file ? { params: { file: spec.file } } : {}),
+            inactive: background && !!near,
+            ...(reference
+              ? {
+                  position: {
+                    referenceGroup: reference.group,
+                    ...(opening
+                      ? {
                           direction:
-                            spec.id === "chat"
-                              ? ("left" as const)
-                              : ("right" as const),
-                        }),
-                },
-              }
-            : {}),
-        });
+                            opening.direction === "right"
+                              ? ("right" as const)
+                              : ("below" as const),
+                        }
+                      : near
+                        ? {}
+                        : {
+                            direction:
+                              spec.id === "chat"
+                                ? ("left" as const)
+                                : ("right" as const),
+                          }),
+                  },
+                }
+              : {}),
+          });
+        const added = api.getPanel(spec.id)!;
         const tab = tabElement(added);
         if (!added.api.isVisible) {
           tab.classList.add("dock-new");
@@ -641,11 +778,13 @@ export function createDockHost(
     },
     layout,
     refreshActions,
-    remove(id: string) {
+    remove(id: string): DockPlace | undefined {
       for (const action of actionOrigins.keys())
         if (action.dataset.pane === id) restoreAction(action);
       const panel = api.getPanel(id);
       if (!panel) return;
+      const before = api.toJSON();
+      delete (before.grid as { maximizedNode?: unknown }).maximizedNode;
       quiet = true;
       try {
         api.removePanel(panel);
@@ -654,6 +793,7 @@ export function createDockHost(
       } finally {
         quiet = false;
       }
+      return { before, after: arrangement(api.toJSON()) };
     },
     restoreWindows() {
       callbacks.leaveFullscreen();
@@ -674,6 +814,7 @@ export function createDockHost(
       }
     },
     dispose() {
+      finishSelection();
       gestures.abort();
       cancelAnimationFrame(placing);
       observer.disconnect();

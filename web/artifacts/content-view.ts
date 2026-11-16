@@ -12,7 +12,9 @@ import {
   revealArtifactImage,
   renderDocumentMarkdown,
 } from "../document-markdown.js";
+import { watchReview, type DocumentChanges } from "../document-review.js";
 import { setNotice } from "./artifact-detail.js";
+import { artifactRelativePath, openArtifactFile } from "./file-links.js";
 import { invalidatePaneCache } from "../panes.js";
 import { watchPageErrors } from "./page-errors.js";
 import { cancelSelectionComment } from "./selection-comments.js";
@@ -108,6 +110,7 @@ export async function renderContent(
   pane: ArtifactEl,
   info: ArtifactInfo,
   content: string | null,
+  changes: { changes: DocumentChanges; previous: string } | null = null,
 ): Promise<boolean> {
   cancelSelectionComment(pane);
   pane._rs.imageAbort?.abort();
@@ -115,19 +118,36 @@ export async function renderContent(
   pane._rs.imageAbort = controller;
   const body = pane.querySelector<HTMLElement>(".report-doc")!;
   body.innerHTML = "";
+  pane._rs.changes = changes?.changes ?? null;
+  watchReview(body, pane._rs.changes);
   if (info.format === "markdown") {
+    const agent = pane._rs.agentId!,
+      version = pane._rs.selectedVersion;
     renderDocumentMarkdown(body, content || "", {
       title: info.title,
       signal: controller.signal,
       agentId: pane._rs.agentId!,
       documentPath: info.entry || info.filename,
       artifactId: info.id,
+      previous: changes?.previous,
+      openRelative: (path, fragment) =>
+        !!version &&
+        openArtifactFile(
+          {
+            agent,
+            artifact: info.id,
+            version,
+            owner: info.owner_agent_id,
+            path: artifactRelativePath(info.entry || info.filename, path),
+          },
+          fragment,
+        ),
       resolveRelative: (path, image) => {
         const url = artifactFileUrl(
-          pane._rs.agentId!,
+          agent,
           info.id,
-          path,
-          pane._rs.selectedVersion,
+          artifactRelativePath(info.entry || info.filename, path),
+          version,
         );
         return image ? refreshUrl(pane, url) : url;
       },

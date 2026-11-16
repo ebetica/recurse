@@ -225,6 +225,9 @@ export const tests: BrowserTest[] = [
       await page.locator("#prompt-close").click();
       await page.locator("#safety-btn").click();
       await page
+        .getByRole("button", { name: "Turn off safety review", exact: true })
+        .click();
+      await page
         .locator("#safety-btn .lbl")
         .filter({ hasText: /^Yolo mode$/ })
         .waitFor();

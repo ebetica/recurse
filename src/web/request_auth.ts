@@ -4,6 +4,7 @@
 // Operator routes refuse agent markers; callback tokens reach one route only.
 
 import { constants } from "node:fs";
+import { BRAND_ICON_NAMES } from "../branding";
 import { open, readFile, rename } from "node:fs/promises";
 import { isIP, isIPv6 } from "node:net";
 import { join } from "node:path";
@@ -18,6 +19,7 @@ import {
 import { CALLBACK_TOKEN_PREFIX } from "../backends/connected";
 import { keyedLabel } from "../backends/label";
 import { COOKIE_NAME, type OperatorAuth } from "../auth/session";
+import { EXPLORER_EDIT_BYTES } from "./explorer_io";
 import {
   SERVICE_BODY_MAX_BYTES,
   serviceCapability,
@@ -34,7 +36,7 @@ import {
 } from "../observability/runtime_logging";
 import { parsePythonJson } from "../utils/py_compact_json";
 import type { Middleware } from "../server";
-import { jsonResponse, type Exchange } from "./router";
+import { HttpError, jsonResponse, type Exchange } from "./router";
 import { loopbackAudience } from "./route_audience";
 
 export const LOGIN_MAX_FREE = 5;
@@ -239,6 +241,15 @@ async function cookieAuthed(
   return true;
 }
 
+/** Recheck cookie authority after acquiring the credential-change queue. */
+export async function requireCurrentSession(
+  ex: Exchange,
+  operator: OperatorAuth,
+): Promise<void> {
+  if (authMethod(ex) === "cookie" && !(await cookieAuthed(ex, operator)))
+    throw new HttpError(401, "unauthorized");
+}
+
 /**
  * Publish `DATA_DIR/server.json` (0600, atomic rename) with the port and a
  * stable loopback token, keeping an existing token. Returns the token.
@@ -387,6 +398,37 @@ export interface RequestAuthDeps {
   readonly homeSeen?: () => void;
 }
 
+export type AuthMethod =
+  | "backend-key"
+  | "remote-callback"
+  | "service"
+  | "tailscale"
+  | "cookie"
+  | "loopback"
+  | "local";
+
+/** The request's authentication method; routes read it only through here. */
+export function authMethod(ex: Exchange): AuthMethod | undefined {
+  return ex.state.auth_method as AuthMethod | undefined;
+}
+
+/**
+ * The operator's browser session (cookie, Tailscale or local). With
+ * `allowBackendKey`, a connected home's backend key also counts.
+ */
+export function isOperator(
+  ex: Exchange,
+  { allowBackendKey = false }: { allowBackendKey?: boolean } = {},
+): boolean {
+  const method = String(ex.state.auth_method);
+  return (
+    method === "cookie" ||
+    method === "tailscale" ||
+    method === "local" ||
+    (allowBackendKey && method === "backend-key")
+  );
+}
+
 /** Fail closed on raw marker presence, even with an invalid agent id. */
 export function agentMarked(ex: Exchange): boolean {
   return (
@@ -448,8 +490,20 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
       );
     const mintKey =
       ex.path === "/api/backend-keys" && ex.request.method === "POST";
-    if (ex.path === "/login" || mintKey) ex.bodyLimit = LOGIN_BODY_MAX_BYTES;
+    if (
+      ex.path === "/login" ||
+      mintKey ||
+      ex.path === "/api/settings/two-factor"
+    )
+      ex.bodyLimit = LOGIN_BODY_MAX_BYTES;
     if (ex.path === "/api/ui-timing") ex.bodyLimit = 24 * 1024;
+    if (
+      ex.request.method === "PUT" &&
+      /^\/api\/(?:backends\/[^/]+\/)?conversations\/[^/]+\/tree\/file\/?$/.test(
+        ex.path,
+      )
+    )
+      ex.bodyLimit = EXPLORER_EDIT_BYTES;
     // Invariant: CSRF before auth: a forged cross-site mutation is refused
     // regardless of session state.
     if (!csrfOk(ex.request.method, headers)) {
@@ -575,6 +629,13 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
       ex.state.auth_method = "tailscale";
       return operator(ex);
     }
+    if (
+      ["GET", "HEAD"].includes(ex.request.method) &&
+      (ex.path === "/manifest.webmanifest" ||
+        ex.path === "/app-icon" ||
+        BRAND_ICON_NAMES.some((name) => ex.path === `/static/brand/${name}`))
+    )
+      return next(ex);
     if (loopbackAuthenticated(ex, deps.loopbackToken)) {
       const audience = loopbackAudience(ex.request.method, ex.path);
       const bundled = ["subagent", "worktree", "supervisor"].includes(

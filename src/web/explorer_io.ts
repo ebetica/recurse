@@ -1,16 +1,21 @@
 // One bounded, off-thread file service for the operator's Explorer.
 // Cursors and downloads belong to conversations; shutdown drains the Worker.
 // Abandoned replies release handles; admission bounds pending calls.
+// Saved text passes through in memory only; nothing here logs it.
 import { HttpError } from "./router";
 
 export const EXPLORER_PAGE_SIZE = 48;
 export const EXPLORER_CHUNK_BYTES = 16 * 1024;
 export const EXPLORER_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+/** The largest text file the operator can edit or save. */
+export const EXPLORER_EDIT_BYTES = 256 * 1024;
 
 export interface ExplorerScope {
   owner: string;
   root: string;
   path: string;
+  contextRoot?: string;
+  agentDir?: string;
 }
 export interface ExplorerEntry {
   name: string;
@@ -27,9 +32,12 @@ export interface ExplorerListing {
 export interface ExplorerPreview {
   root: string;
   path: string;
+  canonicalPath: string;
+  promptResource: boolean;
   size: number;
   version: string;
-  kind: "text" | "binary";
+  /** `missing`: the file does not exist but its folder does. */
+  kind: "text" | "binary" | "missing";
   text?: string;
   next: number | null;
 }
@@ -38,6 +46,13 @@ export interface ExplorerRequests {
   preview: ExplorerScope & { offset: number; version?: string };
   admit: ExplorerScope;
   download: ExplorerScope;
+  /** `version` null creates a file; `overwrite` skips the version check. */
+  save: ExplorerScope & {
+    text: string;
+    version: string | null;
+    overwrite: boolean;
+    canonicalPath: string;
+  };
   read: { owner: string; token: string; offset: number; length: number };
   release: { owner: string; token: string };
   shutdown: Record<string, never>;
@@ -47,6 +62,7 @@ export interface ExplorerResults {
   preview: ExplorerPreview;
   admit: null;
   download: { token: string; name: string; size: number };
+  save: ExplorerPreview;
   read: Uint8Array;
   release: null;
   shutdown: null;

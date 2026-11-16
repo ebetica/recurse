@@ -1,7 +1,12 @@
 import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import { join } from "node:path";
-import { gotoRoot, showAgentList, type BrowserTest } from "./common";
+import {
+  gotoRoot,
+  postFixture,
+  showAgentList,
+  type BrowserTest,
+} from "./common";
 
 export const tests: BrowserTest[] = [
   // Feature: #3166 finished dots are shared across devices and sidebar layouts.
@@ -145,20 +150,11 @@ export const tests: BrowserTest[] = [
           ).toBeTrue();
           await page.mouse.move(1000, 700);
         }
-        expect(
-          (
-            await context.request.post(
-              `${base}__browser-test/save-sidebar-script`,
-              {
-                data: {
-                  script:
-                    'export default rows => [{title: "Finished", rows: rows.filter(r => r.unread)}, {title: "Viewed", rows: rows.filter(r => !r.unread)}];',
-                  by: "operator",
-                },
-              },
-            )
-          ).ok(),
-        ).toBeTrue();
+        await postFixture(base, "save-sidebar-script", {
+          script:
+            'export default rows => [{title: "Finished", rows: rows.filter(r => r.unread)}, {title: "Viewed", rows: rows.filter(r => !r.unread)}];',
+          by: "operator",
+        });
         await page.reload();
         await showAgentList(page);
         await browserExpect(dot).toBeVisible();
@@ -192,6 +188,45 @@ export const tests: BrowserTest[] = [
         await context.close();
         await other.close();
       }
+    }
+  },
+  // Regression: #3287 a view closed just after its headers kept counting.
+  async function test_unread_dot_after_abandoned_views(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 915 },
+    });
+    const page = await context.newPage();
+    try {
+      const created = await context.request.post(`${base}api/conversations`, {
+        data: {},
+      });
+      expect(created.ok()).toBeTrue();
+      const { id } = await created.json();
+      await gotoRoot(page, base);
+      const row = page.locator(`#agent-list .agent[data-id="${id}"]`);
+      await row.waitFor();
+      await page.evaluate(
+        async ({ url }) => {
+          for (let wait = 0; wait < 120; wait += 1) {
+            const abort = new AbortController();
+            const done = fetch(url, { signal: abort.signal }).catch(() => {});
+            await new Promise((resolve) => setTimeout(resolve, wait % 60));
+            abort.abort();
+            await done;
+          }
+        },
+        { url: `${base}api/conversations/${id}/events?viewing=true` },
+      );
+      expect(
+        (
+          await context.request.post(`${base}api/conversations/${id}/deliver`, {
+            data: { content: "Reply only Abandoned views reply" },
+          })
+        ).ok(),
+      ).toBeTrue();
+      await browserExpect(row.locator(".agent-unread")).toBeVisible();
+    } finally {
+      await context.close();
     }
   },
 ];

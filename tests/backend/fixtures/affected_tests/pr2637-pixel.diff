@@ -1,0 +1,4 @@
+diff --git a/tests/backend/fixtures/durable_images/pixel.jpg b/tests/backend/fixtures/durable_images/pixel.jpg
+new file mode 100644
+index 000000000..76e385034
+Binary files /dev/null and b/tests/backend/fixtures/durable_images/pixel.jpg differ

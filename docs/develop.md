@@ -25,8 +25,9 @@ Read tests/check.sh and test headers for environment quirks. tests/check.sh unse
 CHAT_REPO_URL and RECURSE_SELF_DEPLOY; unset them when running individual tests too.
 
 ```bash
-tests/check.sh web       # Prettier, design checks, Oxlint, frontend tests/types/build
-tests/check.sh ts        # size limits, comment/test policy, backend Prettier/types/tests
+bun tests/checks/static.ts  # the static gate every stage runs first
+tests/check.sh web       # Prettier, Oxlint, frontend tests/types/build
+tests/check.sh ts        # backend Prettier/types/tests
 tests/check.sh browser   # rebuild web/dist, Playwright tests
 tests/check.sh provider  # reply-path tests against recorded providers
 tests/check.sh           # web, ts and browser in order

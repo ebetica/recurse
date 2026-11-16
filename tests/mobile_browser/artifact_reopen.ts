@@ -6,6 +6,7 @@ import type { Page } from "playwright";
 import * as artifacts from "../../src/artifacts";
 import {
   captureErrors,
+  closeWithRoutes,
   gotoRoot,
   postFixture,
   rootAgentId,
@@ -165,10 +166,9 @@ export const artifactReopen: BrowserTest = async (browser, base, data) => {
     if (kind === "html") {
       await writeFile(join(repo, entry), content("Initial html"));
       await artifacts.publish(context, owner, String(item.id));
-      const other = await postFixture(
-        base,
-        "seed-artifact-app?agent=artifact-link-source",
-      );
+      const other = await postFixture(base, "seed-artifact-app", {
+        agent: "artifact-link-source",
+      });
       const browserContext = await browser.newContext({
         viewport: { width: 1280, height: 800 },
       });
@@ -315,7 +315,7 @@ export const artifactReopen: BrowserTest = async (browser, base, data) => {
       ).toBe(202);
       await waitForSourceDeletion(page, base);
     } finally {
-      await page.close();
+      await closeWithRoutes(page);
       const current = await artifacts.get(context, owner, String(item.id));
       await artifacts.deleteArtifact(
         context,

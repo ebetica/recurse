@@ -34,7 +34,7 @@ export function registerRelayRoutes(
   callbacks?: HomeCallbacks,
   queue?: RelayQueue,
   checkUrl?: string,
-): void {
+): RelayInbox {
   const inbox = new RelayInbox(
     callbacks,
     queue,
@@ -499,4 +499,5 @@ export function registerRelayRoutes(
       longRunning: true,
     },
   );
+  return inbox;
 }

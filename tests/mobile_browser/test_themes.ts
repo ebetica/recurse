@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import type { Page, Route } from "playwright";
+import type { Locator, Page, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   generateTheme,
@@ -12,12 +12,14 @@ import {
   closeWithRoutes,
   gotoRoot,
   postFixture,
+  reloadConversation,
   runBrowserTests,
   themeColors,
   type BrowserTest,
   openSettingsPanel,
 } from "./common";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 async function openDetail(page: Page, label: string) {
@@ -35,7 +37,551 @@ async function closeDetail(page: Page, label: string) {
     .click();
 }
 
+async function themeCornersHit(target: Locator): Promise<boolean> {
+  return target.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return [
+      [box.left + 8, box.top + 8],
+      [box.right - 8, box.top + 8],
+      [box.left + 8, box.bottom - 8],
+      [box.right - 8, box.bottom - 8],
+    ].every(([x, y]) =>
+      element.contains(element.ownerDocument.elementFromPoint(x!, y!)),
+    );
+  });
+}
+
 export const tests: BrowserTest[] = [
+  // Feature: #3387 custom CSS previews, persists through Settings and native tools, and cannot fetch resources or conceal file destinations.
+  async function test_optional_theme_css(browser, base, data) {
+    const path = join(data, "data/config/themes.json");
+    const shots = join(
+      process.env.RECURSE_AGENT_TMPDIR || tmpdir(),
+      "theme-css",
+    );
+    await mkdir(shots, { recursive: true });
+    const custom = { ...themePalettes[0]!, name: "Browser custom CSS" };
+    const preview =
+      '@media screen and (min-width: 1px) { [data-theme="background"] label:has([name="custom-css"]) { visibility: hidden !important; } }';
+    const svg = `data:image/svg+xml,${encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="120" height="120"><path d="M0 120L120 0M-30 90L90-30M30 150L150 30" stroke="#75b9ff" stroke-opacity=".25" stroke-width="12"/></svg>')}`;
+    const sample = `[data-theme="background"], [data-theme="thread"] { background-image: url("${svg}"); }
+      [data-theme="chat-header"] { border-bottom: 4px solid #75b9ff; }
+      [data-theme="composer"] { border: 3px solid #75b9ff; border-radius: 18px; }
+      [data-theme="assistant-message"] { border-left: 4px solid #75b9ff; padding-left: 12px; }`;
+    try {
+      for (const width of [1280, 412]) {
+        await writeFile(
+          path,
+          JSON.stringify({ theme: custom.name, custom: [custom] }),
+        );
+        const workdir = join(data, "data", `theme-css-${width}`);
+        await mkdir(workdir, { recursive: true });
+        const destination = join(workdir, "AGENTS.md");
+        const openedPath = join(workdir, "notes.txt");
+        const cssPath = join(workdir, "theme.css");
+        await writeFile(destination, "mode = custom\n");
+        await symlink(destination, openedPath);
+        const sentinel = `${base}theme-css-resource-${width}`;
+        const hostile = `@import url("${sentinel}?import");
+          ${sample}
+          :root {
+            --camouflage: linear-gradient(red,red), /*url("data:*/url(${sentinel}?camouflage-original)/*")*/;
+            --camouflage-live: linear-gradient(transparent,transparent), /*url("data:*/url(${sentinel}?camouflage-live)/*")*/, linear-gradient(blue,blue);
+            --masked: linear-gradient(transparent,transparent), /*url("data:*/url(${sentinel}?camouflage-chain)/*")*/, linear-gradient(blue,blue);
+            --next: var(--masked); --last: var(--next);
+          }
+          #input { background-image: var(--camouflage); }
+          [data-theme="thread"] { background-image: var(--camouflage-live); }
+          [data-theme="sidebar"] { background-image: var(--last) !important; }
+          @font-face { font-family: hostile; src: url("${sentinel}?font"); }
+          @property --remote { syntax: "<image>"; inherits: false; initial-value: url("${sentinel}?property"); }
+          @keyframes hostile { from { background-image: url("${sentinel}?keyframes"); } }
+          [data-theme="composer"] { background-image: var(--remote); }
+          [data-theme="user-message"] { visibility: hidden !important; }
+          [data-theme="chat-header"] { --external: src("${sentinel}?src"); background-image: var(--external); }
+          [data-theme="assistant-message"] {
+            background-image: u\\72l("${sentinel}?escaped");
+            border-image-source: image-set("${sentinel}?image-set" 1x);
+            cursor: url("${sentinel}?cursor"), auto;
+            font-family: hostile;
+            animation: hostile 1s infinite;
+          }
+          [data-theme-protected], iframe.side-frame { visibility: hidden !important; opacity: 0 !important; }
+          [data-theme="pane"]:has([data-theme-protected])::after { content: ""; position: fixed; inset: 0; z-index: 2147483647; background: red; }`;
+        await writeFile(cssPath, hostile);
+        const fixture = await postFixture(base, "seed-theme-css", {
+          agent: `theme-css-${width}`,
+          workdir,
+          name: custom.name,
+          cssPath,
+          destination: openedPath,
+        });
+        const context = await browser.newContext({
+          viewport: { width, height: 915 },
+          isMobile: width === 412,
+          hasTouch: width === 412,
+        });
+        const page = await context.newPage();
+        const requests: string[] = [];
+        page.on("request", (request) => {
+          if (request.url().startsWith(sentinel)) requests.push(request.url());
+        });
+        await page.route(`${sentinel}**`, (route) =>
+          route.fulfill({ body: "blocked fixture resource" }),
+        );
+        const settled = async (id: string) => {
+          const conv = await (
+            await page.request.get(`${base}api/conversations/${id}`)
+          ).json();
+          return conv.status === "idle" && !conv.pending?.length;
+        };
+        const openCss = async () => {
+          await openSettingsPanel(page);
+          await page
+            .getByRole("button", { name: "Appearance", exact: true })
+            .click();
+          if (width === 412) await openDetail(page, "Custom CSS");
+          return page.locator('textarea[name="custom-css"]');
+        };
+        const closeCss = async () => {
+          if (width === 412) await closeDetail(page, "Custom CSS");
+          await page.locator("#settings-close").click();
+        };
+        try {
+          await page.goto(`${base}#agent=${fixture.agent}`, {
+            waitUntil: "domcontentloaded",
+          });
+          const input = await openCss();
+          await input.scrollIntoViewIfNeeded();
+          await browserExpect.poll(() => themeCornersHit(input)).toBe(true);
+          await input.fill(preview);
+          await browserExpect.poll(() => themeCornersHit(input)).toBe(false);
+          const editor = input.locator("..").locator("..");
+          await editor
+            .getByRole("button", { name: "Cancel", exact: true })
+            .click();
+          await browserExpect(input).toHaveValue("");
+          await browserExpect.poll(() => themeCornersHit(input)).toBe(true);
+          await input.fill(preview);
+          await editor
+            .getByRole("button", { name: "Save", exact: true })
+            .click();
+          await browserExpect
+            .poll(
+              async () =>
+                (
+                  await (
+                    await page.request.get(`${base}api/settings/theme`)
+                  ).json()
+                ).customCss,
+            )
+            .toBe(preview);
+          expect(JSON.parse(await readFile(path, "utf8")).custom[0].css).toBe(
+            preview,
+          );
+          await closeCss();
+          await page.reload();
+          const persisted = await openCss();
+          await browserExpect(persisted).toHaveValue(preview);
+          await browserExpect
+            .poll(() => themeCornersHit(persisted))
+            .toBe(false);
+          await closeCss();
+          await page.goto(`${base}#agent=${fixture.agent}`, {
+            waitUntil: "domcontentloaded",
+          });
+          await page
+            .locator("#input:enabled")
+            .fill("Select the custom CSS from the supplied file.");
+          await page.locator("#send").click();
+          const link = page.locator(
+            `.msg.assistant a[data-file-path="${openedPath}"]`,
+          );
+          await link.waitFor();
+          await browserExpect
+            .poll(
+              async () =>
+                (
+                  await (
+                    await page.request.get(`${base}api/settings/theme`)
+                  ).json()
+                ).customCss,
+            )
+            .toBe(hostile);
+          await browserExpect
+            .poll(() =>
+              themeCornersHit(
+                page.locator('[data-theme="user-message"]').last(),
+              ),
+            )
+            .toBe(false);
+          await page.evaluate(
+            () =>
+              new Promise<void>((resolve) => {
+                const browser = globalThis as any;
+                browser.requestAnimationFrame(() =>
+                  browser.requestAnimationFrame(resolve),
+                );
+              }),
+          );
+          expect(requests.filter((url) => url.includes("camouflage"))).toEqual(
+            [],
+          );
+          expect(requests).toEqual([]);
+          await page.goto(`${base}?customCss=off#agent=${fixture.agent}`, {
+            waitUntil: "domcontentloaded",
+          });
+          const message = page.locator('[data-theme="user-message"]').last();
+          await message.scrollIntoViewIfNeeded();
+          await browserExpect.poll(() => themeCornersHit(message)).toBe(true);
+          await page.goto(`${base}#agent=${fixture.agent}`, {
+            waitUntil: "domcontentloaded",
+          });
+          await message.scrollIntoViewIfNeeded();
+          await browserExpect.poll(() => themeCornersHit(message)).toBe(false);
+          await link.click();
+          const view = page.locator(".pane-col.file-tab .explorer").last();
+          const destinationBar = view.locator(".explorer-alias");
+          await browserExpect(destinationBar).toHaveText(
+            `Opens ${openedPath} → saves to ${destination}`,
+          );
+          const modelWarning = view.locator(
+            '[data-theme-protected="model-file-warning"]',
+          );
+          await browserExpect(modelWarning).toContainText(
+            "Don’t save secrets here.",
+          );
+          await browserExpect
+            .poll(() => themeCornersHit(modelWarning))
+            .toBe(true);
+          await browserExpect
+            .poll(() => themeCornersHit(destinationBar))
+            .toBe(true);
+          await view.getByRole("button", { name: "Edit", exact: true }).click();
+          await browserExpect
+            .poll(() =>
+              themeCornersHit(
+                view.getByRole("button", { name: "Save", exact: true }),
+              ),
+            )
+            .toBe(true);
+          await view
+            .getByRole("button", { name: "Cancel", exact: true })
+            .click();
+          await page
+            .getByRole("button", { name: "Close notes.txt", exact: true })
+            .click();
+          await browserExpect.poll(() => themeCornersHit(message)).toBe(false);
+          await page
+            .locator("#input:enabled")
+            .fill("/btw Summarize this conversation.");
+          await page.locator("#send").click();
+          const sidePane = page.locator('.pane-col[data-pane="side"]');
+          const frame = sidePane.locator("iframe.side-frame");
+          await frame.waitFor({ state: "attached" });
+          await browserExpect.poll(() => themeCornersHit(frame)).toBe(true);
+          const sideId = (await frame.getAttribute("data-side"))!;
+          await browserExpect.poll(() => settled(sideId)).toBe(true);
+          await page
+            .getByRole("button", {
+              name: "Close Side conversations",
+              exact: true,
+            })
+            .click();
+          await browserExpect.poll(() => themeCornersHit(message)).toBe(false);
+          await openSettingsPanel(page);
+          await page
+            .locator('#settings-nav button[data-cat="account"]')
+            .click();
+          await browserExpect(
+            page.locator(
+              '[data-theme-protected="two-factor-sign-in"] input[name="password"]',
+            ),
+          ).toHaveCount(1);
+          await browserExpect(
+            page.locator('#settings-overlay input[name="current"]'),
+          ).toHaveCount(1);
+          if (width === 412) {
+            await page
+              .getByRole("button", {
+                name: "Back to all settings",
+                exact: true,
+              })
+              .click();
+            await browserExpect(
+              page.locator(
+                '#settings-overlay [data-theme-protected], #settings-overlay input[type="password"]',
+              ),
+            ).toHaveCount(0);
+          }
+          await page
+            .locator('#settings-nav button[data-cat="appearance"]')
+            .click();
+          await browserExpect(
+            page.locator(
+              '#settings-overlay [data-theme-protected], #settings-overlay input[type="password"]',
+            ),
+          ).toHaveCount(0);
+          if (width === 412)
+            await page
+              .getByRole("button", {
+                name: "Back to all settings",
+                exact: true,
+              })
+              .click();
+          await page
+            .locator('#settings-nav button[data-cat="account"]')
+            .click();
+          await browserExpect(
+            page.locator('#settings-overlay input[name="current"]'),
+          ).toHaveCount(1);
+          await page.locator("#settings-close").click();
+          await browserExpect(
+            page.locator("#settings-sections > *"),
+          ).toHaveCount(0);
+          await writeFile(
+            path,
+            JSON.stringify({
+              theme: custom.name,
+              custom: [
+                {
+                  ...custom,
+                  css: `${hostile}\n#settings-overlay:not(.on), .settings-cat[hidden] { display: block !important; }`,
+                },
+              ],
+            }),
+          );
+          await page.reload();
+          await browserExpect
+            .poll(() => themeCornersHit(page.locator("#settings-close")))
+            .toBe(true);
+          await browserExpect(
+            page.locator("#settings-overlay"),
+          ).not.toHaveClass(/\bon\b/);
+          await browserExpect(
+            page.locator(
+              '#settings-overlay [data-theme-protected], #settings-overlay input[type="password"], #settings-overlay .setup-key, #settings-overlay .recovery-codes',
+            ),
+          ).toHaveCount(0);
+          await browserExpect.poll(() => settled(fixture.agent)).toBe(true);
+          const safetyPosts: boolean[] = [];
+          page.on("request", (request) => {
+            if (
+              request.method() === "POST" &&
+              new URL(request.url()).pathname ===
+                `/api/conversations/${fixture.agent}/safety`
+            )
+              safetyPosts.push(request.postDataJSON().off);
+          });
+          const safetyOff = async () =>
+            (
+              await (
+                await page.request.get(
+                  `${base}api/conversations/${fixture.agent}`,
+                )
+              ).json()
+            ).safety_off;
+          await writeFile(
+            path,
+            JSON.stringify({
+              theme: custom.name,
+              custom: [
+                {
+                  ...custom,
+                  css: `${hostile}\n#safety-btn { position: fixed !important; inset: 0 !important; width: 100vw !important; height: 100vh !important; z-index: 2147483647 !important; opacity: 0 !important; }`,
+                },
+              ],
+            }),
+          );
+          await page.goto(`${base}#agent=${fixture.agent}`);
+          await reloadConversation(page);
+          const overlayHit = () =>
+            page
+              .locator("#safety-btn")
+              .evaluate(
+                (element, x) =>
+                  element.contains(
+                    element.ownerDocument.elementFromPoint(x, 200),
+                  ),
+                width - 100,
+              );
+          await browserExpect.poll(overlayHit).toBe(true);
+          expect(await safetyOff()).toBe(false);
+          await page.mouse.click(width - 100, 200);
+          const confirmation = page.getByRole("dialog", {
+            name: "Turn off safety review?",
+            exact: true,
+          });
+          await browserExpect(confirmation).toBeVisible();
+          expect(safetyPosts).toEqual([]);
+          expect(await safetyOff()).toBe(false);
+          const confirmOff = confirmation.getByRole("button", {
+            name: "Turn off safety review",
+            exact: true,
+          });
+          await browserExpect
+            .poll(() => themeCornersHit(confirmOff))
+            .toBe(true);
+          await browserExpect
+            .poll(() =>
+              themeCornersHit(
+                confirmation.getByRole("button", {
+                  name: "Cancel",
+                  exact: true,
+                }),
+              ),
+            )
+            .toBe(true);
+          await page.screenshot({
+            path: join(shots, `safety-confirm-${width}.png`),
+          });
+          await confirmation
+            .getByRole("button", { name: "Cancel", exact: true })
+            .click();
+          await browserExpect(confirmation).toHaveCount(0);
+          await browserExpect.poll(overlayHit).toBe(true);
+          expect(safetyPosts).toEqual([]);
+          await page.mouse.click(width - 100, 200);
+          await browserExpect(confirmation).toBeVisible();
+          await page.keyboard.press("Escape");
+          await browserExpect(confirmation).toHaveCount(0);
+          expect(safetyPosts).toEqual([]);
+          expect(await safetyOff()).toBe(false);
+          await writeFile(
+            path,
+            JSON.stringify({
+              theme: custom.name,
+              custom: [
+                {
+                  ...custom,
+                  css: `${sample}\n#side-frame-parking { display: block !important; position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; }
+              #side-frame-parking iframe { display: block !important; visibility: visible !important; opacity: 1 !important; width: 100% !important; height: 100% !important; pointer-events: auto !important; }`,
+                },
+              ],
+            }),
+          );
+          await page.reload();
+          const parked = page.locator("#side-frame-parking iframe.side-frame");
+          await browserExpect(parked).toBeVisible();
+          const parkedInput = page
+            .frameLocator("#side-frame-parking iframe.side-frame")
+            .locator("#input:enabled");
+          await parkedInput.waitFor();
+          await parkedInput.evaluate((element) => {
+            const owner = element.ownerDocument.defaultView! as unknown as {
+              parkedClicks: number;
+            };
+            owner.parkedClicks = 0;
+            element.ownerDocument.addEventListener(
+              "click",
+              () => owner.parkedClicks++,
+            );
+          });
+          const parkedBox = (await parkedInput.boundingBox())!;
+          await page.mouse.click(
+            parkedBox.x + parkedBox.width / 2,
+            parkedBox.y + parkedBox.height / 2,
+          );
+          expect(
+            await parkedInput.evaluate(
+              (element) =>
+                (
+                  element.ownerDocument.defaultView! as unknown as {
+                    parkedClicks: number;
+                  }
+                ).parkedClicks,
+            ),
+          ).toBe(0);
+          expect(
+            await parked.evaluate(
+              (element) => element.ownerDocument.activeElement === element,
+            ),
+          ).toBe(false);
+          await writeFile(
+            path,
+            JSON.stringify({
+              theme: custom.name,
+              custom: [
+                {
+                  ...custom,
+                  css: `${sample}\n#input { visibility: hidden !important; }`,
+                },
+              ],
+            }),
+          );
+          await page.goto(`${base}?customCss=off#agent=${fixture.agent}`);
+          await page.locator("#input:enabled").waitFor();
+          await browserExpect
+            .poll(() => themeCornersHit(page.locator("#input")))
+            .toBe(true);
+          if (width === 412) {
+            await page.locator("#pane-fab").tap();
+            await page.locator('.pane-menu-item[data-pane="side"]').tap();
+          } else await page.locator('.rail-btn[data-pane="side"]').click();
+          await browserExpect(frame).toHaveAttribute(
+            "src",
+            /[?&]customCss=off(?:&|#)/,
+          );
+          const sideInput = page
+            .frameLocator('.pane-col[data-pane="side"] iframe.side-frame')
+            .locator("#input:enabled");
+          await sideInput.waitFor();
+          await browserExpect.poll(() => themeCornersHit(sideInput)).toBe(true);
+          const createdSide = await page.request.post(
+            `${base}api/conversations/${fixture.agent}/side`,
+            { data: {} },
+          );
+          expect(createdSide.ok()).toBe(true);
+          const secondSide = ((await createdSide.json()) as { id: string }).id;
+          await sidePane
+            .locator(`.side-picker option[value="${secondSide}"]`)
+            .waitFor({ state: "attached" });
+          await sidePane.locator(".side-picker").selectOption(secondSide);
+          await browserExpect
+            .poll(() =>
+              sideInput.evaluate((element) => ({
+                search: element.ownerDocument.location.search,
+                hash: element.ownerDocument.location.hash,
+              })),
+            )
+            .toEqual({
+              search: "?embed=1&customCss=off",
+              hash: `#agent=${encodeURIComponent(secondSide)}`,
+            });
+          await browserExpect.poll(() => themeCornersHit(sideInput)).toBe(true);
+          await writeFile(
+            path,
+            JSON.stringify({
+              theme: custom.name,
+              custom: [{ ...custom, css: sample }],
+            }),
+          );
+          const samplePage = await browser.newPage({
+            viewport: { width, height: 915 },
+            isMobile: width === 412,
+          });
+          try {
+            await samplePage.goto(`${base}#agent=${fixture.agent}`, {
+              waitUntil: "domcontentloaded",
+            });
+            await samplePage.locator("#input:enabled").waitFor();
+            await samplePage
+              .getByRole("link", { name: openedPath, exact: true })
+              .first()
+              .waitFor();
+            await samplePage.screenshot({ path: join(shots, `${width}.png`) });
+          } finally {
+            await samplePage.close();
+          }
+          expect(requests).toEqual([]);
+        } finally {
+          await context.close();
+        }
+      }
+    } finally {
+      await rm(path, { force: true });
+    }
+  },
   // Feature: #2426 one checked family and a prominent selected appearance, with unavailable controls visibly disabled.
   async function test_one_family_selection_and_appearance(browser, base, data) {
     const page = await browser.newPage({
@@ -699,59 +1245,6 @@ export const tests: BrowserTest[] = [
         expect(colors.arrow, name).toBe(colors.muted);
         expect(colors.keyword, name).toBe(colors.syntax);
       }
-    } finally {
-      await page.close();
-    }
-  },
-  // Regression: #2727 per-image sizing variables need a local declaration, not a theme token.
-  async function test_generated_theme_is_complete(browser, base) {
-    const page = await browser.newPage();
-    try {
-      await gotoRoot(page, base);
-      await page.getByRole("button", { name: "Choose effort level" }).click();
-      await page.locator("#effort-range[aria-valuetext]").waitFor();
-      expect(await page.locator("style#theme").textContent()).toContain(
-        ":root{",
-      );
-      const result = await page.evaluate(() => {
-        const { document, getComputedStyle } = globalThis as any;
-        const style = getComputedStyle(document.documentElement);
-        const declared = new Set<string>(),
-          referenced = new Set<string>();
-        const declarations = (style: any) => {
-          for (let i = 0; i < (style?.length ?? 0); i++)
-            if (style[i].startsWith("--")) declared.add(style[i]);
-        };
-        const visit = (rules: any) => {
-          for (const rule of rules) {
-            if (rule.cssRules) visit(rule.cssRules);
-            declarations(rule.style);
-            for (const match of String(rule.cssText).matchAll(
-              /var\((--[\w-]+)/g,
-            ))
-              referenced.add(match[1]);
-          }
-        };
-        for (const sheet of document.styleSheets) visit(sheet.cssRules);
-        for (const element of document.querySelectorAll("[style]"))
-          declarations(element.style);
-        const missing = [...referenced].filter((name) => !declared.has(name));
-        return {
-          missing,
-          background: getComputedStyle(document.body).backgroundColor,
-          bg: style.getPropertyValue("--bg").trim(),
-        };
-      });
-      expect(result.missing).toEqual([]);
-      const bg = generateTheme(
-        themePalettes.find((p) => p.name === "Material Dark")!,
-      ).bg!;
-      expect(result.bg).toBe(bg);
-      const channels = bg
-        .slice(1)
-        .match(/../g)!
-        .map((v) => parseInt(v, 16));
-      expect(result.background).toBe(`rgb(${channels.join(", ")})`);
     } finally {
       await page.close();
     }

@@ -8,6 +8,7 @@ import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   gotoRoot,
+  postFixture,
   rootAgentId,
   showAgentList,
   type BrowserTest,
@@ -41,13 +42,7 @@ export async function enableTagSidebar(
     })),`,
       ) +
     `\nconst plain = (() => { ${settings.default.replace("export default function sidebar", "return function sidebar")} })();`;
-  expect(
-    (
-      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
-        data: { script, by: "operator" },
-      })
-    ).ok(),
-  ).toBeTrue();
+  await postFixture(base, "save-sidebar-script", { script, by: "operator" });
   return script;
 }
 
@@ -87,6 +82,19 @@ const sectionOf = (page: Page, id: string) =>
     }
     return null;
   }, id);
+const edgesUncovered = (locator: Locator) =>
+  locator.evaluate((element) => {
+    const box = element.getBoundingClientRect();
+    return [
+      [box.left + 1, box.y + box.height / 2],
+      [box.right - 1, box.y + box.height / 2],
+      [box.x + box.width / 2, box.top + 1],
+      [box.x + box.width / 2, box.bottom - 1],
+    ].every(([x, y]) => {
+      const hit = element.ownerDocument.elementFromPoint(x!, y!);
+      return !!hit && element.contains(hit);
+    });
+  });
 const header = (page: Page, title: string) =>
   page.locator(
     `.tree-section-header[data-section-key='${JSON.stringify(["", title])}']`,
@@ -97,6 +105,145 @@ const serverTags = async (context: BrowserContext, base: string, id: string) =>
   ).tags;
 
 export const tests: BrowserTest[] = [
+  // Feature: #3371 edge drops choose a sibling parent without promising sibling order.
+  async function test_sidebar_drag_parent(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+    });
+    const saved = await (
+      await context.request.get(`${base}api/sidebar/script`)
+    ).json();
+    const ids = await seedSections(context, base);
+    const response = await context.request.post(`${base}api/conversations`, {
+      data: { parent: ids.fresh },
+    });
+    expect(response.ok()).toBeTrue();
+    const second = (await response.json()).id as string;
+    await postFixture(base, "save-sidebar-script", {
+      script: `export default rows => [{ title: "Agents", rows: ${JSON.stringify([ids.fresh, ids.busy, ids.stale, ids.archived])}.map(id => rows.find(r => r.id === id && r.depth === 0)).filter(Boolean) }];`,
+      by: "operator",
+    });
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    await gotoRoot(page, base);
+    const row = (id: string) =>
+      page.locator(`#agent-list .agent[data-id="${id}"]`);
+    const expand = async (id: string) => {
+      await row(id).click();
+      await row(id).focus();
+      if ((await row(id).getAttribute("aria-expanded")) === "false")
+        await page.keyboard.press("l");
+    };
+    const parentOf = async (id: string) =>
+      (
+        (await (await context.request.get(`${base}api/tree`)).json()) as any[]
+      ).find((n) => n.id === id)?.parent;
+    const inset = (target: Locator) =>
+      target.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return [
+          [box.left + 6, box.top + 6],
+          [box.right - 6, box.top + 6],
+          [box.left + 6, box.bottom - 6],
+          [box.right - 6, box.bottom - 6],
+        ].every(([x, y]) =>
+          element.contains(element.ownerDocument.elementFromPoint(x!, y!)),
+        );
+      });
+    const start = async (source: string, target: Locator, edge: boolean) => {
+      expect(await inset(row(source))).toBeTrue();
+      expect(await inset(target)).toBeTrue();
+      const from = (await row(source).boundingBox())!;
+      const to = (await target.boundingBox())!;
+      await page.mouse.move(from.x + from.width / 2, from.y + from.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(
+        from.x + from.width / 2 + 8,
+        from.y + from.height / 2,
+        { steps: 4 },
+      );
+      const y = to.y + (edge ? -0.5 : to.height / 2);
+      await page.mouse.move(to.x + to.width / 2, y, { steps: 12 });
+      await page.mouse.move(to.x + to.width / 2 + 1, y);
+    };
+    const left = (target: Locator) =>
+      target.evaluate((element) => element.getBoundingClientRect().left);
+    const line = page.locator(".agent-drop-line");
+    await header(page, "Agents").waitFor();
+    await expand(ids.fresh);
+    await row(second).waitFor();
+    const children = page.locator('#agent-list .agent[aria-level="2"]');
+    expect(await children.count()).toBe(2);
+    const lower = children.nth(1);
+    const childBox = (await lower.boundingBox())!;
+    const aboveBox = (await children.nth(0).boundingBox())!;
+    expect(childBox.y).toBeGreaterThan(aboveBox.y);
+    await start(ids.busy, lower, true);
+    await line.waitFor();
+    expect(await left(line)).toBeCloseTo(await left(lower.locator(".row1")), 0);
+    expect(await page.locator(".drop-ok").count()).toBe(0);
+    await takeScreenshot(page, "sidebar-sibling-insertion.png");
+    await page.mouse.up();
+    await browserExpect.poll(() => parentOf(ids.busy)).toBe(ids.fresh);
+    await browserExpect(row(ids.busy)).toHaveAttribute("aria-level", "2");
+    expect(await left(row(ids.busy).locator(".row1"))).toBeCloseTo(
+      await left(row(second).locator(".row1")),
+      0,
+    );
+    await start(ids.busy, row(ids.child), false);
+    await browserExpect(row(ids.child)).toHaveClass(/drop-ok/);
+    expect(await line.count()).toBe(0);
+    await page.mouse.up();
+    await browserExpect.poll(() => parentOf(ids.busy)).toBe(ids.child);
+    await browserExpect(row(ids.busy)).toHaveAttribute("aria-level", "3");
+    expect(await left(row(ids.busy).locator(".row1"))).toBeGreaterThan(
+      await left(row(ids.child).locator(".row1")),
+    );
+    await start(ids.busy, row(ids.archived), true);
+    await line.waitFor();
+    expect(await left(line)).toBeCloseTo(
+      await left(row(ids.archived).locator(".row1")),
+      0,
+    );
+    await page.mouse.up();
+    await browserExpect.poll(() => parentOf(ids.busy)).toBeNull();
+    await browserExpect(row(ids.busy)).toHaveAttribute("aria-level", "1");
+    expect(await left(row(ids.busy).locator(".row1"))).toBeCloseTo(
+      await left(row(ids.stale).locator(".row1")),
+      0,
+    );
+    await expand(ids.fresh);
+    await expand(ids.child);
+    for (const [target, edge] of [
+      [ids.child, false],
+      [ids.grandchild, true],
+    ] as const) {
+      await start(ids.fresh, row(target), edge);
+      await browserExpect(
+        page.locator(edge ? ".agent-drop-line.invalid" : ".drop-bad"),
+      ).toBeVisible();
+      await page.mouse.up();
+      expect(await parentOf(ids.fresh)).toBeNull();
+      expect(await parentOf(ids.child)).toBe(ids.fresh);
+    }
+    await start(ids.busy, header(page, "Agents"), false);
+    expect(await page.locator(".drop-ok, .agent-drop-line").count()).toBe(0);
+    await page.mouse.up();
+    expect(await parentOf(ids.busy)).toBeNull();
+    expect(errors).toEqual([]);
+    for (const id of [ids.fresh, ids.busy, ids.stale, ids.archived]) {
+      const response = await context.request.delete(
+        `${base}api/conversations/${id}`,
+      );
+      expect(response.ok()).toBeTrue();
+      await browserExpect.poll(() => parentOf(id)).toBeUndefined();
+    }
+    await postFixture(base, "save-sidebar-script", {
+      script: saved.script,
+      by: "operator",
+    });
+    await context.close();
+  },
   // Feature: #2526 phone-only density must not override desktop sidebar styling.
   async function test_sidebar_compact_rows(browser, base) {
     for (const width of [412, 1280]) {
@@ -469,7 +616,7 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await context.close();
   },
-  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
+  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3289 retry a sidebar script run that timed out; #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
   async function test_sidebar_sections(browser, base) {
     let context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -787,14 +934,7 @@ export const tests: BrowserTest[] = [
         "rowActions: [PIN],",
         'rowActions: [PIN], actions: [{...SNOOZE, label: "Snooze all", rows: inbox}],',
       );
-    expect(
-      (
-        await context.request.post(
-          `${base}__browser-test/save-sidebar-script`,
-          { data: { script, by: "operator" } },
-        )
-      ).ok(),
-    ).toBeTrue();
+    await postFixture(base, "save-sidebar-script", { script, by: "operator" });
     const page = await context.newPage();
     await page.clock.install();
     await gotoRoot(page, base);
@@ -1001,20 +1141,7 @@ async function typedTags(
   ).toBe(0);
   if (width === 412) {
     for (const control of await dialog.locator("input, button").all())
-      expect(
-        await control.evaluate((element) => {
-          const box = element.getBoundingClientRect();
-          return [
-            [box.left + 1, box.y + box.height / 2],
-            [box.right - 1, box.y + box.height / 2],
-            [box.x + box.width / 2, box.top + 1],
-            [box.x + box.width / 2, box.bottom - 1],
-          ].every(([x, y]) => {
-            const hit = element.ownerDocument.elementFromPoint(x!, y!);
-            return !!hit && element.contains(hit);
-          });
-        }),
-      ).toBeTrue();
+      expect(await edgesUncovered(control)).toBeTrue();
   }
   await takeScreenshot(page, `tag-box-${width}.png`);
   await input.press("Escape");
@@ -1099,20 +1226,7 @@ async function typedTags(
     for (const toggle of await page.locator(".tree-section-toggle").all()) {
       await toggle.scrollIntoViewIfNeeded();
       expect((await toggle.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-      expect(
-        await toggle.evaluate((element) => {
-          const box = element.getBoundingClientRect();
-          return [
-            [box.left + 1, box.y + box.height / 2],
-            [box.right - 1, box.y + box.height / 2],
-            [box.x + box.width / 2, box.top + 1],
-            [box.x + box.width / 2, box.bottom - 1],
-          ].every(([x, y]) => {
-            const hit = element.ownerDocument.elementFromPoint(x!, y!);
-            return !!hit && element.contains(hit);
-          });
-        }),
-      ).toBeTrue();
+      expect(await edgesUncovered(toggle)).toBeTrue();
     }
   }
   await newButton.click();
@@ -1270,13 +1384,10 @@ async function typedTags(
       'defaults: { "recurse-dev": { effort: 4 } }',
     )
     .replace("title: tag,", 'title: tag + " defaults",');
-  expect(
-    (
-      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
-        data: { script: defaultsScript, by: "operator" },
-      })
-    ).ok(),
-  ).toBeTrue();
+  await postFixture(base, "save-sidebar-script", {
+    script: defaultsScript,
+    by: "operator",
+  });
   let releaseWorker!: () => void;
   const workerHeld = new Promise<void>((resolve) => (releaseWorker = resolve));
   await page.route("**/static/sidebar-worker.js?*", async (route) => {
@@ -1320,13 +1431,7 @@ async function typedTags(
   await browserExpect(page.locator("#effort-range")).toHaveValue("3");
   await showAgentList(page);
   const script = `export default rows => [{ title: "Projects", rows: rows.filter(r => r.depth === 0), actions: [{ label: "Tag all", ask: "tag", set: "fixed", clear: "research" }, { label: "Remove tag", ask: "tag", clear: "ask" }] }];`;
-  expect(
-    (
-      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
-        data: { script, by: "operator" },
-      })
-    ).ok(),
-  ).toBeTrue();
+  await postFixture(base, "save-sidebar-script", { script, by: "operator" });
   await page.reload();
   await showAgentList(page);
   await header(page, "Projects").waitFor();
@@ -1380,13 +1485,10 @@ async function typedTags(
       })
     ).ok(),
   ).toBeTrue();
-  expect(
-    (
-      await context.request.post(`${base}__browser-test/save-sidebar-script`, {
-        data: { script: demo, by: "operator" },
-      })
-    ).ok(),
-  ).toBeTrue();
+  await postFixture(base, "save-sidebar-script", {
+    script: demo,
+    by: "operator",
+  });
   for (const [id, tag] of [
     [ids.fresh, "recurse"],
     [ids.archived, "research"],
@@ -1506,14 +1608,16 @@ async function customScript(
   ids: Ids,
 ): Promise<void> {
   const script = [
-    "export default function sidebar(rows) {",
+    "export default function sidebar(rows, now) {",
     '  if (rows.some((r) => r.tags.boom)) throw new Error("boom");',
+    "  if (rows.some((r) => r.tags.hang)) for (;;);",
+    "  if (rows.some((r) => r.tags.slow) && Date.now() < now * 1000 + 300) for (;;);",
     "  return [",
     `    { title: "Mine", rows: rows.filter((r) => r.id === "${ids.fresh}") },`,
     `    { title: "Has PR", rows: rows.filter((r) => r.parent === "${ids.fresh}" && r.depth === 1 && r.prs.some((pr) => pr.number === 42 && pr.checks === "pass" && !pr.merged)) },`,
     `    { title: "Others", rows: rows.filter((r) => r.depth === 0 && r.id !== "${ids.fresh}") },`,
     `    { title: "Hidden", hideWhenEmpty: true, rows: ["${ids.fresh}", "unknown"], empty: "Hidden empty text", actions: [{ label: "Hidden action", set: "pinned", rows }] },`,
-    '    { title: "Visible empty", hideWhenEmpty: false, rows: [], empty: "Visible empty text" },',
+    '    { title: "Visible empty", hideWhenEmpty: false, rows: [], empty: rows.some((r) => r.tags.slow) ? "Slow ran" : "Visible empty text" },',
     "  ];",
     "}",
   ].join("\n");
@@ -1576,6 +1680,19 @@ async function customScript(
     .waitFor();
   await page.locator("#settings-close").click();
   await notice.waitFor({ state: "hidden" });
+  const banner = notice.getByRole("alert");
+  for (const tag of ["slow", "hang"]) {
+    const tagged = await context.request.post(`${base}api/sidebar/tags`, {
+      data: { ids: [ids.fresh], set: { [tag]: null } },
+    });
+    expect(tagged.ok()).toBe(true);
+    if (tag === "slow")
+      await page.getByText("Slow ran", { exact: true }).waitFor();
+  }
+  await banner
+    .getByText("Sidebar script failed: The script ran longer than 50 ms")
+    .waitFor();
+  await header(page, "Inbox").waitFor();
 
   let release!: () => void;
   const held = new Promise<void>((resolve) => (release = resolve));
@@ -1594,7 +1711,6 @@ async function customScript(
     data: { ids: [ids.fresh], set: { boom: null } },
   });
   expect(boom.ok()).toBe(true);
-  const banner = notice.getByRole("alert");
   await banner
     .getByText("Sidebar script failed: Error: boom (line 2)")
     .waitFor();

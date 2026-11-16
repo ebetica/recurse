@@ -1,17 +1,30 @@
-// Bounded Explorer filesystem work. Lazy directory cursors never recurse.
-// Downloads hold no-follow descriptors and stream 64 KiB chunks.
-// Cursors expire; downloads close with their response. Conversation-owned
-// handles have a global cap.
-import { type FileHandle } from "node:fs/promises";
+// Bounded Explorer I/O: lazy cursors, pinned downloads, owner-only save temps.
+// Cursors expire; downloads close with responses; handles have a global cap.
+// Saves never log text. Version checks are best-effort against external
+// writers, not an atomic CAS.
+import { constants, type Stats } from "node:fs";
+import { realpath, type FileHandle } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { entriesAt, lstatAt } from "../utils/dir_fd";
+import { basename, dirname, join } from "node:path";
+import {
+  entriesAt,
+  lstatAt,
+  openAt,
+  renameAt,
+  statAt,
+  unlinkAt,
+} from "../utils/dir_fd";
 import { runBounded, safeGitEnv } from "../workdir_git";
+import { loadPromptContextFiles } from "../agents/durable/prompt_resources";
+import { resolveRoots } from "../local_roots";
 import {
   EXPLORER_CHUNK_BYTES,
   EXPLORER_DOWNLOAD_BYTES,
+  EXPLORER_EDIT_BYTES,
   EXPLORER_PAGE_SIZE,
   type ExplorerMessage,
   type ExplorerReply,
+  type ExplorerRequests,
   type ExplorerScope,
   type ExplorerEntry,
   type ExplorerListing,
@@ -48,6 +61,7 @@ const active = new Set<Promise<void>>();
 let sealed = false;
 const listingOwners = new Map<string, AbortController>();
 const HANDLE_IDLE_MS = 60_000;
+let saving: Promise<unknown> = Promise.resolve();
 let opening = 0;
 const port = globalThis as unknown as Worker;
 
@@ -177,7 +191,12 @@ async function list(
     const prefix = parts.length ? `${parts.join("/")}/` : "";
     const [stats, ignoredPaths] = await Promise.all([
       Promise.all(
-        names.map((name) => lstatAt(item.dir.fd, name).catch(() => null)),
+        names.map(async (name) => {
+          const stat = await lstatAt(item.dir.fd, name).catch(() => null);
+          return stat?.isSymbolicLink()
+            ? ((await statAt(item.dir.fd, name).catch(() => null)) ?? stat)
+            : stat;
+        }),
       ),
       ignored(
         scope.root,
@@ -225,15 +244,97 @@ async function list(
   }
 }
 
+const versionOf = (stats: Stats) =>
+  `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
+const absent = (error: unknown) =>
+  (error as { code?: string }).code === "ENOENT";
+
+/** A missing file whose folder exists is `missing`, so it can be created. */
+async function opened(scope: ExplorerScope) {
+  const parts = pathParts(scope.path);
+  try {
+    return await regularFile(scope.root, parts);
+  } catch (error) {
+    if (!absent(error) || !parts.length) throw error;
+    const { dir } = await directory(scope.root, parts.slice(0, -1));
+    const found = await lstatAt(dir.fd, parts.at(-1)!).then(
+      () => true,
+      (lstatError) => !absent(lstatError),
+    );
+    await dir.close();
+    if (found) throw error;
+    return null;
+  }
+}
+
+/** Resolve existing targets, or the canonical parent of a new file. */
+async function destination(scope: ExplorerScope): Promise<string> {
+  const parts = pathParts(scope.path);
+  if (!parts.length) refuse(422, "not a file");
+  try {
+    return await realpath(join(scope.root, ...parts));
+  } catch (error) {
+    if (!absent(error)) throw error;
+    const { dir, canonicalPath } = await directory(
+      scope.root,
+      parts.slice(0, -1),
+    );
+    try {
+      const exists = await lstatAt(dir.fd, parts.at(-1)!).then(
+        () => true,
+        (error) => {
+          if (!absent(error)) throw error;
+          return false;
+        },
+      );
+      if (exists) throw error;
+      return join(canonicalPath, parts.at(-1)!);
+    } finally {
+      await dir.close();
+    }
+  }
+}
+
+async function promptResource(
+  scope: ExplorerScope,
+  canonicalPath: string,
+): Promise<boolean> {
+  if (
+    [scope.path, canonicalPath].some((path) =>
+      /\.(md|markdown|mdx)\.*$/i.test(path),
+    )
+  )
+    return true;
+  const files = await loadPromptContextFiles(
+    scope.contextRoot ?? scope.root,
+    scope.agentDir ?? resolveRoots().piAgent,
+  );
+  for (const file of files)
+    if ((await realpath(file.path).catch(() => file.path)) === canonicalPath)
+      return true;
+  return false;
+}
+
 async function preview(
   scope: ExplorerScope & { offset: number; version?: string },
 ): Promise<ExplorerPreview> {
-  const { handle, stats } = await regularFile(
-    scope.root,
-    pathParts(scope.path),
-  );
+  const file = await opened(scope);
+  const canonicalPath = file?.canonicalPath ?? (await destination(scope));
+  if (!file)
+    return {
+      root: scope.root,
+      path: scope.path,
+      canonicalPath,
+      promptResource: await promptResource(scope, canonicalPath),
+      size: 0,
+      version: "",
+      kind: "missing",
+      next: null,
+    };
+  const { handle, stats } = file;
   try {
-    const version = `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
+    const warning = await promptResource(scope, canonicalPath);
+    const version = versionOf(stats);
     if (scope.offset && scope.version !== version)
       refuse(409, "the file changed; reopen it");
     if (scope.offset > stats.size)
@@ -264,6 +365,8 @@ async function preview(
       path: scope.path,
       size: stats.size,
       version,
+      canonicalPath,
+      promptResource: warning,
       kind: text ? "text" : "binary",
       ...(text ? { text: text.text } : {}),
       next: next < stats.size ? next : null,
@@ -271,6 +374,87 @@ async function preview(
   } finally {
     await handle.close();
   }
+}
+
+/**
+ * Replace or create a file with UTF-8 text via an owner-only temporary file.
+ * New files use mode 0600; replaced files keep their mode.
+ */
+async function save(scope: ExplorerRequests["save"]): Promise<ExplorerPreview> {
+  const bytes = new TextEncoder().encode(scope.text);
+  if (bytes.length > EXPLORER_EDIT_BYTES)
+    refuse(413, "the file is too large to save here");
+  const parts = pathParts(scope.path);
+  if (!parts.length) refuse(422, "not a file");
+  const unchangedDestination = async () => {
+    let target: string;
+    try {
+      target = await destination(scope);
+    } catch {
+      refuse(409, "The file destination changed; reopen it before saving.");
+    }
+    if (target !== scope.canonicalPath)
+      refuse(409, "The file destination changed; reopen it before saving.");
+    return target;
+  };
+  const target = await unchangedDestination();
+  const name = basename(target);
+  const { dir } = await directory(dirname(target), []);
+  const temp = `.${name.slice(0, 200)}.${randomUUID().slice(0, 8)}.tmp`;
+  let written = false;
+  try {
+    const before = await lstatAt(dir.fd, name).catch((error) =>
+      absent(error) ? null : Promise.reject(error),
+    );
+    const current = (stats: Stats | null) => {
+      if (stats && !stats.isFile()) refuse(422, "not a regular file");
+      if (scope.overwrite) return;
+      if (scope.version === null && stats)
+        refuse(409, "A file with this name already exists.");
+      if (
+        scope.version !== null &&
+        (!stats || versionOf(stats) !== scope.version)
+      )
+        refuse(409, "The file changed on disk since you opened it.");
+    };
+    current(before);
+    const handle = await openAt(
+      dir.fd,
+      temp,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    written = true;
+    try {
+      await handle.writeFile(bytes);
+      await handle.chmod(before ? before.mode & 0o7777 : 0o600);
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    current(
+      await lstatAt(dir.fd, name).catch((error) =>
+        absent(error) ? null : Promise.reject(error),
+      ),
+    );
+    await unchangedDestination();
+    const namedParent = await directory(dirname(target), []);
+    try {
+      if (!sameFile(await namedParent.dir.stat(), await dir.stat()))
+        refuse(409, "The file destination changed; reopen it before saving.");
+    } finally {
+      await namedParent.dir.close();
+    }
+    await renameAt(dir.fd, temp, dir.fd, name);
+    written = false;
+  } finally {
+    if (written) await unlinkAt(dir.fd, temp).catch(() => {});
+    await dir.close().catch(() => {});
+  }
+  return preview({ ...scope, offset: 0, version: undefined });
 }
 
 async function request(message: ExplorerMessage, signal: AbortSignal) {
@@ -296,6 +480,13 @@ async function request(message: ExplorerMessage, signal: AbortSignal) {
   }
   if (message.op === "list") return list(message.args, signal);
   if (message.op === "preview") return preview(message.args);
+  if (message.op === "save") {
+    // Invariant: One save at a time, so each version check and its rename
+    // cannot interleave with another Recurse save of the same file.
+    const run = saving.then(() => save(message.args));
+    saving = run.catch(() => {});
+    return run;
+  }
   if (message.op === "admit") {
     const root = await directory(
       message.args.root,
@@ -383,7 +574,9 @@ function fail(id: number, error: unknown): void {
       ? 403
       : ["ELOOP", "EMLINK", "ENOTDIR"].includes(item.code ?? "")
         ? 422
-        : 404);
+        : ["EROFS", "ENOSPC", "EDQUOT"].includes(item.code ?? "")
+          ? 507
+          : 404);
   reply({
     id,
     error: {
@@ -393,8 +586,10 @@ function fail(id: number, error: unknown): void {
         : status === 403
           ? "permission denied"
           : status === 422
-            ? "symbolic links and non-directories are not followed"
-            : "file or folder not found",
+            ? "not a folder or regular file"
+            : status === 507
+              ? "the disk is full or read-only"
+              : "file or folder not found",
     },
   });
 }

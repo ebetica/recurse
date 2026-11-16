@@ -104,7 +104,7 @@ export const toolsTests: BrowserTest[] = [
           status: 200,
           contentType: "text/event-stream",
           body:
-            `retry: 3000\n\n` +
+            `retry: 100\n\n` +
             `id: chronology:${eventsRevision}\n` +
             "event: snapshot\n" +
             `data: ${JSON.stringify({ status: "ready", instance_id: "chronology", revision: eventsRevision, blocks: rows, older: false, newer: false })}\n\n`,
@@ -284,7 +284,7 @@ export const toolsTests: BrowserTest[] = [
             status: 200,
             contentType: "text/event-stream",
             body:
-              `retry: 3000\n\n` +
+              `retry: 100\n\n` +
               `id: streaming:${eventsRevision}\n` +
               "event: snapshot\n" +
               `data: ${JSON.stringify({ status: "ready", instance_id: "streaming", revision: eventsRevision, blocks: rows, older: false, newer: false })}\n\n`,

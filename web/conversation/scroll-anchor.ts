@@ -32,20 +32,6 @@ export function isPinnedToBottom(
   return scrollHeight - scrollTop - clientHeight < threshold;
 }
 
-// Upward scrolling (including browser focus/jumps) releases the open-thread
-// bottom latch. Height-only growth and bottom-adjacent clamping do not.
-export function hasScrolledAwayFromBottom(
-  followedScrollTop: number,
-  scrollTop: number,
-  scrollHeight: number,
-  clientHeight: number,
-): boolean {
-  return (
-    scrollTop < followedScrollTop &&
-    !isPinnedToBottom(scrollHeight, scrollTop, clientHeight)
-  );
-}
-
 // Pure: the corrected scrollTop that keeps the anchor's screen offset.
 // beforeTop/afterTop are the anchor's getBoundingClientRect().top readings.
 // Clamped like tree_projection's centeredRowScrollTop: collapsing more than
@@ -122,7 +108,7 @@ export function captureViewport(
 export interface ScrollAnchorViewport {
   readonly scrollHeight: number;
   readonly clientHeight: number;
-  scrollTop: number;
+  readonly scrollTop: number;
   getBoundingClientRect(): { top: number };
 }
 
@@ -133,11 +119,12 @@ export interface ScrollAnchorRow {
 
 // Anchors a synchronous toggle/repaint on a surviving keyed DOM node. Explicit
 // controls override bottom pinning; a rAF corrects deferred layout. Returns an
-// instant correction for the owner's later layout observations.
+// instant correction for later layout observations; `write` sets offsets.
 export function withScrollAnchor(
   viewport: ScrollAnchorViewport,
   rows: readonly ScrollAnchorRow[],
   mutate: () => void,
+  write: (top: number) => void,
   explicitAnchor: ScrollAnchorRow | null = null,
 ): (() => void) | null {
   if (
@@ -170,10 +157,12 @@ export function withScrollAnchor(
   if (!anchor || beforeTop === undefined || !anchor.isConnected) return null;
   const correct = (): void => {
     if (!anchor.isConnected) return;
-    viewport.scrollTop = anchoredScrollTop(
-      viewport.scrollTop,
-      beforeTop,
-      anchor.getBoundingClientRect().top,
+    write(
+      anchoredScrollTop(
+        viewport.scrollTop,
+        beforeTop,
+        anchor.getBoundingClientRect().top,
+      ),
     );
   };
   correct();

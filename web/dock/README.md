@@ -2,6 +2,9 @@
 
 The desktop workspace puts the chat and registered panes in draggable, tabbed
 windows. Phones keep the pane overlay and do not request dockview or its CSS.
+On desktop the page shell preloads both, and the first window layout happens
+at full width, so Chat never paints at an interim width. A phone that widens
+to desktop loads them then.
 
 ## Source files
 
@@ -10,8 +13,9 @@ windows. Phones keep the pane overlay and do not request dockview or its CSS.
 - [host.ts](host.ts) adapts dockview's tabs, splits and resizing to existing DOM
   content. [commands.ts](commands.ts) owns window navigation, arrangement and
   transient split hints. [layout.ts](layout.ts) validates saved native grids without
-  importing the window library. [style.css](style.css) applies the shared card
-  tokens, tab styling and keyboard hints.
+  importing the window library. [style.css](style.css) draws flat windows that meet
+  at 1px divider lines, tab styling and keyboard hints. Dividers keep
+  dockview's 4px drag area and highlight as a 1px accent line.
 - [../panes/file-tabs.ts](../panes/file-tabs.ts) keeps bounded file definitions
   and positively validated source descriptors inside native layouts.
 
@@ -36,17 +40,34 @@ their icons, keeping full-name tooltips and accessible labels; the active title
 stays complete. Native horizontal scrolling keeps every tab reachable at narrow
 widths.
 
-The active pane's fullscreen button lives at the right of its window's tabstrip;
+Every window, including Chat, has a fullscreen button at the right of its tabstrip;
 close stays on each tab. Pane-specific pickers and actions remain below the tabs,
 and panes without those controls have no empty extra row. The same native
-fullscreen button returns to its pane before fullscreen or phone layout, keeping
-its handler, focus and keyboard ownership. Desktop fullscreen is a layout,
-not a modal dialog; phone overlays remain modal. Tab stays within the visible
-fullscreen pane. Window keys (`g`/`w` and `z`) also work from focused non-editor
+fullscreen button returns to its pane heading (Chat's header for Chat) while
+fullscreen, labelled Exit fullscreen, keeping its handler, focus and keyboard
+ownership. Chat's control stays hidden on phones. Escape from fullscreen Chat
+restores the windows after inner menus and editor Escape handlers have priority. Desktop fullscreen is a layout,
+not a modal dialog; phone overlays remain modal. Fullscreen content has an opaque background; other windows, their controls and
+resize dividers stay hidden without changing the native grid. Leaving fullscreen
+reveals the same layout. Explicit Chat focus or a source-message jump leaves
+another window's fullscreen/Only view before revealing Chat. Tab stays within the
+visible fullscreen pane. Window keys (`g`/`w` and `z`) also work from focused non-editor
 controls; native button activation keeps its keys. Chat activity controls retain
 thread shortcuts while Enter and Space activate the focused control. Window controls retain their
 pane's keyboard and staged-comment ownership; conversation or availability
 cleanup restores the usual tree/menu focus.
+
+Pointer text drags stay in the window or left panel where the press began.
+Tabs, tab actions, resize gutters and rail buttons are not selectable;
+sidebar headings, custom text and diagnostics remain copyable. The shared host
+scopes selection only while a pointer is held, including touch and pen. On release,
+cancel or blur it clips a range that crossed the source boundary, then restores
+selectability everywhere. A missed release also recovers from a no-buttons mouse
+or pointer event, before keyboard input, or on context menus, native dragging and
+visibility changes. These recovery listeners exist only during the gesture;
+pointer capture is not used. Editors are never excluded. Keyboard and programmatic
+selection, double/triple clicks and native Select All remain available at rest.
+Phones are unchanged.
 
 Dockview activation is not keyboard focus. Its tabs and wrappers are not Tab
 stops. Clicking Chat returns to Normal mode without adding a focusable chat
@@ -63,10 +84,12 @@ updates its window ownership without requiring a new focus event. Content tempor
 parked during layout changes keeps its keyboard focus targets.
 Pane focus waits for a visible window and enabled controls. New keyboard,
 pointer or input actions cancel an unfinished focus request. Closing a pane
-restores its opener only if focus has not moved elsewhere. Submitting comments
-keeps that pane closed through refreshes and later visits until reopened;
-other panes retain their staged comments.
-Closing Chat keeps its content parked; composing reopens it.
+restores its opener only if focus has not moved elsewhere. Submitting Artifact comments
+keeps its tab visible and active without saving a new layout. Other comment viewers
+close on submission and stay closed through refreshes until reopened; other panes
+retain their staged comments.
+Closing Chat keeps its content parked. The rail's first button (Chat, `g1`)
+reopens it, as do composing, New and choosing a conversation.
 Narrowing to phone keeps the focused pane or the pane owning a floating comment
 draft, including its editor focus and selection. Cleaning up another pane must
 not cancel that draft. Global pane and agent finders are mounted outside Chat
@@ -76,8 +99,9 @@ height. Mentions remain beside the composer, and phone placement is unchanged.
 
 ## Conversation layouts
 
-Each conversation remembers its native window splits, sizes, tabs, active tabs and
-closed Chat in this browser, including after reload. The existing conversation
+Each conversation remembers its native window splits, sizes, tabs and active tabs
+in this browser, including after reload. A saved layout without Chat restores
+with Chat added beside it. The existing conversation
 UI-state store owns retention, draft promotion, cross-tab field merging and owner
 cleanup. Its versioned `window-layout` field permits at most 32,000 JSON characters;
 other pane fields retain their 3,000-character limit. Record and owner bounds stay
@@ -106,6 +130,18 @@ selection across the whole replacement, including temporary parking; a pane
 comment draft is never displaced.
 Window focus history, merge directions and one-shot opening hints do not cross
 conversation visits.
+
+A closed window, Chat included, reopens where it was. Closing notes the grid
+just before the close and which tabs share which windows in which splits right
+after it. Reopening by any route (rail, keys, finder, automatic opens, the
+per-visit Chat re-show) restores that grid while the windows still hold the
+same tabs in the same splits; sizes and selected tabs may have changed, and
+other windows keep their selected tabs and `wt` merge directions. Otherwise, or with a pending `wv`/`ws`
+split, the usual opening rule applies. Places are kept per conversation in
+memory only; one cap covers all conversations together (newest 64), so a
+deleted conversation's places simply age out. A reload uses the usual rule. Closes during a
+conversation switch or a restore are not noted. Reopening saves like any other
+open: only operator opens change the saved layout.
 Phones retain their own overlay choice and never overwrite the desktop arrangement;
 returning to desktop restores it while preserving the composer's draft and caret.
 
@@ -117,7 +153,7 @@ and leaves another window's fullscreen/Only view. On phones it returns to the
 conversation. Initial order uses bounded device-local opening history, decayed
 over time; Chat openings from the finder count too. Typing filters by title.
 Arrow keys select, Enter opens, and Escape returns focus.
-Already-open panes, including Chat, are labelled Open. `g1`–`g9` open panes in rail order;
+Already-open panes, including Chat, are labelled Open. `g1`–`g9` open panes in rail order, starting with Chat;
 rail tooltips show the keys. `q` closes the focused pane, `i` focuses the
 composer, and other printable keys never start a draft from a pane. `wQ` closes
 all panes and leaves Chat open, preserving its draft and caret. Plain `p` no

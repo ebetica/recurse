@@ -1,5 +1,6 @@
 import { test_backend_client } from "./test_backend_client";
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import { EventEmitter, once } from "node:events";
 import {
   ROOT,
@@ -10,6 +11,7 @@ import {
   openSettingsPanel,
   rootAgentId,
   runBrowserTests,
+  startNewAgent,
   themeColors,
   visibleAndUncovered,
   type BrowserTest,
@@ -354,7 +356,7 @@ async function test_poll_omission_cannot_blank_a_delivered_message_or_reply(
   await context.close();
 }
 
-// Regression: #2743 a pre-offline probe success must not hide offline recovery.
+// Regression: #2743 #3360 monitor ordering is independent of Chat layout.
 async function test_connection_monitor_precedes_authoritative_read(
   browser: any,
   base: string,
@@ -411,53 +413,57 @@ async function test_connection_monitor_precedes_authoritative_read(
         })
       : route.fulfill({ status: 503, json: { detail: "unavailable" } });
   });
-  const monitorResponse = page.waitForResponse(base + "api/version");
-  await gotoRoot(page, base);
-  await (await monitorResponse).finished();
-  await page.waitForFunction("window.__treeAttempts>=1");
-  expect(await page.evaluate("window.__conversationAttempts")).toBe(0);
-  expect(await page.locator("#messages").isVisible()).toBeTrue();
-  await versionRequested;
-  versionAvailable = false;
-  await page.evaluate("dispatchEvent(new Event('offline'))");
-  releaseVersion();
-  await page
-    .locator('#connection-status.on[data-state="offline"] button')
-    .waitFor();
-  await page.locator("#connection-status button").click();
-  await page.waitForFunction(
-    "!document.querySelector('#connection-status button').disabled",
-  );
-  const wakeResponse = page.waitForResponse(base + "api/version");
-  versionAvailable = true;
-  await page.evaluate(
-    "dispatchEvent(new Event('online'));dispatchEvent(new Event('focus'));dispatchEvent(new PageTransitionEvent('pageshow'))",
-  );
-  await (await wakeResponse).finished();
-  const ta = await page.evaluate("window.__treeAttempts");
-  await page.evaluate("localStorage.setItem('recurse.treeMode','503')");
-  await page.waitForFunction(`window.__treeAttempts>${ta}`);
-  const ca = await page.evaluate("window.__conversationAttempts");
-  await page.evaluate(
-    "localStorage.setItem('recurse.treeMode','allow');localStorage.setItem('recurse.conversationMode','503')",
-  );
-  await page.waitForFunction(`window.__conversationAttempts>${ca}`);
-  await page.evaluate(
-    "localStorage.setItem('recurse.conversationMode','delay-success')",
-  );
-  await page.waitForFunction("window.__delayedConversationStarted");
-  await page.evaluate(
-    "localStorage.setItem('recurse.conversationMode','503');dispatchEvent(new Event('focus'))",
-  );
-  await page.waitForFunction("window.__delayedConversationComplete");
-  await page.evaluate(
-    "localStorage.setItem('recurse.conversationMode','allow')",
-  );
-  await page.waitForURL(`${base}?_recurse_generation=browser-e2e-current**`);
-  await page.locator(".agent").first().waitFor();
-  await page.waitForFunction("location.search === ''");
-  await page.locator("#input").waitFor();
-  expect(errors).toEqual([]);
+  try {
+    const monitorResponse = page.waitForResponse(base + "api/version");
+    await gotoRoot(page, base);
+    await (await monitorResponse).finished();
+    await page.waitForFunction("window.__treeAttempts>=1");
+    expect(await page.evaluate("window.__conversationAttempts")).toBe(0);
+    await page.locator("#messages").waitFor();
+    await versionRequested;
+    versionAvailable = false;
+    await page.evaluate("dispatchEvent(new Event('offline'))");
+    releaseVersion();
+    await page
+      .locator('#connection-status.on[data-state="offline"] button')
+      .waitFor();
+    await page.locator("#connection-status button").click();
+    await page.waitForFunction(
+      "!document.querySelector('#connection-status button').disabled",
+    );
+    const wakeResponse = page.waitForResponse(base + "api/version");
+    versionAvailable = true;
+    await page.evaluate(
+      "dispatchEvent(new Event('online'));dispatchEvent(new Event('focus'));dispatchEvent(new PageTransitionEvent('pageshow'))",
+    );
+    await (await wakeResponse).finished();
+    const ta = await page.evaluate("window.__treeAttempts");
+    await page.evaluate("localStorage.setItem('recurse.treeMode','503')");
+    await page.waitForFunction(`window.__treeAttempts>${ta}`);
+    const ca = await page.evaluate("window.__conversationAttempts");
+    await page.evaluate(
+      "localStorage.setItem('recurse.treeMode','allow');localStorage.setItem('recurse.conversationMode','503')",
+    );
+    await page.waitForFunction(`window.__conversationAttempts>${ca}`);
+    await page.evaluate(
+      "localStorage.setItem('recurse.conversationMode','delay-success')",
+    );
+    await page.waitForFunction("window.__delayedConversationStarted");
+    await page.evaluate(
+      "localStorage.setItem('recurse.conversationMode','503');dispatchEvent(new Event('focus'))",
+    );
+    await page.waitForFunction("window.__delayedConversationComplete");
+    await page.evaluate(
+      "localStorage.setItem('recurse.conversationMode','allow')",
+    );
+    await page.waitForURL(`${base}?_recurse_generation=browser-e2e-current**`);
+    await page.locator(".agent").first().waitFor();
+    await page.waitForFunction("location.search === ''");
+    await page.locator("#input").waitFor();
+    expect(errors).toEqual([]);
+  } finally {
+    releaseVersion();
+  }
   await context.close();
 }
 
@@ -926,6 +932,108 @@ async function test_background_warming_waits_for_the_focused_read(
   await context.close();
 }
 
+// Regression: #3395 empty and draft pages detect updates without a conversation read.
+async function test_updates_without_an_open_conversation(
+  browser: any,
+  base: string,
+) {
+  const nodes = (await (await fetch(`${base}api/tree`)).json()) as any[];
+  for (const node of nodes.filter((node: any) => !node.parent)) {
+    const response = await fetch(`${base}api/conversations/${node.id}`, {
+      method: "DELETE",
+    });
+    expect(response.ok).toBe(true);
+  }
+  await browserExpect
+    .poll(
+      async () =>
+        ((await (await fetch(`${base}api/tree`)).json()) as any[]).length,
+    )
+    .toBe(0);
+  const shell = await (await fetch(base)).text();
+  for (const width of [1280, 390]) {
+    for (const draft of [false, true]) {
+      const context = await browser.newContext({
+        viewport: { width, height: 844 },
+        isMobile: width === 390,
+        hasTouch: width === 390,
+      });
+      const page = await context.newPage();
+      const errors = captureErrors(page);
+      let version = "browser-e2e-current";
+      let conversationReads = 0;
+      page.on("request", (request: any) => {
+        if (/\/api\/conversations\/[^/]+(?:\/view)?$/.test(request.url()))
+          conversationReads++;
+      });
+      await page.route(
+        (url: URL) => url.pathname === new URL(base).pathname,
+        (route: any) =>
+          route.fulfill({
+            body: shell.replace(
+              'data-version="browser-e2e-current"',
+              `data-version="${version}"`,
+            ),
+            contentType: "text/html",
+          }),
+      );
+      await page.route(`${base}api/version`, (route: any) =>
+        route.fulfill({
+          json: { version },
+          headers: { "Cache-Control": "no-store" },
+        }),
+      );
+      let releaseTree!: () => void;
+      const treeHeld = new Promise<void>((resolve) => {
+        releaseTree = resolve;
+      });
+      await page.route(`${base}api/tree`, async (route: any) => {
+        await treeHeld;
+        await route.continue();
+      });
+      try {
+        await page.goto(base, { waitUntil: "domcontentloaded" });
+        if (draft) {
+          await startNewAgent(page);
+          await page.locator("#input").fill("Keep this unsent draft");
+        }
+        releaseTree();
+        await openSettingsPanel(page);
+        const reloaded = draft
+          ? null
+          : page.waitForURL(`${base}?_recurse_generation=browser-e2e-next**`, {
+              waitUntil: "commit",
+            });
+        version = "browser-e2e-next";
+        await page.evaluate("dispatchEvent(new Event('focus'))");
+        if (draft) {
+          await page.locator("#update-status.on button").waitFor();
+          await page.locator("#settings-close").click();
+          expect(await page.locator("#input").inputValue()).toBe(
+            "Keep this unsent draft",
+          );
+          expect(await page.locator("body").getAttribute("data-version")).toBe(
+            "browser-e2e-current",
+          );
+          expect(conversationReads).toBe(0);
+          expect(errors).toEqual([]);
+          continue;
+        }
+        await reloaded;
+        await browserExpect(page.locator("body")).toHaveAttribute(
+          "data-version",
+          "browser-e2e-next",
+        );
+        expect(conversationReads).toBe(0);
+        expect(errors).toEqual([]);
+      } finally {
+        releaseTree();
+        await context.close();
+      }
+    }
+  }
+}
+
 export const tests: BrowserTest[] = [
   test_backend_client,
   test_focused_conversation_outranks_background_reads,
@@ -936,5 +1044,6 @@ export const tests: BrowserTest[] = [
   test_poll_omission_cannot_blank_a_delivered_message_or_reply,
   test_connection_monitor_precedes_authoritative_read,
   test_deferred_generation_recovery_keeps_chat_usable,
+  test_updates_without_an_open_conversation,
 ];
 if (import.meta.main) await runBrowserTests([["recovery", tests]]);

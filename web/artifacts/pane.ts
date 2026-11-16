@@ -21,6 +21,7 @@ import { readAgentLink, readArtifactLink } from "../deep-link.js";
 import { artifactGeneration } from "../panes/autoopen.js";
 import { DRAFT, state } from "../state.js";
 import { registerCommentSource } from "../comments.js";
+import { changesHeader, reviewedFooter } from "../document-review.js";
 import { artifactFileUrl, isFullVersion, versionLabel } from "./model.js";
 import type { PaneContext, PaneNavigation } from "../types.js";
 import {
@@ -393,6 +394,10 @@ export function renderShell(pane: ArtifactEl): void {
       ? rs.contentInfo
       : currentInfo;
   const versions = rs.versionsId === currentInfo?.id ? rs.versions : [];
+  const changes =
+    !browsing && rs.changes && rs.contentInfo?.version === rs.changes.version
+      ? rs.changes
+      : null;
   const onArtifact = (event: Event) => {
     const picker = event.target as HTMLSelectElement;
     if (!selectArtifact(pane, picker.value)) picker.value = rs.selId || "";
@@ -621,6 +626,17 @@ export function renderShell(pane: ArtifactEl): void {
       >
         ${noticeText}
       </div>
+      ${changes
+        ? changesHeader(
+            changes,
+            versions
+              .filter((item) => item.version !== changes.version)
+              .map((item) => ({
+                value: item.version,
+                label: versionLabel(item, changes.version),
+              })),
+          )
+        : nothing}
       ${browsing
         ? html`<div class="artifact-list">
             <input
@@ -662,6 +678,10 @@ export function renderShell(pane: ArtifactEl): void {
           </div>`
         : nothing}`,
     pane.querySelector<HTMLElement>(".artifact-shell")!,
+  );
+  render(
+    changes ? reviewedFooter(pane.querySelector(".report-doc")) : nothing,
+    pane.querySelector<HTMLElement>(".doc-review-foot")!,
   );
 }
 
@@ -863,7 +883,7 @@ registerPane({
   },
   render(element: HTMLElement, ctx: PaneContext) {
     const pane = element as ArtifactEl;
-    pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div></article><div class="report-comments"></div><div class="report-bar"></div>`;
+    pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div><div class="doc-review-foot"></div></article><div class="report-comments"></div><div class="report-bar"></div>`;
     pane._rs = {
       agentId: null,
       browsing: false,

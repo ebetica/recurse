@@ -277,7 +277,7 @@ export class TreeLifecycle {
     });
   }
 
-  /** Queue behind an in-process holder; optional deadline bounds admission. */
+  /** Try before deadline refusal; queue only behind an in-process holder. */
   async awaitReservation(
     token: LeaseToken,
     site = "unspecified",
@@ -288,10 +288,6 @@ export class TreeLifecycle {
     let reported = 0;
     let blocker: HolderSnapshot | null = null;
     for (;;) {
-      if (this.now() >= deadline) {
-        this.reportBusy(token, this.now() - started, site, cid);
-        throw new TreeLifecycleBusy("tree lifecycle admission timed out");
-      }
       try {
         const nested = this.reserve(token, site, cid);
         this.reportWait(
@@ -305,6 +301,10 @@ export class TreeLifecycle {
         return nested;
       } catch (error) {
         if (!(error instanceof TreeLifecycleBusy)) throw error;
+      }
+      if (this.now() >= deadline) {
+        this.reportBusy(token, this.now() - started, site, cid);
+        throw new TreeLifecycleBusy("tree lifecycle admission timed out");
       }
       const wake = this.nextRelease(
         Math.min(this.waitReport, deadline - this.now()),

@@ -1,7 +1,7 @@
-// Snapshot targets/text into sends; saved-agent jobs persist before clearing
-// the composer and retry in recipient order under the shared browser lock.
-// Boot sends wait for authoritative selection; draft creation happens once.
-// Own attachments/drafts/input; keep permanent failures for explicit retry.
+// @tla specs/tla/send/OperatorSend.tla: Save, Attempt, Retry, Respond, Reload.
+// Snapshot sends; persist before clearing and retry under the browser lock.
+// Boot sends wait for selection; create drafts once; own attachments/input.
+// Keep permanent failures for explicit retry.
 import { hasCommentSends } from "./artifacts/comment-outbox.js";
 import { treeOf } from "./backends/tree.js";
 import {
@@ -1218,7 +1218,7 @@ export function startDraft(spec: DraftSpec): void {
   // will be created under, so Back closes it and lands on that parent.
   syncHistoryToSelection();
   refreshUpBtn();
-  inputEl.focus();
+  focusComposerAtEnd();
 }
 /** Open a top-level draft immediately, with optional preselected tags. */
 export function startNewAgent(

@@ -14,6 +14,7 @@ interface ServerStatus {
 }
 
 export function buildMcpStatus(body: HTMLElement): () => void {
+  body.dataset.themeProtected = "service-sign-in";
   const { api, jpost } = settingsClient();
   const list = document.createElement("div");
   list.className = "mcp-status group";

@@ -21,6 +21,7 @@ import { BackendKeys } from "../auth/backend_keys";
 import { registerBackendKeyRoutes } from "./backend_keys";
 import { ServiceAuth } from "../auth/service";
 import { OperatorAuth } from "../auth/session";
+import { defaultIconUrl } from "../branding";
 import { CHECKOUT_ROOT } from "../build_dir";
 import { piAgentDir, resolveRoots, preparePiAgentDir } from "../local_roots";
 import { Config, SETTINGS_RECHECK_MS } from "../config";
@@ -127,6 +128,8 @@ export interface AppOptions {
   /** Where web/index.html and web/dist live (default the checkout). */
   readonly sourceRoot?: string;
   readonly sink?: WebLogSink;
+  /** Epoch-seconds clock for operator authentication. */
+  readonly operatorNow?: () => number;
 }
 
 export interface App {
@@ -144,6 +147,8 @@ export interface App {
   readonly detached: Promise<void>[];
   /** Connections to remotes, for tests that shorten the idle period. */
   readonly connectedBackends: ConnectedBackends;
+  /** Relay confirmation deadlines, exposed for short real-path tests. */
+  readonly relayInbox: ReturnType<typeof registerRelayRoutes>;
 }
 
 type Mutate = <T>(
@@ -159,6 +164,8 @@ export async function buildApp(options: AppOptions): Promise<App> {
     authenticatedProviders: () => snapshot?.authenticatedProviders() ?? [],
     storedCustomProviders: () => snapshot?.storedCustomProviders() ?? [],
     settingsRecheckMs: SETTINGS_RECHECK_MS,
+    warn: (event, fields) =>
+      logEvent(logger("config", sink), WARNING, event, { fields }),
   });
   await config.refreshSettings();
   const paths = config.paths;
@@ -226,9 +233,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
 
   const operator = new OperatorAuth({
     authFile: join(paths.DATA_DIR, "auth.json"),
+    now: options.operatorNow,
     env: options.env,
     displayName: config.displayName,
     themesFile: paths.THEMES_FILE,
+    defaultIconUrl: async () =>
+      defaultIconUrl("favicon.svg", (await frontend.snapshot())[1]),
   });
   const loopbackToken = await publishLoopbackToken(
     paths.DATA_DIR,
@@ -365,7 +375,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     },
     (fields) => logEvent(web, INFO, "agent_backend_request", { fields }),
   );
-  registerRelayRoutes(
+  const relayInbox = registerRelayRoutes(
     router,
     connectedBackends,
     {
@@ -460,6 +470,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     target: (cid) => durable.searchTarget(cid),
     archive: durable.archive,
     search: durable.messageSearch,
+    currentTurn: (cid) => durable.liveRows.get(cid)?.runFirstEntry,
   });
   const warnModelList = (event: string, fields: Record<string, string>) =>
     logEvent(web, WARNING, event, { fields });
@@ -502,6 +513,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     mutateExternalStorage: (work) => mutate(work),
   });
   registerNotificationRoutes(router, instance.notifications, {
+    frontend,
     workerSource: join(sourceRoot, "web", "push-worker.ts"),
     displayName: config.displayName,
     brandingFile: join(paths.CONFIG_DIR, "branding.json"),
@@ -583,6 +595,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     drafts: instance.drafts,
     config: {
       resolveEffortLevel: (level) => config.resolveEffortLevel(level),
+      isFileProviderModel: (model) => config.isFileProviderModel(model),
       piBgShellEnabled: paths.PI_BG_SHELL_ENABLED,
     },
     agentTools: instance.agentTools,
@@ -596,8 +609,8 @@ export async function buildApp(options: AppOptions): Promise<App> {
       workdirFile: (key) => instance.agentTemp.workdirFile(key),
       resolveDiffCwd: (stored, persisted, signal) =>
         instance.workdirGit.resolveDiffCwd(stored, persisted, signal),
-      worktreeDiff: (cwd, base, source, signal) =>
-        instance.workdirGit.worktreeDiff(cwd, base, source, signal),
+      worktreeDiff: (cwd, base, source, signal, untracked) =>
+        instance.workdirGit.worktreeDiff(cwd, base, source, signal, untracked),
       diffFile: (cwd, path, base, contents, snapshot) =>
         instance.workdirGit.diffFile(cwd, path, base, contents, snapshot),
       pullRequestDiff: (url, path, queue) =>
@@ -630,6 +643,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
   registerFileRoutes(router, filesDeps);
   const explorer = registerExplorerRoutes(router, {
     cwd: filesDeps.imageCwd,
+    agentDir: credentialRoots.piAgent,
     signal: instance.shutdownController.signal,
     search: (cid, cwd, query, signal) =>
       durable.searchService(FffWorker).fileNames(cid, cwd, query, signal),
@@ -888,5 +902,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
     serve,
     detached,
     connectedBackends,
+    relayInbox,
   };
 }

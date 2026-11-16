@@ -1,7 +1,7 @@
-// Shared single-row pane heading and controls. Feature modules render into the
-// controls slot; the frame owns heading, loading status and close action.
+// Shared pane headings and native fullscreen controls, including Chat.
+// Features render into the controls slot; frames own loading and close.
 import { render } from "lit";
-import { CLOSE_ICON } from "../icons.js";
+import { CLOSE_ICON, PANE_COMPRESS_ICON, PANE_EXPAND_ICON } from "../icons.js";
 
 const powerbars = new WeakMap<HTMLElement, HTMLElement>();
 const fullscreenButtons = new WeakMap<HTMLElement, HTMLButtonElement>();
@@ -28,6 +28,29 @@ export function retainPanePowerbar(
   return retained;
 }
 
+export function updateFullscreenControl(
+  button: HTMLButtonElement,
+  on: boolean,
+): void {
+  button.innerHTML = on ? PANE_COMPRESS_ICON : PANE_EXPAND_ICON;
+  button.title = on ? "Exit fullscreen" : "Fullscreen";
+  button.setAttribute("aria-label", on ? "Exit fullscreen" : "Open fullscreen");
+  button.setAttribute("aria-pressed", String(on));
+}
+
+export function createFullscreenControl(
+  id: string,
+  toggle: () => void,
+): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.className = "fs icon-btn";
+  button.dataset.pane = id;
+  button.type = "button";
+  button.onclick = toggle;
+  updateFullscreenControl(button, false);
+  return button;
+}
+
 export function createPanePowerbar(
   id: string,
   title: string,
@@ -48,11 +71,7 @@ export function createPanePowerbar(
   status.setAttribute("aria-atomic", "true");
   const controls = document.createElement("div");
   controls.className = "pane-powerbar-controls";
-  const fs = document.createElement("button");
-  fs.className = "fs icon-btn";
-  fs.dataset.pane = id;
-  fs.type = "button";
-  fs.onclick = fullscreen;
+  const fs = createFullscreenControl(id, fullscreen);
   fullscreenButtons.set(bar, fs);
   const x = document.createElement("button");
   x.className = "x";

@@ -81,7 +81,7 @@ export async function buildEnv(
   if (o.safetyOff) env.PI_SAFETY_OFF = "1";
   delete env.RECURSE_MODEL_POLICY;
   if (o.model != null)
-    env.RECURSE_MODEL_POLICY = config.trustedModelPolicy(o.model);
+    env.RECURSE_MODEL_POLICY = await config.trustedModelPolicy(o.model);
   for (const [name, root] of [
     ["RECURSE_WORKSPACE_ROOT", o.workspaceRoot],
     ["RECURSE_WORKTREES_ROOT", o.worktreesRoot],

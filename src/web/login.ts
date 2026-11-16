@@ -15,10 +15,12 @@ import {
   type RuntimeLogger,
 } from "../observability/runtime_logging";
 import { jsonObjectBody } from "./request_body";
+import { registerTwoFactorRoutes } from "./two_factor";
 import {
   clientIp,
   htmlResponse,
   LOGIN_PASSWORD_MAX_CHARS,
+  requireCurrentSession,
   sessionCookie,
   type LoginThrottle,
 } from "./request_auth";
@@ -67,14 +69,20 @@ export function parseUrlencoded(body: Uint8Array): Map<string, string> {
 }
 
 /** FastAPI `password: str = Form("")`. */
-async function formPassword(ex: Exchange): Promise<string> {
+async function formFields(
+  ex: Exchange,
+): Promise<{ password: string; code: string }> {
   const type = (ex.request.headers.get("content-type") ?? "")
     .split(";")[0]!
     .trim()
     .toLowerCase();
   if (type === "application/x-www-form-urlencoded") {
     const body = new Uint8Array(await ex.request.arrayBuffer());
-    return parseUrlencoded(body).get("password") ?? "";
+    const fields = parseUrlencoded(body);
+    return {
+      password: fields.get("password") ?? "",
+      code: fields.get("code") ?? "",
+    };
   }
   if (type === "multipart/form-data") {
     let form: FormData;
@@ -94,11 +102,15 @@ async function formPassword(ex: Exchange): Promise<string> {
           msg: "Input should be a valid string",
         },
       ]);
-    return value ?? "";
+    const code = form.getAll("code").at(-1);
+    return {
+      password: value ?? "",
+      code: typeof code === "string" ? code : "",
+    };
   }
 
   await ex.request.arrayBuffer();
-  return "";
+  return { password: "", code: "" };
 }
 
 /** FastAPI `body: dict`: the parsed JSON object, or its 422/400 answer. */
@@ -141,7 +153,7 @@ function requireStr(value: unknown): string {
   return value;
 }
 
-function secureCookie(ex: Exchange): boolean {
+export function secureCookie(ex: Exchange): boolean {
   return (
     ex.tailscaleSocket === true ||
     ex.scheme !== "http" ||
@@ -178,35 +190,48 @@ function redirectHome(extra: Record<string, string> = {}): Response {
 export function registerLoginRoutes(router: Router, deps: LoginDeps): void {
   const sleep = deps.sleep ?? ((seconds: number) => Bun.sleep(seconds * 1000));
   const { operator, throttle } = deps;
+  registerTwoFactorRoutes(router, deps);
 
   router.post("/login", async (ex) => {
-    const password = await formPassword(ex);
+    const { password, code } = await formFields(ex);
     if (!(await operator.enabled())) return redirectHome();
     const ip = clientIp(ex.request.headers, ex.client);
-    const wait = throttle.retryAfter(ip);
-    if (wait > 0) {
+    const locked = async () => {
+      const wait = throttle.retryAfter(ip);
+      if (wait <= 0) return null;
       const secs = Math.trunc(wait) + 1;
       return htmlResponse(
         await operator.loginPage(`Too many attempts — try again in ${secs}s`),
         429,
         { "retry-after": String(secs) },
       );
-    }
+    };
+    const refused = await locked();
+    if (refused) return refused;
     await sleep(0.5);
-    const tooLong = codePoints(password) > LOGIN_PASSWORD_MAX_CHARS;
-    if (tooLong || !(await operator.verifyPassword(password))) {
-      throttle.recordFail(ip);
-      return htmlResponse(
-        await operator.loginPage("Wrong password", tooLong ? "" : password),
-        401,
-      );
-    }
-    throttle.recordSuccess(ip);
-    return redirectHome({
-      "set-cookie": sessionCookieHeader(
-        await operator.makeToken(),
-        secureCookie(ex),
-      ),
+    return operator.withPasswordLock(async () => {
+      const refused = await locked();
+      if (refused) return refused;
+      const twoFactor = await operator.twoFactorEnabled();
+      const tooLong = codePoints(password) > LOGIN_PASSWORD_MAX_CHARS;
+      const token =
+        tooLong || (twoFactor && code.length > 64)
+          ? null
+          : await operator.signIn(password, twoFactor ? code : "");
+      if (!token) {
+        throttle.recordFail(ip);
+        return htmlResponse(
+          await operator.loginPage(
+            twoFactor ? "Wrong password or code" : "Wrong password",
+            tooLong || twoFactor ? "" : password,
+          ),
+          401,
+        );
+      }
+      throttle.recordSuccess(ip);
+      return redirectHome({
+        "set-cookie": sessionCookieHeader(token, secureCookie(ex)),
+      });
     });
   });
 
@@ -224,6 +249,7 @@ export function registerLoginRoutes(router: Router, deps: LoginDeps): void {
   router.post("/api/password", async (ex) => {
     const body = await jsonDictBody(ex);
     const change = async () => {
+      await requireCurrentSession(ex, operator);
       if (!(await operator.enabled()))
         throw new HttpError(503, "authentication not configured");
       const current = truthy(body.current) ? body.current : "";
@@ -266,8 +292,6 @@ export function registerLoginRoutes(router: Router, deps: LoginDeps): void {
       );
       return response;
     };
-    return deps.backendKeys
-      ? deps.backendKeys.withPasswordLock(change)
-      : change();
+    return operator.withPasswordLock(change);
   });
 }

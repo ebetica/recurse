@@ -15,7 +15,7 @@ import { conditionalJson } from "./caching";
 import { jsonDictBody } from "./login";
 import { TEMP_ID_RE } from "./conversations";
 import { ReviveRefused } from "../agents/supervisor/revive";
-import { clientIp } from "./request_auth";
+import { clientIp, isOperator } from "./request_auth";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 
 type Rec = Record<string, unknown>;
@@ -369,9 +369,7 @@ export function registerTreeRoutes(router: Router, deps: TreeRoutesDeps): void {
     async (ex) => {
       if (
         !deps.loopbackAuthenticated(ex) &&
-        !["backend-key", "cookie", "tailscale", "local"].includes(
-          String(ex.state.auth_method),
-        )
+        !isOperator(ex, { allowBackendKey: true })
       )
         throw new HttpError(403);
       const limit = Math.min(Math.max(Number(ex.query.limit), 1), 50);

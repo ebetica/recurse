@@ -53,6 +53,8 @@ import { createMessageSender } from "./deliver_message";
 import { jsonObjectBody } from "./request_body";
 import {
   agentMarked,
+  authMethod,
+  isOperator,
   serviceOwnsRequest,
   servicePrincipalOf,
   serviceRequestPolicy,
@@ -186,7 +188,10 @@ export interface ConversationsRoutesDeps {
     readTurnPrompt(cid: string, offset: number): Promise<unknown>;
     readThinkingText(cid: string, offset: number): Promise<unknown>;
     readContextUsage(cid: string): Promise<unknown>;
-    readBasePrompt(cid: string): Promise<unknown>;
+    readBasePrompt(
+      cid: string,
+      includeSafetyReview?: boolean,
+    ): Promise<unknown>;
     fileSnapshot(cid: string): { collection: string; owner: string } | null;
   };
   /** attachments.preview.describe; null when the id does not resolve. */
@@ -204,6 +209,7 @@ export interface ConversationsRoutesDeps {
       attachmentDraft: string | null;
       tags?: Tags;
       muted: boolean;
+      operatorSelectedModel?: boolean;
     }): Promise<Rec>;
     createOrRejoinServiceConversation(options: {
       title: string | null;
@@ -240,6 +246,7 @@ export interface ConversationsRoutesDeps {
       model: string,
       effort: string | null,
       level: number | null,
+      operatorSelectedModel?: boolean,
     ): Promise<Rec | null>;
   };
   readonly compaction: {
@@ -273,6 +280,7 @@ export interface ConversationsRoutesDeps {
   };
   readonly config: {
     resolveEffortLevel(level: number): [string, string];
+    isFileProviderModel(model: string): boolean;
     readonly piBgShellEnabled: boolean;
   };
   readonly agentTools: {
@@ -299,6 +307,7 @@ export interface ConversationsRoutesDeps {
       base: string | null,
       source: string,
       signal?: AbortSignal,
+      includeUntracked?: boolean,
     ): Promise<unknown>;
     diffFile(
       cwd: string,
@@ -350,6 +359,16 @@ export function registerConversationRoutes(
   deps: ConversationsRoutesDeps,
 ): ReturnType<typeof createMessageSender> {
   const { store } = deps;
+  const operatorSelectedFileModel = (ex: Exchange, model: unknown): boolean => {
+    const fileModel =
+      typeof model === "string" && deps.config.isFileProviderModel(model);
+    if (fileModel && (!isOperator(ex) || agentMarked(ex)))
+      throw new HttpError(
+        403,
+        "Choose file-defined models through an effort level saved in Settings",
+      );
+    return fileModel;
+  };
 
   const messageIsLiveSteer = (cid: string): boolean => {
     if (deps.liveRunId(cid) === null) return false;
@@ -566,6 +585,7 @@ export function registerConversationRoutes(
     "/api/conversations",
     async (ex) => {
       const body = (await dictBody(ex, false)) ?? {};
+      const operatorSelectedModel = operatorSelectedFileModel(ex, body.model);
       if (["fork_of", "sibling_of", "context"].some((key) => key in body))
         throw new HttpError(
           422,
@@ -604,6 +624,7 @@ export function registerConversationRoutes(
             attachmentDraft: (draft ?? null) as string | null,
             tags,
             muted,
+            operatorSelectedModel,
           }),
         );
       } catch (error) {
@@ -622,6 +643,9 @@ export function registerConversationRoutes(
 
   router.post("/api/conversations/spawn", async (ex) => {
     const body = (await dictBody(ex, false)) ?? {};
+    const operatorSelectedModel = operatorSelectedFileModel(ex, body.model);
+    delete body.operator_selected_model;
+    if (operatorSelectedModel) body.operator_selected_model = true;
     const cid = body.id;
     if (typeof cid !== "string" || !TEMP_ID_RE.test(cid))
       throw new HttpError(422, "a valid agent id is required");
@@ -905,7 +929,10 @@ export function registerConversationRoutes(
   });
 
   router.get("/api/conversations/{cid}/prompt", async (ex) => {
-    const view = await deps.reads.readBasePrompt(ex.params.cid!);
+    const view = await deps.reads.readBasePrompt(
+      ex.params.cid!,
+      isOperator(ex, { allowBackendKey: true }) && !agentMarked(ex),
+    );
     if (view == null) throw new HttpError(404);
     return jsonResponse(view);
   });
@@ -943,6 +970,7 @@ export function registerConversationRoutes(
     if (typeof store.load(cid)?.side_of === "string")
       throw new HttpError(409, "a side conversation uses its parent's model");
     const body = await dictBody(ex);
+    const operatorSelectedModel = operatorSelectedFileModel(ex, body.model);
     const level = body.level ?? null;
     let model = body.model ?? null;
     let effort = body.effort ?? null;
@@ -971,6 +999,7 @@ export function registerConversationRoutes(
       model,
       effort as string | null,
       level as number | null,
+      operatorSelectedModel,
     );
     if (applied === null) throw new HttpError(409, "unknown model");
     return jsonResponse({
@@ -1282,8 +1311,8 @@ export function registerConversationRoutes(
     const body = await dictBody(ex);
     let relayed: { sender: string; title: string | null } | null = null;
     if ("relayed_from" in body) {
-      const method = String(ex.state.auth_method);
-      if (!["cookie", "tailscale", "local", "backend-key"].includes(method))
+      const method = String(authMethod(ex));
+      if (!isOperator(ex, { allowBackendKey: true }))
         throw new HttpError(
           403,
           "relayed_from requires an operator session or backend key",
@@ -1435,7 +1464,13 @@ export function registerConversationRoutes(
         cwd = resolved;
         source = resolvedSource;
         return jsonResponse(
-          await deps.git.worktreeDiff(cwd, base ?? stored, source, signal),
+          await deps.git.worktreeDiff(
+            cwd,
+            base ?? stored,
+            source,
+            signal,
+            queryStr(ex, "untracked") !== "0",
+          ),
         );
       };
       try {
@@ -1449,7 +1484,11 @@ export function registerConversationRoutes(
       }
     },
     {
-      query: { base: { type: "str" }, pr: { type: "str" } },
+      query: {
+        base: { type: "str" },
+        pr: { type: "str" },
+        untracked: { type: "str" },
+      },
       longRunning: true,
     },
   );

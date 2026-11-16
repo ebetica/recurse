@@ -24,8 +24,8 @@
     "requests": 40
   },
   "switch": {
-    "bytes": 62420,
-    "requests": 94
+    "bytes": 64143,
+    "requests": 99
   },
   "idle": {
     "bytes": 25426,

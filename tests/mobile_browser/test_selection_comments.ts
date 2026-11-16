@@ -486,6 +486,7 @@ async function checkArtifactCommentSend(
               .click();
           else await page.keyboard.press(submit);
           expect((await delivered).ok()).toBe(true);
+          expect(await page.locator(paneSelector).isVisible()).toBe(true);
           await page.locator(".msg.user", { hasText: note }).waitFor();
           expect(deliveries).toHaveLength(1);
           expect(deliveries[0]).toContain(note);
@@ -499,7 +500,7 @@ async function checkArtifactCommentSend(
             await page.evaluate(() => (globalThis as any).__commentPageMarker),
           ).toBe(true);
           await page.getByText(reply, { exact: true }).waitFor();
-          if (!(await paragraph.isVisible())) await link.click();
+          expect(await paragraph.isVisible()).toBe(true);
           await paragraph.waitFor();
           await waitForPaneScroll(page, scrollerSelector, paneSelector);
           expect(
@@ -530,10 +531,17 @@ export const tests: BrowserTest[] = [
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
     });
+    await context.grantPermissions(["clipboard-read", "clipboard-write"]);
     try {
       await postFixture(base, "seed-pane-reading");
       const page = await context.newPage();
       await gotoRoot(page, base);
+      const keyboardQuote = "Keyboard copying includes Chat prose.";
+      await page.locator("#input").fill(`Reply only ${keyboardQuote}`);
+      await page.locator("#input").press("Enter");
+      await page
+        .locator(".msg.assistant .content", { hasText: keyboardQuote })
+        .waitFor();
       await page
         .getByRole("link", { name: "Reading document", exact: true })
         .click();
@@ -569,6 +577,27 @@ export const tests: BrowserTest[] = [
         await page.locator(".msg.assistant .content").first().selectText();
         const threadOffer = page.locator(".selection-comment-offer");
         await threadOffer.waitFor();
+        await selectWithMouse(page, paragraph, "triple");
+        await page.evaluate(() =>
+          (globalThis as any).getSelection().removeAllRanges(),
+        );
+        await page.keyboard.press("g");
+        await page.keyboard.press("h");
+        await page.evaluate(() =>
+          (globalThis as any).navigator.clipboard.writeText("Before Chat copy"),
+        );
+        await page.keyboard.press("Control+a");
+        const selectedByKeyboard = await page.evaluate(() =>
+          String((globalThis as any).getSelection()),
+        );
+        expect(selectedByKeyboard.split("\n")).toContain(keyboardQuote);
+        await page.keyboard.press("Control+c");
+        const copiedText = await page.evaluate(() =>
+          (globalThis as any).navigator.clipboard.readText(),
+        );
+        expect(copiedText.split("\n")).toContain(keyboardQuote);
+        await page.locator(".msg.assistant .content").first().selectText();
+        await threadOffer.waitFor();
         expect(await popover.isVisible()).toBe(true);
         await page.keyboard.press("c");
         const composer = page.locator("#input");
@@ -601,6 +630,129 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
     await checkArtifactCommentSend(browser, base);
+  },
+  // Feature: #3365 iframe releases, pointer cancellation and keyboard input cannot leave another window unselectable.
+  async function test_selection_recovers_after_interrupted_drag(browser, base) {
+    const quote = "Keyboard copying after an iframe release.";
+    const item = await postFixture(base, "seed-pane-reading", {
+      markdown: [
+        "# Gesture recovery",
+        quote,
+        "```html-embed\n<p>Sealed selection target.</p>\n```",
+      ].join("\n\n"),
+    });
+    const context = await browser.newContext({
+      viewport: { width: 1280, height: 800 },
+      permissions: ["clipboard-read", "clipboard-write"],
+    });
+    try {
+      const page = await context.newPage();
+      const errors: string[] = [];
+      page.on("pageerror", (error: Error) => errors.push(error.message));
+      await gotoRoot(page, base);
+      const source = "Start a selection in Chat.";
+      await page.locator("#input").fill(`Reply only ${source}`);
+      await page.locator("#input").press("Enter");
+      const reply = page.locator(".msg.assistant .content p", {
+        hasText: source,
+      });
+      await reply.waitFor();
+      await page.locator(`a[href="#artifact=${item.id}"]`).click();
+      const frame = page.locator("iframe.report-embed");
+      await page
+        .frameLocator("iframe.report-embed")
+        .getByText("Sealed selection target.", { exact: true })
+        .waitFor();
+      expect(await frame.getAttribute("sandbox")).toBe("allow-scripts");
+      expect(
+        await frame.evaluate(
+          (element: any) => element.contentDocument === null,
+        ),
+      ).toBe(true);
+      const paragraph = page.locator(".report-doc p", { hasText: quote });
+      const startDrag = async () => {
+        await page.evaluate(() =>
+          (globalThis as any).getSelection().removeAllRanges(),
+        );
+        await reply.scrollIntoViewIfNeeded();
+        const chat = (await reply.boundingBox())!;
+        await page.mouse.move(chat.x + 1, chat.y + chat.height / 2);
+        await page.mouse.down();
+        await page.mouse.move(chat.x + 60, chat.y + chat.height / 2, {
+          steps: 4,
+        });
+        expect(
+          await page.evaluate(() =>
+            String((globalThis as any).getSelection()).trim(),
+          ),
+        ).not.toBe("");
+      };
+      const copyFromPreview = async () => {
+        await page.locator('.pane-col[data-pane="report"] .pane-body').focus();
+        await page.evaluate(() =>
+          (globalThis as any).navigator.clipboard.writeText(
+            "Before preview copy",
+          ),
+        );
+        await page.keyboard.press("Control+a");
+        const selected = await page.evaluate(() =>
+          String((globalThis as any).getSelection()),
+        );
+        expect(selected.split("\n")).toContain(quote);
+        await page.keyboard.press("Control+c");
+        const copied = await page.evaluate(() =>
+          (globalThis as any).navigator.clipboard.readText(),
+        );
+        expect(copied.split("\n")).toContain(quote);
+      };
+      await startDrag();
+      const preview = (await frame.boundingBox())!;
+      await page.mouse.move(
+        preview.x + preview.width / 2,
+        preview.y + preview.height / 2,
+        { steps: 12 },
+      );
+      await page.mouse.up();
+      await copyFromPreview();
+
+      await page.evaluate(() =>
+        (globalThis as any).getSelection().removeAllRanges(),
+      );
+      const touch = await context.newCDPSession(page);
+      await touch.send("Emulation.setTouchEmulationEnabled", { enabled: true });
+      await reply.scrollIntoViewIfNeeded();
+      const chat = (await reply.boundingBox())!;
+      await touch.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: chat.x + 10, y: chat.y + chat.height / 2 }],
+      });
+      await page.locator("body.dock-selection-scoped").waitFor();
+      await paragraph.selectText();
+      expect(
+        await page.evaluate(() => String((globalThis as any).getSelection())),
+      ).toBe("");
+      await touch.send("Input.dispatchTouchEvent", {
+        type: "touchCancel",
+        touchPoints: [],
+      });
+      await page.waitForFunction(
+        (expected: string) =>
+          String((globalThis as any).getSelection()).trim() === expected,
+        quote,
+      );
+      await touch.send("Emulation.setTouchEmulationEnabled", {
+        enabled: false,
+      });
+      await touch.detach();
+      await copyFromPreview();
+
+      await startDrag();
+      await copyFromPreview();
+      await page.mouse.up();
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
   },
   // Regression: #2600 Chromium extends triple-click ranges past nonselectable chrome.
   async function test_selection_comments_mouse_clicks(browser, base) {

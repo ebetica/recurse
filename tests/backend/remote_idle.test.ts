@@ -1,7 +1,8 @@
 import { expect, setSystemTime, test } from "bun:test";
 import { ConnectedBackends } from "../../src/backends/connected";
-import { readFile, rm, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readFile, writeFile } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
+import { retire } from "../../src/utils/trash";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { publishLoopbackToken } from "../../src/web/request_auth";
@@ -9,12 +10,22 @@ import { BackendKeys } from "../../src/auth/backend_keys";
 import { keyedLabel } from "../../src/backends/label";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
 import { RelayQueue } from "../../src/web/relay_queue";
+import type { RelayRequest } from "../../src/web/relay_inbox";
+import {
+  connect,
+  forward,
+  outcome,
+  request,
+  settled,
+  withRemoteWire,
+} from "./fixtures/remote_wire";
 import { appWorld, PASSWORD } from "./web_app_support";
 import { fauxHost, until } from "./fixtures/durable_host/host";
 
 // Feature: #2935 Idle remotes pause home polls and tag streams (#3017).
 test("an idle sleeping remote pauses home polls, queues messages and wakes on use", async () => {
   const checkins: string[] = [];
+  const checkinsByHome = { home: 0, laptop: 0 };
   let checkAnswer: "sleep" | "wake" | "error" = "sleep";
   let laptopAuth = "";
   let laptopPaused = 0;
@@ -25,6 +36,7 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       const auth = request.headers.get("authorization") ?? "";
       checkins.push(`${new URL(request.url).pathname} ${auth.slice(0, 20)}`);
       const name = auth === laptopAuth ? "laptop" : "home";
+      checkinsByHome[name]++;
       const answer = !paused[name]
         ? "wake"
         : name === "laptop"
@@ -34,7 +46,7 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       if (answer === "sleep" && auth === laptopAuth) laptopPaused++;
       return Response.json({
         requests: [],
-        ...(answer === "sleep" ? { sleep_seconds: 1 } : {}),
+        ...(answer === "sleep" ? { sleep_seconds: 0.01 } : {}),
       });
     },
   });
@@ -55,6 +67,7 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       env: worlds[i]!.env,
       sink: new WebLogSink(() => {}),
     });
+    app.connectedBackends.pollWaitSeconds = 0.05;
     const deps = (app.instance.durable as unknown as { deps: DurableHostDeps })
       .deps;
     const provider = (fixtures[i]!.host as unknown as { deps: DurableHostDeps })
@@ -114,7 +127,7 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
           slept[name]!++;
           return Response.json(
             JSON.parse(
-              body.replace('"sleep_seconds":3600', '"sleep_seconds":1'),
+              body.replace('"sleep_seconds":3600', '"sleep_seconds":0.01'),
             ),
           );
         } finally {
@@ -135,18 +148,12 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
     apps[i]!.instance.durable.metadata(cid).pending.length === 0;
   const viewed = (i: number, cid: string, text: string) => async () =>
     JSON.stringify(await apps[i]!.instance.durable.view(cid)).includes(text);
-  const learn = RelayQueue.prototype.learn;
   const sidebarStreams: AbortController[] = [];
-  let laptopLearned = 0;
-  RelayQueue.prototype.learn = async function (labels, name, key) {
-    await learn.call(this, labels, name, key);
-    if (labels.includes("Laptop")) laptopLearned++;
-  };
   try {
     await until(() =>
       apps.every((app) => app.instance.lifecycle.readinessSnapshot().ready),
     );
-    apps[1]!.connectedBackends.idleAfterMs = 3000;
+    apps[1]!.connectedBackends.idleAfterMs = 25;
     const ids = await Promise.all(
       apps.map(async (app, i) => {
         const id = String(
@@ -278,7 +285,12 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
         30_000,
       );
       const quiet = { home: seen.home!.length, laptop: seen.laptop!.length };
-      await Bun.sleep(2000);
+      const checks = { ...checkinsByHome };
+      await until(
+        () =>
+          checkinsByHome.home > checks.home &&
+          checkinsByHome.laptop > checks.laptop,
+      );
       expect({ home: seen.home!.length, laptop: seen.laptop!.length }).toEqual(
         quiet,
       );
@@ -461,13 +473,14 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       remotePort,
     );
     await until(() => apps[1]!.instance.lifecycle.readinessSnapshot().ready);
-    apps[1]!.connectedBackends.idleAfterMs = 3000;
+    apps[1]!.connectedBackends.idleAfterMs = 25;
     fixtures[2]!.faux.setResponses(
       Array.from({ length: 25 }, () => fauxAssistantMessage("laptop ok")),
     );
     const laptopPrompt = async () =>
       JSON.stringify(await laptop!.instance.durable.prompt(p));
-    await Bun.sleep(2000);
+    const sleptAgain = checkinsByHome.laptop;
+    await until(() => checkinsByHome.laptop > sleptAgain);
     expect(seen.laptop!.length).toBe(quiet.laptop);
     const asleepPolls = polls();
     checkAnswer = "wake";
@@ -494,24 +507,16 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
     expect(migrated.labels.Laptop).toBeUndefined();
     expect(migrated.labels[laptopAddress]).toMatchObject({ label: "Laptop" });
     await until(settled(2, p));
-    let sleeps = slept.laptop;
-    await until(() => slept.laptop > sleeps, 30_000);
     await quietly();
     const before = polls();
-    const learnedBefore = laptopLearned;
+    checkAnswer = "wake";
     fixtures[1]!.faux.setResponses([
-      async (_context, options) => {
-        await until(
-          () => laptopLearned > learnedBefore || !!options?.signal?.aborted,
-          30_000,
-        );
-        return fauxAssistantMessage(
-          fauxToolCall("bash", {
-            command: `bun ${cliPath} send ${p}@Laptop 'Reply while awake'`,
-          }),
-          { stopReason: "toolUse" },
-        );
-      },
+      fauxAssistantMessage(
+        fauxToolCall("bash", {
+          command: `bun ${cliPath} send ${p}@Laptop 'Reply while awake'`,
+        }),
+        { stopReason: "toolUse" },
+      ),
       fauxAssistantMessage("remote replied"),
     ]);
     fixtures[2]!.faux.setResponses([fauxAssistantMessage("laptop ok")]);
@@ -538,8 +543,7 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
     );
     await until(settled(1, r));
     await until(settled(2, p));
-    sleeps = slept.laptop;
-    await until(() => slept.laptop > sleeps, 30_000);
+    checkAnswer = "sleep";
     await quietly();
     checkAnswer = "error";
     const failedCheck = polls();
@@ -552,7 +556,6 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       (await fetch(servers[2]!.url + "/api/backends/R", { method: "DELETE" }))
         .status,
     ).toBe(200);
-    sleeps = slept.laptop;
     const reconnect = await fetch(servers[2]!.url + "/api/backends", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -563,7 +566,6 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
       }),
     });
     expect(reconnect.status).toBe(200);
-    await until(() => slept.laptop > sleeps, 30_000);
     await quietly();
     for (const controller of sidebarStreams) controller.abort();
     const homePort = servers[0]!.port;
@@ -612,7 +614,6 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
     expect(await callbacks()).toEqual([]);
   } finally {
     for (const controller of sidebarStreams) controller.abort();
-    RelayQueue.prototype.learn = learn;
     checkIn.stop(true);
     gateways.home.stop(true);
     gateways.laptop.stop(true);
@@ -621,10 +622,12 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
     await Promise.all(fixtures.map((f) => f.host.close()));
     await Promise.all(apps.flatMap((app) => app.detached));
     await Promise.all(
-      worlds.map(({ root }) => rm(root, { recursive: true, force: true })),
+      worlds.map(({ root }) =>
+        retire(root, join(dirname(root), `remote-idle-trash-${process.pid}`)),
+      ),
     );
   }
-}, 240_000);
+}, 30_000);
 
 // Regression: #2994 Passive probes respect sleep and revoked keys (#3000, #3017).
 test("passive probes allow sleep and revoked connections stay stopped until sign-in", async () => {
@@ -693,6 +696,7 @@ test("passive probes allow sleep and revoked connections stay stopped until sign
       env: homeWorld.env,
       sink: new WebLogSink(() => {}),
     });
+    homeApp.connectedBackends.pollWaitSeconds = 0.05;
     homeServer = await homeApp.serve({ port: 0 });
     await until(() => homeApp!.instance.lifecycle.readinessSnapshot().ready);
   };
@@ -843,7 +847,272 @@ test("passive probes allow sleep and revoked connections stay stopped until sign
     await server.close();
     await app.instance.shutdown();
     await Promise.all(app.detached);
-    await rm(world.root, { recursive: true, force: true });
-    await rm(homeWorld.root, { recursive: true, force: true });
+    for (const root of [world.root, homeWorld.root])
+      retire(root, join(dirname(root), `remote-idle-trash-${process.pid}`));
   }
+}, 30_000);
+
+// Regression: #3286 A successful explicit read issued before a newer 401 cannot resume polling.
+test("a queued wire reply wakes and stale success cannot resume revoked polling", async () => {
+  await withRemoteWire(true, async (home, remote) => {
+    let holdTranscript = false;
+    let held = false;
+    let reject = false;
+    let authenticatedCalls = 0;
+    const release = Promise.withResolvers<void>();
+    let staleRead: Promise<Response> | undefined;
+    const gateway = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      async fetch(incoming) {
+        if (incoming.headers.has("authorization")) authenticatedCalls++;
+        if (reject) return new Response(null, { status: 401 });
+        const response = await forward(remote, incoming);
+        if (
+          holdTranscript &&
+          new URL(incoming.url).pathname.endsWith("/transcript")
+        ) {
+          holdTranscript = false;
+          const body = await response.text();
+          expect(response.status).toBe(200);
+          held = true;
+          await release.promise;
+          return new Response(body, response);
+        }
+        return response;
+      },
+    });
+    const paused = () =>
+      !home.app.connectedBackends.awakeLabels().includes("R");
+    const state = () =>
+      home.app.connectedBackends.list().find((row) => row.label === "R")!.state;
+    try {
+      await connect(home, gateway.url.origin);
+      await until(paused);
+      const key = (
+        await new BackendKeys(remote.world.env.CHAT_DATA_DIR!).list()
+      )[0]!;
+      home.provider.faux.setResponses([
+        fauxAssistantMessage("queued wire received"),
+      ]);
+      const sent = await request(remote, "/api/relay/messages", {
+        target: `${home.agent}@${keyedLabel(key.name, key.id)}`,
+        content: "Reply retained while its home poll is paused",
+      });
+      expect(sent.status).toBe(202);
+      const { id } = (await sent.json()) as { id: string };
+      expect((await outcome(remote, id)).state).toBe("queued");
+      const queuePath = join(
+        remote.world.env.CHAT_DATA_DIR!,
+        "relay-queue.json",
+      );
+      expect(await readFile(queuePath, "utf8")).toContain(id);
+      expect(
+        (await request(home, `/api/relay/transcript/R/${remote.agent}`)).status,
+      ).toBe(200);
+      await until(async () =>
+        JSON.stringify(
+          await home.app.instance.durable.view(home.agent),
+        ).includes("queued wire received"),
+      );
+      await until(() => settled(home));
+      await until(
+        async () => !(await readFile(queuePath, "utf8")).includes(id),
+      );
+      await until(paused);
+
+      holdTranscript = true;
+      staleRead = request(home, `/api/relay/transcript/R/${remote.agent}`);
+      await until(() => held);
+      reject = true;
+      await expect(
+        home.app.connectedBackends.checkRelay(
+          "R",
+          new AbortController().signal,
+        ),
+      ).rejects.toThrow();
+      expect(state()).toBe("key_revoked");
+      reject = false;
+      release.resolve();
+      expect((await staleRead).status).toBe(200);
+      expect(state()).toBe("key_revoked");
+
+      const before = authenticatedCalls;
+      const blocked = await request(home, "/api/relay/messages", {
+        target: `${remote.agent}@R`,
+        content: "Must not send while revoked",
+      });
+      expect(blocked.status).toBe(409);
+      expect(await blocked.text()).toContain("key was revoked");
+      expect(
+        (await request(home, "/api/backends/R/status", undefined, {})).status,
+      ).toBe(424);
+      expect(authenticatedCalls).toBe(before);
+      expect(
+        (await request(home, `/api/relay/transcript/R/${remote.agent}`)).status,
+      ).toBe(200);
+      expect(state()).toBe("connected");
+      await until(paused);
+
+      const quotaKey = await new BackendKeys(
+        remote.world.env.CHAT_DATA_DIR!,
+      ).mint("Quota");
+      const labels = Array.from({ length: 11 }, (_, i) => `Quota${i}`);
+      const learned = await fetch(
+        remote.server.url +
+          `/api/relay/requests?labels=${labels.join(",")}&wait=0`,
+        {
+          headers: { authorization: `Bearer ${quotaKey.key}` },
+        },
+      );
+      expect(learned.status).toBe(200);
+      await learned.arrayBuffer();
+      const queuedIds: string[] = [];
+      const targets = labels.flatMap((label, i) =>
+        Array.from({ length: i === 0 ? 21 : i === 10 ? 1 : 20 }, () => label),
+      );
+      for (const [index, label] of targets.entries()) {
+        const sent = await request(remote, "/api/relay/messages", {
+          target: `${home.agent}@${keyedLabel(label, quotaKey.id)}`,
+          content: `Retained quota message ${index}`,
+        });
+        expect(sent.status).toBe(202);
+        const { id } = (await sent.json()) as { id: string };
+        queuedIds.push(id);
+        const result = await outcome(remote, id);
+        expect(result.state).toBe("queued");
+        if (index === 20 || index === targets.length - 1)
+          expect(result.reason).toContain(
+            "dropped the 1 oldest queued message(s)",
+          );
+        if (index === 20)
+          expect(
+            (
+              JSON.parse(await readFile(queuePath, "utf8")) as {
+                requests: RelayRequest[];
+              }
+            ).requests.map((r) => r.id),
+          ).toEqual(queuedIds.slice(1));
+      }
+      const keyed = JSON.parse(await readFile(queuePath, "utf8")) as {
+        labels: Record<
+          string,
+          { name: string; key: string | null; label: string }
+        >;
+        requests: RelayRequest[];
+      };
+      expect(keyed.requests).toHaveLength(200);
+      expect(keyed.requests.map((r) => r.id)).toEqual(queuedIds.slice(2));
+
+      const homeOrigin = new URL(home.server.url).origin;
+      home.app.connectedBackends.noteOperator(homeOrigin);
+      let callback:
+        | { token: string; url: string; labels: string[] }
+        | undefined;
+      await until(async () => {
+        for await (const path of new Bun.Glob(
+          "**/recurse-home-callbacks.json",
+        ).scan({ cwd: remote.world.root, dot: true, absolute: true })) {
+          callback = (
+            JSON.parse(await readFile(path, "utf8")) as {
+              token: string;
+              url: string;
+              labels: string[];
+            }[]
+          )[0];
+        }
+        return !!callback;
+      });
+      expect(callback).toMatchObject({
+        url: homeOrigin,
+        labels: ["Home"],
+      });
+      const notice = (path: string, token: string, body?: object) =>
+        fetch(home.server.url + path, {
+          method: body ? "POST" : "GET",
+          headers: {
+            authorization: `Bearer ${token}`,
+            "content-type": "application/json",
+          },
+          body: body ? JSON.stringify(body) : undefined,
+        });
+      expect(
+        (await notice("/api/remote-events", callback!.token, { type: "test" }))
+          .status,
+      ).toBe(200);
+      expect((await notice("/api/tree", callback!.token)).status).toBe(401);
+      expect(
+        (
+          await notice("/api/backends", callback!.token, {
+            label: "forged",
+            url: homeOrigin,
+          })
+        ).status,
+      ).toBe(401);
+      const wrongToken =
+        callback!.token.slice(0, -1) +
+        (callback!.token.endsWith("0") ? "1" : "0");
+      expect(
+        (await notice("/api/remote-events", wrongToken, { type: "relay" }))
+          .status,
+      ).toBe(401);
+      await until(paused);
+      for (const side of [home, remote]) {
+        await side.app.sink.file!.flush();
+        const log = await readFile(
+          join(side.world.env.CHAT_DATA_DIR!, "logs/recurse.log"),
+          "utf8",
+        );
+        expect(log).toContain("event=http_response");
+        expect(log).not.toContain(callback!.token);
+        expect(log).not.toContain(wrongToken);
+        expect(log).not.toContain(quotaKey.key);
+      }
+      expect(await readFile(queuePath, "utf8")).not.toContain(quotaKey.key);
+
+      await writeFile(
+        queuePath,
+        JSON.stringify({
+          labels: Object.fromEntries(
+            Object.values(keyed.labels).map(({ label, ...route }) => [
+              label,
+              route,
+            ]),
+          ),
+          requests: keyed.requests.map((r) => ({
+            ...r,
+            label: keyed.labels[r.label]!.label,
+          })),
+        }),
+      );
+      const migrated = new RelayQueue(
+        queuePath,
+        new BackendKeys(remote.world.env.CHAT_DATA_DIR!),
+      );
+      const quotaAddress = keyedLabel(labels[0]!, quotaKey.id);
+      const retained = await migrated.for([labels[0]!], quotaKey.id);
+      expect(retained.map((r) => r.request.id)).toEqual(queuedIds.slice(2, 21));
+      expect(
+        retained.every(
+          (r) => r.address === quotaAddress && r.request.label === labels[0],
+        ),
+      ).toBe(true);
+      expect(await migrated.for([labels[0]!], key.id)).toEqual([]);
+      await migrated.remove(queuedIds.at(-1)!);
+      const rewritten = JSON.parse(
+        await readFile(queuePath, "utf8"),
+      ) as typeof keyed;
+      expect(rewritten.labels[labels[0]!]).toBeUndefined();
+      expect(rewritten.labels[quotaAddress]).toMatchObject({
+        label: labels[0],
+        key: quotaKey.id,
+      });
+      expect(rewritten.requests.some((r) => r.label === labels[0])).toBe(false);
+      expect(rewritten.requests).toHaveLength(199);
+    } finally {
+      release.resolve();
+      await staleRead?.catch(() => undefined);
+      await gateway.stop(true);
+    }
+  });
 }, 30_000);

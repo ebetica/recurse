@@ -51,6 +51,7 @@ export async function buildAuthApp(
   options: {
     sleep?: (seconds: number) => Promise<void>;
     now?: () => number;
+    passwordQueued?: () => void;
     backendKeys?: boolean;
     extraRoutes?: (router: Router) => void;
     port?: number;
@@ -80,7 +81,14 @@ export async function buildAuthApp(
   const env: Record<string, string | undefined> = { ...envCreds };
   const records: RuntimeLogRecord[] = [];
   const sink: LogSink = { write: (record) => void records.push(record) };
-  const operator = new OperatorAuth({
+  class ObservedOperatorAuth extends OperatorAuth {
+    override withPasswordLock<T>(work: () => Promise<T>): Promise<T> {
+      const pending = super.withPasswordLock(work);
+      options.passwordQueued?.();
+      return pending;
+    }
+  }
+  const operator = new ObservedOperatorAuth({
     authFile: join(dataDir, "auth.json"),
     env,
     displayName: "Recurse",

@@ -490,6 +490,7 @@ export async function buildConversationsApp(
       },
     },
     config: {
+      isFileProviderModel: () => false,
       resolveEffortLevel(level) {
         const found = levels[String(level)];
         if (!found)

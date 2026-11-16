@@ -175,10 +175,7 @@ export interface ChangedFile {
   status: string;
 }
 
-// Split the summary's file list into the two displayed groups. `files`
-// already ends with the untracked names, so `untracked` (the authoritative,
-// longer-capped list) only contributes names `files` does not carry — the
-// pane never shows the same path twice.
+// Split tracked files from legacy untracked rows and the bounded name list.
 export function buildFileRows(
   files: ChangedFile[],
   untracked: string[],
@@ -187,9 +184,7 @@ export function buildFileRows(
   const seen = new Set(files.map((f) => f.path));
   return {
     changed,
-    // Invariant: Untracked names ride along at the end of `files` too; they
-    // belong to this group, with `untracked` contributing only longer-capped
-    // extras.
+    // Invariant: Older backends may also include untracked names in `files`.
     untracked: [
       ...files.filter((f) => f.status === "untracked").map((f) => f.path),
       ...untracked.filter((p) => !seen.has(p)),

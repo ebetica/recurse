@@ -1,8 +1,10 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import { mkdir, rename } from "node:fs/promises";
 import {
   gotoRoot,
   postFixture,
+  rootAgentId,
   runBrowserTests,
   startNewAgent,
   waitForLayout,
@@ -10,6 +12,153 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3323 Non-editing controls must not suppress desktop shortcuts.
+  async function test_hotkeys_from_image_and_native_controls(browser, base) {
+    const { demo } = await postFixture(base, "seed-published-image-navigation");
+    const { demo: media } = await postFixture(base, "seed-published-media");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    try {
+      await page.goto(`${base}#agent=${demo}`);
+      await waitForLayout(page);
+      const image = page.locator(
+        '#messages .agent-attachment-preview:has(img[alt="published-1.png"])',
+      );
+      const input = page.locator("#input");
+      const compose = async () => {
+        await page.keyboard.press("i");
+        await browserExpect(input).toBeFocused();
+        await browserExpect(input).toHaveValue("");
+        await input.press("Escape");
+      };
+      await image.scrollIntoViewIfNeeded();
+      const downloadControl = image.locator("..").locator("a[download]");
+      expect(
+        await downloadControl.evaluate((element) => {
+          const rect = element.getBoundingClientRect();
+          const inset = Math.min(rect.width, rect.height) / 4;
+          return [rect.left + inset, rect.right - inset].every((x) =>
+            [rect.top + inset, rect.bottom - inset].every((y) =>
+              element.contains(element.ownerDocument.elementFromPoint(x, y)),
+            ),
+          );
+        }),
+      ).toBeTrue();
+      const downloaded = page.waitForEvent("download");
+      await downloadControl.click();
+      await downloaded;
+      await browserExpect(downloadControl).toBeFocused();
+      await compose();
+      await image.focus();
+      await page.keyboard.press("Tab");
+      await browserExpect(downloadControl).toBeFocused();
+      await compose();
+      await downloadControl.focus();
+      await page.keyboard.press("Shift+Tab");
+      await browserExpect(image).toBeFocused();
+      await compose();
+      await image.locator("img").click();
+      const viewer = page.locator("dialog.image-popout[open]");
+      await viewer.waitFor();
+      await page.keyboard.press("ArrowRight");
+      await browserExpect(viewer.locator(".files-name")).not.toHaveText(
+        "published-1.png",
+      );
+      await page.keyboard.press("ArrowLeft");
+      await browserExpect(viewer.locator(".files-name")).toHaveText(
+        "published-1.png",
+      );
+      const preview = viewer.locator(".files-detail img");
+      await preview.evaluate((image: any) => image.decode());
+      const box = (await preview.boundingBox())!;
+      await page.keyboard.down("Control");
+      await page.mouse.move(box.x + box.width * 0.2, box.y + box.height * 0.2);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width * 0.6, box.y + box.height * 0.6, {
+        steps: 4,
+      });
+      await page.mouse.up();
+      await page.keyboard.up("Control");
+      const comment = viewer.locator(".report-comment-popover textarea");
+      await comment.fill("Keep this image comment");
+      await viewer
+        .getByRole("button", { name: "Download", exact: true })
+        .focus();
+      await page.keyboard.press("c");
+      await browserExpect(viewer).toBeVisible();
+      await browserExpect(comment).toBeFocused();
+      await browserExpect(comment).toHaveValue("Keep this image comment");
+      await viewer.getByRole("button", { name: "Cancel", exact: true }).click();
+      await compose();
+      await page
+        .locator("dialog.image-popout[open]")
+        .waitFor({ state: "hidden" });
+      for (const key of ["Enter", "Space"]) {
+        await downloadControl.focus();
+        await page.keyboard.press("Shift+Tab");
+        await browserExpect(image).toBeFocused();
+        await page.keyboard.press("g");
+        await page.keyboard.press(key);
+        await page.locator("dialog.image-popout[open]").waitFor();
+        await compose();
+      }
+      await page.locator('.rail-btn[data-pane="explorer"]').click();
+      const explorer = page.locator('.pane-col[data-pane="explorer"]');
+      await explorer.waitFor();
+      await image.click();
+      await page.locator("dialog.image-popout[open]").waitFor();
+      await page.keyboard.press("q");
+      await page
+        .locator("dialog.image-popout[open]")
+        .waitFor({ state: "hidden" });
+      await browserExpect(explorer).toBeVisible();
+      await image.click();
+      await page.locator("dialog.image-popout[open]").waitFor();
+      await page.keyboard.press("f");
+      await browserExpect(page.locator("#agent-finder-query")).toBeFocused();
+      await page
+        .locator("dialog.image-popout[open]")
+        .waitFor({ state: "hidden" });
+      await page.keyboard.press("Escape");
+      await explorer.locator(".pane-body").focus();
+      await browserExpect(explorer.locator(".pane-body")).toBeFocused();
+      await page.keyboard.press("q");
+      await explorer.waitFor({ state: "detached" });
+      const chatTabClose = page
+        .locator('#dock .dv-tab[data-dock-panel="chat"]')
+        .getByRole("button", { name: "Close Chat", exact: true });
+      await chatTabClose.focus();
+      await browserExpect(chatTabClose).toBeFocused();
+      await compose();
+      await page.goto(`${base}#agent=${media}`);
+      const chip = page.getByRole("button", { name: "Open tone.wav in Files" });
+      await chip.waitFor();
+      await chip.focus();
+      await browserExpect(chip).toBeFocused();
+      await compose();
+      const fileDownload = chip.locator("..").locator("a[download]");
+      await fileDownload.focus();
+      await browserExpect(fileDownload).toBeFocused();
+      await compose();
+      await chip.click();
+      const audio = page.locator(".pane-col.file-tab audio");
+      await audio.focus();
+      await browserExpect(audio).toBeFocused();
+      await compose();
+      await page.locator('.rail-btn[data-pane="explorer"]').click();
+      const search = page.locator("#explorer-search");
+      await search.fill("");
+      await search.press("i");
+      await browserExpect(search).toBeFocused();
+      await browserExpect(search).toHaveValue("i");
+      await input.fill("Typing stays in the composer");
+      await input.press("i");
+      await browserExpect(input).toHaveValue("Typing stays in the composeri");
+    } finally {
+      await page.close();
+    }
+  },
   // Regression: #3208 Initial desktop sizing must preserve native composer input and caret.
   async function test_composer_typing_after_desktop_mount(browser, base) {
     const context = await browser.newContext({
@@ -72,13 +221,13 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
-  // Regression: #2314 #3239 #3241 Window keys preserve native input and useful badges.
+  // Regression: #2314 #3239 #3241 #3351 #3356 #3372 #3377 #3393 Live window state.
   async function test_pane_focus_and_visibility_keys(browser, base) {
     await postFixture(base, "seed-model-selection-error", {
       agent: "dock-focus-send",
       model: "fauxordinary/faux-1",
     });
-    await postFixture(base, "seed-artifact-app");
+    const app = await postFixture(base, "seed-artifact-app");
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
     });
@@ -89,7 +238,9 @@ export const tests: BrowserTest[] = [
       await dockStyle;
       await route.continue();
     });
-    await gotoRoot(page, base);
+    await page.goto(`${base}#agent=${rootAgentId()}&artifact=${app.id}`, {
+      waitUntil: "domcontentloaded",
+    });
     const pane = page.locator('.pane-col[data-pane="report"]');
     await pane.waitFor();
     const thread = page.locator("#scroll");
@@ -414,12 +565,31 @@ export const tests: BrowserTest[] = [
     await focused('.pane-col[data-pane="explorer"] .pane-body');
     await go("l");
     await focused('.pane-col[data-pane="report"] .pane-body');
+    const reportBody = pane.locator(".pane-body");
     for (const [left, right, down, up] of [
       ["h", "l", "j", "k"],
       ["Shift+H", "Shift+L", "Shift+J", "Shift+K"],
     ]) {
       await arrange("t");
-      await arrange(left);
+      await reportBody.waitFor({ state: "visible" });
+      await reportBody.focus();
+      await browserExpect(reportBody).toBeFocused();
+      await page.keyboard.press("w");
+      await page.locator("#window-key-hints").waitFor({ state: "visible" });
+      const visibility = await reportBody.evaluate((node) => {
+        const previous = node.style.visibility;
+        node.style.visibility = "hidden";
+        return previous;
+      });
+      await page.waitForFunction(() => {
+        const document = (globalThis as any).document;
+        return document.activeElement === document.body;
+      });
+      await reportBody.evaluate((node, previous) => {
+        node.style.visibility = previous;
+      }, visibility);
+      await page.keyboard.press(left);
+      await page.locator("#window-key-hints").waitFor({ state: "hidden" });
       expect((await windowBox("report")).x).toBeLessThan(
         (await windowBox("chat")).x,
       );
@@ -495,6 +665,13 @@ export const tests: BrowserTest[] = [
     await pane.locator(".pane-body").focus();
     await arrange("t");
     await arrange("=");
+    for (const _reopen of [false, true]) {
+      await page.locator('.rail-btn[data-pane="explorer"]').click();
+      await tab("explorer").waitFor();
+      await tab("explorer").getByRole("button").click();
+      await tab("explorer").waitFor({ state: "detached" });
+    }
+    await pane.locator(".pane-body").focus();
     await arrange("e");
     expect((await windowBox("report")).y).not.toBe((await windowBox("chat")).y);
     expect((await windowBox("report")).x).toBe((await windowBox("chat")).x);
@@ -986,9 +1163,12 @@ export const tests: BrowserTest[] = [
     ).toEqual([2, 8]);
     await shot("conversation-b");
     const { demo: autoOwner } = await postFixture(base, "seed-files-auto-open");
-    const publishAutomatic = async () =>
-      ((await postFixture(base, "republish-auto-open")) as { draft: number })
-        .draft;
+    const publishAutomatic = async (gate?: string) =>
+      (
+        (await postFixture(base, "republish-auto-open", { gate })) as {
+          draft: number;
+        }
+      ).draft;
     await page.locator(`.agent[data-id="${autoOwner}"]`).click();
     await page.locator('.rail-btn[data-pane="files"]').waitFor();
     const automaticFiles = page.locator(".pane-col.file-tab");
@@ -1002,7 +1182,13 @@ export const tests: BrowserTest[] = [
     const autoHeading = automaticFiles.locator(
       ".files-detail .files-markdown h1",
     );
-    const autoFirst = await publishAutomatic();
+    const publishing = publishAutomatic("first-publication");
+    await page.locator(".msg.user").nth(1).waitFor();
+    await postFixture(base, "release", {
+      agent: autoOwner,
+      gate: "first-publication",
+    });
+    const autoFirst = await publishing;
     await autoHeading
       .filter({ hasText: `Draft ${autoFirst}` })
       .waitFor({ state: "attached" });
@@ -1160,11 +1346,22 @@ export const tests: BrowserTest[] = [
     try {
       await visitFiles("main");
       await visitFiles(fileFixture.demo);
-      const metadata = page.waitForResponse((response) =>
-        response.url().includes(`/conversations/${fileFixture.demo}/files?`),
-      );
+      const metadata = page
+        .waitForEvent("framenavigated", (frame) => frame === page.mainFrame())
+        .then(() =>
+          page.waitForRequest(
+            `**/api/conversations/${fileFixture.demo}/files?*`,
+          ),
+        )
+        .then((request) => request.response());
       await page.reload();
-      await (await metadata).finished();
+      const response = await metadata;
+      expect(response?.status()).toBe(200);
+      expect(
+        (await response!.json()).files.map(
+          (file: { name: string }) => file.name,
+        ),
+      ).toEqual(["diagram.svg"]);
       await page.locator('.rail-btn[data-pane="files"]').waitFor();
       await waitLayout([["chat"]]);
       expect(await tab(filePanelId).count()).toBe(0);
@@ -1236,7 +1433,7 @@ export const tests: BrowserTest[] = [
     await storedLayout(splitOwner, [["chat"]], false);
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitLayout([["chat"]]);
-    expect(await input.inputValue()).toBe(
+    await browserExpect(input).toHaveValue(
       "Keep this draft when all panes close",
     );
     await page.locator('.rail-btn[data-pane="explorer"]').click();

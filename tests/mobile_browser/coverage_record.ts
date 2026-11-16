@@ -10,9 +10,25 @@ import {
 
 const ROOT = join(import.meta.dir, "../..");
 const DIST = join(ROOT, "web/dist");
-const CSS_SOURCES = ["web/theme.css", "web/panes/powerbar.css", "web/app.css"];
+const CSS_SOURCES: Record<string, string[]> = {
+  "/static/app.css": ["web/theme.css", "web/panes/powerbar.css", "web/app.css"],
+  "/static/dockview.css": [
+    "node_modules/dockview/dist/styles/dockview.css",
+    "web/dock/style.css",
+  ],
+  "/static/diff.css": ["web/diff/style.css"],
+  "/static/files.css": ["web/files/style.css"],
+  "/static/pane-powerbar.css": ["web/panes/powerbar.css"],
+};
 
 const TOKEN_SCRIPT = `(() => {
+  let frame = null;
+  try {
+    frame = frameElement;
+  } catch {}
+  if (self !== top && (!frame || (frame.hasAttribute("sandbox") &&
+      !frame.sandbox.contains("allow-scripts"))))
+    return;
   const seen = new Set();
   let pending = [];
   const add = (el) => {
@@ -228,16 +244,16 @@ export class CoverageRecorder {
   ): void {
     const pathname = new URL(url).pathname;
     const sources: Array<[string, number, string]> = [];
-    if (pathname === "/static/app.css") {
+    if (CSS_SOURCES[pathname]) {
       let offset = 0;
-      for (const file of CSS_SOURCES) {
+      for (const file of CSS_SOURCES[pathname]) {
         const body = readFileSync(join(ROOT, file), "utf8");
         const at = text.indexOf(body, offset);
         if (at < 0) {
           this.add(this.css, `unmapped:${pathname}`, "");
           return;
         }
-        sources.push([file, at, body]);
+        if (file.startsWith("web/")) sources.push([file, at, body]);
         offset = at + body.length;
       }
     } else if (/^\/static\/[\w-]+\.css$/.test(pathname)) {
@@ -290,8 +306,15 @@ export class CoverageRecorder {
     }
   }
 
-  async finishGroup(label: string): Promise<void> {
+  async finishGroup(label: string, passed: boolean): Promise<void> {
     await this.flush();
+    if (passed) this.write(label);
+    this.js = new Map();
+    this.css = new Map();
+    this.tokens = new Set();
+  }
+
+  private write(label: string): void {
     this.server(label);
     const sets = (map: Map<string, Set<string>>) =>
       Object.fromEntries(
@@ -313,9 +336,6 @@ export class CoverageRecorder {
         cssKnown: sets(this.cssKnown),
       }),
     );
-    this.js = new Map();
-    this.css = new Map();
-    this.tokens = new Set();
   }
 }
 

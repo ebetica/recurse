@@ -289,8 +289,8 @@ text(await tools.publish({paths:[${JSON.stringify(source)}]}));
   );
 });
 
-// Feature: #2892 settings and Artifacts are discovered on demand through Pi codemode.
-test("settings and Artifacts stay out of initial requests and remain discoverable and callable", async () => {
+// Feature: #2892 settings and Artifacts remain discoverable and callable through Pi codemode.
+test("settings and Artifacts have native schemas and remain discoverable and callable from scripts", async () => {
   const { root, env } = await world();
   seedPiModelList(join(root, "data", "config"));
   const instance = await build(env);
@@ -357,17 +357,17 @@ test("settings and Artifacts stay out of initial requests and remain discoverabl
   expect((await instance.agentTools.skillsFor(cid))?.[0]).toContainEqual(
     expect.objectContaining({ name: "recurse-settings" }),
   );
-  expect(initial).not.toContain('"name":"recurse_settings"');
+  expect(initial).toContain('"name":"recurse_settings"');
   expect(initial).not.toContain("### `recurse_settings`");
-  expect(initial).not.toContain('"name":"artifact"');
+  expect(initial).toContain('"name":"artifact"');
   expect(initial).not.toContain("### `artifact`");
-  expect(initial).not.toContain("Ghostty palette file");
+  expect(initial).toContain("Ghostty palette file");
   expect(discovered).toContain("recurse_settings");
   expect(discovered).toContain("artifact");
   expect(described).toContain("Ghostty palette file");
   expect(described).toContain("including the level-1 safety reviewer");
   expect(described).toContain(
-    "Change Recurse settings; read the recurse-settings skill first.",
+    "View or change Recurse settings; returns the requested settings or action result.",
   );
   expect(described).toContain("set_level");
   expect(described).toContain("from_file");
@@ -1059,7 +1059,7 @@ test("warmOpen builds the shared Models and Settings' catalog, so the first open
     for (const spy of spies) spy.mockClear();
     await instance.config.writeAvailableModels();
     await instance.durable.open(cid);
-    expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0, 0, 0]);
+    expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0, 0, 1]);
   } finally {
     for (const spy of spies) spy.mockRestore();
   }

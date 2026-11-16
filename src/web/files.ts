@@ -30,7 +30,7 @@ import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse, type OpenedFile } from "./static";
 import { conditionalBytes, PRIVATE_REVALIDATE } from "./caching";
 import { resizable, thumbnail } from "./thumbnails";
-import { agentMarked } from "./request_auth";
+import { agentMarked, isOperator } from "./request_auth";
 import { readPathImage } from "./path_image";
 
 /** Image extensions render inline; any other upload is a download. */
@@ -478,12 +478,7 @@ export function registerFileRoutes(
     ["GET", "HEAD"],
     "/api/conversations/{cid}/path-image",
     async (ex) => {
-      if (
-        agentMarked(ex) ||
-        !["cookie", "local", "tailscale", "backend-key"].includes(
-          String(ex.state.auth_method),
-        )
-      )
+      if (agentMarked(ex) || !isOperator(ex, { allowBackendKey: true }))
         throw new HttpError(403, "only the operator can view local images");
       const cid = ex.params.cid!;
       const cwd = await deps.imageCwd(cid);

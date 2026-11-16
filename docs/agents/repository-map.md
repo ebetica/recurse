@@ -48,7 +48,7 @@ release that imports it.
 | Part                                                                            | What it owns                                                                                                                                                       |
 | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | [src/extensions/](../../src/extensions/README.md)                               | Durable extensions: `src/extensions/core/{safety,shells,context,environment}/` and `src/extensions/extra/{fff,mcp,rtk,model-clock,codex,usage-limits,cache-warm}/` |
-| [src/extensions/core/settings/](../../src/extensions/core/settings/settings.ts) | On-demand native effort-level and colour-theme tool                                                                                                                |
+| [src/extensions/core/settings/](../../src/extensions/core/settings/settings.ts) | Native effort-level and colour-theme tool                                                                                                                          |
 | [tools/](../../tools/README.md)                                                 | Agent CLIs (subagents and worktrees)                                                                                                                               |
 | [src/launcher/](../../src/launcher/README.md)                                   | `./recurse`, `src/local.ts`, builds and where files live                                                                                                           |
 | `scripts/patches/`                                                              | Bun patches to pinned dependencies; prefer a Pi extension over a new patch                                                                                         |
@@ -65,6 +65,6 @@ lives in `src/auth/anthropic_oauth.ts`, not an extension.
 
 | Part                                  | What it owns                                                                                                           |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| [web/dock/](../../web/dock/README.md) | Desktop chat and pane windows, tabs, drag/drop and focus; lazy-loaded, absent on phones                                |
+| [web/dock/](../../web/dock/README.md) | Desktop chat and pane windows, tabs, drag/drop and focus; preloaded on desktop, absent on phones                       |
 | [web/](../../web/README.md)           | The browser app: `web/app.ts`, built into `web/dist/` and loaded by `web/index.html`                                   |
 | [tests/](../../tests/README.md)       | Backend, extension, web, browser and live tests; suite checks in `tests/checks/` and developer scripts in `tests/dev/` |

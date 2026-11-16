@@ -2,6 +2,7 @@
 // Agents never reach Settings, credentials or safety changes, whatever the key.
 // Bound per-label calls through EOF/cancellation; offline calls queue nothing.
 // Validate paths; refuse redirects; sandbox remote apps under an opaque origin.
+import { authMethod } from "./request_auth";
 import { validBackendLabel } from "../backends/label";
 import { backendAgentAllowed, remoteSettingsRoute } from "../auth/backend_keys";
 import type { ConnectedBackends } from "../backends/connected";
@@ -37,7 +38,7 @@ export function registerBackendProxy(
     "/api/backends/{label}/{path:path}",
     async (ex) => {
       const agent =
-        ex.state.auth_method === "loopback"
+        authMethod(ex) === "loopback"
           ? requireLocalAgent(ex, agents)
           : (requireBackendOperator(ex), null);
       const path = ex.params.path!;

@@ -73,6 +73,8 @@ test("custom palettes validate independently, appear in choices, and generate se
       { ...custom, palette: custom.palette.slice(1) },
       { ...custom, background: "red" },
       { ...custom, foreground: "#fff" },
+      { ...custom, css: false },
+      { ...custom, css: "x".repeat(50_001) },
       {
         ...custom,
         palette: custom.palette.map((c, i) => (i === 5 ? "oops" : c)),
@@ -122,6 +124,38 @@ test("custom palettes validate independently, appear in choices, and generate se
     await expect(
       writeTheme(path, { custom: [{ ...custom, palette: [] }] }),
     ).rejects.toThrow("exactly 16");
+    const css = '[data-theme="composer"] { border-radius: 12px; }';
+    const styled = await writeTheme(path, {
+      theme: "Warm solarized",
+      custom: [{ ...custom, css }],
+    });
+    expect(styled.css).toBe(selected.css);
+    expect(styled.customCss).toBe(css);
+    expect(styled.version).not.toBe(selected.version);
+    expect(
+      styled.themes.find((p) => p.name === "Warm solarized")?.customCss,
+    ).toBe(css);
+    expect(JSON.parse(await readFile(path, "utf8")).custom[0].css).toBe(css);
+    const imported = await writeTheme(join(dir, "imported.json"), {
+      theme: styled.theme,
+      custom: styled.custom,
+    });
+    expect(imported.customCss).toBe(css);
+    expect(imported.version).toBe(styled.version);
+    for (const invalidCss of [false, "x".repeat(50_001)])
+      await expect(
+        writeTheme(path, { custom: [{ ...custom, css: invalidCss }] }),
+      ).rejects.toThrow("css must be a string of at most 50000 characters");
+    expect((await readTheme(path)).customCss).toBe(css);
+    const capped = await writeTheme(path, {
+      custom: [{ ...custom, css: "x".repeat(50_000) }],
+    });
+    expect(capped.customCss).toHaveLength(50_000);
+    const builtin = await writeTheme(path, { theme: "Nord" });
+    expect(builtin).not.toHaveProperty("customCss");
+    expect(builtin.themes.find((p) => p.name === "Nord")).not.toHaveProperty(
+      "customCss",
+    );
     await writeFile(
       path,
       JSON.stringify({ custom: {}, theme: "Unknown custom" }),

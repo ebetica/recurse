@@ -1,7 +1,7 @@
-// Render a fresh fake-provider request in the Recurse checkout; require fewer
-// than 15,000 system-prompt characters. Fix the recorded ladder/model names,
-// memory/tree inputs and metadata paths. Load context, skills, CLI help and
-// tool descriptions through the current production renderers.
+// Render a fresh fake-provider request; require fewer than 15,000 characters.
+// Fix ladder/model names, memory/tree inputs and checkout/runtime paths.
+// Production renderers still load real context, skills and CLI help; only
+// known fixture-root paths are canonicalized after capture.
 import { mkdtemp, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -33,12 +33,19 @@ export interface PromptBudget {
   codemodeDescription: string;
 }
 
-/** Capture the real Durable request with only dynamic fixture inputs fixed. */
-export async function renderPromptBudget(): Promise<PromptBudget> {
-  const repo = resolve(import.meta.dir, "../..");
+/** Capture a real Durable request with canonical fixture metadata paths. */
+export async function renderPromptBudget(
+  repo = resolve(import.meta.dir, "../.."),
+): Promise<PromptBudget> {
+  const sourceRepo = resolve(import.meta.dir, "../..");
   const root = await mkdtemp(join(tmpdir(), "recurse-prompt-budget-"));
   const trash = await mkdtemp(join(tmpdir(), "recurse-prompt-budget-trash-"));
   const data = join(root, "data");
+  const canonical = (text: string) =>
+    text
+      .replaceAll(root, "/fixture/runtime")
+      .replaceAll(repo, "/fixture/recurse")
+      .replaceAll(sourceRepo, "/fixture/recurse");
   const config = createConfig({
     cwd: repo,
     toolsDir: join(repo, "tools"),
@@ -121,18 +128,19 @@ export async function renderPromptBudget(): Promise<PromptBudget> {
     const messages = captured.context.messages.filter(
       (message) => message.role === "system",
     );
-    const sections = Object.assign(
-      {},
-      ...messages.map((message) => message.sections ?? {}),
-    );
+    const sections: Record<string, string> = {};
+    for (const message of messages)
+      for (const [name, value] of Object.entries(message.sections ?? {}))
+        if (value !== null) sections[name] = canonical(value);
     const codemode = messages
       .flatMap((message) => message.toolsAdded ?? [])
       .find((tool) => tool.name === "codemode");
     return {
-      total: messages.map(getSystemMessageText).filter(Boolean).join("\n\n")
-        .length,
+      total: canonical(
+        messages.map(getSystemMessageText).filter(Boolean).join("\n\n"),
+      ).length,
       sections,
-      codemodeDescription: codemode?.description ?? "",
+      codemodeDescription: canonical(codemode?.description ?? ""),
     };
   } finally {
     await host?.close();

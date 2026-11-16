@@ -11,6 +11,7 @@ import {
   checkNewAgent,
 } from "../web/sidebar/arrangement.ts";
 import { sidebarRows, type RowSource } from "../web/sidebar/rows.ts";
+import { runRetryingTimeout } from "../web/sidebar/retry.ts";
 import { MAX_SCRIPT_BYTES, type ScriptResult } from "../web/sidebar/sandbox.ts";
 
 export const DEFAULT_SCRIPT = join(
@@ -128,20 +129,8 @@ export class SidebarScript {
       throw new SidebarScriptError("The script is over 16 KB.");
     const now = this.now();
     const rows = sidebarRows(this.tree(), now);
-    const worker = new Worker(
-      join(import.meta.dir, "sidebar_dry_run.worker.ts"),
-    );
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const result = await runRetryingTimeout(() => runDryRun(script, rows, now));
     try {
-      const result = await new Promise<ScriptResult>((resolve, reject) => {
-        timer = setTimeout(
-          () => reject(new SidebarScriptError("The script did not finish.")),
-          DRY_RUN_MS,
-        );
-        worker.onmessage = (event) => resolve(event.data);
-        worker.onerror = (event) => reject(new Error(event.message));
-        worker.postMessage({ script, rows, now });
-      });
       if ("error" in result)
         throw new SidebarScriptError(
           result.line === null
@@ -157,10 +146,30 @@ export class SidebarScript {
       if (error instanceof ArrangementError)
         throw new SidebarScriptError(error.message);
       throw error;
-    } finally {
-      clearTimeout(timer);
-      worker.terminate();
     }
+  }
+}
+
+async function runDryRun(
+  script: string,
+  rows: unknown[],
+  now: number,
+): Promise<ScriptResult> {
+  const worker = new Worker(join(import.meta.dir, "sidebar_dry_run.worker.ts"));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await new Promise<ScriptResult>((resolve, reject) => {
+      timer = setTimeout(
+        () => reject(new SidebarScriptError("The script did not finish.")),
+        DRY_RUN_MS,
+      );
+      worker.onmessage = (event) => resolve(event.data);
+      worker.onerror = (event) => reject(new Error(event.message));
+      worker.postMessage({ script, rows, now });
+    });
+  } finally {
+    clearTimeout(timer);
+    worker.terminate();
   }
 }
 

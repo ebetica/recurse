@@ -57,6 +57,25 @@ The folder can also be a Git URL, which Recurse clones once. Recurse keeps its
 own data for that folder beside it, and never writes into your files unless an
 agent edits them.
 
+### Protect password sign-in
+
+On password-protected instances, **Settings → Account → Two-factor sign-in**
+optionally adds codes from an authenticator app. Enter your current password,
+open the authenticator link (or enter the setup key in your app), then enter a
+code to turn it on. Save the ten recovery codes; each works once and they are
+shown only at setup. Sign-in then needs your password and an authenticator or
+unused recovery code. Turning it off needs both factors too. Turning it on or
+off signs out other browser sessions; existing remote connections keep working.
+
+If you lose both your authenticator and recovery codes, reset sign-in on the
+server: stop Recurse, remove `auth.json` from its `CHAT_DATA_DIR`, and restart
+with the original `CHAT_AUTH_SALT` and `CHAT_AUTH_HASH` configuration. This
+restores the original password and clears two-factor sign-in. Without those
+configured password credentials, removing that file restores passwordless
+access; do not expose the server publicly in that state. This is the server's
+sign-in file, not the model-provider credentials in Pi's directory. See the
+[credential module](../src/auth/session.ts).
+
 ### 3. Choose a model
 
 A model generates an agent's replies. Open **Settings** and sign in to Claude

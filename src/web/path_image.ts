@@ -53,10 +53,7 @@ export async function readPathImage(
   );
   let handle;
   try {
-    handle = await open(
-      location,
-      constants.O_RDONLY | constants.O_NONBLOCK | constants.O_NOFOLLOW,
-    );
+    handle = await open(location, constants.O_RDONLY | constants.O_NONBLOCK);
     const before = await handle.stat();
     if (!before.isFile()) throw new HttpError(404, "image not found");
     if (before.size > maxBytes)

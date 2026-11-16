@@ -23,18 +23,76 @@ import {
 } from "../thread-render/background-shells.js";
 import { rowThreads } from "../row-thread-state.js";
 import { paint } from "./thread.js";
-import { activeDescendants, activeAgentSummary } from "../active-agents.js";
+import {
+  activeDescendants,
+  activeAgentSummary,
+  activeDescendantCount,
+} from "../active-agents.js";
 import { guardLeaveComments } from "../comments.js";
 import { activeAgentRowT, selectAgent } from "../sidebar.js";
 import type { Conversation } from "../types.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { CLOSE_ICON } from "../icons.js";
+import { CLOSE_ICON, PERSON_ICON, TERMINAL_ICON } from "../icons.js";
 
 export let shellSurfaceAgent: string | null = null;
 let shellSurfaceReturnFocus: HTMLElement | null = null;
 
 export let agentSurfaceAgent: string | null = null;
 let agentSurfaceReturnFocus: HTMLElement | null = null;
+
+export function shellChipT(
+  conv: Conversation,
+  label: string,
+): TemplateResult | typeof nothing {
+  if (!label) return nothing;
+  const title = conv.shells?.agent_title || conv.title || conv.id;
+  const { shellCount } = activeShells(conv);
+  return html`<button
+    class="badge running shell-chip live"
+    type="button"
+    data-shell-chip
+    data-agent-id=${conv.id}
+    aria-controls="shell-overlay"
+    aria-expanded=${shellSurfaceAgent === conv.id ? "true" : "false"}
+    aria-label=${`${label} for ${title}`}
+    title=${`${label} for ${title}`}
+    @click=${(event: Event) => {
+      event.stopPropagation();
+      openShellSurface(conv.id, event.currentTarget as HTMLButtonElement);
+    }}
+  >
+    <span class="chip-label">${shellCount}</span>${unsafeHTML(TERMINAL_ICON)}
+  </button>`;
+}
+
+// Sibling to the shell chip: names this conversation's running subagents from
+// the tree the sidebar already polls, and opens the same overlay card listing
+// them — every row navigates like a sidebar row.
+export function agentChipT(
+  conv: Conversation,
+  label: string,
+): TemplateResult | typeof nothing {
+  if (!label) return nothing;
+  const title = conv.title || conv.id;
+  return html`<button
+    class="badge accent agent-chip"
+    type="button"
+    data-agent-chip
+    data-agent-id=${conv.id}
+    aria-controls="shell-overlay"
+    aria-expanded=${agentSurfaceAgent === conv.id ? "true" : "false"}
+    aria-label=${`${label} for ${title}`}
+    title=${`${label} for ${title}`}
+    @click=${(event: Event) => {
+      event.stopPropagation();
+      openAgentSurface(conv.id, event.currentTarget as HTMLButtonElement);
+    }}
+  >
+    <span class="chip-label"
+      >${activeDescendantCount(state.nodes, conv.id)}</span
+    >${unsafeHTML(PERSON_ICON)}
+  </button>`;
+}
 
 const SURFACE_GAP_PX = 8;
 const SURFACE_MARGIN_PX = 8;
@@ -407,7 +465,9 @@ document.addEventListener("keydown", shellSurfaceKeydown, true);
 scrollEl.addEventListener("scroll", repositionSurface, { passive: true });
 window.addEventListener("resize", repositionSurface);
 window.visualViewport?.addEventListener("resize", repositionSurface);
-new ResizeObserver(repositionSurface).observe(scrollEl);
+new ResizeObserver(repositionSurface).observe(scrollEl, {
+  box: "content-box",
+});
 document.addEventListener("click", (event) => {
   if (!shellSurfaceAgent && !agentSurfaceAgent) return;
   const target = event.target as Element | null;

@@ -17,6 +17,7 @@ import type { ViewPage } from "./row-thread-state/view-blocks.js";
 import { pruneOptimistic } from "./pending-queue.js";
 import { cancelRevealTimer } from "./conversation/disclosure.js";
 import { fillViewport } from "./conversation/navigation.js";
+import { writeThreadScroll } from "./conversation/scroll-ledger.js";
 import { paint } from "./conversation/thread.js";
 import { invalidateFiles, noteRowsRead, noteTurns } from "./files.js";
 import type { Conversation, Turn } from "./types.js";
@@ -330,7 +331,7 @@ export async function loadOlderRows(
     const prevHeight = scrollEl.scrollHeight;
     const prevTop = scrollEl.scrollTop;
     paint(state.currentConv?.id === conv.id ? state.currentConv : conv);
-    scrollEl.scrollTop = prevTop + scrollEl.scrollHeight - prevHeight;
+    writeThreadScroll(prevTop + scrollEl.scrollHeight - prevHeight);
   } catch {
   } finally {
     loadingOlder = false;

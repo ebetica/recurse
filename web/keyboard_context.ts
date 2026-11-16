@@ -55,7 +55,6 @@ export interface FocusLayers {
   finder: boolean;
   insidePane: boolean;
   textEditor: boolean;
-  interactiveControl: boolean;
   modalLayer: boolean;
 }
 
@@ -68,6 +67,5 @@ export function classifyKeyTarget(layers: FocusLayers): KeyTarget {
   if (layers.composer) return "composer";
   if (layers.rename) return "rename";
   if (layers.textEditor) return "editor";
-  if (layers.interactiveControl) return "control";
   return "chrome";
 }

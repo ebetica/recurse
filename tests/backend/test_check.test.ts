@@ -211,11 +211,48 @@ test("CLI warning/strict exits and real git diff regression deletion gate", asyn
     );
     put("tests/backend/case.ts", 'test("restart", () => {});\n');
     expect((await run("--diff", base, "--pr-body", "body.txt")).exitCode).toBe(
-      0,
+      1,
     );
     await git("rm", "-q", "-f", "tests/backend/case.ts");
     expect((await run("--diff", base, "--pr-body", "body.txt")).exitCode).toBe(
       1,
+    );
+    const cast = "const deps = {} as unknown as TreeDeps;\n";
+    put("tests/backend/http_tree.test.ts", cast);
+    await git("add", "tests/backend/http_tree.test.ts");
+    expect((await run("--strict")).exitCode).toBe(0);
+    put("tests/backend/http_tree.test.ts", cast + cast);
+    const over = await run("--strict");
+    expect(over.exitCode).toBe(1);
+    expect(over.stdout.toString()).toBe(
+      [
+        "tests/backend/http_tree.test.ts:1 T3 hand-made deps cast (cap 1 here)",
+        "tests/backend/http_tree.test.ts:2 T3 hand-made deps cast (cap 1 here)",
+        "Test warnings: 2",
+        "By rule: T3=2",
+        "By area: backend=2",
+        "",
+      ].join("\n"),
+    );
+    put("tests/backend/http_tree.test.ts", cast);
+    put("tests/mobile_browser/server/agents.ts", "await Bun.sleep(1000);\n");
+    await git("add", "tests/mobile_browser/server/agents.ts");
+    expect((await run("--strict")).exitCode).toBe(0);
+    put(
+      "tests/mobile_browser/server/agents.ts",
+      "await Bun.sleep(999);\nawait page.click({ timeout: 5_000 });\n",
+    );
+    const waits = await run("--strict");
+    expect(waits.exitCode).toBe(1);
+    expect(waits.stdout.toString()).toBe(
+      [
+        "tests/mobile_browser/server/agents.ts:2 T6 explicit browser timeout (cap 0 here)",
+        "tests/mobile_browser/server/agents.ts:1 T6 sleep of a second or more cap is 1; lower it to 0",
+        "Test warnings: 2",
+        "By rule: T6=2",
+        "By area: mobile_browser=2",
+        "",
+      ].join("\n"),
     );
   } finally {
     rmSync(cwd, { recursive: true, force: true });

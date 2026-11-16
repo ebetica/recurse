@@ -41,10 +41,18 @@ export interface SearchHit {
 export interface SearchOptions {
   query: string;
   role?: TranscriptRole;
+  conversationOnly?: boolean;
+  alternatives?: string[];
+  since?: number;
+  until?: number;
+  cursor?: string;
   limit?: number;
   scope: string;
   signal?: AbortSignal;
+  exclude?: { cid: string; fromEntry: number };
 }
+export class SearchInputError extends Error {}
+
 export class SearchBusyError extends Error {
   constructor() {
     super("Search busy; retry after current searches finish");
@@ -114,6 +122,8 @@ export type SearchFile = {
 export type QueryResult = {
   hits: SearchHit[];
   truncated: boolean;
+  truncation?: "hit_limit" | "byte_limit" | "agent_limit";
+  next_cursor?: string;
   missing?: string[];
   unindexed?: string[];
   bytes_scanned?: number;
@@ -293,7 +303,7 @@ export class MessageSearch {
       const current = worker;
       worker.onmessage = (event) =>
         slowSpan("search_reply_handle", undefined, () => {
-          const { id, value, error, log } = event.data;
+          const { id, value, error, invalidInput, log } = event.data;
           if (log) {
             this.log(
               log.event,
@@ -307,7 +317,10 @@ export class MessageSearch {
           const pending = this.waiting.get(id);
           if (!pending) return;
           this.waiting.delete(id);
-          if (error) pending.waiter.reject(new Error(error));
+          if (error)
+            pending.waiter.reject(
+              invalidInput ? new SearchInputError(error) : new Error(error),
+            );
           else pending.waiter.resolve(value);
         });
       worker.onerror = () => {
@@ -401,14 +414,27 @@ export class MessageSearch {
   async search(
     targets: SearchTarget[],
     options: SearchOptions,
-  ): Promise<{ hits: SearchHit[]; truncated: boolean; not_indexed: number }> {
+  ): Promise<{
+    hits: SearchHit[];
+    truncated: boolean;
+    truncation?: QueryResult["truncation"];
+    next_cursor?: string;
+    filters_applied: true;
+    not_indexed: number;
+    incomplete: { agent: string; path: string; reason: "missing" | "stale" }[];
+  }> {
+    const terms = [options.query, ...(options.alternatives ?? [])];
     if (
-      !options.query.trim() ||
-      options.query.length > 4096 ||
-      /[\r\n\u0000]/.test(options.query)
+      terms.length > 8 ||
+      terms.some((term) => !term.trim() || /[\r\n\u0000]/.test(term)) ||
+      terms.reduce((size, term) => size + term.length, 0) > 4096
     )
-      throw new Error(
-        "Search requires a single-line query of 1–4096 characters",
+      throw new SearchInputError(
+        "Use 1–8 single-line literals totaling at most 4096 characters",
+      );
+    if (options.cursor && options.cursor.length > 32768)
+      throw new SearchInputError(
+        "Search cursor is too large; narrow the scope",
       );
     const start = performance.now();
     options.signal?.throwIfAborted();
@@ -442,9 +468,15 @@ export class MessageSearch {
       const result = await abortable(running, controller.signal);
       const incomplete = new Set(result.unindexed ?? []);
       for (const path of result.missing ?? []) incomplete.add(path);
-      const notIndexed = files.filter(({ path }) =>
-        incomplete.has(path),
-      ).length;
+      const missing = new Set(result.missing ?? []);
+      const coverage = files
+        .filter(({ path }) => incomplete.has(path))
+        .map(({ path, target }) => ({
+          agent: target.agent ?? target.cid,
+          path,
+          reason: missing.has(path) ? ("missing" as const) : ("stale" as const),
+        }));
+      const notIndexed = coverage.length;
       this.log(
         "search_query",
         {
@@ -466,7 +498,11 @@ export class MessageSearch {
       return {
         hits: result.hits,
         truncated: result.truncated,
+        ...(result.truncation ? { truncation: result.truncation } : {}),
+        ...(result.next_cursor ? { next_cursor: result.next_cursor } : {}),
+        filters_applied: true,
         not_indexed: notIndexed,
+        incomplete: coverage,
       };
     } finally {
       if (running) {

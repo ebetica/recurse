@@ -19,6 +19,10 @@ export function el<K extends keyof HTMLElementTagNameMap>(
   text?: string,
 ): HTMLElementTagNameMap[K] {
   const n = document.createElement(tag);
+  if (tag === "button") n.dataset.theme = "button";
+  if (tag === "input" || tag === "textarea" || tag === "select")
+    n.dataset.theme = "input";
+  if (tag === "dialog") n.dataset.theme = "dialog";
   if (cls) n.className = cls;
   if (text != null) n.textContent = text;
   return n;
@@ -26,10 +30,25 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 
 export const listEl = req("#agent-list");
 export const msgsEl = req("#messages");
-export const scrollEl = req("#scroll");
+// Read-only: only conversation/scroll-ledger.ts moves the thread.
+export const scrollEl: Omit<HTMLElement, "scrollTop"> & {
+  readonly scrollTop: number;
+  scroll: never;
+  scrollBy: never;
+  scrollTo: never;
+  scrollIntoView: never;
+} = req("#scroll");
 export const liveBarEl = req("#live-bar");
 export const inputEl = req<HTMLTextAreaElement>("#input");
 export const sendEl = req<HTMLButtonElement>("#send");
 export const titleEl = req("#conv-title");
 export const scrollBtn = req<HTMLButtonElement>("#scroll-btn");
 export const shellOverlayEl = req("#shell-overlay");
+
+document.body.dataset.theme = "background";
+req("#sidebar").dataset.theme = "sidebar";
+req("#topbar").dataset.theme = "chat-header";
+scrollEl.dataset.theme = "thread";
+req("#composer").dataset.theme = "composer";
+inputEl.dataset.theme = "input";
+sendEl.dataset.theme = "button";

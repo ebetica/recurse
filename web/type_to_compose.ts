@@ -53,26 +53,6 @@ export function shouldTypeToCompose(
   );
 }
 
-// Inputs, textareas, selects, contenteditable regions (including an explicitly
-// contenteditable="false" island), and ARIA textboxes own their keystrokes.
-// Walk ancestors because key events can originate from a child of an editable
-// host.
-export function isTextEditorTarget(target: EventTarget | null): boolean {
-  let element = target as HTMLElement | null;
-  while (element && typeof element === "object") {
-    const tag =
-      typeof element.tagName === "string" ? element.tagName.toLowerCase() : "";
-    if (tag === "input" || tag === "textarea" || tag === "select") return true;
-    if (element.isContentEditable) return true;
-    if (typeof element.getAttribute === "function") {
-      if (element.getAttribute("contenteditable") !== null) return true;
-      if (element.getAttribute("role") === "textbox") return true;
-    }
-    element = element.parentElement;
-  }
-  return false;
-}
-
 // A dialog owns even non-editing key presses made inside it. App.ts separately
 // reports globally-open native/settings/inspector dialogs whose backdrop has
 // focus, so typing can never jump behind a modal.

@@ -1,7 +1,7 @@
-// Pure policy for opening the Artifacts pane. Artifact polling stays in
-// report.ts; panes.ts supplies the current UI guards and applies this helper's
-// edge-triggered decision. Attention survives navigation in one record per live
-// conversation; first phone discovery baselines existing artifacts silently.
+// Pure policy for published-pane attention and automatic Files opening.
+// panes.ts supplies UI guards and applies edge-triggered decisions. Artifacts
+// only notify; first discovery baselines existing artifacts silently, and
+// attention survives navigation in one record per live conversation.
 
 export type ArtifactGeneration = string | null | undefined;
 export type AutoOpenAnnouncement = "opened" | "available" | null;
@@ -24,8 +24,6 @@ export interface ArtifactAutoOpenDecision {
   open: boolean;
   badged: boolean;
   announcement: AutoOpenAnnouncement;
-  // Desktop defaults preserve focus; phone modal integration focuses inside.
-  focusHeading: false;
 }
 
 const decision = (
@@ -36,7 +34,6 @@ const decision = (
   open,
   badged,
   announcement,
-  focusHeading: false,
 });
 
 export function artifactGeneration(
@@ -71,7 +68,7 @@ export class ArtifactPaneAutoOpenPolicy {
     }
   >();
 
-  constructor(private readonly trackSeenGenerations = false) {}
+  constructor(private readonly notifyOnly = false) {}
 
   retainAgents(agentIds: ReadonlySet<string>): void {
     for (const id of this.visits.keys())
@@ -81,7 +78,7 @@ export class ArtifactPaneAutoOpenPolicy {
 
   beginVisit(agentId: string): void {
     if (this.agentId === agentId) return;
-    if (this.trackSeenGenerations && this.agentId)
+    if (this.notifyOnly && this.agentId)
       this.visits.set(this.agentId, {
         generation: this.generation,
         generationKnown: this.generationKnown,
@@ -106,7 +103,7 @@ export class ArtifactPaneAutoOpenPolicy {
   noteUserPaneChoice(agentId: string): void {
     if (agentId !== this.agentId) return;
     this.deliberatePaneChoice = true;
-    if (this.trackSeenGenerations) return;
+    if (this.notifyOnly) return;
     this.badged = false;
     if (this.generationKnown && this.generation !== null) this.handled = true;
   }
@@ -127,8 +124,7 @@ export class ArtifactPaneAutoOpenPolicy {
       return decision(false, false);
     }
 
-    const baseline =
-      this.trackSeenGenerations && input.mobile && !this.generationKnown;
+    const baseline = this.notifyOnly && !this.generationKnown;
     const changed =
       !this.generationKnown || input.generation !== this.generation;
     if (changed) {
@@ -151,11 +147,9 @@ export class ArtifactPaneAutoOpenPolicy {
       return decision(false, true, announce);
     }
 
-    // Invariant: On a phone, opening a pane covers the entire conversation.
-    // Keep Artifacts discoverable through the panel button without replacing
-    // the operator's view. An explicit open calls noteArtifactsOpened() and
-    // consumes this generation.
-    if (input.mobile) {
+    // Invariant: Artifact discovery only notifies; phone panes also require
+    // explicit opening because they cover the conversation.
+    if (this.notifyOnly || input.mobile) {
       const announce = !this.badged ? "available" : null;
       this.badged = true;
       return decision(false, true, announce);

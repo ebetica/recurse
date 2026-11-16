@@ -1,4 +1,4 @@
-// Unref'd main/Worker timers; idle emits nothing. No native CPU/memory reads.
+// Unref'd main/Worker timers; idle samples every stallMs and emits nothing.
 // observer_late_ms: max observer lateness in window, including overdue ticks.
 // Both late suggests shared pause; only main late suggests main-thread work.
 // No snapshot waits. window_ms excludes diagnostics; spans aren't CPU causes.
@@ -8,6 +8,8 @@ import { templateRoute } from "../http_transport";
 import {
   drainSlowSpans,
   drainWorkerReplies,
+  onOpenPhase,
+  openPhaseCount,
   overlappingOpenPhases,
 } from "./slow_span";
 import { INFO, WARNING, logEvent, type RuntimeLogger } from "./runtime_logging";
@@ -23,6 +25,8 @@ export interface LoopLagOptions {
   /** Names of detached tasks in flight (read only for a stall). */
   readonly jobs?: () => readonly string[];
   readonly intervalMs?: number;
+  /** Pace with no request, running turn or open phase; default stallMs. */
+  readonly idleIntervalMs?: number;
   readonly stallMs?: number;
   readonly summaryMs?: number;
   readonly now?: () => number;
@@ -34,6 +38,9 @@ export interface TrackedRequest {
 
 export class LoopLag {
   private readonly intervalMs: number;
+  private readonly idleIntervalMs: number;
+  private scheduledMs = 0;
+  private unlisten: (() => void) | null = null;
   private readonly stallMs: number;
   private readonly summaryMs: number;
   private readonly now: () => number;
@@ -49,6 +56,7 @@ export class LoopLag {
   constructor(private readonly options: LoopLagOptions) {
     this.intervalMs = options.intervalMs ?? 20;
     this.stallMs = options.stallMs ?? 250;
+    this.idleIntervalMs = options.idleIntervalMs ?? this.stallMs;
     this.summaryMs = options.summaryMs ?? 60_000;
     this.now = options.now ?? (() => performance.now());
   }
@@ -59,12 +67,15 @@ export class LoopLag {
     drainWorkerReplies(-Infinity);
     this.windowStart = this.now();
     this.startObserver();
-    this.schedule();
+    this.unlisten = onOpenPhase(() => this.speedUp());
+    this.schedule(true);
   }
 
   stop(): void {
     if (this.timer !== null) clearTimeout(this.timer);
     this.timer = null;
+    this.unlisten?.();
+    this.unlisten = null;
     const observer = this.observer;
     this.observer = null;
     void observer?.worker.terminate();
@@ -125,17 +136,27 @@ export class LoopLag {
   request(request: TrackedRequest): () => void {
     this.active = true;
     this.inFlight.add(request);
+    this.speedUp();
     return () => {
       if (!this.inFlight.delete(request)) return;
       if (this.finished.length < SHOWN) this.finished.push(request);
     };
   }
 
-  private schedule(): void {
-    this.expected = this.now() + this.intervalMs;
+  private speedUp(): void {
+    // Invariant: an overdue idle timer still fires, logging the stall it spans.
+    if (this.timer === null || this.scheduledMs === this.intervalMs) return;
+    if (this.now() >= this.expected) return;
+    clearTimeout(this.timer);
+    this.schedule(true);
+  }
+
+  private schedule(busy: boolean): void {
+    this.scheduledMs = busy ? this.intervalMs : this.idleIntervalMs;
+    this.expected = this.now() + this.scheduledMs;
     if (this.observer)
       Atomics.store(this.observer.state, 0, this.observerClock());
-    this.timer = setTimeout(() => this.sample(), this.intervalMs);
+    this.timer = setTimeout(() => this.sample(), this.scheduledMs);
     this.timer.unref?.();
   }
 
@@ -143,15 +164,16 @@ export class LoopLag {
     const now = this.now();
     const late = Math.max(0, now - this.expected);
     this.samples.push(late);
-    if (this.options.runningCount() > 0) this.active = true;
-    const start = this.expected - this.intervalMs;
+    const running = this.options.runningCount() > 0;
+    if (running) this.active = true;
+    const start = this.expected - this.scheduledMs;
     const spans = drainSlowSpans(start, now);
     const replies = drainWorkerReplies(start);
     if (late > this.stallMs)
       this.stall(late, now, spans, replies, this.observerLateness());
     this.finished = [];
     if (now - this.windowStart >= this.summaryMs) this.summarize(now);
-    this.schedule();
+    this.schedule(running || this.inFlight.size > 0 || openPhaseCount() > 0);
   }
 
   private stall(
@@ -174,13 +196,13 @@ export class LoopLag {
         ...(observerLate === undefined
           ? {}
           : { observer_late_ms: observerLate }),
-        window_ms: Math.round(now - this.expected + this.intervalMs),
+        window_ms: Math.round(now - this.expected + this.scheduledMs),
         routes: [...routes],
         conversations,
         jobs,
         spans,
         worker_replies: replies,
-        phases: overlappingOpenPhases(this.expected - this.intervalMs, now),
+        phases: overlappingOpenPhases(this.expected - this.scheduledMs, now),
         diagnostics_ms: Math.round(this.now() - now),
       },
     });

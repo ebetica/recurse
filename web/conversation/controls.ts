@@ -12,6 +12,7 @@ import { $, msgsEl, scrollBtn, scrollEl, titleEl } from "../dom.js";
 import { fillViewport, loadOlder } from "./navigation.js";
 import { poll } from "./poll.js";
 import { BOTTOM_FOLLOW_THRESHOLD_PX } from "./scroll-anchor.js";
+import { jumpThreadScroll, writeThreadScroll } from "./scroll-ledger.js";
 import { followLatestReply } from "./thread.js";
 import { renderSidebar } from "../sidebar.js";
 import { DRAFT, state } from "../state.js";
@@ -19,7 +20,7 @@ import { copyText } from "../tool_details.js";
 import { type Conversation } from "../types.js";
 
 let scrollFrame = 0;
-let pendingBottom: ((top: number) => void) | null = null;
+let pendingBottom = false;
 export function updateScrollBtn(): void {
   if (scrollFrame) return;
   scrollFrame = requestAnimationFrame(() => {
@@ -30,12 +31,8 @@ export function updateScrollBtn(): void {
       ? Math.max(0, height - viewport)
       : scrollEl.scrollTop;
     const fromBottom = height - top - viewport;
-    const follow = pendingBottom;
-    pendingBottom = null;
-    if (follow) {
-      follow(top);
-      scrollEl.scrollTop = top;
-    }
+    if (pendingBottom) writeThreadScroll(top);
+    pendingBottom = false;
     scrollBtn.classList.toggle(
       "visible",
       fromBottom > BOTTOM_FOLLOW_THRESHOLD_PX,
@@ -45,19 +42,19 @@ export function updateScrollBtn(): void {
   });
 }
 /** Coalesces bottom following and edge controls into one read/write batch. */
-export function followThreadBottom(onFollow: (top: number) => void): void {
-  pendingBottom = onFollow;
+export function followThreadBottom(): void {
+  pendingBottom = true;
   updateScrollBtn();
 }
 export function cancelThreadBottom(): void {
-  pendingBottom = null;
+  pendingBottom = false;
 }
 scrollEl.addEventListener("scroll", updateScrollBtn, { passive: true });
 // Disclosures/composer growth change edge fades without scroll events.
 const edgeObserver = new ResizeObserver(updateScrollBtn);
-edgeObserver.observe(scrollEl);
-edgeObserver.observe(msgsEl);
-new ResizeObserver(fillViewport).observe(scrollEl);
+edgeObserver.observe(scrollEl, { box: "content-box" });
+edgeObserver.observe(msgsEl, { box: "content-box" });
+new ResizeObserver(fillViewport).observe(scrollEl, { box: "content-box" });
 scrollEl.addEventListener(
   "scroll",
   () => {
@@ -67,7 +64,7 @@ scrollEl.addEventListener(
 );
 export function scrollToLatest(): void {
   followLatestReply();
-  scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior: "smooth" });
+  jumpThreadScroll(scrollEl.scrollHeight, "smooth");
 }
 scrollBtn.addEventListener("click", scrollToLatest);
 

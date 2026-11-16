@@ -119,6 +119,31 @@ export async function assertSectionSpacing(
               `section-spacing-${width}-${appearance}.png`,
             ),
           });
+        if (width === 1280) {
+          const columns = await page
+            .locator("#agent-list .agent:has(.time)")
+            .evaluateAll((rows) =>
+              rows
+                .filter((row) => row.getClientRects().length)
+                .map((row) => {
+                  const edges = (selector: string) => {
+                    const box = row
+                      .querySelector(selector)
+                      ?.getBoundingClientRect();
+                    return (
+                      box && `${Math.round(box.left)}-${Math.round(box.right)}`
+                    );
+                  };
+                  return { time: edges(".time"), kids: edges(".kids") };
+                }),
+            );
+          const times = new Set(columns.map((row) => row.time));
+          const kids = columns.flatMap((row) => row.kids || []);
+          expect(columns.length).toBeGreaterThan(3);
+          expect(times.size).toBe(1);
+          expect(kids.length).toBeGreaterThan(1);
+          expect(new Set(kids.map((edge) => edge.split("-")[1])).size).toBe(1);
+        }
         const gaps: number[] = [];
         for (const header of await headers.all()) {
           await header.scrollIntoViewIfNeeded();

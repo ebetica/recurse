@@ -6,15 +6,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
-  realpathSync,
   rmSync,
-  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
+import { linkDependencies } from "./linked_dependencies";
 
 const ROOT = join(import.meta.dir, "../..");
 const PASSWORD = "update-test-password-1";
@@ -152,10 +151,7 @@ test("Update now moves a release install to the next tag, restarts it and keeps 
     0,
     expect.stringContaining("cloning recurse v0.0.1"),
   ]);
-  symlinkSync(
-    realpathSync(join(ROOT, "node_modules")),
-    join(install, "node_modules"),
-  );
+  linkDependencies(install);
 
   const data = join(root, "data");
   const target = join(root, "target");
@@ -299,7 +295,10 @@ test("Update now moves a release install to the next tag, restarts it and keeps 
       const { update } = await updateStatus();
       return ["waiting", "failed"].includes(update?.state) ? update : null;
     });
-    expect(waiting).toEqual({ state: "waiting", detail: "1" });
+    expect(waiting, await readFile(log, "utf8")).toEqual({
+      state: "waiting",
+      detail: "1",
+    });
     expect(await version()).toBe("0.0.1");
     expect(await git(install, "describe", "--tags")).toBe("v0.0.2");
 

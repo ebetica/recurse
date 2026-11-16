@@ -8,6 +8,7 @@ import {
   fauxProvider,
 } from "@earendil-works/pi-ai";
 import { DurableHost } from "../../src/agents/durable/host";
+import type { DeliverOptions } from "../../src/agents/supervisor/delivery";
 import {
   registerConversationRoutes,
   type ConversationsRoutesDeps,
@@ -47,8 +48,11 @@ function world() {
     requireActionReady: () => undefined,
     durable: host,
     delivery: {
-      deliver: (cid: string, text: string) =>
-        host.send(cid, text, crypto.randomUUID()),
+      deliver: (cid: string, text: string, options?: DeliverOptions) =>
+        host.send(cid, text, crypto.randomUUID(), {
+          interrupt: options?.interrupt,
+          onInterrupt: options?.onInterrupt,
+        }),
       requestRun: () => undefined,
     },
   } as unknown as ConversationsRoutesDeps);

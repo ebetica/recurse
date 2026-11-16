@@ -4,9 +4,15 @@
 `remote_client.ts` owns bounded calls and streaming transport. Keys never enter
 agent environments or proxy responses. The receiving backend enforces its key
 policy in `src/auth/backend_keys.ts`.
+Prompt reads preserve raw agent-marker restrictions through the proxy, including
+operator-authenticated requests with a marker. The forwarded empty marker asserts
+no identity; the receiving backend omits reviewer data without hiding other prompt
+content. Unmarked operator reads can inspect reviewer requests and replies.
 
 Connections use atomic 0600 writes in Pi's credential directory and one mutation
-queue to keep labels unique. Passwords are exchanged once. Logout leaves
+queue to keep labels unique. Passwords and optional two-factor codes are exchanged
+once, never saved. A remote's code-required response opens the code field in
+Settings; existing keys do not require codes. Logout leaves
 connections intact. Agent-requested addresses persist pending without keys;
 only operator sign-in contacts them. Pending entries are not health-checked,
 including after restart; failed sign-in stays pending. Older records without
@@ -94,8 +100,10 @@ saved with the connection and survives restart. Signing in with a new key or
 removing and re-adding the connection resumes polling. Proxied browser reads
 fail immediately with the sign-in error, so browser refreshes cannot keep
 contacting a revoked remote. Explicit relay checks and transcript reads may
-still try once; only a successful request resumes automatic polling. Callback
-notices cannot resume a revoked connection.
+still try once; only a successful request issued after the latest recorded 401
+resumes automatic polling. Every 401 advances that rejection's ownership, even
+when already revoked; an older success cannot clear it while waiting for the
+serialized credential write. Callback notices cannot resume a revoked connection.
 
 `RECURSE_SLEEP_CHECK_URL` names a check-in service that answers relay polls
 without starting the instance. Version and sleep answers advertise it as
@@ -121,7 +129,10 @@ oldest out is told how many were dropped. Only labels a home polled with,
 under a backend key that still exists (or keyless), are queued, and only that
 home is offered them; others fail with "no connected home routes". Without the
 setting, nothing is queued and unclaimed sends fail after 90 seconds, enough
-for a sleeping home to start.
+for a sleeping home to start. A claimed message with no result instead becomes
+unconfirmed, because the home may already have admitted it. `RelayInbox` owns
+that confirmation deadline; real-path tests shorten it without changing claims
+or supplying a result.
 
 Inbound keys store only secret digests and reread disk on every check.
 Serialized writes prevent last-used updates from resurrecting revoked keys;

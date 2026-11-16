@@ -1,6 +1,6 @@
 // Owns thread assembly, paint state, change keys and saved reading viewports.
 // Chrome/fetch invoke paint/renderConv but never mutate presentation state.
-// Repaints and hidden layout clamps preserve the reader's row or bottom.
+// Holds keep rows or bottom; unrecorded offsets (scroll-ledger.ts) release.
 // Phone thread drags blur the field; scrolling/composer gestures do not.
 import { commentOutbox } from "../artifacts/comment-outbox.js";
 import { outboxBubbles } from "../composer/outbox.js";
@@ -13,6 +13,7 @@ import {
 } from "../thread-render/activity-boundary.js";
 import { turnGroupBlocks } from "../thread-render/turn-groups.js";
 import { updateChrome } from "./chrome.js";
+import { thinkingStore } from "./thinking.js";
 import {
   cancelThreadBottom,
   followThreadBottom,
@@ -30,12 +31,17 @@ import { phoneNavigation } from "../phone-nav.js";
 import {
   BOTTOM_FOLLOW_THRESHOLD_PX,
   captureViewport,
-  hasScrolledAwayFromBottom,
   type SavedViewport,
   shouldFollowConversationBottom,
   type ScrollAnchorRow,
   withScrollAnchor,
 } from "./scroll-anchor.js";
+import {
+  recordThreadScroll,
+  threadJumping,
+  threadScrolledByReader,
+  writeThreadScroll,
+} from "./scroll-ledger.js";
 import { renderMermaidIn } from "../mermaid.js";
 import { renderMathIn } from "../math.js";
 import { fillViewport, revealRowMessage } from "./navigation.js";
@@ -74,15 +80,14 @@ import { contextUsageKey } from "../context/tokens.js";
 import { conversationPainted } from "../show-timing.js";
 import { state } from "../state.js";
 import { stoppingId } from "./stop.js";
+import { activityBoundaryT, pendingActionT } from "../thread-render.js";
 import {
-  activityBoundaryT,
-  pendingActionT,
-  promptBanner,
   queuedT,
   shellUnavailableT,
   waitingPanelT,
   workingT,
-} from "../thread-render.js";
+} from "./live-panel.js";
+import { promptBanner } from "../prompt/banner.js";
 import { activityStatusKind } from "../thread-render/tool_activity.js";
 import { copyText, toolDetailStore } from "../tool_details.js";
 import { type Conversation } from "../types.js";
@@ -166,11 +171,9 @@ export function anchoredPaint(
     rows,
     () => {
       paint(conv);
-      if (anchor) {
-        viewportHold = null;
-        cancelThreadBottom();
-      }
+      if (anchor) releaseBottomFollow();
     },
+    writeThreadScroll,
     anchor,
   );
   if (anchor && correct)
@@ -240,21 +243,15 @@ window.addEventListener("recurse:tree-authoritative", () => {
 });
 
 let toolDetailConversation: string | null = null;
-// Follows a new selection or explicit jump until the reader gestures.
+// Follows the bottom across repaints until the reader gestures.
 let bottomFollowConversation: string | null = null;
-let followedScrollTop = 0;
-function scrollToBottom(): void {
-  followThreadBottom((top) => {
-    followedScrollTop = top;
-  });
-}
+const scrollToBottom = followThreadBottom;
 // Where the reader left each thread (null: at the bottom), bounded like rows.
 const savedViewports = new Map<string, SavedViewport | null>();
 const MAX_SAVED_VIEWPORTS = 100;
 type ViewportHold = SavedViewport & { conversation: string; revealed: boolean };
 // Holds a returning reader's row in place until they scroll or jump.
 let viewportHold: ViewportHold | null = null;
-let heldScrollTop = 0;
 let heldRowSearch: SavedViewport | null = null;
 type SendPin = {
   conversation: string;
@@ -277,7 +274,6 @@ export function followLatestReply(): void {
   viewportHold = null;
   if (sendPin) sendPin.held = false;
   bottomFollowConversation = toolDetailConversation;
-  followedScrollTop = scrollEl.scrollTop;
 }
 const rowElement = (row: string) =>
   msgsEl.querySelector<HTMLElement>(`[data-row-id="${CSS.escape(row)}"]`);
@@ -320,7 +316,10 @@ export function pinOperatorSend(conversation: string): void {
  */
 export function holdQueuedSend(conversation: string): void {
   if (conversation !== toolDetailConversation) return;
+  if (threadScrolledByReader()) releaseBottomFollow();
   disclosureHold = null;
+  // Invariant: Writing the current offset ends a running smooth jump.
+  writeThreadScroll(scrollEl.scrollTop);
   const pin = sendPin;
   // Invariant: A queued send freezes the current view, even before the first
   // send reaches the top or its stored row arrives.
@@ -342,7 +341,6 @@ export function holdQueuedSend(conversation: string): void {
     offset: row.getBoundingClientRect().top - top,
     revealed: true,
   };
-  heldScrollTop = scrollEl.scrollTop;
 }
 /** Only reader input releases a pin, never an offset clamped by a reflow. */
 const pinHeld = () =>
@@ -353,7 +351,7 @@ function applySendPin(): void {
   const pin = sendPin;
   if (!pin || !pinHeld()) return;
   if (pin.frozenTop !== null) {
-    scrollEl.scrollTop = pin.frozenTop;
+    writeThreadScroll(pin.frozenTop);
     return;
   }
   const row = pin.row ? rowElement(pin.row) : null;
@@ -366,13 +364,13 @@ function applySendPin(): void {
     scrollEl.scrollTop +
     sent.getBoundingClientRect().top -
     scrollEl.getBoundingClientRect().top;
-  scrollEl.scrollTop = Math.max(
-    0,
-    Math.min(top, scrollEl.scrollHeight - scrollEl.clientHeight),
+  writeThreadScroll(
+    Math.max(0, Math.min(top, scrollEl.scrollHeight - scrollEl.clientHeight)),
   );
 }
 function saveViewport(id: string): void {
   if (!scrollEl.clientHeight) return;
+  if (threadScrolledByReader()) releaseBottomFollow();
   const saved =
     viewportHold?.conversation === id
       ? { row: viewportHold.row, offset: viewportHold.offset }
@@ -433,14 +431,13 @@ function applyViewportHold(): void {
   else {
     const target = heldRowElement(hold);
     if (target && viewportHold === hold)
-      scrollEl.scrollTop +=
-        target.getBoundingClientRect().top -
-        scrollEl.getBoundingClientRect().top -
-        hold.offset;
+      writeThreadScroll(
+        scrollEl.scrollTop +
+          target.getBoundingClientRect().top -
+          scrollEl.getBoundingClientRect().top -
+          hold.offset,
+      );
   }
-  // Invariant: Offsets the thread itself set (holding, clamping after a
-  // repaint, older-page compensation) are not the reader scrolling away.
-  heldScrollTop = scrollEl.scrollTop;
 }
 // Pages older history until the held row is loaded. Only exhausted history
 // (the row no longer exists) falls back to the bottom; a failed page keeps
@@ -460,7 +457,6 @@ async function pageToHeldRow(hold: ViewportHold) {
       rowThreadOlder.get(cid) !== false
     ) {
       await loadOlderRows(state.currentConv, false);
-      heldScrollTop = scrollEl.scrollTop;
       if (count() <= held) break;
       held = count();
     }
@@ -541,35 +537,23 @@ for (const event of [
 scrollEl.addEventListener(
   "scroll",
   () => {
-    if (!scrollEl.clientHeight) return;
-    // Invariant: Scroll events report the current offset, so one queued by the
-    // previous thread reads the held offset and keeps the hold.
-    if (
-      viewportHold !== null &&
-      Math.abs(scrollEl.scrollTop - heldScrollTop) > 1
-    )
-      releaseBottomFollow();
-    if (
-      bottomFollowConversation !== null &&
-      hasScrolledAwayFromBottom(
-        followedScrollTop,
-        scrollEl.scrollTop,
-        scrollEl.scrollHeight,
-        scrollEl.clientHeight,
-      )
-    )
-      releaseBottomFollow();
+    // Invariant: Scroll events report the current offset, so one queued by
+    // the previous thread reads the held offset and keeps the hold.
+    if (threadScrolledByReader()) releaseBottomFollow();
   },
   { passive: true },
 );
 
 if (typeof ResizeObserver !== "undefined") {
   const bottomFollowResize = new ResizeObserver(() => {
+    // Invariant: Scroll events precede layout in a frame, so an unrecorded
+    // offset seen here is the layout's clamp.
+    recordThreadScroll();
     applySendPin();
     if (pinHeld()) return;
     if (disclosureHold) {
       // Invariant: Delayed window layout cannot move a pressed control; reader
-      // gestures, sends and conversation changes release its screen anchor.
+      // input, scrolls, sends and conversation changes release its anchor.
       if (
         disclosureHold.conversation === state.selectedId &&
         disclosureHold.anchor.isConnected
@@ -585,8 +569,8 @@ if (typeof ResizeObserver !== "undefined") {
     if (viewportHold) applyViewportHold();
     else scrollToBottom();
   });
-  bottomFollowResize.observe(msgsEl);
-  bottomFollowResize.observe(scrollEl);
+  bottomFollowResize.observe(msgsEl, { box: "content-box" });
+  bottomFollowResize.observe(scrollEl, { box: "content-box" });
 }
 
 // Keys loaded turns and pending bubbles by identity to preserve their DOM.
@@ -694,7 +678,7 @@ function threadTemplate(
     (block) => `${renderedLogGeneration}:${block.key}`,
     (block, index) =>
       html`${index === acceptedBefore ? acceptedT : nothing}
-      ${activityBoundaryT(conv, block, index === last, queued)}`,
+      ${activityBoundaryT(conv, block, { current: index === last, queued })}`,
   )}
   ${acceptedBefore < 0 ? acceptedT : nothing}
   ${tailWaiting ? waitingPanelT(conv) : nothing}
@@ -734,6 +718,7 @@ export function paint(conv: Conversation): void {
   const previousConversation = toolDetailConversation;
   const replacingConversation =
     previousConversation === null || previousConversation !== conv.id;
+  if (!replacingConversation && threadScrolledByReader()) releaseBottomFollow();
   if (replacingConversation) {
     disclosureHold = null;
     if (previousConversation !== null) saveViewport(previousConversation);
@@ -750,9 +735,6 @@ export function paint(conv: Conversation): void {
     } else sendPin = null;
     // Invariant: A bottom follow the outgoing thread queued must not land here.
     cancelThreadBottom();
-    // Invariant: The outgoing thread's offsets mean nothing here; a scroll
-    // event it queued must not read as leaving this thread's bottom.
-    followedScrollTop = 0;
   } else if (
     (bottomFollowConversation ?? conv.id) !== conv.id ||
     (viewportHold?.conversation ?? conv.id) !== conv.id
@@ -765,16 +747,21 @@ export function paint(conv: Conversation): void {
   }
   toolDetailConversation = conv.id;
   prepareLiveReveal(conv);
+  // Invariant: Mid-jump, neither a captured hold nor being near the bottom
+  // may write the offset; either write stops the smooth scroll short.
+  const jumping = threadJumping();
   const nearBottom =
+    !jumping &&
     scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight <
-    BOTTOM_FOLLOW_THRESHOLD_PX;
+      BOTTOM_FOLLOW_THRESHOLD_PX;
   if (
     !disclosureHold &&
     !viewportHold &&
     !pinHeld() &&
     !nearBottom &&
     !replacingConversation &&
-    bottomFollowConversation === null
+    bottomFollowConversation === null &&
+    !jumping
   ) {
     const saved = captureViewport(scrollEl, [
       ...msgsEl.querySelectorAll<HTMLElement>("[data-row-id]"),
@@ -792,6 +779,11 @@ export function paint(conv: Conversation): void {
       nearBottom,
       bottomFollowConversation,
     );
+  // Invariant: Another paint must not hold above a queued bottom write.
+  if (followBottom) bottomFollowConversation = conv.id;
+  // Invariant: the thread renders before the live bar, which reads the
+  // committed thinking step recorded while building the thread template.
+  thinkingStore.beginThreadPaint();
   const [threadT, liveBar] = threadTemplate(conv);
   render(threadT, msgsEl);
   render(liveBar ? liveBar() : nothing, liveBarEl);
@@ -807,6 +799,7 @@ export function paint(conv: Conversation): void {
   paintAgentSurface(conv);
   renderMermaidIn(msgsEl);
   renderMathIn(msgsEl);
+  recordThreadScroll();
   applySendPin();
   if (viewportHold) applyViewportHold();
   else if (followBottom) scrollToBottom();

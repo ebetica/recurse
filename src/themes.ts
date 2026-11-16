@@ -1,7 +1,7 @@
 // Pi palettes generate web tokens; themes.json selects family/appearance.
 // Operator bubbles keep Pi lightness/hue with capped chroma.
-// Legacy theme values remain readable; custom palettes are singles.
-// Report invalid entries; atomic writes retain unknown keys.
+// Custom palettes are singles; optional CSS is separate, capped on read/write.
+// Legacy values stay readable; report invalid entries and retain unknown keys.
 import {
   colorToHex,
   colorToOklch,
@@ -20,7 +20,9 @@ export interface ThemePalette {
   background: string;
   foreground: string;
   palette: string[];
+  css?: string;
 }
+export const MAX_THEME_CSS_LENGTH = 50_000;
 type Generator = (input: {
   background: ReturnType<typeof colorToRgb>;
   foreground: ReturnType<typeof colorToRgb>;
@@ -299,6 +301,7 @@ const choice = (palette: ThemePalette) => {
   return {
     name: palette.name,
     css: renderThemeCss(palette),
+    ...(palette.css === undefined ? {} : { customCss: palette.css }),
     appearance: tokens["color-scheme"],
     family: familyFor(palette.name)?.[0] ?? palette.name,
     label: familyFor(palette.name)?.[2] ?? palette.name,
@@ -351,7 +354,11 @@ function selection(raw: Record<string, unknown>, problems: string[]) {
                   (c) => typeof c === "string" && /^#[\da-f]{6}$/i.test(c),
                 )
               ? "colours must be #rrggbb"
-              : "";
+              : entry.css !== undefined &&
+                  (typeof entry.css !== "string" ||
+                    entry.css.length > MAX_THEME_CSS_LENGTH)
+                ? `css must be a string of at most ${MAX_THEME_CSS_LENGTH} characters`
+                : "";
     if (reason) {
       problems.push(`${label}: ${reason}.`);
       continue;
@@ -361,6 +368,7 @@ function selection(raw: Record<string, unknown>, problems: string[]) {
       background: entry.background,
       foreground: entry.foreground,
       palette: entry.palette,
+      ...(entry.css === undefined ? {} : { css: entry.css }),
     };
     try {
       generateTheme(palette);
@@ -496,11 +504,17 @@ function renderSelection(value: ReturnType<typeof selection>) {
       : cssFor(
           family && value.appearance === "light" ? family[1] : value.theme,
         );
+  const customCss = value.custom.find((p) => p.name === value.theme)?.css;
   choices ??= themePalettes.map(choice);
   return {
     ...value,
     css,
-    version: createHash("sha256").update(css).digest("hex").slice(0, 12),
+    ...(customCss === undefined ? {} : { customCss }),
+    version: createHash("sha256")
+      .update(css)
+      .update(customCss ? `\0${customCss}` : "")
+      .digest("hex")
+      .slice(0, 12),
     themes: [...choices, ...value.custom.map(choice)],
   };
 }

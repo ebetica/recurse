@@ -42,7 +42,7 @@ test("trusted policy parser distinguishes absence from every invalid value", () 
   }
 });
 
-test("registry selection never substitutes another provider or active model", () => {
+test("registry selection keeps trusted routes across an acting model mismatch", () => {
   const directLuna = {
     provider: "openai",
     id: "gpt-5.6-luna",
@@ -76,10 +76,11 @@ test("registry selection never substitutes another provider or active model", ()
   expect(found).toEqual([["openai", "gpt-5.6-luna"]]);
 
   const wrongActive = { ...ctx, model: codexLuna } as ExtensionContext;
-  expect(
-    pickReviewerCandidates(wrongActive, policy, "reviewer")?.[0],
-  ).toBeUndefined();
-  expect(found).toHaveLength(1);
+  expect(pickReviewerCandidates(wrongActive, policy, "reviewer")?.[0]).toEqual({
+    model: directLuna as any,
+    effort: "low",
+  });
+  expect(found).toHaveLength(2);
 
   const wrongLookup = {
     ...ctx,
@@ -90,7 +91,7 @@ test("registry selection never substitutes another provider or active model", ()
   ).toBeUndefined();
 });
 
-test("reviewer candidates are ordered, normalized, and summary never falls back", () => {
+test("reviewer candidates are ordered and normalized", () => {
   const fallbackPolicy = {
     ...valid,
     reviewer: {
@@ -141,7 +142,6 @@ test("reviewer candidates are ordered, normalized, and summary never falls back"
     ["openai-codex", "gpt-5.6-luna"],
     ["anthropic", "claude-sonnet-5"],
   ]);
-  expect(pickReviewerCandidates(ctx, state, "summary")?.[0]).toBeUndefined();
 });
 
 test("candidate lists reject malformed entries and empty lists", () => {

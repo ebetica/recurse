@@ -172,7 +172,8 @@ export const tests: BrowserTest[] = [
       ).json();
       const artifact = await (
         await remoteContext.request.post(
-          `${remote.base}__browser-test/seed-artifact-app?agent=${root}`,
+          `${remote.base}__browser-test/seed-artifact-app`,
+          { data: { agent: root } },
         )
       ).json();
       const writable = await (
@@ -662,7 +663,20 @@ export const tests: BrowserTest[] = [
             .url()
             .endsWith(`/api/backends/Laptop/conversations/${agent}/safety`),
         );
-        await page.locator("#safety-btn").click();
+        await (
+          off
+            ? page.locator("#safety-btn")
+            : page.getByRole("switch", {
+                name: /^Safety review off \(Yolo mode\)/,
+              })
+        ).click();
+        if (off)
+          await page
+            .getByRole("button", {
+              name: "Turn off safety review",
+              exact: true,
+            })
+            .click();
         expect((await toggled).ok()).toBe(true);
         expect(
           (

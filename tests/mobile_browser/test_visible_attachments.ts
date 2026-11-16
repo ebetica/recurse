@@ -4,6 +4,28 @@ import { expect as browserExpect } from "playwright/test";
 import { postFixture, waitForLayout, type BrowserTest } from "./common";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3339 native publication summaries name the published files.
+  async function test_native_publication_summary(browser, base) {
+    for (const [fixture, expected] of [
+      ["seed-published-sizes", ["Published 1 file", "Published 1 file"]],
+      ["seed-published-bash", ["Published 2 files"]],
+    ] as const) {
+      const { demo } = await postFixture(base, fixture);
+      const page = await browser.newPage();
+      try {
+        await page.goto(`${base}#agent=${demo}`);
+        for (const width of [1280, 390]) {
+          await page.setViewportSize({ width, height: 900 });
+          const summary = page.locator(".activity-group-summary .turn-summary");
+          await browserExpect(summary).toHaveText([...expected]);
+          await page.reload();
+          await browserExpect(summary).toHaveText([...expected]);
+        }
+      } finally {
+        await page.close();
+      }
+    }
+  },
   // Feature: #3021 thread images show filenames without letterboxed frames.
   async function test_image_filename_captions(browser, base) {
     const page = await browser.newPage();
@@ -243,7 +265,7 @@ export const tests: BrowserTest[] = [
       );
       await page.evaluate(() => ((globalThis as any).stallLiveEvents = true));
       await reconnected;
-      await postFixture(base, "advance-live-publication");
+      await postFixture(base, "release", { agent, gate: "advance" });
       await page
         .getByRole("button", { name: "Open recovered-report.txt in Files" })
         .waitFor();
@@ -272,7 +294,7 @@ export const tests: BrowserTest[] = [
         route.abort(),
       );
       await page.evaluate(() => ((globalThis as any).stallLiveEvents = true));
-      await postFixture(base, "release-live-publication");
+      await postFixture(base, "release", { agent, gate: "finish" });
       await page.waitForFunction(
         () => !(globalThis as any).document.querySelector("#send.stop"),
       );
@@ -288,8 +310,15 @@ export const tests: BrowserTest[] = [
           ),
       );
       expect(await page.locator("#send.stop").count()).toBe(0);
+      await page.unroute(`**/api/conversations/${agent}/view**`);
+      await page.reload();
+      await browserExpect(
+        page.locator(".activity-group-summary .turn-summary"),
+      ).toHaveText(
+        "Ran 3 commands, published 11 files, 1 background shell finished",
+      );
     } finally {
-      await postFixture(base, "release-live-publication");
+      await postFixture(base, "release", { agent, gate: "finish" });
       await page.close();
     }
   },

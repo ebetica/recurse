@@ -1,4 +1,4 @@
-// Settings rebuilds sections on open and target changes (settings/target.ts).
+// Settings mounts only the open category; closing removes its controls.
 // Label controls; add text only for non-obvious consequences or actionable
 // errors. Do not expose implementation names. Each section or list item has at
 // most one primary button for its main action.
@@ -21,9 +21,10 @@ import {
 } from "./settings/models.js";
 import { clearSkillsCache } from "./skills.js";
 import { installFocusTrap, restoreFocus } from "./focus_trap.js";
-import { buildThemeSection } from "./settings/theme.js";
+import { buildThemeSection, cancelThemeCssPreview } from "./settings/theme.js";
 import { buildBrandingSection } from "./settings/branding.js";
 import { buildSidebarSection } from "./settings/sidebar.js";
+import { buildTwoFactorSection } from "./settings/two-factor.js";
 import { buildMcpStatus } from "./settings/mcp.js";
 import { buildConnectedBackends } from "./settings/backends.js";
 import { buildNotificationsSection } from "./settings/notifications.js";
@@ -99,51 +100,41 @@ export function openSettings(cat?: Category) {
   if (target) setTimeout(() => target.focus(), 30);
 }
 const settingsRelease = $("#settings-release")!;
-/** Build every section for one Recurse: "" is this one, else a remote label. */
+/** Mount one category for this Recurse or a remote, never hidden forms. */
 function renderSettings(label: string) {
+  cancelThemeCssPreview();
   closeSettingsDetails();
   setSettingsLabel(label);
   settingsBackend.value = label;
   void showRelease(settingsRelease, label);
   const pane = $("#settings-sections")!;
   const nav = $("#settings-nav")!;
-  pane.textContent = "";
-  nav.textContent = "";
-  let current: Category | null = null;
-  const pages: HTMLElement[] = [];
-  // Invariant: Phones show the category list until a category is chosen;
-  // wide screens always show the sidebar and the chosen page side by side.
+  pane.replaceChildren();
+  nav.replaceChildren();
+  const cats = label
+    ? (["auth", "models", "agents"] as const)
+    : (["account", "appearance", "auth", "models", "agents"] as const);
+  let current: Category = cats[0];
+  let mounted: Category | null = null;
+  const back = () => {
+    if (settingsDepth() === 2) return history.back();
+    show(current, false);
+    nav.querySelector<HTMLElement>(`[data-cat="${current}"]`)?.focus();
+  };
   const show = (cat: Category, drill: boolean) => {
     settingsModal.classList.toggle("drilled", drill);
     for (const btn of nav.querySelectorAll("button"))
       btn.classList.toggle("on", btn.dataset.cat === cat);
-    if (current === cat) return;
     current = cat;
-    for (const page of pages) page.hidden = page.dataset.cat !== cat;
-  };
-  showCategory = show;
-  const back = () => {
-    if (settingsDepth() === 2) return history.back();
-    settingsModal.classList.remove("drilled");
-    nav.querySelector<HTMLElement>(`[data-cat="${current}"]`)?.focus();
-  };
-  const cats = label
-    ? (["auth", "models", "agents"] as const)
-    : (["account", "appearance", "auth", "models", "agents"] as const);
-  for (const cat of cats) {
-    const btn = categoryButton(cat);
-    btn.onclick = () => {
-      show(cat, true);
-      const link = pages
-        .find((page) => !page.hidden)
-        ?.querySelector<HTMLElement>(".settings-back");
-      if (link?.offsetParent) {
-        pushSettingsEntry(2);
-        link.focus();
-      }
-    };
-    nav.appendChild(btn);
+    if (mounted === cat && (!phoneSettings.matches || drill)) return;
+    cancelThemeCssPreview();
+    closeSettingsDetails();
+    pane.replaceChildren();
+    mounted = null;
+    if (phoneSettings.matches && !drill) return;
     const page = categoryPage(cat, back);
+    page.hidden = false;
+    pane.appendChild(page);
     for (const s of settingsSections.filter((x) => x.cat === cat)) {
       const { section, body } = settingsSectionShell(
         s.title,
@@ -152,13 +143,36 @@ function renderSettings(label: string) {
       page.appendChild(section);
       s.build(body, closeSettings);
     }
-    pane.appendChild(page);
-    pages.push(page);
+    mounted = cat;
+  };
+  showCategory = show;
+  for (const cat of cats) {
+    const btn = categoryButton(cat);
+    btn.onclick = () => {
+      show(cat, true);
+      const link = pane.querySelector<HTMLElement>(".settings-back");
+      if (link?.offsetParent) {
+        pushSettingsEntry(2);
+        link.focus();
+      }
+    };
+    nav.appendChild(btn);
   }
   show(cats[0], false);
 }
 const phoneSettings = matchMedia("(max-width: 700px)");
 const settingsDepth = (): number => Number(history.state?.settings) || 0;
+phoneSettings.addEventListener("change", () => {
+  if (!settingsOpen()) return;
+  const category = $("#settings-nav button.on")?.dataset.cat as
+    | Category
+    | undefined;
+  if (!category) return;
+  if (phoneSettings.matches && $("#settings-sections .settings-cat")) {
+    settingsModal.classList.add("drilled");
+    if (settingsDepth() === 1) pushSettingsEntry(2);
+  } else if (!phoneSettings.matches) showCategory(category, false);
+});
 let unwinding = false;
 function unwind(): void {
   unwinding = true;
@@ -201,13 +215,18 @@ window.addEventListener("popstate", () => {
   if (location.href !== settingsHref) return;
   const depth = settingsDepth();
   if (depth === 1 && settingsModal.classList.contains("drilled")) {
-    settingsModal.classList.remove("drilled");
-    $("#settings-nav button.on")?.focus();
+    const selected = $("#settings-nav button.on")!;
+    showCategory(selected.dataset.cat as Category, false);
+    selected.focus();
   } else if (depth === 0) closeSettings();
 });
 export function closeSettings(): boolean {
   if (!settingsOverlay.classList.contains("on")) return false;
+  cancelThemeCssPreview();
   closeSettingsDetails();
+  $("#settings-sections")!.replaceChildren();
+  $("#settings-nav")!.replaceChildren();
+  showCategory = () => {};
   if (settingsDepth() && !unwinding) unwind();
   else seen();
   settingsOverlay.classList.remove("on");
@@ -232,6 +251,7 @@ settingsSection("Name and icon", "appearance", buildBrandingSection);
 settingsSection("Sidebar", "appearance", buildSidebarSection);
 settingsSection("Remotes", "account", buildConnectedBackends);
 settingsSection("Change password", "account", (body) => {
+  body.dataset.themeProtected = "change-password";
   body.innerHTML = `
     <form autocomplete="off">
       <div class="group">
@@ -267,10 +287,14 @@ settingsSection("Change password", "account", (body) => {
     }
     btn.disabled = true;
     try {
-      const r = await homeJpost("/api/password", {
-        current: val("current"),
-        new: val("new"),
-      });
+      const r = await homeJpost(
+        "/api/password",
+        {
+          current: val("current"),
+          new: val("new"),
+        },
+        { renewsSession: true },
+      );
       if (r.ok) {
         clearSkillsCache();
         form.reset();
@@ -289,6 +313,8 @@ settingsSection("Change password", "account", (body) => {
     }
   });
 });
+
+settingsSection("Two-factor sign-in", "account", buildTwoFactorSection);
 
 settingsSection("Claude", "auth", buildClaudeSection);
 settingsSection("OpenAI", "auth", buildOpenAISection);

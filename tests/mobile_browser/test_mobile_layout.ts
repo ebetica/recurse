@@ -274,7 +274,7 @@ export const tests: BrowserTest[] = [
     ).toBeGreaterThanOrEqual(60);
     await context.close();
   },
-  // Regression: #2505 the sidebar and fonts can be ready before the first conversation view loads.
+  // Regression: #2505 #3269 the sidebar, fonts and desktop Chat window are ready before the first visible Chat frame.
   async function test_fresh_mobile_and_desktop(browser, base) {
     for (const [name, viewport, isMobile, hasTouch] of [
       ["phone", { width: 390, height: 844 }, true, true],
@@ -287,12 +287,43 @@ export const tests: BrowserTest[] = [
       });
       const page = await context.newPage();
       const errors = captureErrors(page);
+      if (name === "desktop")
+        await page.addInitScript(() => {
+          const browser = globalThis as any;
+          browser.__chatWidths = [];
+          const sample = () => {
+            const main = browser.document.querySelector("#main");
+            if (main?.checkVisibility({ visibilityProperty: true }))
+              browser.__chatWidths.push(main.getBoundingClientRect().width);
+            if (!browser.__chatSettled) browser.requestAnimationFrame(painted);
+          };
+          const painted = () => {
+            const channel = new browser.MessageChannel();
+            channel.port1.onmessage = sample;
+            channel.port2.postMessage(0);
+          };
+          browser.requestAnimationFrame(painted);
+        });
       await routeArtifacts(page, base);
       await gotoRoot(page, base);
       await page.locator(".agent").first().waitFor();
       await page.evaluate(async () => {
         await (globalThis as any).document.fonts.ready;
       });
+      await waitForLayout(page);
+      if (name === "desktop") {
+        const chat = await page.evaluate(() => {
+          const browser = globalThis as any;
+          browser.__chatSettled = true;
+          return {
+            narrowest: Math.min(...browser.__chatWidths),
+            settled: browser.document
+              .querySelector("#main")
+              .getBoundingClientRect().width,
+          };
+        });
+        expect(chat.narrowest).toBeGreaterThanOrEqual(chat.settled - 1);
+      }
       await page.waitForFunction(
         "!document.querySelector('#thread-loading').classList.contains('on') && !document.querySelector('#messages').classList.contains('stale')",
       );
@@ -495,7 +526,7 @@ export const tests: BrowserTest[] = [
             "document.activeElement?.closest('#sidebar') === null",
           ),
         ).toBeTrue();
-        await page.locator('.pane-col[data-pane="report"]').waitFor();
+        await page.locator('.rail-btn[data-pane="report"]').click();
         await assertArtifactVersionMenuEscape(page);
         await visibleAndUncovered(page, ".agent");
         await visibleAndUncovered(page, "#input");
@@ -1418,7 +1449,7 @@ export const tests: BrowserTest[] = [
           top: el.scrollTop,
           height: el.scrollHeight,
         }));
-        await postFixture(base, "scroll-pin-release");
+        await postFixture(base, "release", { agent, gate: "reply" });
         await page.getByText("First paragraph 10.", { exact: false }).waitFor();
         await waitForLayout(page);
         expect(
@@ -1502,7 +1533,7 @@ export const tests: BrowserTest[] = [
         ).toBeTrue();
         expect(await input.inputValue()).toBe(draft);
         for (let i = 0; i < 4; i++)
-          await postFixture(base, "scroll-pin-release");
+          await postFixture(base, "release", { agent, gate: "reply" });
         await page.getByText("Scroll pin finished.", { exact: true }).waitFor();
       } finally {
         await context.request.delete(`${base}api/conversations/${agent}`);

@@ -121,6 +121,7 @@ export class ConnectedBackends {
   private readonly versions = new Map<string, Compatibility>();
   private callSequence = 0;
   private readonly apiResponses = new WeakMap<RecordRow, number>();
+  private readonly revocations = new WeakMap<RecordRow, object>();
   private readonly versionChecks = new WeakMap<RecordRow, VersionCheck>();
   private readonly probed = new Map<string, number>();
   private queue: Promise<unknown> = Promise.resolve();
@@ -137,6 +138,8 @@ export class ConnectedBackends {
   private readonly registerRetry = new Map<string, number>();
   /** Operator use lasts this long after the last browser request. */
   idleAfterMs = 180_000;
+  /** Maximum relay long-poll wait; tests may shorten it. */
+  pollWaitSeconds = 25;
   /** True while agents run on this instance; set by the app. */
   busy: () => boolean = () => false;
   /** Paused remotes: when to re-poll; check-in URL and the key it gets. */
@@ -674,6 +677,7 @@ export class ConnectedBackends {
     if (row.pending)
       throw new HttpError(409, `${label} needs sign-in in Settings`);
     this.requireCompatible(label);
+    const revocation = this.revocations.get(row);
     const response = await this.call(
       row,
       `/api/subagent-tool/conversations/${cid}/transcript`,
@@ -683,7 +687,7 @@ export class ConnectedBackends {
       },
     );
     if (response.status === 401) await this.revoke(row);
-    if (response.status === 200) await this.resume(row);
+    if (response.status === 200) await this.resume(row, revocation);
     this.wake(label);
     return response;
   }
@@ -713,16 +717,22 @@ export class ConnectedBackends {
       ]);
     });
   }
-  connect(label: unknown, value: unknown, password: unknown): Promise<void> {
-    return this.establish(label, value, password);
+  connect(
+    label: unknown,
+    value: unknown,
+    password: unknown,
+    code?: unknown,
+  ): Promise<void> {
+    return this.establish(label, value, password, code);
   }
-  signIn(label: string, password: unknown): Promise<void> {
-    return this.establish(label, undefined, password, true);
+  signIn(label: string, password: unknown, code?: unknown): Promise<void> {
+    return this.establish(label, undefined, password, code, true);
   }
   private establish(
     label: unknown,
     value: unknown,
     password: unknown,
+    code: unknown,
     signIn = false,
   ): Promise<void> {
     this.requireAvailable();
@@ -785,11 +795,23 @@ export class ConnectedBackends {
             throw new HttpError(422, "remote password required");
           response = await call("key_creation", "/api/backend-keys", {
             method: "POST",
-            body: { password, name: this.home },
+            body: { password, code, name: this.home },
             timeoutMs: 60_000,
           });
-          if (response.status === 401)
-            throw new HttpError(422, "wrong password");
+          if (response.status === 401) {
+            if (
+              (response.data as { code_required?: unknown } | null)
+                ?.code_required === true
+            )
+              throw new HttpError(
+                428,
+                "Enter an authenticator or recovery code for that Recurse instance",
+              );
+            throw new HttpError(
+              422,
+              code ? "wrong password or code" : "wrong password",
+            );
+          }
           if (response.status === 429)
             throw new HttpError(
               429,
@@ -898,6 +920,7 @@ export class ConnectedBackends {
   private async revoke(row: RecordRow): Promise<void> {
     if (!this.rows.includes(row)) return;
     row.key_revoked = true;
+    this.revocations.set(row, {});
     this.asleep.delete(row.label);
     this.setHealth(row, {
       state: "key_revoked",
@@ -908,10 +931,17 @@ export class ConnectedBackends {
       if (this.rows.includes(row)) await this.save(this.rows);
     });
   }
-  private async resume(row: RecordRow): Promise<void> {
+  private async resume(
+    row: RecordRow,
+    issuedRevocation: object | undefined,
+  ): Promise<void> {
     if (row.key_revoked)
       await this.serialized(async () => {
-        if (!this.rows.includes(row)) return;
+        if (
+          !this.rows.includes(row) ||
+          this.revocations.get(row) !== issuedRevocation
+        )
+          return;
         delete row.key_revoked;
         await this.save(this.rows);
       });
@@ -1068,6 +1098,7 @@ export class ConnectedBackends {
     signal: AbortSignal,
     timeoutMs = 3000,
   ): Promise<void> {
+    const revocation = this.revocations.get(row);
     this.probed.set(row.label, Date.now());
     try {
       const response = await this.call(row, "/api/status", {
@@ -1080,7 +1111,7 @@ export class ConnectedBackends {
       }
       if (response.status === 200 && isStatus(response.data)) {
         if (!(await this.refreshVersion(row, signal)) || signal.aborted) return;
-        if (timeoutMs === 60_000) await this.resume(row);
+        if (timeoutMs === 60_000) await this.resume(row, revocation);
       }
       if (row.key_revoked) return;
       this.setHealth(
@@ -1172,7 +1203,7 @@ export class ConnectedBackends {
         await this.checkIn(label, asleep, signal);
         continue;
       }
-      if (sleep <= 0) return 25;
+      if (sleep <= 0) return this.pollWaitSeconds;
       await new Promise<void>((resolve) => {
         const done = () => {
           clearTimeout(timer);

@@ -13,7 +13,11 @@ type Rec = Record<string, unknown>;
  * The inspector's view of a Durable conversation: the system messages and
  * the whole request of its latest model call, exactly as captured.
  */
-export async function prompt(host: DurableHost, cid: string): Promise<Rec> {
+export async function prompt(
+  host: DurableHost,
+  cid: string,
+  includeSafetyReview: boolean,
+): Promise<Rec> {
   const conv = host.deps.load(cid);
   const view = {
     system: "",
@@ -26,11 +30,16 @@ export async function prompt(host: DurableHost, cid: string): Promise<Rec> {
     opened.harness,
     opened.conversation,
   );
+  const review = includeSafetyReview
+    ? await opened.reviewCaptures.latest(cid)
+    : undefined;
+  const safety_review = review ? JSON.parse(review.json) : undefined;
   const capture = await opened.captures.latest(cid);
   if (capture === undefined)
     return {
       ...view,
       naming,
+      safety_review,
       capture_status: host.isRunning(cid) ? "pending" : "unavailable",
     };
   const request = slowSpan("request_capture_decode", cid, () =>
@@ -41,6 +50,7 @@ export async function prompt(host: DurableHost, cid: string): Promise<Rec> {
   return {
     ...view,
     naming,
+    safety_review,
     system: request.context.systemPrompt ?? "",
     system_messages: request.context.messages.filter(
       (message) => message.role === "system",

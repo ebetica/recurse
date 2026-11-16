@@ -10,7 +10,7 @@ const MAX_ERROR = 300;
 
 export type ScriptResult =
   | { sections: unknown; newAgent?: unknown }
-  | { error: string; line: number | null };
+  | { error: string; line: number | null; timeout?: true };
 
 /** Run `script`'s default export on `rows`; the error names its line. */
 export async function runSidebarScript(
@@ -39,8 +39,8 @@ export async function runSidebarScript(
     const sidebar = exports.consume((value) => value.getProp("default"));
     if (vm.typeof(sidebar) !== "function")
       return { error: "The script must export a default function", line: null };
-    deadline = performance.now() + RUN_MS;
     const input = vm.hostToHandle(rows);
+    deadline = performance.now() + RUN_MS;
     const output = vm.callFunction(
       sidebar,
       vm.undefined,
@@ -52,7 +52,11 @@ export async function runSidebarScript(
     const { name, message, stack } = (error ?? {}) as Error;
     const line = /sidebar\.js:(\d+)/.exec(String(stack))?.[1];
     if (message === "interrupted")
-      return { error: `The script ran longer than ${RUN_MS} ms`, line: null };
+      return {
+        error: `The script ran longer than ${RUN_MS} ms`,
+        line: null,
+        timeout: true,
+      };
     const text = `${name || "Error"}: ${message || String(error)}`;
     return {
       error: text.length > MAX_ERROR ? `${text.slice(0, MAX_ERROR)}…` : text,

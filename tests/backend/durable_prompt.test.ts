@@ -207,7 +207,7 @@ test("tree memory is shared within the current tree only", async () => {
           message.sections?.codemode ? [message.sections.codemode] : [],
         )
         .at(-1);
-      expect(declarations).toContain("artifact, recurse_settings");
+      expect(declarations).toBeUndefined();
       const memory = request.context.messages
         .flatMap((message) =>
           message.sections?.recurse_memory

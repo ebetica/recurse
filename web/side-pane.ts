@@ -1,7 +1,7 @@
-// Side pane: /btw and new forks share a frame, warmed behind focused reads.
-// Switching changes its hash; closing parks it. Deletes hide in stale reads
-// and restore on failure. Desktop lists retain the frame and unsent draft;
-// desktop navigation uses the owning pane while editors retain native keys.
+// Side frames warm after focused reads; hash switches retain drafts.
+// Closing parks them inert or drops them without moveBefore.
+// Visible frames suspend theme CSS; customCss=off follows frame URLs.
+// Deletes restore on failure. Editors keep native keys; panes use their owner.
 import { html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
@@ -53,7 +53,8 @@ coarsePointer.addEventListener("change", () => {
 // Without moveBefore, moving reloads frames: never park/warm; boot on open.
 const canPark = "moveBefore" in Element.prototype;
 
-const frameUrl = (id: string) => `/?embed=1#agent=${encodeURIComponent(id)}`;
+const frameUrl = (id: string) =>
+  `/?embed=1${new URLSearchParams(location.search).get("customCss") === "off" ? "&customCss=off" : ""}#agent=${encodeURIComponent(id)}`;
 
 function owningSideFrame(): Element | null {
   if (!embedded || coarsePointer.matches) return null;
@@ -96,6 +97,7 @@ function parking(): HTMLElement {
     lot = document.createElement("div");
     lot.id = "side-frame-parking";
     lot.hidden = true;
+    lot.inert = true;
     document.body.append(lot);
   }
   return lot;
@@ -113,6 +115,7 @@ function placeFrame(target: HTMLElement, id: string, title?: string): void {
   if (!frame) {
     frame = document.createElement("iframe");
     frame.className = "side-frame";
+    frame.dataset.themeProtected = "embedded-side";
     frame.src = frameUrl(id);
   } else if (frame.dataset.side !== id)
     // Invariant: Only the hash changes, so the embedded app switches

@@ -1,7 +1,7 @@
 // Pure view model for token usage attributed to one operator-response boundary.
 // Inputs are completed backend turns assigned by activity-boundary.ts.
-// Assistant rows never participate: only a turn summary can account for every
-// model call.
+// Recorded turn totals account for every model call; without them, visible
+// reply usage supplies only a lower bound.
 import type {
   ConversationModelUsageGroup,
   SafetyReviewUsageGroup,
@@ -18,6 +18,9 @@ import {
   turnTotalUsage,
   turnUsageModel,
 } from "./turn-usage.js";
+
+import type { ActivityBoundary } from "./activity-boundary.js";
+import { isNoticeOnlyAssistant, visibleAssistant } from "./turn-view.js";
 
 interface UsageSum {
   input: number;
@@ -360,6 +363,28 @@ export function replyUsageTotal(
     modelTotal,
     safetyTotal: null,
   };
+}
+
+export function activityHasUsage(usage: ActivityUsage): boolean {
+  return Boolean(
+    turnUsageModel(usage.modelTotal) ||
+    usage.safetyTotal?.groups.some((group) => turnUsageModel(group)),
+  );
+}
+
+export function boundaryUsage(boundary: ActivityBoundary): ActivityUsage {
+  const recorded = activityUsage(boundary.usageTurns, boundary.usagePartial);
+  // Invariant: Usage appears once per response, recorded aggregate preferred.
+  // Without totals, reply usage is a lower bound; disclosure never changes
+  // scope.
+  const replyReports = boundary.slices.flatMap((slice) => {
+    const assistant = visibleAssistant(slice.segment.assistant);
+    if (!assistant || isNoticeOnlyAssistant(assistant)) return [];
+    return [assistant.usage];
+  });
+  return activityHasUsage(recorded)
+    ? recorded
+    : (replyUsageTotal(replyReports, recorded) ?? recorded);
 }
 
 export function activityUsageLabel(usage: ActivityUsage): string {

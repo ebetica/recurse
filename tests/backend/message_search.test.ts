@@ -21,6 +21,7 @@ import {
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import type { CommitPublication } from "@earendil-works/pi-durable";
 import { setSafetyReviewOff } from "../../src/extensions/core/safety/durable";
+import { BackendKeys } from "../../src/auth/backend_keys";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { backfillMessageSearch } from "../../src/search/backfill";
 import { MessageSearch } from "../../src/search";
@@ -42,6 +43,10 @@ interface Results {
   }[];
   truncated: boolean;
   not_indexed: number;
+  truncation?: "hit_limit" | "byte_limit" | "agent_limit";
+  next_cursor?: string;
+  filters_applied: true;
+  incomplete: { agent: string; path: string; reason: "missing" | "stale" }[];
 }
 
 // Feature: #3014 search finds conversational text and commands across live trees and retained deletion.
@@ -67,17 +72,22 @@ test("message search follows commits and reads retained history without revival"
   }
   const app = await buildApp({ env, sink: new SearchLog(() => {}) });
   const faux = fauxProvider({ tokensPerSecond: 1_000_000 });
+  const searchReady = join(root, "search-ready");
+  const releaseSearch = join(root, "release-search");
   faux.setResponses([
+    fauxAssistantMessage("earlier-run-needle"),
     fauxAssistantMessage(
       [
         { type: "text", text: "search-preface\nsearch-preface second line" },
         fauxToolCall("bash", {
-          command: "printf 'tool-%s\\n' 'output-only-unique'",
+          command: `set -e; printf 'tool-%s\\n' 'output-only-unique'; bun ${resolve(import.meta.dir, "../../tools/subagent.ts")} search needle-user; bun ${resolve(import.meta.dir, "../../tools/subagent.ts")} search printf; bun ${resolve(import.meta.dir, "../../tools/subagent.ts")} search earlier-run-needle --role assistant; touch ${searchReady}; while [ ! -f ${releaseSearch} ]; do sleep 0.01; done; printf search-finished`,
         }),
       ],
       { stopReason: "toolUse" },
     ),
-    fauxAssistantMessage("needle-reply\nneedle-reply second line"),
+    fauxAssistantMessage(
+      `needle-reply\nneedle-reply second line\n${"before ".repeat(30)}excerpt-anchor${" after".repeat(100)}`,
+    ),
     ...Array.from({ length: 6 }, (_, i) =>
       fauxAssistantMessage(`compaction-reply-${i}`),
     ),
@@ -137,9 +147,15 @@ test("message search follows commits and reads retained history without revival"
       "x-recurse-agent": parent,
       "content-type": "application/json",
     };
-    const search = async (q: string, options: Record<string, string> = {}) => {
+    const search = async (
+      q: string,
+      options: Record<string, string> = {},
+      alternatives: string[] = [],
+    ) => {
+      const params = new URLSearchParams({ q, ...options });
+      for (const term of alternatives) params.append("or", term);
       const response = await fetch(
-        `${running.url}/api/subagent-tool/search?${new URLSearchParams({ q, ...options })}`,
+        `${running.url}/api/subagent-tool/search?${params}`,
         { headers },
       );
       expect(response.status).toBe(200);
@@ -164,15 +180,56 @@ test("message search follows commits and reads retained history without revival"
       );
       await app.instance.durable.messageSearch.drain();
     };
+    await sendPlainReply(child, "earlier-run-input");
     const sent = await fetch(`${running.url}/api/v1/agents/${child}/messages`, {
       method: "POST",
       headers,
       body: JSON.stringify({ text: "needle-user" }),
     });
     expect(sent.status).toBe(200);
+    await until(() => Bun.file(searchReady).exists());
+    const remoteKey = await new BackendKeys(env.CHAT_DATA_DIR!).mint(
+      "search-home",
+    );
+    for (const callerHeaders of [
+      {
+        "x-loopback-token": String(token),
+        "x-recurse-bundled-tool": "subagent",
+      },
+      {
+        authorization: `Bearer ${remoteKey.key}`,
+        "x-recurse-agent-caller": child,
+        "x-recurse-agent": child,
+      },
+    ] as Record<string, string>[]) {
+      const response = await fetch(
+        `${running.url}/api/subagent-tool/search?${new URLSearchParams({ q: "needle-user", target: child, role: "agent" })}`,
+        { headers: callerHeaders },
+      );
+      expect(response.status).toBe(200);
+      const visible = (await response.json()) as Results;
+      expect(visible.hits).toHaveLength(1);
+      expect(visible.hits[0]!.agent).toBe(child);
+    }
+    const ownHeaders = { ...headers, "x-recurse-agent": child };
+    const current = await fetch(
+      `${running.url}/api/subagent-tool/search?${new URLSearchParams({ q: "needle-user", target: child, role: "agent" })}`,
+      { headers: ownHeaders },
+    );
+    expect(current.status).toBe(200);
+    expect(((await current.json()) as Results).hits).toEqual([]);
+    const earlier = await fetch(
+      `${running.url}/api/subagent-tool/search?${new URLSearchParams({ q: "earlier-run-needle", target: child, role: "assistant" })}`,
+      { headers: ownHeaders },
+    );
+    expect(earlier.status).toBe(200);
+    const old = (await earlier.json()) as Results;
+    expect(old.hits).toHaveLength(1);
+    expect(old.hits[0]!.agent).toBe(child);
+    await writeFile(releaseSearch, "continue");
     await until(
       () =>
-        faux.state.callCount === 2 &&
+        faux.state.callCount === 3 &&
         app.instance.durable.metadata(child).status === "idle",
     );
     following.detach();
@@ -215,12 +272,61 @@ test("message search follows commits and reads retained history without revival"
     ]);
     expect(reply[0]!.entry).toBeGreaterThan(0);
     expect(reply[0]!.time).toBeGreaterThan(0);
+    expect(
+      (
+        await search("needle-reply", {
+          target: child,
+          since: new Date(reply[0]!.time).toISOString(),
+        })
+      ).hits,
+    ).toHaveLength(1);
+    expect(
+      (
+        await search("needle-reply", {
+          target: child,
+          until: new Date(reply[0]!.time).toISOString(),
+        })
+      ).hits,
+    ).toEqual([]);
+    expect(
+      (
+        await search("needle-reply", {
+          target: child,
+          since: new Date(reply[0]!.time + 1).toISOString(),
+        })
+      ).hits,
+    ).toEqual([]);
+    expect(
+      (await search("printf", { target: child, conversation: "true" })).hits,
+    ).toEqual([]);
+    const combined = await search(
+      "needle-user",
+      { target: child, conversation: "true" },
+      ["needle-reply"],
+    );
+    expect(combined.filters_applied).toBe(true);
+    expect(combined.hits.map((hit) => hit.role).sort()).toEqual([
+      "agent",
+      "assistant",
+    ]);
     const readHit = async (hit: Results["hits"][number]) => {
       const lines = (await readFile(hit.path, "utf8")).split("\n");
       expect(hit.line).toBeGreaterThan(0);
       return lines[hit.line - 1]!;
     };
     expect(await readHit(reply[0]!)).toContain("needle-reply");
+    const clipped = (await search("excerpt-anchor", { target: child })).hits;
+    expect(clipped).toHaveLength(1);
+    expect(clipped[0]!.snippet).toStartWith("[… clipped] ");
+    expect(clipped[0]!.snippet).toEndWith(" [… clipped]");
+    expect(await readHit(clipped[0]!)).toContain("excerpt-anchor");
+    expect(
+      (await search("needle-user", { target: child, role: "tool-result" }))
+        .hits,
+    ).toEqual([]);
+    expect(
+      (await search("printf", { target: child, role: "tool-result" })).hits,
+    ).toEqual([]);
     expect(await readFile(sidecar, "utf8")).toContain(
       "needle-reply\nneedle-reply second line",
     );
@@ -277,6 +383,10 @@ test("message search follows commits and reads retained history without revival"
     expect(output).toHaveLength(1);
     expect(await readHit(output[0]!)).toContain("tool-output-only-unique");
     expect(
+      (await search("search-finished", { target: child, role: "tool-result" }))
+        .hits,
+    ).toHaveLength(1);
+    expect(
       (await search("needle-reply needle-reply second", { target: child }))
         .hits,
     ).toEqual([]);
@@ -293,9 +403,14 @@ test("message search follows commits and reads retained history without revival"
         "bun",
         resolve(import.meta.dir, "../../tools/subagent.ts"),
         "search",
-        "needle-reply",
+        "missing-primary-literal",
         parent,
         "--tree",
+        "--conversation",
+        "--or",
+        "needle-reply",
+        "--or",
+        "needle-user",
       ],
       {
         env: { ...env, RECURSE_AGENT_ID: parent },
@@ -309,9 +424,9 @@ test("message search follows commits and reads retained history without revival"
       cli.exited,
     ]);
     expect({ exit, stderr }).toEqual({ exit: 0, stderr: "" });
-    expect(stdout).toContain(`${sidecar}:${reply[0]!.line}: needle-reply`);
+    expect(stdout).toContain(`${sidecar}:${reply[0]!.line}\n`);
     expect(stdout).toContain(
-      `[${child} ${new Date(reply[0]!.time).toISOString()} assistant]`,
+      `  agent=${child} role=assistant time=${new Date(reply[0]!.time).toISOString()} offset=${reply[0]!.line}\nneedle-reply\n`,
     );
     const denied = await fetch(
       `${running.url}/api/subagent-tool/search?q=needle`,
@@ -328,6 +443,19 @@ test("message search follows commits and reads retained history without revival"
       { headers },
     );
     expect(invalid.status).toBe(422);
+    for (const params of [
+      "conversation=true&role=tool",
+      "since=2026-02-30",
+      "since=2026-11-12&until=2026-11-11",
+      "cursor=not-a-valid-token",
+      "or=%0A",
+    ]) {
+      const rejected = await fetch(
+        `${running.url}/api/subagent-tool/search?q=needle&${params}`,
+        { headers },
+      );
+      expect(rejected.status).toBe(422);
+    }
     for (let i = 0; i < 6; i++) {
       const sent = await fetch(
         `${running.url}/api/v1/agents/${child}/messages`,
@@ -342,7 +470,7 @@ test("message search follows commits and reads retained history without revival"
       expect(sent.status).toBe(200);
       await until(
         () =>
-          faux.state.callCount === i + 3 &&
+          faux.state.callCount === i + 4 &&
           app.instance.durable.metadata(child).status === "idle",
       );
     }
@@ -368,9 +496,9 @@ test("message search follows commits and reads retained history without revival"
     expect((await search("needle-reply", { target: child })).hits).toHaveLength(
       1,
     );
-    expect((await search("needle-user", { target: child })).hits).toHaveLength(
-      1,
-    );
+    expect(
+      (await search("needle-user", { target: child, role: "agent" })).hits,
+    ).toHaveLength(1);
     expect(await readHit(reply[0]!)).toContain("needle-reply");
     await app.instance.durable.clear(child);
     await until(
@@ -424,6 +552,11 @@ test("message search follows commits and reads retained history without revival"
     });
     expect(missing.hits).toEqual([]);
     expect(missing.not_indexed).toBeGreaterThan(0);
+    expect(missing.incomplete).toContainEqual({
+      agent: deleted.hits[0]!.agent,
+      path: archiveSidecar,
+      reason: "missing",
+    });
     expect(await stat(archiveSidecar).catch(() => null)).toBeNull();
     const checkpoint = join(root, "data", "message-search-backfill.json");
     await Promise.all(app.detached);
@@ -532,6 +665,7 @@ test("message search follows commits and reads retained history without revival"
     });
     expect(priority.hits).toMatchObject([{ cid: parent, role: "assistant" }]);
     expect(priority.truncated).toBe(true);
+    expect(priority.truncation).toBe("hit_limit");
     expect(activity.slice(phaseStart)).toEqual([1, 0]);
     const heldTranscript = `${archiveSidecar}.held`;
     const database = join(archiveSidecar, "..", "session.sqlite");
@@ -705,7 +839,7 @@ test("message search returns indexed results while backfill is waiting", async (
     ]);
     expect({ stdout, stderr, exit }).toEqual({
       stdout: "",
-      stderr: "1 agent is not indexed yet; results are incomplete.\n",
+      stderr: `Incomplete: ${cid} — transcript missing (not indexed).\n`,
       exit: 0,
     });
     expect(await stat(sidecar).catch(() => null)).toBeNull();
@@ -757,7 +891,11 @@ test("message search returns indexed results while backfill is waiting", async (
           query: "backfill-needle",
           scope: "stale-state",
         }),
-      ).toMatchObject({ not_indexed: 1, truncated: false });
+      ).toMatchObject({
+        not_indexed: 1,
+        truncated: false,
+        incomplete: [{ agent: cid, path: sidecar, reason: "stale" }],
+      });
       await rm(stateFile);
       expect(
         await cold.search([target], {

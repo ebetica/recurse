@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { rm, writeFile } from "node:fs/promises";
+import { access, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import {
@@ -14,6 +14,7 @@ import { appWorld } from "./web_app_support";
 import { Config } from "../../src/config";
 import { DurableHost } from "../../src/agents/durable/host";
 import { setSafetyReviewOff } from "../../src/extensions/core/safety/durable";
+import { RecurseUsageDoc } from "../../src/extensions/core/context/durable-compaction";
 import { UsageDoc } from "../../node_modules/@earendil-works/pi-durable/dist/harness/usage.js";
 import { testDeps, until, held } from "./fixtures/durable_host/host";
 import type { WarmingClock } from "../../src/extensions/extra/cache-warm/cache-warm";
@@ -274,6 +275,274 @@ test("cache warming replays busy conversations, accounts usage and stops at idle
       warming.release();
       await (instance?.shutdown() ?? host.close());
       expect(timers.size).toBe(0);
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+}, 30000);
+
+// Feature: #3266 Compact long idle Durable conversations inside their last prompt-cache window.
+test("idle compaction shares cache deadlines, cancels stale work and records normal compaction", async () => {
+  for (const mode of [
+    "compact",
+    "warming",
+    "restart",
+    "short",
+    "off",
+    "disabled",
+    "threshold",
+    "unknown",
+    "note",
+    "turn",
+    "descendant",
+    "waiting-short",
+    "late",
+    "model",
+    "abort",
+    "manual",
+    "close",
+  ]) {
+    const { root, env } = appWorld();
+    const config = new Config({ env });
+    await config.setKeepPromptCacheWarm(mode === "warming");
+    if (mode !== "off")
+      await config.setCompactIdleConversations(
+        true,
+        mode === "threshold" ? 200000 : 120000,
+      );
+    let now = 0;
+    const timers = new Map<() => void, number>();
+    const clock: WarmingClock = {
+      now: () => now,
+      schedule(callback, delay) {
+        timers.set(callback, now + delay);
+        return () => {
+          timers.delete(callback);
+        };
+      },
+    };
+    const advance = (ms: number) => {
+      now += ms;
+      for (const [callback, at] of [...timers])
+        if (at <= now) {
+          timers.delete(callback);
+          callback();
+        }
+    };
+    const faux = fauxProvider({
+      tokensPerSecond: 100000,
+      models: [
+        {
+          id: "faux-1",
+          contextWindow: 1000000,
+          cost: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 },
+        },
+      ],
+    });
+    if (mode !== "unknown")
+      faux.models[0].promptCache = { short: 300, long: 300 };
+    const models = createModels();
+    models.setProvider(faux.provider);
+    const record: Record<string, unknown> = {
+      id: "c1",
+      backend: "durable",
+      workdir: root,
+      model: "faux/faux-1",
+    };
+    const records: Record<string, Record<string, unknown>> = { c1: record };
+    let rowChanges = 0;
+    const cacheMisses: Record<string, unknown>[] = [];
+    const fallbacks: Record<string, unknown>[] = [];
+    const bindings: ConstructorParameters<typeof DurableHost>[0] = {
+      ...testDeps(
+        config.paths.DATA_DIR,
+        (cid) => records[cid] ?? null,
+        () => Object.keys(records),
+      ),
+      config,
+      models,
+      warmingClock: clock,
+      log: (event, fields) => {
+        if (event === "durable_idle_compaction_cache_miss")
+          cacheMisses.push(fields);
+        if (event === "durable_compaction_summary_fallback")
+          fallbacks.push(fields);
+      },
+      settings: () => [String(record.model), "off"],
+      rowChanged: () => {
+        rowChanges++;
+      },
+    };
+    let host = new DurableHost(bindings);
+    const summary = held(
+      fauxAssistantMessage("## Goal\nContinue the task.\n## Progress\nDone."),
+    );
+    const turn = held(fauxAssistantMessage("new turn"));
+    faux.setResponses([
+      ...(mode === "warming" ? [turn.step] : []),
+      fauxAssistantMessage("done"),
+      fauxAssistantMessage("done"),
+      ...(mode === "warming" ? [fauxAssistantMessage("warm")] : []),
+      summary.step,
+    ]);
+    try {
+      if (mode === "warming") {
+        records.child = { ...record, id: "child", parent: "c1" };
+        await host.send("child", "Continue", "child-r1");
+        await turn.started;
+      }
+      let opened = await host.open("c1");
+      const idle = () =>
+        !host.isRunning("c1") && host.metadata("c1").pending.length === 0;
+      await host.send(
+        "c1",
+        mode === "short" || mode === "waiting-short"
+          ? "Short context"
+          : "Historical context.\n".repeat(30000),
+        "r1",
+      );
+      await until(idle);
+      await host.send("c1", "Recent context.\n".repeat(10000), "r2");
+      await until(idle);
+      const activityPath = join(host.storagePath("c1"), "..", "activity");
+      const activityExists = () =>
+        access(activityPath).then(
+          () => true,
+          () => false,
+        );
+      await until(async () => !(await activityExists()));
+      if (mode === "warming") {
+        advance(270000);
+        await until(async () =>
+          (
+            await opened.conversation.entries({}, 100, undefined, context)
+          ).items.some((entry) => entry.kind === "recurse.cache-warm"),
+        );
+        turn.release();
+        await until(() => !host.cacheWarmBusy("c1") && timers.size === 1);
+      }
+      const compacts =
+        mode === "compact" ||
+        mode === "warming" ||
+        mode === "restart" ||
+        mode === "descendant";
+      const before = faux.state.callCount;
+      if (
+        mode === "turn" ||
+        mode === "descendant" ||
+        mode === "waiting-short"
+      ) {
+        faux.setResponses([turn.step, summary.step]);
+        const cid = mode === "turn" ? "c1" : "child";
+        if (cid === "child")
+          records.child = { ...record, id: cid, parent: "c1" };
+        await host.send(cid, "Continue", "r3");
+        await turn.started;
+      }
+      if (mode === "disabled") {
+        await config.setCompactIdleConversations(false);
+        host.reconcileCacheWarmers();
+      }
+      if (mode === "note")
+        await host.send("c1", "New context without a turn", "note-r3", {
+          note: true,
+        });
+      if (mode === "model") {
+        record.model = "faux/other";
+        host.invalidatePromptCache("c1");
+      }
+      if (mode === "abort") await host.stop("c1");
+      if (mode === "manual") {
+        await host.compact("c1");
+        await summary.started;
+        summary.release();
+        await until(async () => !(await host.live("c1"))?.compactions?.length);
+      }
+      if (mode === "close") await host.close();
+      if (compacts) {
+        expect(timers.size).toBe(1);
+        advance(269999);
+        expect(faux.state.callCount).toBe(
+          before + Number(mode === "descendant"),
+        );
+      }
+      expect(timers.size).toBe(Number(compacts || mode === "late"));
+      const changes = rowChanges;
+      if (mode === "restart") {
+        await host.close();
+        const crash = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "fixtures/durable_cache_warm/crash.ts"),
+            JSON.stringify(env),
+            root,
+          ],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        const [output, error, code] = await Promise.all([
+          new Response(crash.stdout).text(),
+          new Response(crash.stderr).text(),
+          crash.exited,
+        ]);
+        expect({ error, code }).toEqual({ error: "", code: 0 });
+        expect(JSON.parse(output)).toEqual({ marked: true });
+        expect(cacheMisses).toEqual([]);
+        expect(faux.state.callCount).toBe(before);
+        host = new DurableHost(bindings);
+        opened = await host.open("c1");
+      } else advance(mode === "late" ? 300001 : compacts ? 1 : 270000);
+      if (compacts) {
+        await summary.started;
+        expect(host.cacheWarmBusy("c1")).toBe(mode === "descendant");
+        expect(await activityExists()).toBe(false);
+        summary.release();
+        await until(async () =>
+          (
+            await opened.conversation.entries({}, 100, undefined, context)
+          ).items.some((e) => e.kind === "pi.compaction"),
+        );
+        const entries = (
+          await opened.conversation.entries({}, 100, undefined, context)
+        ).items;
+        expect(
+          entries.filter((entry) => entry.kind === "pi.compaction"),
+        ).toHaveLength(1);
+        expect(
+          entries.filter((entry) => entry.kind === "recurse.cache-warm"),
+        ).toHaveLength(Number(mode === "warming"));
+        expect(faux.state.callCount).toBe(
+          before + 1 + Number(mode === "descendant"),
+        );
+        expect(fallbacks).toEqual([]);
+        const usage = await opened.harness.snapshot(
+          RecurseUsageDoc,
+          opened.conversation.id,
+          context,
+        );
+        expect(usage!.models["faux/faux-1"]!.totalTokens).toBeGreaterThan(0);
+        const view = await host.view("c1");
+        expect(
+          (view.blocks as Record<string, unknown>[]).some(
+            (message) => message.role === "compaction",
+          ),
+        ).toBe(true);
+        expect(rowChanges).toBe(changes);
+        expect(cacheMisses).toEqual([{ cid: "c1", cache_read_tokens: 0 }]);
+      } else
+        expect(faux.state.callCount).toBe(
+          before +
+            Number(
+              mode === "turn" || mode === "waiting-short" || mode === "manual",
+            ),
+        );
+      const after = faux.state.callCount;
+      advance(300000);
+      expect(faux.state.callCount).toBe(after);
+      expect(timers.size).toBe(0);
+    } finally {
+      summary.release();
+      turn.release();
+      await host.close();
+      await config.close();
       await rm(root, { recursive: true, force: true });
     }
   }

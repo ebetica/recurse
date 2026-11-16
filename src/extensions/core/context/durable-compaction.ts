@@ -352,6 +352,15 @@ export function compactionPolicy(contextWindow: number) {
 
 type UsageTotals = JsonObject;
 
+/** Idle admission provenance, committed with its task and retired with it. */
+export const IdleCompactionDoc = defineDoc<{ idle: boolean }>({
+  kind: "recurse.idle-compaction",
+  version: 1,
+  scope: "task",
+  initial: () => ({ idle: false }),
+  checkpointWhen: () => false,
+});
+
 /** Summarizer spend of the Recurse summaries, shaped like pi.usage. */
 export const RecurseUsageDoc = defineDoc<{
   models: Record<string, UsageTotals>;
@@ -470,6 +479,7 @@ export interface DurableCompactionHost {
   /** Start a manual compaction; the compact tool's result text. */
   compact(context: Context, id: Conversation["id"]): Promise<string>;
   report(event: string, error: unknown): void;
+  idleCompactionCacheMiss?(id: Conversation["id"]): void;
   /** The provider's own compaction, replacing readable summary generation. */
   providerCompaction?(
     messages: readonly Message[],
@@ -497,6 +507,7 @@ async function summarizeCompaction(
   },
   agent: Pick<Agent, "model"> & Partial<Pick<Agent, "thinkingLevel">>,
   context: Context,
+  onUsage?: (usage: Usage) => void,
 ): Promise<{ text: string; usage: Usage; model: Model<never> }> {
   const ref = agent.model;
   const model = ref && models.getModel(ref.provider, ref.modelId);
@@ -532,14 +543,20 @@ async function summarizeCompaction(
     m: Model<never>,
     ctx: never,
     options: Record<string, unknown> = {},
-  ) =>
-    models.streamSimple(
+  ) => {
+    const response = models.streamSimple(
       m,
       ctx,
       Object.fromEntries(
         Object.entries(options).filter(([, value]) => value !== undefined),
       ),
-    )) as never;
+    );
+    void response.result().then(
+      (message) => onUsage?.(message.usage),
+      () => undefined,
+    );
+    return response;
+  }) as never;
   const result = await summarizeWithLengthFallback(
     messages,
     model as never,
@@ -750,6 +767,13 @@ export function createDurableCompaction(
           const memo = await api.memo<string>(SUMMARY_MEMO, context);
           if (memo !== undefined) return { summary: memo };
           try {
+            const idle = (
+              await api.snapshot(IdleCompactionDoc, api.taskId, context)
+            )?.idle;
+            const onUsage = (usage: Usage) => {
+              if (idle && usage.cacheRead === 0)
+                host.idleCompactionCacheMiss?.(api.conversationId);
+            };
             const conversation = await host.conversation(
               context,
               api.conversationId,
@@ -787,7 +811,9 @@ export function createDurableCompaction(
                   },
                   agent,
                   context,
+                  onUsage,
                 );
+            if (checkpoint) onUsage(checkpoint.usage);
             await conversation.commit(async (tx) => {
               const doc = await tx.doc(RecurseUsageDoc, conversation.id);
               const key = `${summary.model.provider}/${summary.model.id}`;

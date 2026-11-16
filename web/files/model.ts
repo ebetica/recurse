@@ -173,6 +173,22 @@ export function versionGroups(files: SessionFile[]): SessionFile[][] {
   return groups.sort((a, b) => newestFirst(a[0]!, b[0]!));
 }
 
+export function versionLabel(
+  file: SessionFile,
+  number: number,
+  latest: boolean,
+) {
+  const when = file.created_at
+    ? new Date(file.created_at * 1000).toLocaleString([], {
+        dateStyle: "medium",
+        timeStyle: "short",
+      })
+    : "";
+  return [`Version ${number}`, when, latest ? "latest" : ""]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 /** Markdown files render as formatted text in the detail view. */
 export function rendersAsMarkdown(file: SessionFile): boolean {
   return file.preview === "text" && /\.(?:md|markdown)$/i.test(file.name);
@@ -194,7 +210,7 @@ interface WatchedTurn {
 export class SettledTurnFile {
   private cid: string | null = null;
   private fresh = false;
-  private newest: string | null | undefined = undefined;
+  private baseline: string | null | undefined = undefined;
   private file: string | null = null;
 
   /** A new visit (a conversation, the draft, or nothing selected). */
@@ -202,7 +218,7 @@ export class SettledTurnFile {
     if (cid === this.cid) return;
     this.cid = cid;
     this.fresh = false;
-    this.newest = undefined;
+    this.baseline = undefined;
     this.file = null;
   }
 
@@ -215,12 +231,17 @@ export class SettledTurnFile {
     if (cid !== this.cid || !this.fresh) return;
     let turn: WatchedTurn | undefined;
     for (let index = turns.length - 1; index >= 0 && !turn; index--)
-      if (!turns[index]!.open && !turns[index]!.system) turn = turns[index];
+      if (
+        !turns[index]!.system &&
+        (this.baseline !== undefined || !turns[index]!.open)
+      )
+        turn = turns[index];
     const newest = turn?.turn_id ?? null;
-    const first = this.newest === undefined;
-    if (newest === this.newest) return;
-    this.newest = newest;
-    if (first) return;
+    if (this.baseline === undefined) {
+      this.baseline = newest;
+      return;
+    }
+    if (turn?.open || newest === this.baseline) return;
     const files = (turn?.segments ?? [])
       .flatMap((segment) => segment.assistant?.attachments ?? [])
       .filter((file) => !file.inline_media_type);

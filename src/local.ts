@@ -76,6 +76,12 @@ commands of ./recurse (run before any setup):
   update --check        print the channel and the installed and available
                         versions; changes nothing
 
+environment:
+  RECURSE_READ_ONLY_SIGN_INS
+                        external auth.json used without writes or OAuth
+                        refresh; credentials need at least one hour left.
+                        Other Pi state stays under PI_CODING_AGENT_DIR.
+
 Bun ${BUN_MIN_VERSION} or newer runs the launcher and the server.
 `;
 

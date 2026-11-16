@@ -120,6 +120,10 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-group { margin-bottom: var(--space-4); }
 .diff-group-head { display: flex; align-items: center; gap: var(--space-3);
   margin-bottom: var(--space-2); }
+.diff-untracked > summary { cursor: pointer; list-style: none; min-height: 44px; }
+.diff-untracked > summary::-webkit-details-marker { display: none; }
+.diff-untracked > summary svg { flex: none; width: 16px; height: 16px; }
+.diff-untracked[open] > summary svg { transform: rotate(90deg); }
 .diff-group-label { font-size: 0.78125rem; font-weight: 600; letter-spacing: .02em;
   text-transform: uppercase; color: var(--muted); }
 

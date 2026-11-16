@@ -169,7 +169,7 @@ export interface ReadsDeps {
     turnPrompt(cid: string, offset: number): Promise<JsonObject | null>;
     metadata(cid: string): JsonObject;
     contextUsage(cid: string): Promise<JsonObject>;
-    prompt(cid: string): Promise<JsonObject>;
+    prompt(cid: string, includeSafetyReview?: boolean): Promise<JsonObject>;
   };
   readonly config: Pick<Config, "agentTempLeaf" | "paths">;
   readonly sessionFiles: SessionFilesContext;
@@ -855,10 +855,13 @@ export class SupervisorReads {
   }
 
   /** Captured prompt view over a supervisor claim. */
-  async readBasePrompt(cid: string): Promise<JsonObject | null> {
+  async readBasePrompt(
+    cid: string,
+    includeSafetyReview = false,
+  ): Promise<JsonObject | null> {
     const durable = this.deps.durable;
     if (durable?.owns(this.deps.claims.metadataSnapshot(cid)))
-      return durable.prompt(cid);
+      return durable.prompt(cid, includeSafetyReview);
     const claim = this.claim(cid);
     if (claim === null) return null;
     let view: Record<string, string>;

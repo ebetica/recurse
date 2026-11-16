@@ -46,6 +46,7 @@ import {
 import {
   loadTrustedModelPolicy,
   pickReviewerCandidates,
+  reviewerConfigurationCategory,
   type TrustedModelPolicyState,
 } from "./model-policy.ts";
 import { expandToolCallPaths } from "./path-expansion.ts";
@@ -56,6 +57,7 @@ import {
 } from "./path-scope.ts";
 import { isReadOnlyBashCommand } from "./read-only-bash.ts";
 import { updateReviewerJournal } from "./review-journal.ts";
+import { ReviewHistory } from "./review-history.ts";
 import {
   reviewAction,
   type SafetyReviewAttempt,
@@ -157,6 +159,7 @@ export async function safetyReviewUnavailable(
 }
 
 function unavailableReason(outcome: Outcome): string {
+  if (outcome.configurationFailure) return "reviewer configuration error";
   const failure = classifyReviewFailure(
     outcome.reason,
     Boolean(outcome.journalFailure),
@@ -197,12 +200,17 @@ export type SafetyTrusted = {
 
 export type SafetyOptions = {
   models: Models;
+  /** Trusted catalog, optionally capture-bound to the reviewed conversation. */
+  reviewModels: Models | ((conversationId: string) => Models);
   configDir: string;
   trusted(): SafetyTrusted;
+  /** Settings policy for the stored acting identity, never tool env. */
+  modelPolicy?(acting: { provider: string; id: string }): Promise<string>;
   shells(): readonly ProcessRoot[] | undefined;
   /** Resolve the conversation of a hook; a throw blocks the call. */
   agent(api: HookApi, context: Context): Promise<DurableSafetyAgent>;
   mcpServer?(name: string): string | undefined;
+  log?(event: string, fields: Record<string, unknown>): void;
   reviewAction?: typeof reviewAction;
   loadConfig?: (configDir: string) => SafetyConfig | Promise<SafetyConfig>;
   now?: () => number;
@@ -212,6 +220,7 @@ type Outcome = {
   decision: "allow" | "deny";
   reason: string;
   procedural?: boolean;
+  configurationFailure?: boolean;
   journalFailure?: boolean;
   attempts?: SafetyReviewAttempt[];
   safetyWaitMs?: number;
@@ -222,6 +231,7 @@ type RunState = {
   config: SafetyConfig;
   pathScope: TrustedPathScope | undefined;
   modelPolicy: TrustedModelPolicyState;
+  actingModel: { provider: string; id: string } | undefined;
   breaker: DenialCircuitBreaker;
   denied: Set<string>;
   open: boolean;
@@ -350,14 +360,9 @@ export function createDurableSafety(host: SafetyOptions): Extension {
   const review = host.reviewAction ?? reviewAction;
   const loadConfig = host.loadConfig ?? loadSafetyConfig;
   const now = host.now ?? (() => performance.now());
-  const complete = ((model, context, options) =>
-    host.models.completeSimple(
-      model,
-      context,
-      options,
-    )) as typeof completeSimple;
   const runs = new Map<string, { key: string; state: Promise<RunState> }>();
   const reviewTails = new Map<string, Promise<void>>();
+  const histories = new WeakMap<Conversation, ReviewHistory>();
   const started = new Map<string, number>();
 
   // A run starts with its first input; a new run gets a fresh denial budget
@@ -389,13 +394,28 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         }),
       ]);
       if (config.error) safeLog(invalidConfigMessage());
+      const acting = (await api.snapshot(AgentDoc, api.conversationId, context))
+        ?.model;
+      const actingModel = acting
+        ? { provider: acting.provider, id: acting.modelId }
+        : undefined;
+      let modelPolicy = trusted.modelPolicy;
+      if (actingModel && host.modelPolicy) {
+        try {
+          modelPolicy = await host.modelPolicy(actingModel);
+        } catch {
+          // Invariant: Settings failures still try frozen trusted routes.
+          modelPolicy ??= "";
+        }
+      }
       const state: RunState = {
         key: runKey,
         config,
         pathScope,
         modelPolicy: loadTrustedModelPolicy({
-          RECURSE_MODEL_POLICY: trusted.modelPolicy,
+          RECURSE_MODEL_POLICY: modelPolicy,
         }),
+        actingModel,
         breaker: new DenialCircuitBreaker(),
         denied: new Set(),
         open: false,
@@ -446,15 +466,22 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     nested?: { parentCallId: string; mcpServer?: string },
   ): Promise<Outcome> {
     const conversationId = agent.id;
-    const stored = await api.snapshot(AgentDoc, api.conversationId, context);
-    const active = stored?.model
-      ? host.models.getModel(stored.model.provider, stored.model.modelId)
+    const reviewModels =
+      typeof host.reviewModels === "function"
+        ? host.reviewModels(conversationId)
+        : host.reviewModels;
+    const complete = ((model, request, options) => {
+      const { apiKey, headers, env, ...ownedOptions } = options ?? {};
+      return reviewModels.completeSimple(model, request, ownedOptions);
+    }) as typeof completeSimple;
+    const active = run.actingModel
+      ? reviewModels.getModel(run.actingModel.provider, run.actingModel.id)
       : undefined;
     const sessionId =
       (await api.snapshot(ProviderDoc, api.conversationId, context))
         ?.sessionId ?? `conversation-${api.conversationId}`;
     const ctx = reviewContext(
-      host.models,
+      reviewModels,
       agent.cwd,
       active as ExtensionContext["model"],
       context.abortSignal,
@@ -505,6 +532,24 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         rows as Parameters<typeof buildReviewTranscript>[0],
       );
     }
+    let history = histories.get(agent.conversation);
+    if (!history) {
+      history = new ReviewHistory();
+      histories.set(agent.conversation, history);
+    }
+    const configurationCategory = reviewerConfigurationCategory(
+      ctx,
+      run.modelPolicy,
+      run.actingModel,
+    );
+    const configurationReason =
+      configurationCategory === "invalid_policy"
+        ? "The safety reviewer configuration could not be validated. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings."
+        : configurationCategory === "unsupported_reviewer_pin"
+          ? "Your chosen safety reviewer is not a built-in model or a custom provider configured in Settings, and no trusted fallback is available. Choose a built-in model or custom provider for effort level 1 in Settings."
+          : configurationCategory === "acting_identity_mismatch"
+            ? "The safety reviewer configuration does not match this conversation's model, and no trusted fallback is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings."
+            : "No trusted safety reviewer is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings.";
     let verdict: SafetyVerdict;
     if (reviewers && !journalFailure) {
       verdict = await reviewWithCandidates(review, ctx, reviewers, {
@@ -515,6 +560,7 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         conversationId,
         complete,
         inputs: {
+          history,
           dataDir: host.trusted().dataDir,
           statsRoot: host.trusted().statsRoot,
           processSnapshot: await ownedProcessSnapshot(host.shells()),
@@ -524,20 +570,47 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     } else {
       verdict = {
         decision: "deny",
-        reason: journalFailure
-          ? `Safety reviewer journal failed: ${journalFailure}`
-          : "The configured reviewer model is unavailable or does not match the active model policy.",
+        reason: !reviewers
+          ? configurationReason
+          : `Safety reviewer journal failed: ${journalFailure}`,
         procedural: true,
       };
     }
+    const configurationFailure = !reviewers;
     const safetyWaitMs =
       reviewers && !journalFailure
         ? positiveElapsedMs(safetyStartedMs, now())
         : undefined;
+    if (verdict.procedural) {
+      const failure = configurationFailure
+        ? { stage: "configuration", category: configurationCategory }
+        : classifyReviewFailure(verdict.reason, Boolean(journalFailure));
+      const reviewer =
+        verdict.reviewer ??
+        (reviewers?.[0]
+          ? {
+              provider: reviewers[0].model.provider,
+              model: reviewers[0].model.id,
+            }
+          : undefined);
+      try {
+        host.log?.("safety_review_failed", {
+          cid: conversationId,
+          stage: failure.stage,
+          category: failure.category,
+          ...(reviewer ?? {}),
+          elapsed_ms: positiveElapsedMs(safetyStartedMs, now()) ?? 0,
+          attempts: verdict.reviewAttempts?.length ?? 0,
+        });
+      } catch {
+        // Invariant: Diagnostics never reverse the fail-open decision.
+      }
+    }
     return {
-      decision: verdict.decision,
+      decision: configurationFailure ? "allow" : verdict.decision,
       reason: verdict.reason,
       ...(verdict.procedural ? { procedural: true } : {}),
+      ...(configurationFailure ? { configurationFailure: true } : {}),
       ...(journalFailure ? { journalFailure: true } : {}),
       ...(verdict.reviewAttempts?.length
         ? { attempts: boundedAttempts(verdict.reviewAttempts) }
@@ -647,23 +720,14 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       try {
         await agent.conversation.commit(async (tx) => {
           const doc = await tx.doc(SafetyDoc, agent.conversation.id);
-          if (outcome.procedural && !doc.off)
+          if ((outcome.procedural || outcome.configurationFailure) && !doc.off)
             doc.unavailable = unavailableReason(outcome);
           else delete doc.unavailable;
         }, context);
       } catch {
         safeLog("[pi-safety] Availability display state could not be saved.");
       }
-      if (outcome.procedural) {
-        const failure = classifyReviewFailure(
-          outcome.reason,
-          Boolean(outcome.journalFailure),
-        );
-        safeLog(
-          `[pi-safety] event=review_failure stage=${failure.stage} category=${failure.category}`,
-        );
-        return allow();
-      }
+      if (outcome.procedural || outcome.configurationFailure) return allow();
       if (outcome.decision === "allow") return allow();
       await recordDenied(agent, run.key, denialKey, outcome, context);
       let breaker = {
@@ -741,18 +805,19 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       reviewerUsage && result.usage
         ? addUsage(result.usage, reviewerUsage)
         : (reviewerUsage ?? result.usage);
-    const notice = outcome?.procedural
-      ? [
-          {
-            severity: "warn" as const,
-            code: "safety_review_failed",
-            message: reviewFailureMessage(
-              outcome,
-              Boolean(outcome.journalFailure),
-            ),
-          },
-        ]
-      : [];
+    const notice =
+      outcome?.procedural || outcome?.configurationFailure
+        ? [
+            {
+              severity: "warn" as const,
+              code: "safety_review_failed",
+              message: reviewFailureMessage(
+                outcome,
+                Boolean(outcome.journalFailure),
+              ),
+            },
+          ]
+        : [];
     return {
       ...result,
       details: details as ToolExecutionResult["details"],

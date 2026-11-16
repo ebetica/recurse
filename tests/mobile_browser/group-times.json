@@ -3,6 +3,9 @@
   "codeHead": "c2b92dae4ef6d35b3b3b0c551654274dfa66761b",
   "workers": 8,
   "unmeasured": {
+    "files": "Uses the previous table's median weight until the next full eight-worker run records the split groups.",
+    "files-comments": "Uses the previous table's median weight until the next full eight-worker run records the split groups.",
+    "files-viewers": "Uses the previous table's median weight until the next full eight-worker run records the split groups.",
     "notifications": "Uses the last successful group time (18.444485194 s) from the 2026-11-07 full run at c2b92dae4ef6d35b3b3b0c551654274dfa66761b. Desktop notification dependencies were unavailable for this refresh."
   },
   "seconds": {
@@ -17,6 +20,9 @@
     "durable": 99.762134241,
     "explorer": 15.380581633000023,
     "failed-send-hold": 5.614437167999997,
+    "files": 17.153853993,
+    "files-comments": 17.153853993,
+    "files-viewers": 17.153853993,
     "header": 13.574714053999996,
     "hold-confirm": 11.706133683000001,
     "http": 6.348118590999976,
@@ -36,7 +42,6 @@
     "pane-hotkeys": 12.979245219000001,
     "pane-powerbar": 17.950250683,
     "panes-artifacts": 109.30336262099999,
-    "panes-files": 79.268111354,
     "platform-commands": 74.958214598,
     "pr-diff": 15.034072856,
     "pr-references": 14.107344458,

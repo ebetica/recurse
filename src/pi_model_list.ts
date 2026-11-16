@@ -12,7 +12,8 @@ export interface PiModelListDeps {
     request: Record<string, unknown>,
     opts?: { timeoutMs?: number; maxOutputBytes?: number },
   ): Promise<Record<string, unknown>>;
-  config: Pick<Config, "setPiModelList">;
+  config: Pick<Config, "setPiModelList"> &
+    Partial<Pick<Config, "customModelProviders">>;
   /** One log line per listing that got no per-model reasoning levels. */
   warn?(event: string, fields: Record<string, string>): void;
 }
@@ -25,12 +26,24 @@ async function requestList(
     {
       action: "list_models",
       providers: PI_MODEL_ROUTES.map(([provider]) => provider),
+      custom_providers: Object.keys(deps.config.customModelProviders?.() ?? {}),
       ...(update ? { update: true } : {}),
     },
     { timeoutMs: update ? 60_000 : 30_000, maxOutputBytes: MAX_LIST_BYTES },
   );
   if (result.kind !== "models" || !Array.isArray(result.models))
     throw new Error("Pi returned no model list");
+  const catalogErrors = Array.isArray(result.catalog_errors)
+    ? result.catalog_errors
+    : [result.catalog_error];
+  for (const message of catalogErrors)
+    if (typeof message === "string")
+      deps.warn?.("pi_model_config_invalid", { message });
+  for (const message of Array.isArray(result.catalog_notes)
+    ? result.catalog_notes
+    : [])
+    if (typeof message === "string")
+      deps.warn?.("pi_model_config_note", { message });
   // Invariant: The worker reads reasoning levels through pi-ai, which Pi does
   // not export as a public surface; without them Settings offers every level.
   const unavailable = result.reasoning_levels_unavailable;

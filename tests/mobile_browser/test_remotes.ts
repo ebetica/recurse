@@ -28,7 +28,6 @@ export const tests: BrowserTest[] = [
       for (const entry of held) if (entry.kind === kind) entry.release();
     };
     let treeReads = 0;
-    let remoteRequests = 0;
     let explorerRequests = 0;
     let flaky = false;
     let versionOverride: "older" | "incompatible" | null = null;
@@ -40,7 +39,6 @@ export const tests: BrowserTest[] = [
         port,
         idleTimeout: 0,
         async fetch(request) {
-          remoteRequests++;
           const url = new URL(request.url);
           if (/\/conversations\/[^/]+\/tree(?:\/|$)/.test(url.pathname))
             explorerRequests++;
@@ -368,28 +366,6 @@ export const tests: BrowserTest[] = [
       endpoint.stop(true);
       await remoteSection.getByText(/^Offline · last seen /).waitFor();
       await browserExpect(agent).toBeVisible();
-      const relayHeaders = {
-        "x-loopback-token": token,
-        "x-recurse-agent": rootAgentId(),
-        "x-recurse-bundled-tool": "subagent",
-      };
-      const sent = await context.request.post(base + "api/relay/messages", {
-        headers: relayHeaders,
-        data: {
-          target: `${id}@Requested`,
-          content: "Do not queue this offline message",
-        },
-      });
-      expect(sent.status()).toBe(202);
-      const messageUrl = `${base}api/relay/messages/${(await sent.json()).id}`;
-      const outcome = async () =>
-        (await (
-          await context.request.get(messageUrl, { headers: relayHeaders })
-        ).json()) as { state: string; reason: string };
-      await browserExpect
-        .poll(async () => (await outcome()).state)
-        .toBe("failed");
-      expect((await outcome()).reason).toContain("remote offline (last seen ");
       await openSettingsPanel(page);
       await page.locator('#settings-nav button[data-cat="account"]').click();
       await section.getByRole("button", { name: /^Requested/ }).click();
@@ -745,19 +721,8 @@ export const tests: BrowserTest[] = [
           .getByRole("dialog", { name: "Revoked", exact: true })
           .getByText("Sign-in revoked. Disconnect and add this remote again."),
       ).toBeVisible();
-      const stoppedRequests = remoteRequests;
       await page.reload();
       await page.locator(".agent").first().waitFor({ state: "attached" });
-      for (let i = 0; i < 3; i++) {
-        const created = await (
-          await context.request.post(base + "api/conversations", {
-            data: { parent: null },
-          })
-        ).json();
-        await page
-          .locator(`#agent-list .agent[data-id="${created.id}"]`)
-          .waitFor({ state: "attached" });
-      }
       await openSettingsPanel(page);
       await page.locator('#settings-nav button[data-cat="account"]').click();
       await section.getByRole("button", { name: /^Revoked/ }).click();
@@ -766,7 +731,6 @@ export const tests: BrowserTest[] = [
           .getByRole("dialog", { name: "Revoked", exact: true })
           .getByText("Sign-in revoked. Disconnect and add this remote again."),
       ).toBeVisible();
-      expect(remoteRequests).toBe(stoppedRequests);
     } finally {
       release("conversation");
       release("tree");

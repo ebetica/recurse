@@ -524,6 +524,27 @@ export function registerSettingsRoutes(
     return json({ enabled });
   });
 
+  router.get("/api/settings/idle-compaction", async () =>
+    json({
+      enabled: config.compactIdleConversations(),
+      minimum_tokens: config.idleCompactionMinimumTokens(),
+    }),
+  );
+  router.post("/api/settings/idle-compaction", async (ex) => {
+    const body = await jsonDictBody(ex);
+    const enabled = await mutate(() =>
+      config.setCompactIdleConversations(
+        field(body, "enabled"),
+        field(body, "minimum_tokens", config.idleCompactionMinimumTokens()),
+      ),
+    );
+    deps.promptCacheWarmingChanged?.();
+    return json({
+      enabled,
+      minimum_tokens: config.idleCompactionMinimumTokens(),
+    });
+  });
+
   router.get("/api/settings/maximum-context-window", async () =>
     json({ maximum_context_window: config.maximumContextWindow() }),
   );

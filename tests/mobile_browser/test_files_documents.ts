@@ -3,10 +3,28 @@ import { mkdir } from "node:fs/promises";
 import type { Locator } from "playwright";
 import {
   captureErrors,
+  closeWithRoutes,
+  gotoRoot,
   postFixture,
   runBrowserTests,
   type BrowserTest,
 } from "./common";
+import {
+  filePage,
+  showFilesList,
+  openListedFile,
+  openReplyFile,
+  closeFileTab,
+} from "./files_support";
+
+async function waitForDrawn(target: Locator): Promise<void> {
+  await target
+    .page()
+    .waitForFunction(
+      (element: any) => element.dataset.drawn === "true",
+      await target.elementHandle(),
+    );
+}
 
 async function hitCorners(control: Locator): Promise<void> {
   await control.scrollIntoViewIfNeeded();
@@ -42,6 +60,226 @@ async function codeStyle(pre: Locator) {
 }
 
 export const tests: BrowserTest[] = [
+  async function test_pdf_pages_draw_in_the_detail_view(browser, base) {
+    const { context, page, errors } = await filePage(browser, 1280, 800);
+    const { demo } = (await postFixture(base, "seed-published-pdf")) as {
+      demo: string;
+    };
+    const pdfRequests: string[] = [];
+    const pdfWorkers = () =>
+      page
+        .workers()
+        .filter((worker) => worker.url().endsWith("/pdf.worker.js"));
+    const remote: string[] = [];
+    context.on("request", (request) => {
+      const url = request.url();
+      if (/^https?:/.test(url) && !url.startsWith(base)) remote.push(url);
+    });
+    page.on("request", (request) => {
+      if (/\/static\/pdf/.test(request.url())) pdfRequests.push(request.url());
+    });
+    try {
+      await gotoRoot(page, base);
+      await page.locator(`.agent[data-id="${demo}"]`).click();
+      await page.locator("#conv-title", { hasText: "Published PDF" }).waitFor();
+      expect(pdfRequests).toEqual([]);
+      const initialWorker = page.waitForEvent("worker");
+      let detail = await openReplyFile(page, "slides.pdf");
+      const pages = detail.locator(".files-pdf-page");
+      await detail.getByRole("img", { name: "Page 2 of 2" }).waitFor();
+      expect(await pages.count()).toBe(2);
+      const first = await pages.first().elementHandle();
+      await waitForDrawn(pages.first());
+      const pixel = await page.evaluate((el: any) => {
+        const data = el
+          .getContext("2d")
+          .getImageData(el.width / 2, el.height / 2, 1, 1).data;
+        return [data[0], data[1], data[2]];
+      }, first);
+      expect(pixel[0]).toBeGreaterThan(200);
+      expect(pixel[1]).toBeLessThan(60);
+      expect(
+        pdfRequests.some((url) => url.endsWith("/static/pdfjs/pdf.worker.js")),
+      ).toBe(true);
+      await initialWorker;
+      expect(pdfWorkers()).toHaveLength(1);
+      const firstClosed = pdfWorkers()[0].waitForEvent("close");
+      await closeFileTab(page);
+      await firstClosed;
+      expect(pdfWorkers()).toHaveLength(0);
+      await showFilesList(page);
+      const reopened = page.waitForEvent("worker");
+      await openListedFile(page, "slides.pdf");
+      await detail.getByRole("img", { name: "Page 1 of 2" }).waitFor();
+      const reopenedWorker = await reopened;
+      expect(pdfWorkers()).toHaveLength(1);
+      const cmap = page.waitForResponse((response) =>
+        response.url().endsWith("/static/pdfjs/cmaps/UniJIS-UCS2-H.bcmap"),
+      );
+      const notesWorker = page.waitForEvent("worker");
+      detail = await openReplyFile(page, "notes-ja.pdf");
+      expect((await cmap).status()).toBe(200);
+      await waitForDrawn(detail.getByRole("img", { name: "Page 1 of 1" }));
+      const notes = await notesWorker;
+      expect(pdfWorkers()).toHaveLength(2);
+      expect(pdfWorkers()).toContain(reopenedWorker);
+      const notesClosed = notes.waitForEvent("close");
+      await closeFileTab(page);
+      await notesClosed;
+      expect(pdfWorkers()).toHaveLength(1);
+      detail = await openReplyFile(page, "long.pdf");
+      const last = detail.getByRole("img", { name: "Page 16 of 16" });
+      await last.waitFor();
+      await waitForDrawn(detail.getByRole("img", { name: "Page 1 of 16" }));
+      expect(
+        await detail.locator('.files-pdf-page[data-drawn="true"]').count(),
+      ).toBeLessThan(16);
+      const box = (await detail
+        .getByRole("img", { name: "Page 1 of 16" })
+        .boundingBox())!;
+      await page.keyboard.down("Control");
+      await page.mouse.move(box.x + box.width * 0.1, box.y + box.height * 0.1);
+      await page.mouse.down();
+      await page.mouse.move(box.x + box.width * 0.3, box.y + box.height * 0.2, {
+        steps: 8,
+      });
+      await page.mouse.up();
+      await page.keyboard.up("Control");
+      await page
+        .locator(".report-comment-popover textarea")
+        .fill("Retained PDF note");
+      await page.keyboard.press("Escape");
+      const retained = await detail.locator(".pane-body").elementHandle();
+      await detail.locator(".pane-body").focus();
+      await page.keyboard.press("Escape");
+      await page.waitForFunction((body: any) => !body.isConnected, retained);
+      await openReplyFile(page, "notes-ja.pdf");
+      detail = await openReplyFile(page, "long.pdf");
+      expect(
+        await detail
+          .locator(".pane-body")
+          .evaluate((node, prior) => node === prior, retained),
+      ).toBeTrue();
+      await detail.locator("mark.report-cbox").waitFor();
+      await detail.locator(".report-comment-del").click();
+      await detail.locator(".pane-body").focus();
+      await page.keyboard.press("Shift+G");
+      await waitForDrawn(last);
+      await page.waitForFunction(
+        (el: any) => !el.dataset.drawn && el.width === 0,
+        await detail.getByRole("img", { name: "Page 1 of 16" }).elementHandle(),
+      );
+      await page.keyboard.press("g");
+      await page.keyboard.press("g");
+      await waitForDrawn(detail.getByRole("img", { name: "Page 1 of 16" }));
+      for (const [path, status] of [
+        ["wasm/openjpeg.wasm", 200],
+        ["wasm/jbig2.wasm", 200],
+        ["standard_fonts/FoxitSerif.pfb", 200],
+        ["iccs/CGATS001Compat-v2-micro.icc", 200],
+        ["wasm/quickjs-eval.wasm", 404],
+      ] as const) {
+        const response = await page.request.get(`${base}static/pdfjs/${path}`);
+        expect([path, response.status()]).toEqual([path, status]);
+      }
+      const closing = pdfWorkers().map((worker) =>
+        worker.waitForEvent("close"),
+      );
+      for (const id of await page
+        .locator(".pane-col.file-tab")
+        .evaluateAll((panels) =>
+          panels.map((panel) => panel.getAttribute("data-pane")!),
+        ))
+        await closeFileTab(page, id);
+      const brokenWorker = page
+        .waitForEvent("worker")
+        .then((worker) => worker.waitForEvent("close"));
+      detail = await openReplyFile(page, "broken.pdf");
+      await detail
+        .getByText("Couldn’t show this PDF. Download it to open it.")
+        .waitFor();
+      expect(await detail.locator(".files-pdf-page").count()).toBe(0);
+      await Promise.all([...closing, brokenWorker]);
+      expect(pdfWorkers()).toHaveLength(0);
+      expect(remote).toEqual([]);
+      expect(errors).toEqual([]);
+    } finally {
+      await context.close();
+    }
+  },
+  async function test_pdf_draws_on_a_phone_browser_without_newer_builtins(
+    browser,
+    base,
+  ) {
+    const printer = await browser.newPage();
+    await printer.setContent(`<body style="font: 16px serif"><script>
+      for (let n = 1; n <= 3; n++) {
+        const canvas = document.createElement("canvas");
+        canvas.width = canvas.height = 500;
+        const context = canvas.getContext("2d");
+        const noise = context.createImageData(500, 500);
+        for (let i = 0; i < noise.data.length; i++)
+          noise.data[i] = Math.random() * 256;
+        context.putImageData(noise, 0, 0);
+        document.body.insertAdjacentHTML("beforeend",
+          '<div style="break-after: page"><h1>Page ' + n + " report</h1><p>" +
+          "Quarterly figures. ".repeat(60) + '</p><img src="' +
+          canvas.toDataURL() + '" style="width: 400px"></div>');
+      }
+    </script></body>`);
+    const pdf = await printer.pdf({ format: "A4" });
+    await printer.close();
+    const seeded = await fetch(`${base}__browser-test/seed-posted-pdf`, {
+      method: "POST",
+      body: new Uint8Array(pdf),
+    });
+    const { demo } = (await seeded.json()) as { demo: string };
+    const { context, page, errors } = await filePage(browser, 412, 915, true);
+    const older =
+      "delete Promise.try; delete Math.sumPrecise;" +
+      "for (const name of ['getOrInsert', 'getOrInsertComputed']) {" +
+      " delete Map.prototype[name]; delete WeakMap.prototype[name]; }" +
+      "for (const name of ['fromBase64', 'fromHex']) delete Uint8Array[name];" +
+      "for (const name of ['toBase64', 'toHex', 'setFromBase64', 'setFromHex'])" +
+      " delete Uint8Array.prototype[name];";
+    await context.addInitScript(older);
+    await context.route("**/static/pdfjs/pdf.worker.js", async (route) => {
+      const response = await route.fetch();
+      await route.fulfill({
+        response,
+        body: `${older}\n${await response.text()}`,
+      });
+    });
+    const workers: string[] = [];
+    page.on("worker", (worker) => workers.push(worker.url()));
+    try {
+      await page.goto(`${base}#agent=${demo}`);
+      await page.locator("#conv-title", { hasText: "Posted PDF" }).waitFor();
+      await page
+        .getByRole("button", { name: "Open report.pdf in Files" })
+        .click();
+      const first = page
+        .locator('.pane-col[data-pane="files"] .files-detail')
+        .getByRole("img", { name: "Page 1 of 3" });
+      await first.waitFor();
+      await waitForDrawn(first);
+      const dark = await first.evaluate((el: any) => {
+        const height = Math.floor(el.height * 0.2);
+        const { data } = el
+          .getContext("2d")
+          .getImageData(0, 0, el.width, height);
+        let count = 0;
+        for (let i = 0; i < data.length; i += 4)
+          if (data[i] < 80 && data[i + 1] < 80 && data[i + 2] < 80) count++;
+        return count;
+      });
+      expect(dark).toBeGreaterThan(100);
+      expect(workers).toEqual([`${base}static/pdfjs/pdf.worker.js`]);
+      expect(errors).toEqual([]);
+    } finally {
+      await closeWithRoutes(context);
+    }
+  },
   // Feature: #3173 published documents use lazy, bounded, offline previews on desktop and phones.
   async function test_published_document_previews(browser, base) {
     const { demo } = await postFixture(base, "seed-document-previews");
@@ -72,19 +310,10 @@ export const tests: BrowserTest[] = [
         );
         const open = async (name: string) => {
           if (await pane.isVisible()) {
-            if (width === 412)
-              await pane.locator(".pane-powerbar > .x").click();
-            else {
-              const id = await pane.getAttribute("data-pane");
-              const tab = page.locator(`.dv-tab[data-dock-panel="${id}"]`);
-              await tab.hover();
-              await tab.getByRole("button", { name: /^Close / }).click();
-            }
+            await closeFileTab(page);
             await pane.waitFor({ state: "detached" });
           }
-          await page
-            .getByRole("button", { name: `Open ${name} in Files`, exact: true })
-            .click();
+          await openReplyFile(page, name);
           await pane.locator(".files-document").waitFor();
           await pane
             .getByRole("link", { name: "Download", exact: true })
@@ -287,4 +516,4 @@ export const tests: BrowserTest[] = [
     }
   },
 ];
-if (import.meta.main) await runBrowserTests([["document-previews", tests]]);
+if (import.meta.main) await runBrowserTests([["files-viewers", tests]]);

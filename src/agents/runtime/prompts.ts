@@ -161,6 +161,8 @@ export class Prompts {
 - Read files with \`read\`, not cat/sed; use offset/limit around search hits, but read known external paths directly.
 - Combine a file's changes in one edit call; keep oldText regions minimal and unique. Use write only for new files or complete rewrites.
 - Share generated files with the native \`publish\` tool.
+- For secrets, ask the operator to save them in a NEW file you name (e.g. .env), outside instruction/Markdown files (never AGENTS.md, README.md, CLAUDE.md or *.md prompt imports).
+- Reference that file by path in commands (e.g. load it as environment), never read or print its contents; long-lived model-provider login credentials belong in Settings.
 - For diagrams use \`\`\`mermaid fences; for math use \\(...\\) inline and \\[...\\] display math.
 - Summarize results concisely in your final message; show file paths clearly.
 

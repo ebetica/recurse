@@ -32,13 +32,12 @@ function withRoot<T>(body: (root: string) => Promise<T>): Promise<T> {
   );
 }
 
-function lifecycle(root: string, extra: { now?: () => number } = {}) {
+function lifecycle(root: string) {
   const log = capture();
   const guard = new TreeLifecycle({
     dataDir: root,
     muteLockDir: join(root, "mute_locks"),
     logger: log.logger,
-    ...extra,
   });
   return { guard, ...log };
 }
@@ -75,54 +74,6 @@ test("fenced drains the work before an abort wins", async () => {
   expect(finished).toBe(true);
   expect(await fenced(async () => 7)).toBe(7);
 });
-
-// Feature: #2502 the test deadline begins at lease admission. (also #2460 admission timeout must drain without cancelling its holder.)
-test("a lease token is refused after its hold is released", () =>
-  withRoot(async (root) => {
-    let now = 0;
-    const { guard } = lifecycle(root, { now: () => now });
-    let leaked: LeaseToken | undefined;
-    await guard.guardAsync(
-      "outer",
-      null,
-      async (token) => {
-        leaked = token;
-        now = 0.03;
-        const blocked = guard.guardAsync(
-          "blocked",
-          null,
-          async () => {
-            throw new Error("timed-out waiter entered");
-          },
-          undefined,
-          { timeoutSeconds: 0.04 },
-        );
-        now = 0.08;
-        await expect(blocked).rejects.toThrow(TreeLifecycleBusy);
-        expect(
-          await guard.guardAsync(
-            "inner",
-            null,
-            async (_t, lease) => lease,
-            token,
-          ),
-        ).toBeNull();
-      },
-      undefined,
-      { timeoutSeconds: 0.02 },
-    );
-    await guard.guardAsync("after_timeout", null, async () => {});
-    expect(guard.currentHolder()).toBeNull();
-    await expect(
-      guard.guardAsync("late", null, async () => 1, leaked),
-    ).rejects.toThrow("inactive lifecycle lease token");
-    await expect(guard.withLease(leaked!, async () => 1)).rejects.toThrow(
-      "does not own",
-    );
-    await expect(
-      guard.mutateExternalStorage(() => 1, [], { token: leaked }),
-    ).rejects.toThrow("inactive");
-  }));
 
 test("work spawned inside a hold queues for its own lease", () =>
   withRoot(async (root) => {
@@ -179,50 +130,46 @@ test("dataRootFlock queues in process, bounded, and nests under its token", () =
     }
   }));
 
-// Regression: #3259 slow lease preparation must still try an uncontended lock.
-test("slow preparation still tries the lifecycle lock", () =>
+test("real lifecycle flocks exclude other tokens and release before reuse", () =>
   withRoot(async (root) => {
-    let now = 0;
-    const { guard } = lifecycle(root, { now: () => now });
+    const { guard } = lifecycle(root);
+    const contender = lifecycle(root);
     const entered: string[] = [];
-    const preparing = guard.guardAsync(
-      "create",
+    let released: LeaseToken | undefined;
+    await guard.guardAsync("holder", "main", async (token, lease) => {
+      released = token;
+      expect(lease).not.toBeNull();
+      expect(
+        await guard.guardAsync(
+          "nested",
+          "main",
+          async (_t, held) => held,
+          token,
+        ),
+      ).toBeNull();
+      await expect(
+        contender.guard.guard("blocked", "main", async () => {
+          entered.push("blocked");
+        }),
+      ).rejects.toThrow(TreeLifecycleBusy);
+      expect(contender.guard.currentHolder()).toBeNull();
+    });
+    await expect(
+      guard.guardAsync("spent", "main", async () => {}, released),
+    ).rejects.toThrow("inactive lifecycle lease token");
+    await expect(guard.withLease(released!, async () => {})).rejects.toThrow(
+      "does not own",
+    );
+    await expect(
+      guard.mutateExternalStorage(() => 1, [], { token: released }),
+    ).rejects.toThrow("inactive");
+    await contender.guard.guardAsync(
+      "released",
       "main",
       async (_token, lease) => {
         expect(lease).not.toBeNull();
-        entered.push("uncontended");
+        entered.push("released");
       },
-      undefined,
-      { timeoutSeconds: 3 },
     );
-    expect(guard.currentHolder()?.site).toBe("create");
-    now = 3.267;
-    await preparing;
-    expect(guard.currentHolder()).toBeNull();
-    const contender = lifecycle(root, { now: () => now });
-    await guard.guardAsync("real_holder", "main", async () => {
-      const blocked = contender.guard.guardAsync(
-        "create",
-        "blocked",
-        async () => {
-          entered.push("contended");
-        },
-        undefined,
-        { timeoutSeconds: 3 },
-      );
-      now += 3.267;
-      await expect(blocked).rejects.toThrow(TreeLifecycleBusy);
-      expect(
-        contender.lines.some(
-          (line) =>
-            line.message.includes("event=tree_lifecycle_lease_wait") &&
-            line.message.includes("outcome=busy"),
-        ),
-      ).toBe(true);
-      expect(contender.guard.currentHolder()).toBeNull();
-    });
-    await contender.guard.guardAsync("after_holder", "main", async () => {
-      entered.push("released");
-    });
-    expect(entered).toEqual(["uncontended", "released"]);
+    expect(entered).toEqual(["released"]);
   }));

@@ -1,4 +1,4 @@
-// Capture exact requests after hooks, before auth, not HTTP payloads.
+// Capture requests after hooks, before auth, and scoped completion replies.
 // Refuse credential overrides; omit callbacks and AbortSignal from snapshots.
 // A Worker encodes one uncapped capture per live conversation, images included.
 // Forget on reap; idle captures move to files, which a newer request removes.
@@ -21,7 +21,9 @@ export interface CaptureFiles {
   failed(conversationId: string, error: unknown): void;
 }
 
-type PendingCapture = Omit<RequestCapture, "json"> & { json: Promise<string> };
+type PendingCapture = Omit<RequestCapture, "json"> & {
+  json: Promise<string> | undefined;
+};
 
 export class RequestCaptures {
   private readonly captures = new Map<string, PendingCapture>();
@@ -55,7 +57,7 @@ export class RequestCaptures {
   }
   async latest(conversationId: string): Promise<RequestCapture | undefined> {
     const capture = this.captures.get(conversationId);
-    if (capture) return { ...capture, json: await capture.json };
+    if (capture?.json) return { ...capture, json: await capture.json };
     if (!this.files) return undefined;
     await this.writes.get(conversationId);
     const text = await readFile(this.files.path(conversationId), "utf8").catch(
@@ -96,30 +98,33 @@ export class RequestCaptures {
     });
   }
   /** Drop the conversation's capture, in memory and in its file. */
-  forget(conversationId: string): void {
+  forget(conversationId: string, after?: Promise<unknown>): void {
     this.captures.delete(conversationId);
     clearTimeout(this.timers.get(conversationId));
     this.timers.delete(conversationId);
     if (!this.files || this.closed || this.current.has(conversationId)) return;
     this.current.add(conversationId);
     const path = this.files.path(conversationId);
-    this.queue(conversationId, () =>
-      unlink(path).catch((error: NodeJS.ErrnoException) => {
+    this.queue(conversationId, async () => {
+      if (after) await after;
+      await unlink(path).catch((error: NodeJS.ErrnoException) => {
         if (error.code !== "ENOENT") throw error;
-      }),
-    );
+      });
+    });
   }
   private kept(conversationId: string): void {
     const files = this.files;
     if (!files || this.closed) return;
     const path = files.path(conversationId);
+    clearTimeout(this.timers.get(conversationId));
     const timer = setTimeout(() => {
       this.timers.delete(conversationId);
       const capture = this.captures.get(conversationId);
-      if (!capture || this.closed) return;
+      if (!capture?.json || this.closed) return;
       this.queue(conversationId, async () => {
-        if (this.closed) return;
-        const json = await capture.json;
+        const encoding = capture.json;
+        if (this.closed || !encoding) return;
+        const json = await encoding;
         const tmp = `${path}.tmp`;
         const head = JSON.stringify({
           sessionId: capture.sessionId,
@@ -136,9 +141,13 @@ export class RequestCaptures {
         await rename(tmp, path);
         // Invariant: A request recorded during the write is newer than the
         // file, which must not outlive it.
-        if (this.captures.get(conversationId) !== capture) await unlink(path);
+        if (
+          this.captures.get(conversationId) !== capture ||
+          capture.json !== encoding
+        )
+          await unlink(path);
         else {
-          this.captures.delete(conversationId);
+          capture.json = undefined;
           this.current.delete(conversationId);
         }
       });
@@ -151,10 +160,11 @@ export class RequestCaptures {
     model: unknown,
     context: unknown,
     options: Record<string, unknown> | undefined,
-  ): void {
+    conversationId?: string,
+  ): ((reply: unknown) => void) | undefined {
     const sessionId = options?.sessionId;
     if (typeof sessionId !== "string") return;
-    const cid = this.conversationForSession(sessionId);
+    const cid = conversationId ?? this.conversationForSession(sessionId);
     if (!cid) return;
     this.forget(cid);
     // Invariant: No credential-bearing options are allowed through this
@@ -183,7 +193,7 @@ export class RequestCaptures {
         options: snapshot.options,
       });
     });
-    const capture = { sessionId, method, json };
+    const capture: PendingCapture = { sessionId, method, json };
     this.captures.set(cid, capture);
     void json.catch((error) => {
       if (this.captures.get(cid) === capture) this.files?.failed(cid, error);
@@ -196,6 +206,26 @@ export class RequestCaptures {
       context as Context,
       options,
     );
+    return (reply) => {
+      if (this.closed || this.captures.get(cid) !== capture) return;
+      const request =
+        capture.json ??
+        this.latest(cid).then((stored) => {
+          if (!stored) throw new Error("Request capture is unavailable");
+          return stored.json;
+        });
+      this.forget(cid, request);
+      this.captures.set(cid, capture);
+      capture.json = (async () => {
+        const response = this.serializer.serialize(reply);
+        const [requestJson, replyJson] = await Promise.all([request, response]);
+        return `${requestJson.slice(0, -1)},"reply":${replyJson}}`;
+      })();
+      void capture.json.catch((error) => {
+        if (this.captures.get(cid) === capture) this.files?.failed(cid, error);
+      });
+      this.kept(cid);
+    };
   }
 }
 
@@ -204,7 +234,20 @@ export class RequestCaptures {
 export function captureRequests(
   models: Models,
   captures: RequestCaptures,
+  conversationId?: string,
+  failed?: (conversationId: string) => void,
 ): Models {
+  const capture = <T>(operation: () => T): T | undefined => {
+    try {
+      return operation();
+    } catch (error) {
+      if (conversationId === undefined) throw error;
+      try {
+        failed?.(conversationId);
+      } catch {}
+      return undefined;
+    }
+  };
   const methods = new Set([
     "stream",
     "streamSimple",
@@ -226,20 +269,35 @@ export function captureRequests(
         context: unknown,
         options?: Record<string, unknown>,
       ) => {
-        // Invariant: Not complete/completeSimple: a generation streams, and
-        // Durable's compaction summarizer completes. A summary request is not
-        // the turn's input, and the Pi path's capture (the context event) never
-        // sees one.
-        if (key !== "complete" && key !== "completeSimple")
-          captures.record(String(key), model, context, options);
+        // Invariant: Unscoped completions are compaction, not turn input.
+        const completion = key === "complete" || key === "completeSimple";
+        const reply =
+          !completion || conversationId !== undefined
+            ? capture(() =>
+                captures.record(
+                  String(key),
+                  model,
+                  context,
+                  options,
+                  conversationId,
+                ),
+              )
+            : undefined;
         const sessionId = options?.sessionId;
-        return slowSpan(
+        const result = slowSpan(
           "provider_setup",
-          typeof sessionId === "string"
-            ? captures.conversationId(sessionId)
-            : undefined,
+          conversationId ??
+            (typeof sessionId === "string"
+              ? captures.conversationId(sessionId)
+              : undefined),
           () => value.call(target, model, context, options),
         );
+        return completion && reply
+          ? Promise.resolve(result).then((response) => {
+              capture(() => reply(response));
+              return response;
+            })
+          : result;
       };
     },
   });

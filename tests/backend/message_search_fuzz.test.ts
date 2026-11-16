@@ -219,11 +219,30 @@ async function compare(
   role?: SearchOptions["role"],
   beforeSearch?: () => Promise<void>,
 ) {
-  const options = { query, role, limit: 200, scope: "regression" };
+  const options = {
+    query,
+    role,
+    limit: 200,
+    scope: "regression",
+    cursor: "start",
+  };
   const expected = await oracle(owners.get(search)!, targets, options);
   expect(expected.length).toBeLessThanOrEqual(200);
   await beforeSearch?.();
-  const result = await search.search(targets, options);
+  let result = await search.search(targets, options);
+  const hits = [...result.hits];
+  const cursors = new Set<string>();
+  while (result.next_cursor) {
+    expect(cursors.has(result.next_cursor)).toBe(false);
+    cursors.add(result.next_cursor);
+    result = await search.search(targets, {
+      ...options,
+      cursor: result.next_cursor,
+    });
+    hits.push(...result.hits);
+    expect(result.not_indexed).toBe(0);
+  }
+  result.hits = hits;
   expect(result.truncated, JSON.stringify({ query, role })).toBe(false);
   expect(result.not_indexed, JSON.stringify({ query, role })).toBe(0);
   expect(
@@ -443,7 +462,9 @@ for (const seed of [0x3014, 0xc0ffee, 0xdeadbeef]) {
         ])
           await expect(
             w.search.search([store.target], { query, scope: "regression" }),
-          ).rejects.toThrow("single-line query of 1–4096 characters");
+          ).rejects.toThrow(
+            "single-line literals totaling at most 4096 characters",
+          );
         await check("x".repeat(4096));
       }
       for (let step = 0; step < 24; step++) {
@@ -693,6 +714,117 @@ async function crashedCommit() {
     await w.close();
   }
 }
+
+// Feature: #3309 bounded pages diversify agents and retain every matching entry and role.
+test("message search pages diverse results without repeats or a global ranking", async () => {
+  const w = await world();
+  try {
+    const left = await w.open("left-page");
+    const right = await w.open("right-page");
+    await commit(
+      left,
+      Array.from({ length: 12 }, (_, i) => draft(`page-query left-${i}`)),
+    );
+    await commit(right, [
+      ...Array.from({ length: 3 }, (_, i) => draft(`page-query right-${i}`)),
+      {
+        kind: "pi.assistant",
+        model: [
+          fauxAssistantMessage([
+            { type: "text", text: "page-query proposal" },
+            fauxToolCall("bash", { command: "printf page-query" }),
+          ]),
+        ],
+      },
+    ]);
+    const targets = [left.target, right.target];
+    await Promise.all(targets.map((target) => w.search.sync(target)));
+    const diverse = await w.search.search(targets, {
+      query: "page-query",
+      limit: 6,
+      scope: "tree",
+    });
+    expect(
+      diverse.hits.filter((hit) => hit.agent === left.target.cid),
+    ).toHaveLength(3);
+    expect(
+      diverse.hits.filter((hit) => hit.agent === right.target.cid),
+    ).toHaveLength(3);
+    expect(diverse.next_cursor).toBeUndefined();
+    const options = { query: "page-query", limit: 2, scope: "tree" };
+    let page = await w.search.search(targets, { ...options, cursor: "start" });
+    const firstCursor = page.next_cursor!;
+    expect(typeof firstCursor).toBe("string");
+    await commit(left, [draft("page-query appended during pagination")]);
+    await w.search.sync(left.target);
+    const seen = new Set<string>();
+    const cursors = new Set<string>();
+    for (;;) {
+      for (const hit of page.hits) {
+        const key = `${hit.cid}:${hit.entry}:${hit.role}`;
+        expect(seen.has(key)).toBe(false);
+        seen.add(key);
+      }
+      if (!page.next_cursor) break;
+      expect(cursors.has(page.next_cursor)).toBe(false);
+      cursors.add(page.next_cursor);
+      page = await w.search.search(targets, {
+        ...options,
+        cursor: page.next_cursor,
+      });
+    }
+    expect(page.truncated).toBe(false);
+    expect([...seen].sort()).toEqual(
+      await oracle(owners.get(w.search)!, targets, options),
+    );
+    await expect(
+      w.search.search(targets, {
+        ...options,
+        query: "other query",
+        cursor: firstCursor,
+      }),
+    ).rejects.toThrow("Invalid search cursor");
+    const path = join(dirname(left.target.path), "transcript.txt");
+    await rename(path, `${path}.held`);
+    await w.search.sync(left.target);
+    await expect(
+      w.search.search(targets, { ...options, cursor: firstCursor }),
+    ).rejects.toThrow("A cursor transcript changed");
+  } finally {
+    await w.close();
+  }
+});
+
+// Feature: #3308 bounded searches distinguish hit limits from byte limits.
+test("message search reports the bound that stopped the query", async () => {
+  const w = await world();
+  try {
+    const store = await w.open("output-bound");
+    const text = `bounded-output-needle ${"body ".repeat(200)}\n`.repeat(250);
+    await commit(
+      store,
+      Array.from({ length: 40 }, () => draft(text)),
+    );
+    await w.search.sync(store.target);
+    expect(
+      await w.search.search([store.target], {
+        query: "bounded-output-needle",
+        role: "assistant",
+        limit: 100,
+        scope: "agent",
+      }),
+    ).toMatchObject({ hits: [], truncated: true, truncation: "byte_limit" });
+    const limited = await w.search.search([store.target], {
+      query: "bounded-output-needle",
+      limit: 1,
+      scope: "agent",
+    });
+    expect(limited.truncation).toBe("hit_limit");
+    expect(limited.hits).toHaveLength(1);
+  } finally {
+    await w.close();
+  }
+});
 
 // Regression: #3015 a missing commit publication cannot be skipped by a later higher-id append.
 test("message search catches missed commits before later publication and ignores replay", async () => {

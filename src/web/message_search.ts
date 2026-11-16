@@ -1,9 +1,14 @@
 // Authenticated bundled-tool search and bounded plain-text transcript reads.
 // Targets come from live records or the archive index, never caller file paths.
+import { isOperator } from "./request_auth";
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { SearchBusyError, type MessageSearch } from "../search/index";
+import {
+  SearchBusyError,
+  SearchInputError,
+  type MessageSearch,
+} from "../search/index";
 import { TimeoutError, withTimeout } from "../utils/tasks";
 import {
   SearchScopeError,
@@ -16,14 +21,13 @@ interface SearchDeps extends SearchSelection {
   requireReady(): void;
   loopbackAuthenticated(ex: Exchange): boolean;
   search: MessageSearch;
+  currentTurn(cid: string): number | undefined;
 }
 
 function authorize(ex: Exchange, deps: SearchDeps): void {
   if (
     !deps.loopbackAuthenticated(ex) &&
-    !["backend-key", "cookie", "tailscale", "local"].includes(
-      String(ex.state.auth_method),
-    )
+    !isOperator(ex, { allowBackendKey: true })
   )
     throw new HttpError(403);
   deps.requireReady();
@@ -40,6 +44,8 @@ async function boundary(
       : withTimeout(work, timeoutMs, ex.request.signal));
     return jsonResponse(result, 200, { "cache-control": "no-store" });
   } catch (error) {
+    if (error instanceof SearchInputError)
+      throw new HttpError(422, error.message);
     if (error instanceof SearchBusyError)
       throw new HttpError(429, error.message);
     if (error instanceof TimeoutError)
@@ -53,6 +59,30 @@ async function boundary(
       throw new HttpError(error.status, error.message);
     throw error;
   }
+}
+
+function dateBound(query: URLSearchParams, name: string): number | undefined {
+  const raw = query.get(name);
+  if (raw === null) return undefined;
+  const time = /^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z)?$/.test(
+    raw,
+  )
+    ? Date.parse(raw)
+    : NaN;
+  const normalized =
+    raw.length === 10
+      ? `${raw}T00:00:00.000Z`
+      : raw.replace(
+          /(?:\.(\d{1,3}))?Z$/,
+          (_, fraction: string | undefined) =>
+            `.${(fraction ?? "").padEnd(3, "0")}Z`,
+        );
+  if (!Number.isFinite(time) || new Date(time).toISOString() !== normalized)
+    throw new HttpError(
+      422,
+      `invalid ${name}; use a UTC date or ISO timestamp ending Z`,
+    );
+  return time;
 }
 
 async function readLines(
@@ -165,11 +195,25 @@ export function registerMessageSearch(router: Router, deps: SearchDeps): void {
       const query = ex.url.searchParams;
       const text = query.get("q") ?? "";
       const role = query.get("role") ?? undefined;
+      const alternatives = query.getAll("or");
+      const conversationOnly = query.get("conversation") === "true";
+      const since = dateBound(query, "since");
+      const until = dateBound(query, "until");
+      const cursor = query.get("cursor") ?? undefined;
       const limit = Number(query.get("limit") ?? 20);
       if (
         !text.trim() ||
         text.length > 4096 ||
         /[\r\n\u0000]/.test(text) ||
+        alternatives.length > 7 ||
+        alternatives.some(
+          (term) => !term.trim() || /[\r\n\u0000]/.test(term),
+        ) ||
+        alternatives.reduce((size, term) => size + term.length, text.length) >
+          4096 ||
+        (conversationOnly && role !== undefined) ||
+        (since !== undefined && until !== undefined && since > until) ||
+        (cursor !== undefined && (!cursor || cursor.length > 32768)) ||
         (role !== undefined &&
           !["user", "assistant", "agent", "tool", "tool-result"].includes(
             role,
@@ -180,9 +224,9 @@ export function registerMessageSearch(router: Router, deps: SearchDeps): void {
       )
         throw new HttpError(
           422,
-          "use a single-line query, a transcript role, and limit 1-100",
+          "use 1–8 single-line literals (4096 characters total), --conversation or --role, ordered UTC date bounds, a valid cursor and limit 1-100",
         );
-      for (const name of ["tree", "all", "deleted"])
+      for (const name of ["tree", "all", "deleted", "conversation"])
         if (query.has(name) && !["true", "false"].includes(query.get(name)!))
           throw new HttpError(422, `invalid ${name}`);
       const all = query.get("all") === "true";
@@ -201,9 +245,21 @@ export function registerMessageSearch(router: Router, deps: SearchDeps): void {
           { target, tree, all, deleted },
           signal,
         );
+        const caller = deps.loopbackAuthenticated(ex)
+          ? ex.request.headers.get("x-recurse-agent")
+          : null;
+        const first = caller ? deps.currentTurn(caller) : undefined;
         return deps.search.search(targets, {
           query: text,
+          ...(caller && first !== undefined
+            ? { exclude: { cid: caller, fromEntry: first } }
+            : {}),
           role: role as Parameters<MessageSearch["search"]>[1]["role"],
+          conversationOnly,
+          alternatives,
+          since,
+          until,
+          cursor,
           limit,
           scope: all
             ? deleted

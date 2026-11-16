@@ -34,6 +34,8 @@ with no lifecycle scripts and no server credentials, and its process group is
 killed on timeout. Built pages run in a sandbox with no network access. Unclaimed non-editor keys
 relay only from the focused, mounted frame into the pane/window keymap; editors,
 modified browser keys, composition and page-handled events stay native.
+The relay embeds [../keyboard_target.ts](../keyboard_target.ts)'s shared text-entry
+and native Enter/Space activation predicates; non-text controls retain pane keys.
 
 All Git work is bounded and asynchronous. Each visible change replaces one
 small revision marker for the owner; the UI polls that marker, never the

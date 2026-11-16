@@ -1,7 +1,8 @@
-// Library-backed document conversion in a disposable, time-limited worker.
+// Library-backed document conversion and source syntax in a disposable worker.
 // Archives are expanded with allocation caps and repacked before any parser;
 // the inert worker DOM cannot fetch images or execute notebook/document code.
 import type { DocumentPreview, DocumentSection } from "./document-preview.js";
+import type { SourceToken } from "./source-preview.js";
 
 const MAX_INPUT = 8 * 1024 * 1024;
 const MAX_EXPANDED = 24 * 1024 * 1024;
@@ -205,10 +206,50 @@ async function notebook(data: Uint8Array): Promise<DocumentPreview> {
   };
 }
 
+interface SyntaxNode {
+  type: string;
+  value?: string;
+  properties?: { className?: unknown };
+  children?: SyntaxNode[];
+}
+
+async function syntax(text: string, name: string): Promise<SourceToken[]> {
+  const { getLang, highlighter } = await import("@git-diff-view/core");
+  const language = getLang(name);
+  if (!highlighter.hasRegisteredCurrentLang(language)) return [];
+  const tokens: SourceToken[] = [];
+  let spans = 0;
+  const visit = (node: SyntaxNode, inherited: string[][]): void => {
+    const own = node.properties?.className;
+    const classes = Array.isArray(own)
+      ? own.filter(
+          (value): value is string =>
+            typeof value === "string" && /^[a-zA-Z_][\w-]*$/.test(value),
+        )
+      : [];
+    const scopes = classes.length ? [...inherited, classes] : inherited;
+    if (node.type === "text" && node.value) {
+      spans += scopes.length;
+      if (tokens.length >= 4000 || spans > 4000)
+        throw Error("Source syntax exceeds the preview limit.");
+      tokens.push({ text: node.value, scopes });
+    }
+    for (const child of node.children ?? []) visit(child, scopes);
+  };
+  visit(highlighter.getAST(text, name, language), []);
+  return tokens.some((token) => token.scopes.length) ? tokens : [];
+}
+
 self.onmessage = async (
-  event: MessageEvent<{ bytes: ArrayBuffer; name: string }>,
+  event: MessageEvent<{ bytes: ArrayBuffer; name: string; text?: string }>,
 ) => {
   try {
+    if (typeof event.data.text === "string") {
+      self.postMessage({
+        tokens: await syntax(event.data.text, event.data.name),
+      });
+      return;
+    }
     let data: Uint8Array = new Uint8Array(event.data.bytes);
     if (data.length > MAX_INPUT)
       throw Error("This file is too large to preview.");

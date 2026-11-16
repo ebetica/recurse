@@ -5,6 +5,26 @@ import { settingsSyncControl } from "./settings-sync.js";
 import { buildConnectedHomes } from "./backend-keys.js";
 import { settingsDetail } from "./layout.js";
 
+function signInCode() {
+  const field = document.createElement("label");
+  field.className = "item field";
+  field.textContent = "Authenticator or recovery code";
+  field.hidden = true;
+  const input = document.createElement("input");
+  input.autocomplete = "one-time-code";
+  input.maxLength = 64;
+  input.spellcheck = false;
+  field.append(input);
+  return {
+    field,
+    input,
+    show: () => {
+      field.hidden = false;
+      input.required = true;
+    },
+  };
+}
+
 interface Backend {
   label: string;
   url: string;
@@ -17,6 +37,7 @@ interface Backend {
   remote_release: string | null;
 }
 export function buildConnectedBackends(body: HTMLElement): void {
+  body.dataset.themeProtected = "remote-sign-in";
   body.className = "remotes-settings";
   const list = document.createElement("div");
   list.className = "group";
@@ -66,6 +87,8 @@ export function buildConnectedBackends(body: HTMLElement): void {
     fields.append(field);
     return input;
   });
+  const code = signInCode();
+  fields.append(code.field);
   const submit = document.createElement("button");
   submit.type = "submit";
   submit.className = "primary";
@@ -80,9 +103,10 @@ export function buildConnectedBackends(body: HTMLElement): void {
   incoming.className = "remote-incoming";
   body.append(list, message, add, incoming);
   buildConnectedHomes(incoming);
-  const result = async (response: Response) => {
+  const result = async (response: Response, needCode?: () => void) => {
     const data = await response.json();
     if (!response.ok) {
+      if (response.status === 428) needCode?.();
       const detail =
         typeof data.detail === "string" ? data.detail : "Request failed";
       throw new Error(detail.charAt(0).toUpperCase() + detail.slice(1));
@@ -213,15 +237,20 @@ export function buildConnectedBackends(body: HTMLElement): void {
           submit.type = "submit";
           submit.className = "primary";
           submit.textContent = "Sign in";
-          signIn.append(field, submit);
+          const code = signInCode();
+          signIn.append(field, code.field, submit);
           signIn.onsubmit = async (event) => {
             event.preventDefault();
             submit.disabled = true;
             button.disabled = true;
             submit.textContent = "Signing in…";
             status.hidden = true;
-            const payload = { password: password.value };
+            const payload = {
+              password: password.value,
+              code: code.input.value,
+            };
             password.value = "";
+            code.input.value = "";
             try {
               await result(
                 await api(
@@ -232,6 +261,7 @@ export function buildConnectedBackends(body: HTMLElement): void {
                     body: JSON.stringify(payload),
                   },
                 ),
+                code.show,
               );
               await refresh();
             } catch (error) {
@@ -243,7 +273,9 @@ export function buildConnectedBackends(body: HTMLElement): void {
               password.focus();
             } finally {
               payload.password = "";
+              payload.code = "";
               password.value = "";
+              code.input.value = "";
               submit.disabled = false;
               button.disabled = false;
               submit.textContent = "Sign in";
@@ -284,8 +316,10 @@ export function buildConnectedBackends(body: HTMLElement): void {
       label: inputs[0]!.value,
       url: inputs[1]!.value,
       password: inputs[2]!.value,
+      code: code.input.value,
     };
     inputs[2]!.value = "";
+    code.input.value = "";
     try {
       await result(
         await api("/api/backends", {
@@ -293,8 +327,11 @@ export function buildConnectedBackends(body: HTMLElement): void {
           headers: { "content-type": "application/json" },
           body: JSON.stringify(payload),
         }),
+        code.show,
       );
       form.reset();
+      code.field.hidden = true;
+      code.input.required = false;
       addDetail.close();
       await refresh();
     } catch (error) {
@@ -303,8 +340,11 @@ export function buildConnectedBackends(body: HTMLElement): void {
         true,
         formMessage,
       );
+      addDetail.refresh();
     } finally {
       payload.password = "";
+      payload.code = "";
+      code.input.value = "";
       inputs[2]!.value = "";
       submit.disabled = false;
       submit.textContent = "Connect remote";

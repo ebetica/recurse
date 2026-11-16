@@ -2,6 +2,7 @@
 // Only operator sessions sign in, dismiss or disconnect. Listing probes stale
 // connections in the background; remotes reach /api/remote-events only with
 // a callback token.
+import { authMethod, isOperator } from "./request_auth";
 import type { ConnectedBackends } from "../backends/connected";
 import { jsonDictBody } from "./login";
 import { HttpError, jsonResponse, type Router, type Exchange } from "./router";
@@ -12,11 +13,7 @@ export function requireLocalAgent(
   agents: { title(cid: string): string | undefined },
 ): string {
   const cid = ex.request.headers.get("x-recurse-agent");
-  if (
-    ex.state.auth_method !== "loopback" ||
-    !cid ||
-    agents.title(cid) === undefined
-  )
+  if (authMethod(ex) !== "loopback" || !cid || agents.title(cid) === undefined)
     throw new HttpError(403, "local agent required");
   return cid;
 }
@@ -25,7 +22,7 @@ export function requireBackendOperator(ex: Exchange): void {
   if (
     ex.request.headers.has("x-loopback-token") ||
     ex.request.headers.has("authorization") ||
-    !["cookie", "tailscale", "local"].includes(String(ex.state.auth_method))
+    !isOperator(ex)
   )
     throw new HttpError(403, "operator session required");
 }
@@ -40,7 +37,7 @@ export function registerBackendRoutes(
 ): void {
   const requester = (ex: Exchange) => {
     const cid = ex.request.headers.get("x-recurse-agent");
-    return ex.state.auth_method === "loopback" &&
+    return authMethod(ex) === "loopback" &&
       cid &&
       agents.title(cid) !== undefined
       ? cid
@@ -61,10 +58,10 @@ export function registerBackendRoutes(
       throw new HttpError(400, "invalid JSON body");
     }
     if (cid) {
-      if ("password" in body)
+      if ("password" in body || "code" in body)
         throw new HttpError(403, "agents cannot supply passwords");
       await store.request(body.label, body.url, cid);
-    } else await store.connect(body.label, body.url, body.password);
+    } else await store.connect(body.label, body.url, body.password, body.code);
     return jsonResponse({ ok: true });
   });
   router.post("/api/backends/{label}/sign-in", async (ex) => {
@@ -78,7 +75,7 @@ export function registerBackendRoutes(
       )?.requested_by;
     let text = `Backend ${label} is now connected`;
     try {
-      await store.signIn(label, body.password);
+      await store.signIn(label, body.password, body.code);
     } catch (error) {
       text = `Signing in to backend ${label} failed: ${error instanceof HttpError ? error.message : "Sign-in failed"}`;
       throw error;
@@ -90,7 +87,7 @@ export function registerBackendRoutes(
   });
   router.post("/api/remote-events", async (ex) => {
     const label = ex.state.remote_event_label;
-    if (ex.state.auth_method !== "remote-callback" || typeof label !== "string")
+    if (authMethod(ex) !== "remote-callback" || typeof label !== "string")
       throw new HttpError(403, "remote callback token required");
     const { type } = await jsonDictBody(ex);
     if (type !== "relay" && type !== "test")

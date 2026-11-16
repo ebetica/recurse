@@ -1,6 +1,13 @@
 import { expect } from "bun:test";
 import { pbkdf2Sync } from "node:crypto";
-import { mkdir, mkdtemp, open, rm, type FileHandle } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  type FileHandle,
+} from "node:fs/promises";
 import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { retire } from "../../src/utils/trash";
@@ -69,14 +76,26 @@ export async function themeColors(page: Page, ...colors: string[]) {
 
 let layoutCheck = 0;
 
-export async function waitForLayout(page: Page): Promise<void> {
+export async function waitForLayout(
+  page: Page,
+  { chatWindow = true } = {},
+): Promise<void> {
   const key = `__layoutCheck${layoutCheck++}`;
   await page.waitForFunction(
-    (key) => {
+    ({ key, chatWindow }) => {
       const browser = globalThis as any;
       const { document } = browser;
       const scroll = document.querySelector("#scroll");
       if (!scroll) return false;
+      if (
+        chatWindow &&
+        browser.innerWidth > 700 &&
+        document.querySelector("#main") &&
+        !document.querySelector(
+          '#dock .dock-panel[data-dock-panel="chat"] #main',
+        )
+      )
+        return false;
       const snapshot = () =>
         [
           scroll.scrollTop,
@@ -98,15 +117,17 @@ export async function waitForLayout(page: Page): Promise<void> {
             },
           ),
         ].join(";");
-      const current = snapshot();
+      const time = document.timeline.currentTime ?? browser.performance.now();
       const previous = browser[key];
+      if (previous?.time === time) return false;
+      const current = snapshot();
       const frames = previous?.snapshot === current ? previous.frames + 1 : 0;
-      browser[key] = { snapshot: current, frames };
+      browser[key] = { snapshot: current, frames, time };
       if (frames < 2) return false;
       delete browser[key];
       return true;
     },
-    key,
+    { key, chatWindow },
     { polling: "raf" },
   );
 }
@@ -120,18 +141,24 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 export async function waitReady(
   base: string,
   deadline = Date.now() + 30_000,
+  headers: Record<string, string> = {},
 ): Promise<void> {
   let last = "unknown";
   while (Date.now() < deadline) {
+    let failed = false;
     try {
       const response = await fetch(`${base}__browser-test/ready`, {
+        headers,
         signal: AbortSignal.timeout(1000),
       });
       last = String(response.status);
-      if (response.status === 200 || response.status === 401) return;
+      if (response.status === 200) return;
+      failed = response.status === 500;
+      if (failed) last = await response.text();
     } catch (error) {
       last = String(error);
     }
+    if (failed) throw new Error(`browser test server setup failed: ${last}`);
     await sleep(100);
   }
   throw new Error(
@@ -169,7 +196,41 @@ let coverageGroup = "";
 function browserProgress(step: string): void {
   console.log(`Browser progress: group=${coverageGroup} step=${step}`);
 }
-let groupLog: { file: FileHandle; readers: Promise<void>[] } | undefined;
+let groupLog:
+  | { file: FileHandle; path: string; readers: Promise<void>[] }
+  | undefined;
+const logBarriers = new Map<string, () => void>();
+
+export async function drainedServerLog(
+  base: string,
+  pid: number,
+): Promise<string> {
+  if (!groupLog) throw new Error("browser group log is not open");
+  const marker = `browser-log-barrier-${crypto.randomUUID()}`;
+  const drained = ["stdout", "stderr"].map(
+    (stream) =>
+      new Promise<void>((resolve) => {
+        logBarriers.set(`${pid}:${stream}:${marker}`, resolve);
+      }),
+  );
+  await postFixture(base, "file-edit-log-barrier", { marker });
+  await Promise.all(drained);
+  await groupLog.file.sync();
+  return readFile(groupLog.path, "utf8");
+}
+
+async function logIn(base: string, deadline: number): Promise<string> {
+  const response = await fetch(`${base}login`, {
+    method: "POST",
+    redirect: "manual",
+    body: new URLSearchParams({ password: LOGIN }),
+    signal: AbortSignal.timeout(Math.max(0, deadline - Date.now())),
+  });
+  const cookie = response.headers.get("set-cookie")?.split(";")[0];
+  if (response.status !== 303 || !cookie)
+    throw new Error(`browser test login failed: ${response.status}`);
+  return cookie;
+}
 
 export async function startServer(
   options: { auth?: boolean; sourceRoot?: string } = {},
@@ -285,6 +346,9 @@ export async function startServer(
         await log?.file.write(
           `${new Date().toISOString()} ${child.pid} ${name}: ${line}\n`,
         );
+        const key = `${child.pid}:${name}:${line}`;
+        logBarriers.get(key)?.();
+        logBarriers.delete(key);
       }
     })();
     void capture.catch(() => undefined);
@@ -316,23 +380,25 @@ export async function startServer(
     const listeningMs = Date.now() - (deadline - 30_000);
     const base = `http://127.0.0.1:${port}/`;
     browserProgress(`server-ready pid=${child.pid}`);
-    await waitReady(base, deadline);
+    const headers: Record<string, string> = {};
+    if (options.auth) headers.cookie = await logIn(base, deadline);
+    await waitReady(base, deadline, headers);
     console.log(
       `Server startup: ${JSON.stringify({ group: coverageGroup, pid: child.pid, listening_ms: listeningMs, ready_ms: Date.now() - (deadline - 30_000) })}`,
     );
-    if (options.auth) return { process: child, base, data };
     browserProgress(`server-root pid=${child.pid}`);
     const rootDeadline = Date.now() + 5_000;
-    while (Date.now() < rootDeadline && !rootId) {
-      const response = await fetch(`${base}api/tree`);
+    let root: string | undefined;
+    while (Date.now() < rootDeadline && !root) {
+      const response = await fetch(`${base}api/tree`, { headers });
       if (response.status === 200) {
         const tree = (await response.json()) as any[];
-        rootId = tree.find((node) => node.parent == null)?.id;
+        root = tree.find((node) => node.parent == null)?.id;
       }
-      if (!rootId) await sleep(50);
+      if (!root) await sleep(50);
     }
-    if (!rootId) throw new Error("browser test server returned no root agent");
-    ARTIFACT.owner_agent_id = rootId;
+    if (!root) throw new Error("browser test server returned no root agent");
+    if (!options.auth) rootId = ARTIFACT.owner_agent_id = root;
     return { process: child, base, data };
   } catch (error) {
     await stopServer({ process: child, data });
@@ -477,6 +543,59 @@ export async function reloadConversation(page: Page): Promise<void> {
   await page.reload();
 }
 
+export async function shellSurfaceBounds(page: Page): Promise<any> {
+  const bounds = await page
+    .waitForFunction(() => {
+      const { document } = globalThis as any;
+      const box = (selector: string) =>
+        document.querySelector(selector)?.getBoundingClientRect().toJSON();
+      const sb = box(".shell-surface"),
+        tb = box("#topbar"),
+        cb = box("#composer-wrap");
+      return sb &&
+        tb &&
+        cb &&
+        sb.y >= tb.y + tb.height &&
+        sb.y + sb.height <= cb.y + 1
+        ? { sb, tb, cb }
+        : null;
+    })
+    .catch(async (error) => {
+      const geometry = await page.evaluate(() => {
+        const { document } = globalThis as any;
+        const panel = document.querySelector(".shell-surface");
+        const snapshot = () => ({
+          rects: Object.fromEntries(
+            [
+              "#topbar",
+              "#composer-wrap",
+              "#scroll",
+              ".shell-surface",
+              ".live-panel-box",
+              ".shell-chip",
+            ].map((selector) => [
+              selector,
+              document.querySelector(selector)?.getBoundingClientRect() ?? null,
+            ]),
+          ),
+          placement: panel?.dataset.placement ?? null,
+          style: panel ? [panel.style.top, panel.style.maxHeight] : null,
+          scrolled: [...document.querySelectorAll("*")]
+            .filter((el: any) => el.scrollTop)
+            .map(
+              (el: any) =>
+                `${el.tagName}#${el.id}.${el.className}=${el.scrollTop}`,
+            ),
+        });
+        const before = snapshot();
+        (globalThis as any).dispatchEvent(new Event("resize"));
+        return JSON.stringify({ before, afterResize: snapshot() });
+      });
+      throw new Error(`${error}\nshell surface geometry: ${geometry}`);
+    });
+  return bounds.jsonValue();
+}
+
 export function captureErrors(page: Page): string[] {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(String(error)));
@@ -488,6 +607,34 @@ export function captureErrors(page: Page): string[] {
       errors.push(message.text());
   });
   return errors;
+}
+
+export async function recordJumpHighlight(
+  page: Page,
+): Promise<() => Promise<string>> {
+  await page.evaluate(() => {
+    const browser = globalThis as any;
+    const { document } = browser;
+    browser.jumpHighlight = undefined;
+    const frame = () => {
+      const target = document.querySelector(
+        ".file-jump-target:not(.compacted-activity)",
+      );
+      const box = target?.getBoundingClientRect();
+      if (
+        box?.width &&
+        box.height &&
+        browser.getComputedStyle(target).visibility === "visible"
+      )
+        browser.jumpHighlight = target.dataset.rowId;
+      else browser.requestAnimationFrame(frame);
+    };
+    browser.requestAnimationFrame(frame);
+  });
+  return async () => {
+    await page.waitForFunction(() => (globalThis as any).jumpHighlight);
+    return page.evaluate(() => (globalThis as any).jumpHighlight);
+  };
 }
 
 export function conversationRead(base: string, id: string): RegExp {
@@ -677,15 +824,13 @@ export async function mockConversation(
     });
   };
   await page.route(`${base}api/conversations/${id}/view?*`, view);
-  let lastEvents = "";
-  let eventsRevision = 0;
   await page.route(`${base}api/conversations/${id}/events?*`, (route) => {
     const conv = read();
     const rows = fixtureRows(conv);
     const encoded = JSON.stringify(rows);
-    if (encoded !== lastEvents) {
-      lastEvents = encoded;
-      eventsRevision++;
+    if (encoded !== previous) {
+      previous = encoded;
+      revision++;
     }
     const instance = `fixture:${id}:${conv.thread_generation ?? 0}`;
     const end = rows.length;
@@ -694,10 +839,10 @@ export async function mockConversation(
       status: 200,
       contentType: "text/event-stream",
       body:
-        `retry: 3000\n\n` +
-        `id: ${instance}:${eventsRevision}\n` +
+        `retry: 100\n\n` +
+        `id: ${instance}:${revision}\n` +
         "event: snapshot\n" +
-        `data: ${JSON.stringify({ status: "ready", instance_id: instance, revision: eventsRevision, blocks: rows.slice(start, end), older: start > 0, newer: false })}\n\n`,
+        `data: ${JSON.stringify({ status: "ready", instance_id: instance, revision, blocks: rows.slice(start, end), older: start > 0, newer: false })}\n\n`,
     });
   });
 }
@@ -789,7 +934,8 @@ export async function postFixture(
     method: "POST",
     body: data === undefined ? undefined : JSON.stringify(data),
   });
-  if (!response.ok) throw new Error(`${name}: ${response.status}`);
+  if (!response.ok)
+    throw new Error(`${name}: ${response.status} ${await response.text()}`);
   return response.json();
 }
 
@@ -911,17 +1057,24 @@ export async function dispatchArtifactSelection(
         root,
         browser.NodeFilter.SHOW_TEXT,
       );
-      let node;
-      while (
-        (node = walker.nextNode()) &&
-        !node.textContent?.includes(needle)
-      ) {}
-      if (!root || !node) throw new Error("artifact text is not rendered");
-      const text = node.textContent;
+      const nodes = [];
+      let text = "";
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        const start = text.length;
+        text += node.textContent ?? "";
+        nodes.push({ node, start, end: text.length });
+      }
       const start = text.indexOf(needle);
+      const end = start + needle.length;
+      const first = nodes.find(
+        (node) => node.start <= start && start < node.end,
+      );
+      const last = nodes.find((node) => node.start < end && end <= node.end);
+      if (start < 0 || !needle || !first || !last)
+        throw new Error(`artifact text is not rendered: ${needle}`);
       const range = browser.document.createRange();
-      range.setStart(node, start);
-      range.setEnd(node, start + needle.length);
+      range.setStart(first.node, start - first.start);
+      range.setEnd(last.node, end - last.start);
       const selection = browser.window.getSelection();
       selection.removeAllRanges();
       root.dispatchEvent(
@@ -1059,11 +1212,13 @@ export async function runBrowserTests(
       );
       const logPath = join(logDirectory, `${label}.log`);
       const log = {
+        path: logPath,
         file: await open(logPath, "a"),
         readers: [] as Promise<void>[],
       };
       groupLog = log;
       const previousFailures = failures.length;
+      let passedTests = 0;
       let passed = false;
       try {
         const server = await startServer();
@@ -1093,6 +1248,7 @@ export async function runBrowserTests(
               );
               await test(browser, server.base, server.data, server.process.pid);
               console.log(`PASS: ${label}/${test.name}`);
+              passedTests++;
             } catch (error) {
               failures.push(
                 `${label}/${test.name}: ${error instanceof Error ? error.stack : error}`,
@@ -1116,7 +1272,12 @@ export async function runBrowserTests(
           await cleanup();
           activeCleanup = undefined;
           browserProgress("coverage-finish");
-          await coverage?.finishGroup(label);
+          await coverage?.finishGroup(
+            label,
+            !interrupted &&
+              failures.length === previousFailures &&
+              passedTests === tests.length,
+          );
         }
         passed = !interrupted && failures.length === previousFailures;
       } finally {

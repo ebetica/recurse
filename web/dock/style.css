@@ -1,16 +1,13 @@
-/* Desktop windows: Greg's tabs and card frames on the shared shell tokens.
+/* Desktop windows: Greg's tabs on flat, gapless windows split by 1px lines.
    Loaded with dockview's CSS only on desktop; phones keep their pane overlay. */
 #panes.docked {
   flex-direction: column;
   z-index: var(--z-raised);
-  --dock-gutter: var(--content-inset, 8px);
   --dock-tab-radius: 8px;
   --dock-tab-gap: 4px;
 }
 body #panes.docked.on {
-  margin: calc(var(--dock-gutter) / 2);
   display: flex;
-  gap: 0;
 }
 #panes.docked > .resize-grip {
   display: none;
@@ -26,28 +23,73 @@ body #panes.docked.on {
   width: min(480px, calc(100vw - 2 * var(--space-5)));
   transform: translateX(-50%);
 }
+@media (min-width: 701px) {
+  #sidebar :is(.tree-section-title, .tree-section-count) {
+    -webkit-user-select: text;
+    user-select: text;
+  }
+  #dock .dv-tabs-and-actions-container,
+  #dock .dv-tabs-and-actions-container *,
+  #dock .dv-sash,
+  #pane-rail button,
+  #pane-rail button * {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  body.dock-selection-scoped
+    :is(.dock-panel, #sidebar):not(.dock-selection-scope),
+  body.dock-selection-scoped
+    :is(.dock-panel, #sidebar):not(.dock-selection-scope)
+    * {
+    -webkit-user-select: none !important;
+    user-select: none !important;
+  }
+  body.dock-selection-scoped
+    :is(.dock-panel, #sidebar):not(.dock-selection-scope)
+    :is(input, textarea, [contenteditable], [contenteditable] *) {
+    -webkit-user-select: text !important;
+    user-select: text !important;
+  }
+}
 #dock {
   flex: 1;
   min-height: 0;
   min-width: 0;
 }
-#dock .dv-view:has(> .dv-groupview) {
-  box-sizing: border-box;
-  padding: calc(var(--dock-gutter) / 2);
-}
 #dock .dv-dockview {
   background: transparent;
 }
-/* Windows are separate cards, so the gutter between them needs no divider
-   line; the resize handle still shows the accent on hover. */
-#dock .dv-split-view-container.dv-separator-border .dv-view::before {
-  content: none;
+/* Tab drag previews follow the pointer in 40ms (none with reduced motion). */
+#dock :is(.dv-drop-target-container, .dv-drop-target) {
+  --dv-transition-duration: calc(var(--motion-fast) / 3);
+}
+/* Each divider keeps dockview's wide drag area and highlights as an accent
+   line over the 1px separator between the windows. */
+#dock .dv-sash.dv-disabled {
+  display: none;
+}
+#dock .dv-sash::after {
+  content: "";
+  position: absolute;
+  pointer-events: none;
+  transition: background var(--motion-fast);
+}
+#dock .dv-horizontal > .dv-sash-container > .dv-sash::after {
+  inset: 0 auto 0 50%;
+  width: 1px;
+}
+#dock .dv-vertical > .dv-sash-container > .dv-sash::after {
+  inset: 50% 0 auto;
+  height: 1px;
+}
+#dock .dv-sash:not(.dv-disabled):is(:hover, :active)::after {
+  background: var(--accent);
 }
 #dock .dockview-theme-abyss-spaced {
   background-color: transparent;
   color-scheme: inherit;
   font-family: var(--font-sans);
-  --dv-border-radius: var(--content-radius, 10px);
+  --dv-border-radius: 0px;
   --dv-spacing-padding: 0px;
   --dv-group-view-background-color: var(--bg);
   --dock-strip: light-dark(
@@ -70,7 +112,7 @@ body #panes.docked.on {
   --dv-inactivegroup-visiblepanel-tab-color: var(--text);
   --dv-inactivegroup-hiddenpanel-tab-color: var(--muted);
   --dv-tab-divider-color: transparent;
-  --dv-separator-border: var(--pane-border, var(--border));
+  --dv-separator-border: var(--border);
   --dv-paneview-header-border-color: transparent;
   --dv-paneview-active-outline-color: transparent;
   --dv-drag-over-background-color: color-mix(
@@ -85,7 +127,7 @@ body #panes.docked.on {
     var(--text) 12%,
     transparent
   );
-  --dv-active-sash-color: var(--accent);
+  --dv-active-sash-color: transparent;
   --dv-dnd-compass-color: var(--accent);
   --dv-dnd-compass-cell-color: color-mix(
     in srgb,
@@ -118,7 +160,6 @@ body #panes.docked.on {
 #dock .dv-groupview {
   overflow: hidden;
   background: var(--bg);
-  box-shadow: var(--content-ring, 0 0 0 1px var(--border));
 }
 #dock .dv-content-container {
   background: var(--bg);
@@ -289,15 +330,22 @@ body #panes.docked.on {
   border-radius: inherit;
   pointer-events: none;
 }
-#dock .dock-flash {
-  animation: dock-focus-flash calc(var(--motion-enter) * 2) ease-out;
+/* Windows touch, so the flash rings the inside of the window, above its
+   content. */
+#dock .dock-flash::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-chrome);
+  pointer-events: none;
+  animation: dock-focus-flash calc(var(--motion-enter) * 2) ease-out forwards;
 }
 @keyframes dock-focus-flash {
   from {
-    box-shadow: 0 0 0 2px var(--accent);
+    box-shadow: inset 0 0 0 2px var(--accent);
   }
   to {
-    box-shadow: var(--content-ring, 0 0 0 1px var(--border));
+    box-shadow: inset 0 0 0 2px transparent;
   }
 }
 @media (prefers-reduced-motion: reduce) {
@@ -335,7 +383,15 @@ body #panes.docked.on {
 body:has(#dock .pane-col.fullscreen, #dock #main.fullscreen) #panes.docked {
   z-index: calc(var(--z-drawer) + 4);
 }
+#dock:has(.pane-col.fullscreen, #main.fullscreen) .dv-grid-view {
+  visibility: hidden;
+}
+#dock:has(.pane-col.fullscreen, #main.fullscreen)
+  .dv-render-overlay:not(:has(.pane-col.fullscreen, #main.fullscreen)) {
+  display: none;
+}
 #dock .dv-render-overlay:has(.pane-col.fullscreen, #main.fullscreen) {
+  background: var(--bg);
   position: fixed;
   inset: 0 !important;
   width: 100vw !important;
@@ -391,7 +447,7 @@ body:has(#dock .pane-col.fullscreen, #dock #main.fullscreen) #panes.docked {
   max-width: calc(100vw - var(--space-6) * 2);
   padding: var(--space-4);
   border: 1px solid var(--border);
-  border-radius: var(--content-radius);
+  border-radius: 14px;
   background: var(--panel);
   box-shadow: var(--menu-shadow);
   color: var(--text);

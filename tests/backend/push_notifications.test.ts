@@ -232,8 +232,17 @@ test("finished notices wait for shells and descendants; top-level and taken-over
   };
   try {
     await until(async () => (await json("/api/status")).ready === true);
-    const manifest = await json("/manifest.webmanifest");
-    expect(manifest.icons).toEqual([
+    const manifest = (await json("/manifest.webmanifest")) as {
+      icons: { src: string; sizes: string; type: string; purpose: string }[];
+    };
+    for (const icon of manifest.icons)
+      expect(icon.src).toMatch(/\?v=[0-9a-f]{12}$/);
+    expect(
+      manifest.icons.map((icon) => ({
+        ...icon,
+        src: icon.src.split("?")[0],
+      })),
+    ).toEqual([
       {
         src: "/static/brand/app-icon.svg",
         sizes: "any",

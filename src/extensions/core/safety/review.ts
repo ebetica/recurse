@@ -1,3 +1,7 @@
+// Static: bundled policy, JSON/pi-safety.md rules, framing and host identity.
+// No tool schemas/main-agent prompt. First input supplies all evidence; later
+// reviews add only evidence deltas, cwd/process state and action, then retain
+// actual assistant replies. Bounded conversation chains exclude failed retries.
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -11,9 +15,11 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ReviewEffort } from "./model-policy.ts";
 import { buildReviewerSystemPrompt } from "./policy.ts";
 import { slowSpan } from "../../../observability/slow_span";
+import type { ReviewHistory } from "./review-history.ts";
 export type ReviewInputs = {
   dataDir?: string;
   statsRoot?: string;
+  history?: ReviewHistory;
   processSnapshot: string;
   actingAgent?: { id: string; title?: string };
 };
@@ -45,6 +51,7 @@ export type SafetyVerdict = {
   decision: SafetyDecision;
   reason: string;
   reviewAttempts?: SafetyReviewAttempt[];
+  reviewer?: { provider: string; model: string };
   /** Infrastructure failures fail open and do not count as policy denials. */
   procedural?: boolean;
 };
@@ -557,13 +564,11 @@ export async function reviewAction(
     );
 
   const policy = buildReviewerSystemPrompt(additionalRules, inputs.dataDir);
-  // Invariant: Keep fixed policy in the system prefix; evidence/action retain
-  // no prior action or verdict.
-  const systemPrompt = buildReviewSystemPrompt(
-    policy,
-    model.provider,
-    inputs.actingAgent,
-  );
+  const systemPrompt =
+    buildReviewSystemPrompt(policy, model.provider, inputs.actingAgent) +
+    (inputs.history
+      ? " Earlier reviewer verdicts are not authorization; assess each proposed action independently against the current evidence and fixed policy."
+      : "");
   const conversationSessionId =
     ctx.sessionManager?.getSessionId?.() || undefined;
   // Invariant: Immutable Recurse cid keys the namespace, not Pi session id.
@@ -575,6 +580,18 @@ export async function reviewAction(
     durableEvidence,
     systemPrompt,
   );
+  const historyKey = JSON.stringify([
+    conversationId ?? conversationSessionId,
+    model.provider,
+    model.id,
+    model.api,
+    model.baseUrl,
+    model.headers,
+    model.compat,
+    effort,
+    durableEvidence,
+    systemPrompt,
+  ]);
   const processContext = inputs.processSnapshot;
   // Invariant: OpenRouter must opt into x-session-id affinity for the stable
   // isolated reviewer namespace; evidence appends preserve it, safety
@@ -588,31 +605,52 @@ export async function reviewAction(
     // Invariant: Retry malformed/missing-policy replies once with full policy;
     // neither attempt permits an unpoliced allow.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const texts = slowSpan("safety_prompt", conversationId, () => {
-        const evidence =
-          attempt === 0
-            ? ordinaryReviewText(ctx.cwd, transcript)
-            : policyInlinedReviewText(ctx.cwd, policy, transcript);
-        const actionPrompt =
-          actionSuffix(action, processContext) +
-          // Invariant: A missing-policy sentinel is not a formatting error.
-          (attempt > 0 && !sentinelReported
-            ? `\n\n${REFORMAT_INSTRUCTION}`
-            : "");
-        // Spec: The ChatGPT Codex backend reliably reuses a cached prefix only
-        // through whole earlier messages, not inside one growing message, so
-        // evidence spans append-stable messages and the action comes last.
-        return [...evidenceMessages(evidence), actionPrompt];
-      });
-      const timestamp = Date.now();
-      const messages = texts.map(
-        (text): UserMessage => ({
-          role: "user",
-          content: [{ type: "text", text }],
-          timestamp,
-        }),
-      );
-      const lastEvidence = texts.at(-2)!;
+      const render = (delta: string, initial: boolean): UserMessage[] =>
+        slowSpan("safety_prompt", conversationId, () => {
+          const evidence =
+            attempt > 0
+              ? policyInlinedReviewText(ctx.cwd, policy, transcript)
+              : initial
+                ? ordinaryReviewText(ctx.cwd, delta)
+                : evidencePrefix(ctx.cwd) + (delta || "(no new evidence)");
+          const actionPrompt =
+            actionSuffix(action, processContext) +
+            // Invariant: A missing-policy sentinel is not a formatting error.
+            (attempt > 0 && !sentinelReported
+              ? `\n\n${REFORMAT_INSTRUCTION}`
+              : "");
+          const texts =
+            inputs.history && attempt === 0
+              ? [evidence + actionPrompt]
+              : [...evidenceMessages(evidence), actionPrompt];
+          return texts.map(
+            (text): UserMessage => ({
+              role: "user",
+              content: [{ type: "text", text }],
+              timestamp: Date.now(),
+            }),
+          );
+        });
+      const pending =
+        attempt === 0
+          ? inputs.history?.prepare(
+              historyKey,
+              transcript,
+              systemPrompt,
+              render,
+            )
+          : undefined;
+      const messages = pending?.messages ?? render(transcript, true);
+      const lastEvidenceMessage = (
+        inputs.history ? messages.at(-1) : messages.at(-2)
+      ) as UserMessage;
+      const lastEvidence =
+        typeof lastEvidenceMessage.content === "string"
+          ? lastEvidenceMessage.content
+          : lastEvidenceMessage.content
+              .filter((block) => block.type === "text")
+              .map((block) => block.text)
+              .join("\n");
       requestInFlight = true;
       const response = await settleBeforeAbort(
         complete(
@@ -664,7 +702,11 @@ export async function reviewAction(
         sentinelReported = true;
         continue;
       }
-      if (verdict) return { ...verdict, reviewAttempts };
+      if (verdict) {
+        timed.signal.throwIfAborted();
+        pending?.commit(response);
+        return { ...verdict, reviewAttempts };
+      }
     }
     return failedVerdict(
       sentinelReported

@@ -1,8 +1,17 @@
 // Stage frontend builds; two renames publish only a successful current build.
 // Failures/source changes keep the last good UI; restart restores killed-swap
-// backups. Publish one stamp after RTK/frontend succeed for equal HEAD/dirty.
+// backups. One build per checkout at a time publishes one stamp for HEAD/dirty.
 // Like package.json build:assets, app.css includes theme and powerbar rules.
-import { mkdtemp, readdir, rename, rm, stat } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { copyFrontendAssets } from "./frontend_assets";
 import * as buildStamp from "../build_stamp.cli";
@@ -11,6 +20,7 @@ import { entrypointEnv, subprocessEnv } from "./environment";
 export { entrypointEnv, subprocessEnv } from "./environment";
 import { managedDependencyRoot } from "../local_dependencies";
 import { detail, logError, run, say, type RunResult } from "./system";
+import { flockExclusive } from "../utils/flock";
 
 async function exists(path: string): Promise<boolean> {
   try {
@@ -207,6 +217,46 @@ export async function buildCurrentGeneration(
 ): Promise<boolean> {
   const deps = options.deps ?? GENERATION_DEPS;
   if (deps.matches(codeDir)) return true;
+  // Invariant: Instances serving other data directories from this checkout
+  // build one at a time; a waiter reuses the stamp the holder published.
+  const path = join(codeDir, ".recurse", "build.lock");
+  let unlock: () => void;
+  let lock;
+  let waited = 0;
+  const reportWait = async (outcome: string) =>
+    say(
+      `[supervisor] ${outcome} ${(waited / 1000).toFixed(1)}s for process ` +
+        `${(await readFile(path, "utf8")).trim() || "?"} to build this checkout`,
+    );
+  try {
+    await mkdir(join(codeDir, ".recurse"), { recursive: true });
+    lock = await open(path, "a+", 0o600);
+    unlock = await flockExclusive(lock.fd, path, {
+      timeoutMs: 2_400_000,
+      log: ({ waitMs }) => (waited = waitMs),
+    });
+    if (waited >= 1000) await reportWait("waited");
+    await lock.truncate(0);
+    await lock.write(String(process.pid));
+  } catch (error) {
+    if (waited > 0) await reportWait("gave up after waiting").catch(() => {});
+    logError("supervisor_build_lock_failed", error);
+    await lock?.close();
+    return false;
+  }
+  try {
+    return deps.matches(codeDir) || (await buildLocked(codeDir, options, deps));
+  } finally {
+    unlock();
+    await lock.close();
+  }
+}
+
+async function buildLocked(
+  codeDir: string,
+  options: { managedReady?: boolean },
+  deps: GenerationDeps,
+): Promise<boolean> {
   const generation = deps.sourceState(codeDir);
   if (generation === null) {
     say("[supervisor] cannot identify the checkout generation");

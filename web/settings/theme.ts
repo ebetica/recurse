@@ -1,4 +1,5 @@
-// Picker sheets preview palettes immediately; saves survive reopening.
+// Picker sheets preview palettes immediately; custom CSS previews need Save.
+// Pending saves survive reopening; closing discards unsaved CSS edits.
 import { apiJson, jpost } from "../api.js";
 import { CHECK_ICON } from "../icons.js";
 import { applyTheme, setThemePreview } from "./themes.js";
@@ -10,16 +11,31 @@ let saved: ThemeSettings;
 let preview: ThemeSettings | undefined;
 let saveProblems: string[] = [];
 let updateSection: ((settings: ThemeSettings) => void) | undefined;
+let cancelCssPreview: (() => void) | undefined;
+
+/** Discard the editor's unsaved CSS before closing or rebuilding Settings. */
+export function cancelThemeCssPreview(): void {
+  cancelCssPreview?.();
+}
 
 interface ThemeSettings {
   theme: string;
   appearance: string;
   css: string;
   version: string;
+  customCss?: string;
+  custom: {
+    name: string;
+    background: string;
+    foreground: string;
+    palette: string[];
+    css?: string;
+  }[];
   problems: string[];
   themes: {
     name: string;
     css: string;
+    customCss?: string;
     appearance: string;
     family: string;
     label: string;
@@ -60,8 +76,19 @@ export function buildThemeSection(body: HTMLElement): void {
   const themeBody = document.createElement("div");
   appearanceBody.append(appearanceRow);
   themeBody.append(cards);
-  body.append(appearanceBody, themeBody);
-  const messages = [body, appearanceBody, themeBody].map((parent) => {
+  const cssBody = document.createElement("div");
+  cssBody.hidden = true;
+  cssBody.innerHTML = `
+    <label class="field">Custom CSS<textarea name="custom-css" rows="12" maxlength="50000" spellcheck="false"></textarea></label>
+    <p class="muted">Custom CSS pauses for protected controls and side conversations.</p>
+    <div class="actions"><button type="button" class="primary">Save</button><button type="button" class="secondary">Cancel</button></div>`;
+  const cssInput = cssBody.querySelector("textarea")!;
+  const [cssSave, cssCancel] = cssBody.querySelectorAll("button");
+  let cssTheme: string | undefined;
+  let cssDirty = false;
+  let cssSaving = false;
+  body.append(appearanceBody, themeBody, cssBody);
+  const messages = [body, appearanceBody, themeBody, cssBody].map((parent) => {
     const message = document.createElement("p");
     message.className = "msg err";
     message.setAttribute("role", "alert");
@@ -83,6 +110,57 @@ export function buildThemeSection(body: HTMLElement): void {
       current?.theme ??
       "Loading…",
   );
+  const cssDetail = settingsDetail(cssBody, "Custom CSS");
+  const cssControls = () => {
+    cssInput.disabled = cssSaving;
+    cssSave!.disabled = cssCancel!.disabled = !cssDirty || cssSaving;
+  };
+  const previewCss = () => {
+    if (!current || !cssDirty) return;
+    setThemePreview(true);
+    applyTheme({ ...current, customCss: cssInput.value });
+  };
+  cssInput.addEventListener("input", () => {
+    const custom = current?.custom?.find((item) => item.name === cssTheme);
+    cssDirty = cssInput.value !== (custom?.css ?? "");
+    setThemePreview(cssDirty || !!preview);
+    if (current) applyTheme({ ...current, customCss: cssInput.value });
+    cssControls();
+  });
+  cancelCssPreview = () => {
+    if (!cssDirty) return;
+    cssDirty = false;
+    if (cssSaving) return;
+    const settings = preview ?? saved;
+    setThemePreview(!!preview);
+    if (settings) {
+      applyTheme(settings);
+      paint(settings);
+    }
+  };
+  cssCancel!.onclick = cancelThemeCssPreview;
+  cssSave!.onclick = () => {
+    if (!current || !cssDirty || cssSaving) return;
+    const customCss = cssInput.value;
+    const custom = current.custom.map((item) =>
+      item.name === cssTheme ? { ...item, css: customCss } : item,
+    );
+    persist(
+      {
+        ...current,
+        custom,
+        customCss,
+        themes: current.themes.map((item) =>
+          item.name === cssTheme ? { ...item, customCss } : item,
+        ),
+      },
+      { custom },
+      true,
+    );
+  };
+  cssBody.querySelector("dialog")!.addEventListener("close", () => {
+    if (matchMedia("(max-width: 700px)").matches) cancelThemeCssPreview();
+  });
   const showProblems = (problems: string[]) => {
     for (const message of messages) {
       message.textContent = problems.join(" ");
@@ -93,6 +171,17 @@ export function buildThemeSection(body: HTMLElement): void {
     current = settings;
     appearanceDetail.refresh();
     themeDetail.refresh();
+    const custom = settings.custom?.find(
+      (item) => item.name === settings.theme,
+    );
+    cssBody.hidden = !custom;
+    if (cssTheme !== custom?.name) {
+      cssTheme = custom?.name;
+      cssDirty = false;
+      cssDetail.close();
+    }
+    if (!cssDirty) cssInput.value = custom?.css ?? "";
+    cssControls();
     showProblems(settings.problems);
     if (!cards.childElementCount) {
       for (const theme of settings.themes) {
@@ -162,9 +251,11 @@ export function buildThemeSection(body: HTMLElement): void {
   updateSection = (settings) => {
     if (!body.isConnected) return;
     paint(settings);
+    previewCss();
     if (saveProblems.length) showProblems(saveProblems);
   };
   const choose = (next: ThemeSettings) => {
+    cancelThemeCssPreview();
     const variants = next.themes.filter((theme) => theme.family === next.theme);
     const dark =
       variants.find((theme) => theme.appearance === "dark") ?? variants[0]!;
@@ -174,13 +265,22 @@ export function buildThemeSection(body: HTMLElement): void {
       next.appearance === "system"
         ? `${dark.css}@media (prefers-color-scheme: light){${light.css}}`
         : (next.appearance === "light" ? light : dark).css;
+    const customCss = next.themes.find(
+      (theme) => theme.name === next.theme,
+    )?.customCss;
+    persist(
+      { ...next, css, customCss, version: "" },
+      { theme: next.theme, appearance: next.appearance },
+    );
+  };
+  const persist = (next: ThemeSettings, values: object, cssEdit = false) => {
     const ownRevision = ++revision;
+    cssSaving = cssEdit;
     preview = next;
     saveProblems = [];
     setThemePreview(true);
-    applyTheme({ css, version: "" });
+    applyTheme(next);
     paint(next);
-    const values = { theme: next.theme, appearance: next.appearance };
     saves = saves.then(async () => {
       if (ownRevision !== revision) return;
       let definitive = false;
@@ -193,12 +293,15 @@ export function buildThemeSection(body: HTMLElement): void {
         saved = data;
         if (ownRevision !== revision) return;
         preview = undefined;
+        if (cssEdit) cssDirty = false;
+        cssSaving = false;
         setThemePreview(false);
         applyTheme(data);
         updateSection?.(data);
       } catch (error) {
         if (ownRevision !== revision) return;
-        if (definitive) {
+        cssSaving = false;
+        if (definitive || cssEdit) {
           preview = undefined;
           setThemePreview(false);
           applyTheme(saved);

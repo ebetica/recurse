@@ -1,9 +1,7 @@
 /**
  * Type policy: sizes on the 10.5-20px scale, weights 400/600/700, families
- * as var(--font-sans|mono). Usage: bun tests/checks/font_check.ts; exits 1.
+ * as var(--font-sans|mono). tests/checks/static.ts runs it.
  */
-import { readFileSync } from "node:fs";
-import { trackedFiles } from "./color_check.ts";
 import { cssView } from "./radius_check.ts";
 
 export type Finding = { line: number; value: string; problem: string };
@@ -110,15 +108,4 @@ export function checkFiles(
           : `${file}:${line}: ${problem === "mono" ? "monospace" : "sans-serif"} font ${value} should use var(--font-${problem})`,
     ),
   );
-}
-
-if (import.meta.main) {
-  const errors = checkFiles(
-    trackedFiles(true).map((file) => ({
-      file,
-      text: readFileSync(file, "utf8"),
-    })),
-  );
-  for (const error of errors) console.error(`ERROR: ${error}`);
-  if (errors.length) process.exitCode = 1;
 }

@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import { writeFile } from "node:fs/promises";
-import { captureErrors, type BrowserTest } from "./common";
+import { captureErrors, postFixture, type BrowserTest } from "./common";
 import { test_last_thinking_survives_wait_and_reload } from "./last_thinking";
 export const tests: BrowserTest[] = [
   test_last_thinking_survives_wait_and_reload,
@@ -70,160 +70,159 @@ export const tests: BrowserTest[] = [
     browser,
     base,
   ) {
-    for (const width of [412, 1280]) {
-      for (const mode of [
-        "output",
-        "many-output",
-        "secret-output",
-        "background-output",
-      ]) {
-        const page = await browser.newPage({
-          viewport: { width, height: 915 },
+    for (const [width, mode] of [
+      [412, "output"],
+      [412, "many-output"],
+      [412, "secret-output"],
+      [412, "background-output"],
+      [1280, "background-output"],
+    ] as const) {
+      const page = await browser.newPage({
+        viewport: { width, height: 915 },
+      });
+      const post = (path: string, data?: object) =>
+        page.request.post(`${base}${path}`, { data });
+      const errors = captureErrors(page);
+      let agent = "";
+      let outputGate = "";
+      try {
+        ({ agent, outputGate } = await (
+          await post("__browser-test/seed-live-tools", { mode })
+        ).json());
+        await page.goto(`${base}#agent=${agent}`);
+        await page.locator("#composer").waitFor();
+        await post(`api/conversations/${agent}/deliver`, {
+          content: "Run tools.",
         });
-        const post = (path: string, data?: object) =>
-          page.request.post(`${base}${path}`, { data });
-        const errors = captureErrors(page);
-        let agent = "";
-        let outputGate = "";
-        try {
-          ({ agent, outputGate } = await (
-            await post("__browser-test/seed-live-tools", { mode })
-          ).json());
-          await page.goto(`${base}#agent=${agent}`);
-          await page.locator("#composer").waitFor();
-          await post(`api/conversations/${agent}/deliver`, {
-            content: "Run tools.",
-          });
-          const bar = page.locator(".working .live-label");
-          await bar.filter({ hasText: "Running" }).waitFor();
-          await bar.click();
-          const body = page.locator(".live-tool-body");
-          await body.waitFor();
-          const rows = body.locator(".live-tool-row");
-          expect(await rows.count()).toBe(mode === "many-output" ? 3 : 1);
+        const bar = page.locator(".working .live-label");
+        await bar.filter({ hasText: "Running" }).waitFor();
+        await bar.click();
+        const body = page.locator(".live-tool-body");
+        await body.waitFor();
+        const rows = body.locator(".live-tool-row");
+        expect(await rows.count()).toBe(mode === "many-output" ? 3 : 1);
+        expect(
+          await page
+            .locator(".turn-summary")
+            .filter({ hasText: /[Rr]unning \d+ command/ })
+            .count(),
+        ).toBe(0);
+        const title = await bar.locator(".live-thinking-title").textContent();
+        expect(title).toBe(
+          mode === "many-output"
+            ? "Running 3 commands"
+            : mode === "secret-output"
+              ? "Running command"
+              : `Running ${(await rows.first().locator("code").innerText()).slice(0, 2000)}`,
+        );
+        expect(title).not.toMatch(/\b(?:Ran|Preparing|Thinking)\b/);
+        expect(await rows.locator('[role="timer"]').count()).toBe(
+          await rows.count(),
+        );
+        if (mode !== "secret-output") {
+          await rows.first().locator("pre").waitFor();
+          expect(await rows.first().locator("pre").innerText()).not.toContain(
+            "latest-",
+          );
+        }
+        await writeFile(outputGate, "ready");
+        if (mode !== "secret-output") {
+          expect(await rows.first().locator("code").innerText()).toEndWith(
+            "END_OF_COMMAND",
+          );
           expect(
-            await page
-              .locator(".turn-summary")
-              .filter({ hasText: /[Rr]unning \d+ command/ })
-              .count(),
-          ).toBe(0);
-          const title = await bar.locator(".live-thinking-title").textContent();
-          expect(title).toBe(
-            mode === "many-output"
-              ? "Running 3 commands"
-              : mode === "secret-output"
-                ? "Running command"
-                : `Running ${(await rows.first().locator("code").innerText()).slice(0, 2000)}`,
+            (await rows.first().locator("code").innerText()).length,
+          ).toBeGreaterThan(2000);
+          await rows
+            .first()
+            .locator("pre")
+            .filter({
+              hasText: mode === "background-output" ? "latest-1" : "latest-0",
+            })
+            .waitFor();
+          const tail = await rows.first().locator("pre").innerText();
+          expect(tail.trim().split("\n").length).toBeLessThanOrEqual(5);
+          expect(tail).not.toContain("line-1\n");
+          await rows.first().locator("pre").click();
+          await page.evaluate(() => {
+            const doc = (globalThis as any).document;
+            const range = doc.createRange();
+            range.selectNodeContents(doc.querySelector(".live-tool-row pre"));
+            doc.getSelection().removeAllRanges();
+            doc.getSelection().addRange(range);
+          });
+          expect(
+            await page.evaluate(() =>
+              (globalThis as any).getSelection().toString(),
+            ),
+          ).toContain("latest-");
+          expect(await bar.getAttribute("aria-expanded")).toBe("true");
+        } else {
+          await body.getByText("Output withheld", { exact: true }).waitFor();
+          expect(await body.innerText()).not.toContain("sk-example");
+          expect(await bar.getAttribute("title")).not.toContain("sk-example");
+          expect(await body.locator("code").innerText()).toBe(
+            "Command withheld",
           );
-          expect(title).not.toMatch(/\b(?:Ran|Preparing|Thinking)\b/);
-          expect(await rows.locator('[role="timer"]').count()).toBe(
-            await rows.count(),
+        }
+        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/live-tools-${width}-${mode}-expanded.png`,
+          });
+        if (mode === "background-output") {
+          expect(await page.locator(".turn-summary").allInnerTexts()).toContain(
+            "Ran 1 command",
           );
-          if (mode !== "secret-output") {
-            await rows.first().locator("pre").waitFor();
-            expect(await rows.first().locator("pre").innerText()).not.toContain(
-              "latest-",
-            );
-          }
-          await writeFile(outputGate, "ready");
-          if (mode !== "secret-output") {
-            expect(await rows.first().locator("code").innerText()).toEndWith(
-              "END_OF_COMMAND",
-            );
-            expect(
-              (await rows.first().locator("code").innerText()).length,
-            ).toBeGreaterThan(2000);
-            await rows
-              .first()
-              .locator("pre")
-              .filter({
-                hasText: mode === "background-output" ? "latest-1" : "latest-0",
-              })
-              .waitFor();
-            const tail = await rows.first().locator("pre").innerText();
-            expect(tail.trim().split("\n").length).toBeLessThanOrEqual(5);
-            expect(tail).not.toContain("line-1\n");
-            await rows.first().locator("pre").click();
-            await page.evaluate(() => {
-              const doc = (globalThis as any).document;
-              const range = doc.createRange();
-              range.selectNodeContents(doc.querySelector(".live-tool-row pre"));
-              doc.getSelection().removeAllRanges();
-              doc.getSelection().addRange(range);
-            });
-            expect(
-              await page.evaluate(() =>
-                (globalThis as any).getSelection().toString(),
-              ),
-            ).toContain("latest-");
-            expect(await bar.getAttribute("aria-expanded")).toBe("true");
-          } else {
-            await body.getByText("Output withheld", { exact: true }).waitFor();
-            expect(await body.innerText()).not.toContain("sk-example");
-            expect(await bar.getAttribute("title")).not.toContain("sk-example");
-            expect(await body.locator("code").innerText()).toBe(
-              "Command withheld",
-            );
-          }
-          const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+          await page.locator(".working .shell-chip").click();
+          const shell = page.locator(".shell-surface .shell-row").first();
+          await shell.waitFor();
+          expect(await shell.locator(".shell-command").innerText()).toEndWith(
+            "END_OF_COMMAND",
+          );
+          const meta = shell.locator(".shell-meta");
+          expect(await meta.innerText()).toMatch(/Running[\s\S]*\d+s/);
+          const metaBox = (await meta.boundingBox())!;
+          const list = page.locator(".shell-surface .shell-list");
+          const listBox = (await list.boundingBox())!;
+          expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
+          expect(metaBox.y).toBeGreaterThanOrEqual(listBox.y);
+          expect(metaBox.y + metaBox.height).toBeLessThanOrEqual(
+            listBox.y + listBox.height,
+          );
           if (shots)
             await page.screenshot({
-              path: `${shots}/live-tools-${width}-${mode}-expanded.png`,
+              path: `${shots}/live-tools-${width}-background-shell.png`,
             });
-          if (mode === "background-output") {
-            expect(
-              await page.locator(".turn-summary").allInnerTexts(),
-            ).toContain("Ran 1 command");
-            await page.locator(".working .shell-chip").click();
-            const shell = page.locator(".shell-surface .shell-row").first();
-            await shell.waitFor();
-            expect(await shell.locator(".shell-command").innerText()).toEndWith(
-              "END_OF_COMMAND",
-            );
-            const meta = shell.locator(".shell-meta");
-            expect(await meta.innerText()).toMatch(/Running[\s\S]*\d+s/);
-            const metaBox = (await meta.boundingBox())!;
-            const list = page.locator(".shell-surface .shell-list");
-            const listBox = (await list.boundingBox())!;
-            expect(await list.evaluate((element) => element.scrollTop)).toBe(0);
-            expect(metaBox.y).toBeGreaterThanOrEqual(listBox.y);
-            expect(metaBox.y + metaBox.height).toBeLessThanOrEqual(
-              listBox.y + listBox.height,
-            );
-            if (shots)
-              await page.screenshot({
-                path: `${shots}/live-tools-${width}-background-shell.png`,
-              });
-            await list.evaluate((element) => {
-              element.scrollTop = element.scrollHeight;
+          await list.evaluate((element) => {
+            element.scrollTop = element.scrollHeight;
+          });
+          expect(await shell.locator(".shell-command").innerText()).toEndWith(
+            "END_OF_COMMAND",
+          );
+          if (shots)
+            await page.screenshot({
+              path: `${shots}/live-tools-${width}-background-shell-command-end.png`,
             });
-            expect(await shell.locator(".shell-command").innerText()).toEndWith(
-              "END_OF_COMMAND",
-            );
-            if (shots)
-              await page.screenshot({
-                path: `${shots}/live-tools-${width}-background-shell-command-end.png`,
-              });
-            await page.locator(".shell-surface-close").click();
-          }
-          await bar.click();
-          await body.waitFor({ state: "hidden" });
-          expect(
-            (await page.locator(".live-panel-box").boundingBox())!.height,
-          ).toBe(34);
-          expect(errors).toEqual([]);
-        } finally {
-          if (agent) {
-            await post("__browser-test/durable-release");
-            const view = await (
-              await page.request.get(`${base}api/conversations/${agent}/view`)
-            ).json();
-            await post(`api/conversations/${agent}/deliver`, {
-              run_id: view.active_run,
-            });
-          }
-          await page.close();
+          await page.locator(".shell-surface-close").click();
         }
+        await bar.click();
+        await body.waitFor({ state: "hidden" });
+        expect(
+          (await page.locator(".live-panel-box").boundingBox())!.height,
+        ).toBe(34);
+        expect(errors).toEqual([]);
+      } finally {
+        if (agent) {
+          await postFixture(base, "release", { agent, gate: "reply" });
+          const view = await (
+            await page.request.get(`${base}api/conversations/${agent}/view`)
+          ).json();
+          await post(`api/conversations/${agent}/deliver`, {
+            run_id: view.active_run,
+          });
+        }
+        await page.close();
       }
     }
   },

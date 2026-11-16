@@ -41,6 +41,71 @@ test("CLI enforces only the selected strict rules", async () => {
   });
 });
 
+// Regression: #3361 positive visibility snapshots must wait for browser state
+test("CLI ratchets positive browser visibility snapshots", async () => {
+  await withRepo(async ({ put, run }) => {
+    const reason =
+      "positive visibility snapshot; wait with locator.waitFor() or browserExpect(locator).toBeVisible()";
+    const positive = [
+      "async function first() { expect(await page.locator('button').isVisible()).toBeTrue(); }",
+      "async function second() { expect((await (locator.isVisible()))).toBe((true)); }",
+    ].join("\n");
+    const file = "tests/mobile_browser/case.ts";
+    await put(file, positive);
+    const added = await run("test_check", "--strict");
+    expect(added.exitCode).toBe(1);
+    expect(
+      added.stdout
+        .toString()
+        .split("\n")
+        .filter((line) => line.includes(" T6 ")),
+    ).toEqual([
+      `${file}:1 T6 ${reason} (cap 0 here)`,
+      `${file}:2 T6 ${reason} (cap 0 here)`,
+    ]);
+    await put(
+      file,
+      [
+        "await locator.waitFor();",
+        "await browserExpect(locator).toBeVisible();",
+        "expect(await locator.isVisible()).toBeFalse();",
+        "expect(await locator.isVisible()).toBe(false);",
+        "expect(await locator.isVisible()).not.toBeTrue();",
+        "expect(await locator.isVisible()).not.toBe(true);",
+        "if (await locator.isVisible()) await locator.click();",
+      ]
+        .map((line, i) => `async function allowed${i}() { ${line} }`)
+        .join("\n"),
+    );
+    await put("tests/backend/case.ts", positive);
+    expect((await run("test_check", "--strict")).exitCode).toBe(0);
+    const capped = "tests/mobile_browser/test_active_agents.ts";
+    await put(capped, positive.split("\n")[0]!);
+    expect((await run("test_check", "--strict")).exitCode).toBe(0);
+    await put(capped, positive);
+    const exceeded = await run("test_check", "--strict");
+    expect(exceeded.exitCode).toBe(1);
+    expect(
+      exceeded.stdout
+        .toString()
+        .split("\n")
+        .filter((line) => line.includes(" T6 ")),
+    ).toEqual([
+      `${capped}:1 T6 ${reason} (cap 1 here)`,
+      `${capped}:2 T6 ${reason} (cap 1 here)`,
+    ]);
+    await put(capped, "await locator.waitFor();");
+    const lowered = await run("test_check", "--strict");
+    expect(lowered.exitCode).toBe(1);
+    expect(
+      lowered.stdout
+        .toString()
+        .split("\n")
+        .filter((line) => line.includes(" T6 ")),
+    ).toEqual([`${capped}:1 T6 ${reason} cap is 1; lower it to 0`]);
+  });
+});
+
 test("CLI rejects malformed or repeated strict rule selections", async () => {
   await withRepo(async ({ run }) => {
     for (const flags of [
@@ -329,6 +394,262 @@ test("CLI accepts one feature test and rejects undeclared deletion or multiple a
   });
 });
 
+// Regression: #3343 surviving tests must retain every prior tag id
+test("CLI protects tag ids when tagged tests survive", async () => {
+  await withRepo(async ({ put, run, baseline }) => {
+    const file = "tests/mobile_browser/case.ts";
+    const title = "test_sidebar_status_rows_desktop";
+    const source = recorded("browser-regression").replace(
+      "#2296 checker",
+      "#2296 #3183 checker",
+    );
+    const other = "tests/mobile_browser/other.ts";
+    const otherSource = source.replaceAll(title, "test_other");
+    await put(file, source);
+    await put(other, otherSource);
+    const base = await baseline();
+    await put("body.txt", "");
+    const diff = () =>
+      run("test_check", "--strict", "--diff", base, "--pr-body", "body.txt");
+    await put(file, source.replace(/^  \/\/ Feature:.*\n/m, ""));
+    const removed = await diff();
+    expect(removed.exitCode).toBe(1);
+    expect(removed.stdout.toString()).toContain(
+      `T8 deleted feature #2296 ${title} needs Removes-feature`,
+    );
+    expect(removed.stdout.toString()).toContain(
+      `T8 deleted feature #3183 ${title} needs Removes-feature`,
+    );
+    await put(
+      "body.txt",
+      `Removes-feature: #2296 ${file} ${title}\nRemoves-feature: #3183 ${file} ${title}`,
+    );
+    expect((await diff()).exitCode).toBe(0);
+    await put("body.txt", "");
+    await put(file, source.replace("#2296 #3183 checker", "#2296 checker"));
+    const rewritten = await diff();
+    expect(rewritten.exitCode).toBe(1);
+    expect(rewritten.stdout.toString()).toContain(
+      `T8 deleted feature #3183 ${title} needs Removes-feature`,
+    );
+    await put(
+      file,
+      source.replace(
+        "#2296 #3183 checker",
+        "#3343 #3183 #2296 revised checker",
+      ),
+    );
+    await put(
+      other,
+      otherSource.replace(
+        "#2296 #3183 checker",
+        "#3343 #3183 #2296 revised checker",
+      ),
+    );
+    expect((await diff()).exitCode).toBe(0);
+    const tag = source.match(/^  \/\/ Feature:.*\n/m)![0];
+    await put(
+      file,
+      source
+        .replace(tag, "")
+        .replace("    await mkdir", `${tag}    await mkdir`),
+    );
+    expect((await diff()).exitCode).toBe(1);
+    await put(file, source.replace("Feature:", "Regression:"));
+    expect((await diff()).exitCode).toBe(0);
+    const regressionBase = await baseline();
+    await put(file, source.replace(tag, ""));
+    const regressionDiff = () =>
+      run(
+        "test_check",
+        "--strict",
+        "--diff",
+        regressionBase,
+        "--pr-body",
+        "body.txt",
+      );
+    const regression = await regressionDiff();
+    expect(regression.exitCode).toBe(1);
+    expect(regression.stdout.toString()).toContain(
+      `T8 deleted regression #3183 ${title} needs Removes-regression`,
+    );
+    await put(
+      "body.txt",
+      `Removes-regression: #2296 ${file} ${title}\nRemoves-regression: #3183 ${file} ${title}`,
+    );
+    expect((await regressionDiff()).exitCode).toBe(0);
+  });
+});
+
+// Regression: #3352 moving tags must preserve each duplicate occurrence
+test("CLI preserves moved tags without losing duplicate occurrences", async () => {
+  await withRepo(async ({ put, remove, run, baseline }) => {
+    const file = "tests/mobile_browser/case.ts";
+    const moved = "tests/mobile_browser/moved.ts";
+    const title = "test_sidebar_status_rows_desktop";
+    const source = recorded("browser-regression").replace(
+      "#2296 checker",
+      "#2296 #3183 checker",
+    );
+    await put(file, source);
+    const base = await baseline();
+    await put("body.txt", "");
+    const diff = (from = base) =>
+      run("test_check", "--strict", "--diff", from, "--pr-body", "body.txt");
+    remove(file);
+    await put(moved, source);
+    expect((await diff()).exitCode).toBe(0);
+    await put(moved, source.replace("#2296 #3183 checker", "#2296 checker"));
+    const lostId = await diff();
+    expect(lostId.exitCode).toBe(1);
+    expect(lostId.stdout.toString()).toContain(
+      `T8 deleted feature #3183 ${title} needs Removes-feature`,
+    );
+    await put(moved, source.replaceAll(title, "test_renamed"));
+    const renamed = await diff();
+    expect(renamed.exitCode).toBe(1);
+    expect(renamed.stdout.toString()).toContain(
+      `T8 deleted feature #2296 ${title} needs Removes-feature`,
+    );
+    await put(moved, source);
+    await put(file, source);
+    const duplicateBase = await baseline();
+    remove(file);
+    await put(moved, source + "\n");
+    const duplicate = await diff(duplicateBase);
+    expect(duplicate.exitCode).toBe(1);
+    expect(duplicate.stdout.toString()).toContain(
+      `T8 deleted feature #2296 ${title} needs Removes-feature`,
+    );
+    expect(duplicate.stdout.toString()).toContain(
+      `T8 deleted feature #3183 ${title} needs Removes-feature`,
+    );
+    await put(file, source);
+    await put("tests/mobile_browser/extra.ts", source);
+    expect((await diff(duplicateBase)).exitCode).toBe(0);
+    await put("tests/mobile_browser/another.ts", source);
+    const addedDuplicates = await diff(duplicateBase);
+    expect(addedDuplicates.exitCode).toBe(1);
+    expect(addedDuplicates.stdout.toString()).toContain(
+      "a PR may add at most one new Feature tag",
+    );
+  });
+  await withRepo(async ({ put, remove, run, baseline }) => {
+    const source = recorded("browser-regression");
+    const variants = [
+      source,
+      source.replace("#2296 checker", "#2296 #3183 checker"),
+      source.replace("#2296 checker", "#3183 checker"),
+    ];
+    const files = ["a", "b", "c"].map(
+      (name) => `tests/mobile_browser/${name}.ts`,
+    );
+    for (const [index, file] of files.entries())
+      await put(file, variants[index]!);
+    const base = await baseline();
+    for (const file of files) remove(file);
+    for (const [index, name] of ["d", "e", "f"].entries())
+      await put(`tests/mobile_browser/${name}.ts`, variants[(index + 1) % 3]!);
+    await put(
+      "tests/mobile_browser/z.ts",
+      source.replaceAll("test_sidebar_status_rows_desktop", "test_new"),
+    );
+    await put("body.txt", "");
+    expect(
+      (
+        await run(
+          "test_check",
+          "--strict",
+          "--diff",
+          base,
+          "--pr-body",
+          "body.txt",
+        )
+      ).exitCode,
+    ).toBe(0);
+  });
+  await withRepo(async ({ put, remove, run, baseline }) => {
+    const source = recorded("browser-regression");
+    const removed = "tests/mobile_browser/a.ts";
+    const survivor = "tests/mobile_browser/b.ts";
+    await put(removed, source.replace("Feature:", "Regression:"));
+    await put(survivor, source);
+    const base = await baseline();
+    remove(removed);
+    await put(survivor, source + "\n");
+    await put(
+      "body.txt",
+      `Removes-regression: #2296 ${removed} test_sidebar_status_rows_desktop`,
+    );
+    expect(
+      (
+        await run(
+          "test_check",
+          "--strict",
+          "--diff",
+          base,
+          "--pr-body",
+          "body.txt",
+        )
+      ).exitCode,
+    ).toBe(0);
+  });
+});
+
+// Regression: #3359 base-branch advances must not look like PR deletions
+test("CLI compares PR changes from the merge base unless exact is requested", async () => {
+  await withRepo(async ({ put, run, baseline, git }) => {
+    await put("README.md", "Base\n");
+    const base = await baseline();
+    await git("switch", "-qc", "pr");
+    await put("README.md", "PR\n");
+    await baseline();
+    await git("switch", "-qc", "moved-base", base);
+    await put("tests/mobile_browser/case.ts", recorded("browser-regression"));
+    const moved = await baseline();
+    await git("switch", "-q", "pr");
+    await put("body.txt", "");
+    const diff = (flag: string, ref: string) =>
+      run("test_check", flag, ref, "--pr-body", "body.txt", "--strict");
+    const merged = await diff("--diff", "moved-base");
+    expect(
+      merged.stdout
+        .toString()
+        .split("\n")
+        .filter((line) => line.includes(" T8 ")),
+    ).toEqual([]);
+    expect(merged.exitCode).toBe(0);
+    expect(merged.stdout.toString().split("\n")[0]).toBe(`Diff base: ${base}`);
+    const exact = await diff("--diff-exact", "moved-base");
+    expect(exact.exitCode).toBe(1);
+    expect(exact.stdout.toString().split("\n")[0]).toBe(`Diff base: ${moved}`);
+    expect(
+      exact.stdout
+        .toString()
+        .split("\n")
+        .filter((line) => line.includes(" T8 ")),
+    ).toEqual([
+      "tests/mobile_browser/case.ts:2 T8 deleted feature #2296 test_sidebar_status_rows_desktop needs Removes-feature",
+    ]);
+    const ancestor = await diff("--diff", base);
+    expect(ancestor.exitCode).toBe(0);
+    expect(ancestor.stdout.toString()).toBe(merged.stdout.toString());
+    const exactAncestor = await diff("--diff-exact", base);
+    expect(exactAncestor.exitCode).toBe(0);
+    expect(exactAncestor.stdout.toString()).toBe(ancestor.stdout.toString());
+    for (const flags of [
+      ["--diff", base, "--diff-exact", moved, "--pr-body", "body.txt"],
+      ["--diff-exact"],
+      ["--diff-exact", "--pr-body", "body.txt"],
+      ["--diff-exact", base],
+    ]) {
+      const invalid = await run("test_check", ...flags);
+      expect(invalid.exitCode).toBe(1);
+      expect(invalid.stderr.toString()).toContain("--diff");
+    }
+  });
+});
+
 // Feature: #2871 growing large source files require an exact-head simplification review
 test("CLI requires simplification review only when large source files grow", async () => {
   await withRepo(async ({ put, run, baseline }) => {
@@ -374,6 +695,53 @@ test("CLI requires simplification review only when large source files grow", asy
       (await run("test_check", "--diff", largeBase, "--pr-body", "body.txt"))
         .exitCode,
     ).toBe(0);
+    await put(file, "export {};\n".repeat(2399));
+    const marginBase = await baseline();
+    const sweep = (base = marginBase) =>
+      run("test_check", "--diff", base, "--pr-body", "body.txt", "--strict");
+    await put(file, "export {};\n".repeat(2400));
+    const sweepHead = await baseline();
+    expect((await run("test_check", "--strict")).exitCode).toBe(0);
+    const missingSweep = await sweep();
+    expect(missingSweep.exitCode).toBe(1);
+    expect(missingSweep.stdout.toString()).toContain(
+      "commission a read-only effort-4 subagent",
+    );
+    expect(missingSweep.stdout.toString()).toContain(
+      "Removing lines merely to fit under the limit is not acceptable",
+    );
+    for (const declaration of [
+      `Simplify-review: ${file} none-found ${sweepHead}`,
+      `Simplify-review: ${file} architecture-sweep ${marginBase}`,
+      `Simplify-review: ${file} architecture-sweep ${sweepHead.slice(0, 12)}`,
+      `Simplify-review: ${file} architecture-sweep ${sweepHead} extra`,
+    ]) {
+      await put("body.txt", declaration);
+      expect((await sweep()).exitCode).toBe(1);
+    }
+    await put(
+      "body.txt",
+      `Simplify-review: ${file} architecture-sweep ${sweepHead}`,
+    );
+    expect((await sweep()).exitCode).toBe(0);
+    await put("body.txt", "");
+    expect((await sweep(sweepHead)).exitCode).toBe(0);
+    const optionalBase = sweepHead;
+    const optional = ["play", "ground"].join("") + "/large.ts";
+    await put(optional, "export {};\n".repeat(1500));
+    const optionalDiff = () =>
+      run("test_check", "--diff", optionalBase, "--pr-body", "body.txt");
+    const missingOptional = await optionalDiff();
+    expect(missingOptional.exitCode).toBe(1);
+    expect(missingOptional.stdout.toString()).toContain(
+      `${optional}:1 T8 growing source file`,
+    );
+    const optionalHead = await baseline();
+    await put(
+      "body.txt",
+      `Simplify-review: ${optional} none-found ${optionalHead}`,
+    );
+    expect((await optionalDiff()).exitCode).toBe(0);
   });
 });
 
@@ -382,6 +750,7 @@ async function withRepo(
     put: (file: string, text: string) => Promise<void>;
     remove: (file: string) => void;
     baseline: () => Promise<string>;
+    git: (...args: string[]) => Promise<string>;
     run: (
       tool: string,
       ...flags: string[]
@@ -399,6 +768,7 @@ async function withRepo(
     await git("config", "user.name", "Checker");
     await git("config", "user.email", "checker@example.invalid");
     await body({
+      git,
       async baseline() {
         await git("commit", "-qm", "checker baseline");
         return git("rev-parse", "HEAD");
