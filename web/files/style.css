@@ -72,6 +72,11 @@
     display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
   .files-view > .files-detail:has(> .image-zoom-viewport) {
     display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .pane-body.files-view:has(> .files-detail > .html-page-frame) {
+    display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+  .files-view > .files-detail:has(> .html-page-frame) {
+    display: flex; flex-direction: column; flex: 1; min-height: 0; }
+  .files-view > .files-detail > .html-page-frame { flex: 1; height: auto; min-height: 0; }
   .files-view > .files-detail > .files-detail-bar { flex: none; }
   .files-view > .files-detail > .image-zoom-viewport {
     flex: 1; min-height: 0; container-type: size; }

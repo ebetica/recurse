@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Three slides</title>
+<style>
+  html, body { margin: 0; height: 100%; font-family: Georgia, serif; }
+  body { display: flex; flex-direction: column; background: #1e1b4b; }
+  .deck { flex: 1; position: relative; }
+  .slide { position: absolute; inset: 0; display: none; flex-direction: column;
+    align-items: center; justify-content: center; color: #fff; }
+  .slide.active { display: flex; }
+  .s1 { background: linear-gradient(135deg, #4f46e5, #9333ea); }
+  .s2 { background: linear-gradient(135deg, #059669, #0ea5e9); }
+  .s3 { background: linear-gradient(135deg, #ea580c, #db2777); }
+  h1 { font-size: 3rem; margin: 0 0 1rem; }
+  nav { display: flex; gap: 1rem; justify-content: center; align-items: center;
+    padding: .75rem; background: #0f0d2e; color: #c7d2fe; font-family: sans-serif; }
+</style>
+</head>
+<body>
+<div class="deck">
+  <section class="slide s1 active"><h1>Slide 1: Hello</h1><p>Rendered live inside Recurse.</p></section>
+  <section class="slide s2"><h1>Slide 2: Styles</h1><p>Gradients and flexbox come from the page's CSS.</p></section>
+  <section class="slide s3"><h1>Slide 3: Scripts</h1><p id="status">JavaScript has not run.</p></section>
+</div>
+<nav><button id="prev">Previous</button><span id="counter">1 / 3</span><button id="next">Next</button></nav>
+<img alt="" src="https://example.invalid/probe.png" width="1" height="1">
+<script>
+  const slides = [...document.querySelectorAll(".slide")];
+  let at = 0;
+  const show = (index) => {
+    at = (index + slides.length) % slides.length;
+    slides.forEach((slide, i) => slide.classList.toggle("active", i === at));
+    document.getElementById("counter").textContent = `${at + 1} / ${slides.length}`;
+  };
+  document.getElementById("next").onclick = () => show(at + 1);
+  document.getElementById("prev").onclick = () => show(at - 1);
+  document.getElementById("status").textContent = `JavaScript ran on ${slides.length} slides.`;
+  try { parent.__slidesRan = true; } catch {}
+  fetch("https://example.invalid/probe").catch(() => {});
+</script>
+</body>
+</html>

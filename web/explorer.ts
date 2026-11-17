@@ -13,6 +13,7 @@ import { registerFileTabSource } from "./panes/file-tabs.js";
 import { paneItem } from "./panes/navigation.js";
 import { copyText } from "./tool_details.js";
 import { highlightSource } from "./source-preview.js";
+import { HTML_NAME_RE, htmlModes, htmlPage } from "./html-page.js";
 import { requestUiStatus } from "./ui-events.js";
 import { sendOperatorMessage } from "./conversation/operator-send.js";
 import type { PaneCacheDef, PaneContext, PaneNavigation } from "./types.js";
@@ -710,25 +711,11 @@ function preview(view: View): TemplateResult {
             Edit
           </button>`
         : nothing}
-      ${!view.editing && item?.kind === "text" && /\.html?$/i.test(view.file!)
-        ? html`<div class="explorer-modes" role="group" aria-label="HTML view">
-            ${["Source", "Preview"].map(
-              (label) =>
-                html`<button
-                  class="btn sm"
-                  type="button"
-                  aria-pressed=${String(
-                    view.htmlPreview === (label === "Preview"),
-                  )}
-                  @click=${() => {
-                    view.htmlPreview = label === "Preview";
-                    paint(view);
-                  }}
-                >
-                  ${label}
-                </button>`,
-            )}
-          </div>`
+      ${!view.editing && item?.kind === "text" && HTML_NAME_RE.test(view.file!)
+        ? htmlModes(!view.htmlPreview, (source) => {
+            view.htmlPreview = !source;
+            paint(view);
+          })
         : nothing}
       ${item?.kind === "missing" || view.editing
         ? nothing
@@ -821,12 +808,8 @@ function preview(view: View): TemplateResult {
       ? html`<div class="report-comments explorer-source-only"></div>
           <div class="report-bar explorer-source-only"></div>`
       : nothing}
-    ${view.htmlPreview
-      ? html`<p class="explorer-status">
-            Preview shows loaded text without scripts, styles or external
-            resources.
-          </p>
-          <div class="explorer-html-preview files-document"></div>`
+    ${view.htmlPreview && !view.editing
+      ? htmlPage(endpoint(view, "/page", { path: filePath(view) }), view.file!)
       : nothing}`;
 }
 
@@ -871,37 +854,6 @@ function syncComments(view: View): void {
   claimComments(pane);
   reanchor(pane, id);
   renderComments(pane);
-}
-
-function syncHtmlPreview(view: View): void {
-  const container = view.element.querySelector<HTMLElement>(
-    ".explorer-html-preview",
-  );
-  const text = view.previewText;
-  const name = view.file;
-  const length = String(text.length);
-  if (!container || container.dataset.shownLength === length) return;
-  container.setAttribute("role", "status");
-  container.textContent = "Loading preview…";
-  const ownsView = () =>
-    !view.disposed &&
-    container.isConnected &&
-    view.file === name &&
-    view.previewText === text;
-  void import("./document-preview.js")
-    .then(({ mountHtmlPreview }) => {
-      if (!ownsView() || container.dataset.shownLength === length) return;
-      mountHtmlPreview(container, text, name!);
-      container.dataset.shownLength = length;
-      container.removeAttribute("role");
-    })
-    .catch(() => {
-      if (!ownsView() || container.dataset.shownLength === length) return;
-      container.dataset.shownLength = length;
-      container.setAttribute("role", "alert");
-      container.textContent =
-        "Could not show the preview. Choose Source to read the file.";
-    });
 }
 
 function paint(view: View): void {
@@ -999,7 +951,6 @@ function paint(view: View): void {
   );
   if (phone.matches) resetCursor(view.element);
   syncComments(view);
-  syncHtmlPreview(view);
 }
 
 function cursor(

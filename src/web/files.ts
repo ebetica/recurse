@@ -1,5 +1,5 @@
 // Owner-scoped files and draft uploads: foreign owners are 404; bound bodies.
-// Downloads are inert; image/media/Artifact previews retain sandbox CSP.
+// Downloads are inert; image/media/Artifact previews and HTML pages keep CSP.
 // Operator-only path-image reads bounded, byte-sniffed, no-store snapshots;
 // paths use the conversation cwd or the optional document/Artifact location.
 
@@ -46,6 +46,13 @@ const PREVIEW_CSP = "default-src 'none'; sandbox";
 const SVG_PREVIEW_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox";
 export const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
+/** Files with these names render as live pages in the Artifact sandbox. */
+export const HTML_NAME_RE = /\.html?$/i;
+export const HTML_PAGE_HEADERS: Readonly<Record<string, string>> = {
+  "content-type": "text/html; charset=utf-8",
+  "content-disposition": "inline",
+  "content-security-policy": artifacts.ARTIFACT_ACTIVE_CSP,
+};
 // Owner-bound, attacker-influenced bytes: never shared-cached or re-sniffed.
 export const ARTIFACT_SAFE_HEADERS: Readonly<Record<string, string>> = {
   "cache-control": "private, no-store",
@@ -859,6 +866,24 @@ export function registerFileRoutes(
     ["GET", "HEAD"],
     "/api/conversations/{cid}/attachments/{attachment_id}/thumbnail",
     (ex) => preview(ex, true),
+  );
+  router.add(
+    ["GET", "HEAD"],
+    "/api/conversations/{cid}/attachments/{attachment_id}/page",
+    async (ex) => {
+      // Invariant: Only .html/.htm files render, always under the Artifact
+      // sandbox CSP: scripts run in an opaque origin without network access.
+      const opened = await download(ex);
+      if (!HTML_NAME_RE.test(String(opened.manifest.name))) {
+        await opened.blob.close().catch(() => {});
+        throw new HttpError(404, "page not available");
+      }
+      return rangedResponse(ex.request, await servedBody(opened), {
+        ...PREVIEW_HEADERS,
+        ...HTML_PAGE_HEADERS,
+        "content-length": String(opened.size),
+      });
+    },
   );
 
   router.get("/api/attachments/{name}", async () => {

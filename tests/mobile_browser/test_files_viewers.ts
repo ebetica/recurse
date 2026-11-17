@@ -607,6 +607,78 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Feature: #PR_NUMBER a published HTML file runs live in the offline Artifact sandbox.
+  async function test_published_html_runs_as_a_live_page(browser, base) {
+    const { demo } = (await postFixture(base, "seed-published-html")) as {
+      demo: string;
+    };
+    for (const width of [1280, 412]) {
+      const { context, page, errors } = await filePage(browser, width, 900);
+      const remote: string[] = [];
+      const blocked: string[] = [];
+      context.on("requestfinished", (request) => {
+        if (!request.url().startsWith(base)) remote.push(request.url());
+      });
+      context.on("requestfailed", (request) => {
+        if (request.failure()?.errorText === "csp") blocked.push(request.url());
+      });
+      try {
+        await page.goto(`${base}#agent=${demo}`, {
+          waitUntil: "domcontentloaded",
+        });
+        await page
+          .getByRole("button", { name: "Open slides.html in Files" })
+          .click();
+        const detail = filesSurface(page).filter({
+          has: page.locator(".files-detail"),
+        });
+        const frame = detail.locator("iframe.html-page-frame");
+        const slides = detail.frameLocator("iframe.html-page-frame");
+        await slides
+          .getByRole("heading", { name: "Slide 1: Hello", exact: true })
+          .waitFor();
+        expect(await frame.getAttribute("sandbox")).toBe("allow-scripts");
+        expect(await frame.getAttribute("src")).toEndWith("/page");
+        expect(
+          await frame.evaluate(
+            (element: any) => element.contentDocument === null,
+          ),
+        ).toBe(true);
+        expect(
+          await slides
+            .locator(".s1")
+            .evaluate(
+              (element: any) =>
+                (globalThis as any).getComputedStyle(element).backgroundImage,
+            ),
+        ).toContain("linear-gradient");
+        await fileShot(page, `${width}-html-slide-1.png`);
+        for (const [index, title] of [
+          "Slide 2: Styles",
+          "Slide 3: Scripts",
+        ].entries()) {
+          await slides.getByRole("button", { name: "Next" }).click();
+          await slides.getByRole("heading", { name: title }).waitFor();
+          expect(await slides.locator("#counter").textContent()).toBe(
+            `${index + 2} / 3`,
+          );
+          await fileShot(page, `${width}-html-slide-${index + 2}.png`);
+        }
+        expect(await slides.locator("#status").textContent()).toBe(
+          "JavaScript ran on 3 slides.",
+        );
+        expect(await page.evaluate("window.__slidesRan")).toBeUndefined();
+        expect(remote).toEqual([]);
+        expect(blocked).toEqual(["https://example.invalid/probe.png"]);
+        expect(errors.length).toBeGreaterThan(0);
+        expect(
+          errors.filter((error) => !error.includes("Content Security Policy")),
+        ).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+  },
   async function test_large_files_download_natively(browser, base) {
     const { context, page, errors } = await filePage(browser, 1280, 800);
     const { demo } = await postFixture(base, "seed-published-sizes");

@@ -181,13 +181,6 @@
   width: 16px;
   height: 16px;
 }
-.explorer-modes {
-  display: flex;
-  gap: var(--space-1);
-}
-.explorer-modes [aria-pressed="true"] {
-  background: var(--panel-2);
-}
 .explorer-preview-mode .explorer-source-only {
   display: none;
 }

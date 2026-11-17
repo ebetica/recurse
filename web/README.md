@@ -139,8 +139,8 @@ visit without changing the saved layout. Phones keep in-place previews.
 
 [Reply paths](file-path-links.ts) share [syntax](source-preview.ts) and a 256 KB UTF-8 editor with full, escaped
 canonical paths. Changed destinations refuse saves; Markdown files warn. Saves
-send only paths, not contents (tools can still read them). HTML uses the
-[offline viewer](document-preview.ts).
+send only paths, not contents (tools can still read them). HTML can show a
+sandboxed [live page](html-page.ts).
 
 Selecting text stages the same quote-and-line comments as Files and Artifacts.
 Comments include the opened file's absolute path and go through the shared

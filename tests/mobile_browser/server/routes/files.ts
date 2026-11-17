@@ -360,6 +360,21 @@ export function routes(fx: Fixture): Routes {
       return { demo: cid };
     },
     "seed-published-pdf": pdf,
+    "seed-published-html": () =>
+      once("seed-published-html", async () => {
+        const cid = "files-published-html";
+        await once({ agent: cid }, () =>
+          create(cid, "Published HTML", rootAgentId()),
+        );
+        await publishFiles(cid, {
+          "slides.html": new Uint8Array(
+            await readFile(
+              join(CHECKOUT_ROOT, "tests/mobile_browser/fixtures/slides.html"),
+            ),
+          ),
+        });
+        return { demo: cid };
+      }),
     "seed-published-later": async () => {
       const cid = "files-published-later";
       await once({ agent: cid }, () =>

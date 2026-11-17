@@ -104,10 +104,15 @@ export const tests: BrowserTest[] = [
           const errors = captureErrors(page);
           const requests: string[] = [];
           const htmlRequests: string[] = [];
-          page.on("request", (request) => {
+          page.on("requestfinished", (request) => {
             if (request.url().includes("explorer-html-probe"))
               htmlRequests.push(request.url());
-            if (request.url().includes(`/conversations/${fixture.agent}/tree`))
+          });
+          page.on("request", (request) => {
+            if (
+              request.url().includes(`/conversations/${fixture.agent}/tree`) &&
+              !request.url().includes("/tree/page")
+            )
               requests.push(request.url());
           });
           await page.goto(`${base}#agent=${fixture.agent}`, {
@@ -815,9 +820,7 @@ export const tests: BrowserTest[] = [
               .getByRole("button", { name: "Source", exact: true })
               .getAttribute("aria-pressed"),
           ).toBe("true");
-          expect(
-            await pane.locator(".explorer-html-preview iframe").count(),
-          ).toBe(0);
+          expect(await pane.locator("iframe.html-page-frame").count()).toBe(0);
           await dispatchArtifactSelection(
             page,
             width === 412 ? "touch" : "mouse",
@@ -838,15 +841,15 @@ export const tests: BrowserTest[] = [
           await pane
             .getByRole("button", { name: "Preview", exact: true })
             .click();
-          const frame = pane.locator(".explorer-html-preview iframe");
-          const rendered = pane.frameLocator(".explorer-html-preview iframe");
+          const frame = pane.locator("iframe.html-page-frame");
+          const rendered = pane.frameLocator("iframe.html-page-frame");
           await rendered
             .getByRole("heading", {
               name: "Explorer HTML preview",
               exact: true,
             })
             .waitFor();
-          expect(await frame.getAttribute("sandbox")).toBe("");
+          expect(await frame.getAttribute("sandbox")).toBe("allow-scripts");
           expect(await frame.getAttribute("referrerpolicy")).toBe(
             "no-referrer",
           );
@@ -859,14 +862,11 @@ export const tests: BrowserTest[] = [
           ).toBe(true);
           expect(
             await rendered
-              .locator("script, iframe, form, input, img, [href], [onerror]")
-              .count(),
-          ).toBe(0);
-          expect(
-            await rendered
-              .locator("style", { hasText: "background: red" })
-              .count(),
-          ).toBe(0);
+              .locator("body")
+              .evaluate(
+                (body) => (globalThis as any).getComputedStyle(body).background,
+              ),
+          ).toContain("rgb(255, 0, 0)");
           expect(
             await page.evaluate("window.__explorerHtmlRan"),
           ).toBeUndefined();
@@ -1185,7 +1185,19 @@ export const tests: BrowserTest[] = [
           await composer.press("Escape");
           expect(await composer.inputValue()).toBe("#onlyhere");
           expect(await fileMenu.isVisible()).toBe(false);
-          expect(errors).toEqual([]);
+          expect(
+            errors.some((error) =>
+              error.includes('Blocked a frame with origin "null"'),
+            ),
+          ).toBe(true);
+          expect(
+            errors.filter(
+              (error) =>
+                !/Content Security Policy|Blocked a frame with origin "null"/.test(
+                  error,
+                ),
+            ),
+          ).toEqual([]);
         } finally {
           await context.close();
         }

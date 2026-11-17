@@ -1065,3 +1065,7 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
 .tag-suggestions .btn[aria-pressed="true"] { background: var(--panel-2); outline: 1px solid var(--accent); }
 #sidebar-tag-error { max-width: 240px; color: var(--danger); font-size: 0.8rem; }
 @media (pointer: coarse) { #sidebar-popover .btn, #sidebar-tag-name { min-height: 44px; } }
+.html-modes { display: flex; gap: var(--space-1); }
+.html-modes [aria-pressed="true"] { background: var(--panel-2); }
+/* A live HTML file: white like a browser page, filling most of the pane. */
+.html-page-frame { display: block; width: 100%; height: 75dvh; border: 0; background: var(--page); }

@@ -33,6 +33,10 @@ in-place details, image dialogs and Back navigation. Markdown sibling links open
 file views with a Back step on phones; fragments scroll the opened document.
 Markdown siblings opened from Artifacts use the same reading padding as published
 Markdown files.
+Published `.html`/`.htm` files open as a [live page](../html-page.ts): the
+server's `/page` route serves the bytes under the Artifact sandbox CSP, so the
+page's own styles and inline scripts run in an opaque origin without network
+access. External resources (CDN scripts, remote images) stay blocked.
 Modified clicks and unsupported types retain browser navigation. Inline image enlargement
 retains its dialog on both layouts. Single-key shortcuts close image dialogs
 before acting; `i` focuses the composer. Left/Right still step images. The

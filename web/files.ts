@@ -60,6 +60,7 @@ import { panePowerbar, renderPowerbarControls } from "./panes/powerbar.js";
 import { paneItem } from "./panes/navigation.js";
 import { copyText } from "./tool_details.js";
 import { highlightSource } from "./source-preview.js";
+import { HTML_NAME_RE, htmlPage } from "./html-page.js";
 import { scrollDocumentFragment } from "./document-markdown.js";
 import { changesStamp, filesMarkdown, noteReviewed } from "./files/markdown.js";
 import { installBoxComments, touchDrewBox } from "./files/box-comments.js";
@@ -982,6 +983,11 @@ function mediaHref(cid: string, file: SessionFile): string | null {
   return `${base}/preview`;
 }
 
+function pageHref(cid: string, file: SessionFile): string | null {
+  const base = downloadHref(cid, file);
+  return base && HTML_NAME_RE.test(file.name) ? `${base}/page` : null;
+}
+
 function textPreviewHref(cid: string, file: SessionFile): string | null {
   if (!file.id || file.preview !== "text" || file.unavailable) return null;
   return backendFor(cid).url(
@@ -1154,6 +1160,8 @@ function previewTemplate(
         ></div>`,
       );
   }
+  const page = detail && pageHref(cid, file);
+  if (page) return keyed(file.key, htmlPage(page, file.name));
   if (file.preview !== "text")
     return html`<div class="files-preview-note">
       No preview for this kind of file. Download it to open it.

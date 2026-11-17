@@ -15,6 +15,7 @@ import {
 import { agentMarked, isOperator } from "./request_auth";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse } from "./static";
+import { HTML_NAME_RE, HTML_PAGE_HEADERS } from "./files";
 
 export interface ExplorerRoutesDeps {
   cwd(cid: string): Promise<string | null>;
@@ -224,47 +225,59 @@ export function registerExplorerRoutes(
     { query: { q: { type: "str" } } },
   );
 
+  const serve = async (ex: Exchange, page: boolean) => {
+    const folder = await scope(ex, true);
+    // Invariant: A page is only an .html/.htm file, served with the Artifact
+    // sandbox CSP; everything else downloads as inert bytes.
+    if (page && !HTML_NAME_RE.test(folder.path))
+      throw new HttpError(404, "page not available");
+    const opened = await io.call("download", folder, ex.request.signal);
+    let closing: Promise<void> | undefined;
+    const handle = {
+      async read(
+        buffer: Uint8Array,
+        offset: number,
+        length: number,
+        position: number,
+      ) {
+        const bytes = await io.call("read", {
+          owner: folder.owner,
+          token: opened.token,
+          offset: position,
+          length,
+        });
+        buffer.set(bytes, offset);
+        return { bytesRead: bytes.length };
+      },
+      close() {
+        return (closing ??= io
+          .call("release", { owner: folder.owner, token: opened.token })
+          .then(() => undefined));
+      },
+    };
+    return rangedResponse(
+      ex.request,
+      { handle, size: opened.size },
+      {
+        ...SAFE_HEADERS,
+        "accept-ranges": "bytes",
+        "content-length": String(opened.size),
+        "content-type": "application/octet-stream",
+        "content-disposition": contentDisposition(basename(opened.name)),
+        ...(page ? HTML_PAGE_HEADERS : {}),
+      },
+    );
+  };
   router.add(
     ["GET", "HEAD"],
     "/api/conversations/{cid}/tree/raw",
-    async (ex) => {
-      const folder = await scope(ex, true);
-      const opened = await io.call("download", folder, ex.request.signal);
-      let closing: Promise<void> | undefined;
-      const handle = {
-        async read(
-          buffer: Uint8Array,
-          offset: number,
-          length: number,
-          position: number,
-        ) {
-          const bytes = await io.call("read", {
-            owner: folder.owner,
-            token: opened.token,
-            offset: position,
-            length,
-          });
-          buffer.set(bytes, offset);
-          return { bytesRead: bytes.length };
-        },
-        close() {
-          return (closing ??= io
-            .call("release", { owner: folder.owner, token: opened.token })
-            .then(() => undefined));
-        },
-      };
-      return rangedResponse(
-        ex.request,
-        { handle, size: opened.size },
-        {
-          ...SAFE_HEADERS,
-          "accept-ranges": "bytes",
-          "content-length": String(opened.size),
-          "content-type": "application/octet-stream",
-          "content-disposition": contentDisposition(basename(opened.name)),
-        },
-      );
-    },
+    (ex) => serve(ex, false),
+    { query: pathQuery, longRunning: true },
+  );
+  router.add(
+    ["GET", "HEAD"],
+    "/api/conversations/{cid}/tree/page",
+    (ex) => serve(ex, true),
     { query: pathQuery, longRunning: true },
   );
   return io;

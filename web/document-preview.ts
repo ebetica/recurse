@@ -224,15 +224,6 @@ function display(
   select(0);
 }
 
-/** Show already-loaded HTML through the same sanitized document viewer. */
-export function mountHtmlPreview(
-  container: HTMLElement,
-  html: string,
-  title: string,
-): void {
-  display(container, { sections: [{ title, html }] }, title);
-}
-
 /** Mount from a download URL; the caller keeps its Download action. */
 export function mountDocument(
   container: HTMLElement,
