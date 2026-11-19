@@ -179,7 +179,7 @@ export class McpServers {
         .map((status) =>
           status.state === "failed"
             ? `MCP server ${status.name} unavailable: ${status.reason}.`
-            : `MCP server ${status.name} needs sign-in; the operator signs in under Settings > MCPs.`,
+            : `MCP server ${status.name} needs sign-in; the operator signs in under Settings > Agents > MCP servers.`,
         )
         .join("\n");
     } catch {

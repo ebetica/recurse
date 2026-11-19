@@ -1,9 +1,9 @@
 // Authentication settings own provider sign-in and credential-store requests.
-// Provider actions and usage stay inline on desktop, in sheets on phones.
+// Provider actions and usage open in a sub-page on desktop, a sheet on phones.
 import { copyText } from "../tool_details.js";
 import { settingsClient } from "./target.js";
 import { settingsDetail, settingsRow } from "./layout.js";
-import { showUsageLimits } from "./usage-limits.js";
+import { showUsageLimits, type UsageLimits } from "./usage-limits.js";
 import { subscriptionLogin } from "./subscription-login.js";
 
 interface AuthStatus {
@@ -28,10 +28,7 @@ function providerDetail(body: HTMLElement, name: string): void {
   const tile = section.querySelector(".provider-tile")?.cloneNode(true);
   if (tile instanceof HTMLElement) {
     tile.setAttribute("aria-hidden", "true");
-    for (const row of body.querySelectorAll(
-      ":scope > :is(.settings-row, .settings-detail-summary)",
-    ))
-      row.prepend(tile.cloneNode(true));
+    body.querySelector(":scope > .settings-row")?.prepend(tile);
   }
   body.classList.add("auth-detail");
   body.dataset.themeProtected = "provider-sign-in";
@@ -59,26 +56,13 @@ function markAuthError(body: HTMLElement): void {
   state.refresh();
 }
 
-/** Credentials replace each other; billing routes never fall back. */
-function buildSubscriptionProvider(
-  body: HTMLElement,
-  options: {
-    title: string;
-    name: string;
-    prefix: string;
-    keyLabel: string;
-    placeholder: string;
-    tokenExample: string;
-    billingHint?: string;
-  },
-): void {
+export function buildClaudeSection(body: HTMLElement): void {
   const { api, jpost } = settingsClient();
-  const { title, name, prefix } = options;
+  const prefix = "/api/pi/auth";
   body.innerHTML = `<div class="row auth-actions"></div>
     <div class="keypanel" hidden>
-      ${options.billingHint ? `<p class="hint">${options.billingHint}</p>` : ""}
-      <label class="field">${options.keyLabel}
-        <input type="password" class="key" placeholder="${options.placeholder}" autocomplete="off"></label>
+      <label class="field">Anthropic API key
+        <input type="password" class="key" placeholder="sk-ant-…" autocomplete="off"></label>
       <div class="actions"><button type="button" class="primary savekey">Save key</button></div>
     </div><p class="msg"></p>`;
   const q = <T extends HTMLElement = HTMLElement>(selector: string) =>
@@ -103,21 +87,22 @@ function buildSubscriptionProvider(
     msg.className = "msg " + cls;
     msg.textContent = text;
   };
-  providerDetail(body, title);
+  providerDetail(body, "Claude");
   const applyStatus = (state: AuthStatus) => {
     const on = !!state?.configured;
     markAuth(body, on, state?.label, state?.type);
     showUsageLimits(body, state);
-    signout.hidden = !on || (title === "Claude" && state.type === "ambient");
+    signout.hidden = !on || state.type === "ambient";
     window.dispatchEvent(new Event("recurse-auth-changed"));
   };
   const login = subscriptionLogin(body, {
-    name,
+    name: "Claude",
     prefix,
     jpost,
     show,
     applyStatus,
-    tokenExample: options.tokenExample,
+    tokenExample:
+      '{"token_type":"Bearer","access_token":"…","refresh_token":"…"}',
   });
   const hidePanels = () => {
     login.hide();
@@ -134,7 +119,7 @@ function buildSubscriptionProvider(
     try {
       await login.start();
     } catch {
-      show("err", `Couldn't start ${name} sign-in. Try again.`);
+      show("err", "Couldn't start Claude sign-in. Try again.");
     } finally {
       sub.disabled = false;
     }
@@ -156,10 +141,7 @@ function buildSubscriptionProvider(
       applyStatus(await r.json());
       keypanel.hidden = true;
       q<HTMLInputElement>(".key").value = "";
-      show(
-        "ok",
-        title === "OpenAI" ? "OpenAI API key saved." : "API key saved.",
-      );
+      show("ok", "API key saved.");
     } catch {
       show("err", "Network error. Try again.");
     } finally {
@@ -183,28 +165,188 @@ function buildSubscriptionProvider(
   }
 }
 
-export function buildClaudeSection(body: HTMLElement): void {
-  buildSubscriptionProvider(body, {
-    title: "Claude",
-    name: "Claude",
-    prefix: "/api/pi/auth",
-    keyLabel: "Anthropic API key",
-    placeholder: "sk-ant-…",
-    tokenExample:
-      '{"token_type":"Bearer","access_token":"…","refresh_token":"…"}',
-  });
+interface OpenAIStatus {
+  subscription: "signed_in" | "imported" | "detected" | null;
+  api_key: "saved" | "environment" | null;
+  usage_limits?: UsageLimits;
 }
+
 export function buildOpenAISection(body: HTMLElement): void {
-  buildSubscriptionProvider(body, {
-    title: "OpenAI",
+  const { api, jpost } = settingsClient();
+  const prefix = "/api/pi/codex-auth";
+  body.innerHTML = `
+    <section class="openai-subscription">
+      <h3>ChatGPT subscription</h3>
+      <p class="hint credential-status" role="status">Checking…</p>
+      <div class="row credential-actions">
+        <button type="button" class="secondary signin" disabled>Sign in</button>
+        <button type="button" class="ghost remove-sub" hidden>Remove subscription</button>
+      </div>
+      <p class="msg" role="status"></p>
+    </section>
+    <section class="openai-api-key">
+      <h3>API key</h3>
+      <p class="hint credential-status" role="status">Checking…</p>
+      <div class="row credential-actions">
+        <button type="button" class="secondary editkey" disabled>Add API key</button>
+        <button type="button" class="ghost remove-key" hidden>Remove API key</button>
+      </div>
+      <div class="keypanel" hidden>
+        <p class="hint">Uses OpenAI API billing, not your ChatGPT subscription.</p>
+        <label class="field">OpenAI API key
+          <input type="password" class="key" placeholder="sk-…" autocomplete="off"></label>
+        <div class="actions"><button type="button" class="primary savekey">Save key</button></div>
+      </div>
+      <p class="msg" role="status"></p>
+    </section>`;
+  const q = <T extends HTMLElement = HTMLElement>(selector: string) =>
+    body.querySelector<T>(selector)!;
+  const sub = q(".openai-subscription");
+  const keyPanel = q(".keypanel");
+  const input = q<HTMLInputElement>(".key");
+  const signin = q<HTMLButtonElement>(".signin");
+  const edit = q<HTMLButtonElement>(".editkey");
+  const removeSub = q<HTMLButtonElement>(".remove-sub");
+  const removeKey = q<HTMLButtonElement>(".remove-key");
+  const save = q<HTMLButtonElement>(".savekey");
+  const message = (msg: HTMLElement) => (cls: string, text: string) => {
+    msg.className = `msg ${cls}`;
+    msg.textContent = text;
+  };
+  const showSub = message(q(".openai-subscription > .msg"));
+  const showKey = message(q(".openai-api-key > .msg"));
+  providerDetail(body, "OpenAI");
+  const status = statuses.get(body)!;
+  const applyStatus = ({
+    subscription,
+    api_key: key,
+    usage_limits,
+  }: OpenAIStatus) => {
+    q(".openai-subscription .credential-status").textContent =
+      subscription === "signed_in"
+        ? "Signed in"
+        : subscription
+          ? "Signed in through Codex"
+          : "Not signed in";
+    q(".openai-api-key .credential-status").textContent =
+      key === "saved" ? "Saved" : key ? "Provided by the server" : "Not saved";
+    removeSub.hidden = !subscription || subscription === "detected";
+    removeKey.hidden = key !== "saved";
+    signin.textContent = subscription ? "Sign in again" : "Sign in";
+    edit.textContent = key === "saved" ? "Replace API key" : "Add API key";
+    status.text =
+      subscription && key
+        ? "Subscription + API key"
+        : subscription
+          ? "Subscription · signed in"
+          : key
+            ? "API key · available"
+            : "Not signed in";
+    status.refresh();
+    showUsageLimits(sub, { configured: !!subscription, usage_limits });
+    window.dispatchEvent(new Event("recurse-auth-changed"));
+  };
+  const setBusy = (busy: boolean) => {
+    for (const button of [signin, edit, removeSub, removeKey, save])
+      button.disabled = busy;
+  };
+  const login = subscriptionLogin(sub, {
     name: "ChatGPT",
-    prefix: "/api/pi/codex-auth",
-    keyLabel: "OpenAI API key",
-    placeholder: "sk-…",
+    prefix,
+    jpost,
+    applyStatus,
+    show: showSub,
+    setBusy,
     tokenExample: '{"access_token":"…","refresh_token":"…","expires_in":…}',
-    billingHint:
-      "Uses OpenAI platform API billing, not your ChatGPT subscription.",
   });
+  api(prefix)
+    .then((r) => {
+      if (!r.ok) throw new Error();
+      return r.json();
+    })
+    .then(applyStatus)
+    .catch(() => {
+      markAuthError(body);
+      for (const state of body.querySelectorAll(".credential-status"))
+        state.textContent = "Couldn't check";
+    })
+    .finally(() => setBusy(false));
+
+  signin.onclick = async () => {
+    showSub("", "");
+    keyPanel.hidden = true;
+    setBusy(true);
+    try {
+      await login.start();
+    } catch {
+      showSub("err", "Couldn't start ChatGPT sign-in. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  edit.onclick = () => {
+    login.hide();
+    showKey("", "");
+    keyPanel.hidden = false;
+    input.focus();
+  };
+  const change = async (
+    path: string,
+    data: object | undefined,
+    fallback: string,
+    show: ReturnType<typeof message>,
+    done: () => void,
+  ) => {
+    setBusy(true);
+    sub.inert = true;
+    show("", "");
+    try {
+      const response = await jpost(`${prefix}/${path}`, data);
+      if (!response.ok) return show("err", await errDetail(response, fallback));
+      applyStatus(await response.json());
+    } catch {
+      return show("err", "Network error. Try again.");
+    } finally {
+      sub.inert = false;
+      setBusy(false);
+    }
+    done();
+  };
+  const closeKeyPanel = () => {
+    input.value = "";
+    keyPanel.hidden = true;
+    edit.focus();
+  };
+  save.onclick = () => {
+    const key = input.value.trim();
+    if (!key) return showKey("err", "Enter an API key first.");
+    void change(
+      "api-key",
+      { key },
+      "Couldn't save the API key.",
+      showKey,
+      closeKeyPanel,
+    );
+  };
+  removeKey.onclick = () =>
+    void change(
+      "api-key/remove",
+      undefined,
+      "Couldn't remove the API key.",
+      showKey,
+      closeKeyPanel,
+    );
+  removeSub.onclick = () =>
+    void change(
+      "logout",
+      undefined,
+      "Couldn't remove the subscription sign-in.",
+      showSub,
+      () => {
+        login.hide();
+        signin.focus();
+      },
+    );
 }
 
 // Muse subscription stays hidden until its login flow is verified end-to-end.
@@ -430,21 +572,21 @@ export function buildOpenRouterSection(body: HTMLElement): void {
     }
   });
 }
+/** Custom endpoint keys; the section stays hidden while none is configured. */
 export function buildCustomKeysSection(body: HTMLElement): void {
   body.dataset.themeProtected = "provider-sign-in";
   const { api, jpost } = settingsClient();
-  body.innerHTML = '<div class="customkeys group"></div><p class="msg"></p>';
+  body.innerHTML =
+    '<div class="customkeys group" aria-busy="true"></div><p class="msg"></p>';
   const list = body.querySelector<HTMLElement>(".customkeys")!;
+  const section = body.parentElement!;
+  section.hidden = true;
   type Status = Record<string, { configured?: boolean }>;
   const render = (state: Status) => {
     const refreshers: (() => void)[] = [];
     list.replaceChildren();
     const names = Object.keys(state);
-    if (!names.length) {
-      list.innerHTML =
-        '<p class="hint">No custom model endpoints are configured on this instance.</p>';
-      return;
-    }
+    section.hidden = !names.length;
     for (const name of names) {
       const editor = document.createElement("div");
       editor.innerHTML = `<label class="field">API key
@@ -529,12 +671,18 @@ export function buildCustomKeysSection(body: HTMLElement): void {
         }
       }
     }
+    list.setAttribute("aria-busy", "false");
   };
   api("/api/pi/custom-provider-auth")
-    .then((r) => r.json())
+    .then((r) => {
+      if (!r.ok) throw new Error("Couldn't load custom model keys.");
+      return r.json();
+    })
     .then(render)
     .catch(() => {
+      section.hidden = false;
       body.querySelector(".msg")!.textContent =
         "Couldn't load custom model keys.";
+      list.setAttribute("aria-busy", "false");
     });
 }

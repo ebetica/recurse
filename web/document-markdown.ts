@@ -2,9 +2,12 @@
 // Mermaid, and math. Published siblings precede local paths; web images require
 // a click. Relative links require an in-app policy. Each pane registers its
 // images with the shared click-to-view handler.
-import { htmlPreviewSrcdoc, URL_ATTRIBUTES } from "./artifacts/model.js";
-import { nextArtifactFrameDescriptionId } from "./artifacts/embed.js";
-import { loadDecodedArtifactImage } from "./artifacts/image-loading.js";
+import {
+  htmlPreviewSrcdoc,
+  loadDecodedArtifactImage,
+  nextArtifactFrameDescriptionId,
+  URL_ATTRIBUTES,
+} from "./document-media/index.js";
 import { renderMathIn, renderMathPlaceholders } from "./math.js";
 import { isMermaidLang, renderMermaidIn } from "./mermaid.js";
 import { documentMarkdownFragment } from "./util.js";

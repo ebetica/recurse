@@ -1,6 +1,6 @@
 // Optional draft tags share the sidebar's fuzzy picker and effort defaults.
 import { html, render } from "lit";
-import { askTag } from "../sidebar/actions.js";
+import { askTag } from "../sidebar/index.js";
 import { newAgentSettings } from "../sidebar/script.js";
 import { showDraftModel } from "../models.js";
 import { requestUiStatus } from "../ui-events.js";

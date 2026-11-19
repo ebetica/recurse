@@ -11,7 +11,7 @@ import { retirePath } from "../../../utils/trash_sweep";
 import { slowSpan } from "../../../observability/slow_span";
 import { isDirectory } from "../archive.ts";
 import type { DurableHost } from "../host.ts";
-import { draft, type Held } from "./send.ts";
+import { draft, type Held } from "./submission.ts";
 
 export interface ClearState {
   held: Held[];

@@ -3,6 +3,7 @@ import { buildApp } from "../../src/web/app";
 import { jsonResponse, type Handler } from "../../src/web/router";
 import { publishLoopbackToken } from "../../src/web/request_auth";
 import { createFixture } from "./server/fixture";
+import { installMcpCheckGate } from "./server/mcp_check_gate";
 import { routes as sidebar } from "./server/routes/sidebar";
 import { routes as artifacts } from "./server/routes/artifacts";
 import { routes as git } from "./server/routes/git";
@@ -21,6 +22,7 @@ const app = await buildApp({
   operatorNow: () => operatorTime ?? Date.now() / 1000,
 });
 const { instance, router } = app;
+installMcpCheckGate(instance.mcpChecks, router);
 const fx = createFixture(instance);
 const { load } = fx;
 const { create } = fx.agents;

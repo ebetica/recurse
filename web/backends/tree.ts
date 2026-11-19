@@ -1,15 +1,14 @@
-// One tree loader/current read per backend; slow remotes never hold the home.
-// Abort superseded/invalidated/removed reads; home wake only fences its read.
-// Remotes check API version and back off 5–60s while unreachable.
+// One tree read per backend; slow remotes never hold the home.
+// Abort superseded reads; home wake only fences its read.
+// Exact home snapshots revalidate; remotes check versions and back off.
 // Report body/status changes so callers can skip redraws.
+import type { TreeDelta, TreeUpdate } from "../../src/web/tree_protocol.js";
 import type { TreeNode } from "../types.js";
+import { backendFor, homeBackend, type Backend } from "./backend.js";
 import {
-  backendFor,
   conversationId,
-  homeBackend,
   parseConversationId,
-  type Backend,
-} from "./backend.js";
+} from "./conversation-id/index.js";
 
 export type TreeStatus =
   | "loading"
@@ -30,9 +29,31 @@ export type ApplyTree = (read: TreeRead | null) => boolean;
 const TREE_WEDGE_MS = 12_000;
 let homeVersion: Promise<number> | undefined;
 
+type HomeSnapshot = { etag: string | null; nodes: TreeNode[] };
+
+function applyDelta(
+  snapshot: HomeSnapshot,
+  delta: TreeDelta<TreeNode>,
+): TreeNode[] {
+  if (delta.base !== snapshot.etag) throw new Error("Wrong tree delta base");
+  const rows = new Map(snapshot.nodes.map((node) => [node.id, node]));
+  for (const id of delta.deleted)
+    if (!rows.delete(id)) throw new Error("Unknown deleted tree row");
+  for (const node of delta.changed) rows.set(node.id, node);
+  const order = delta.order ?? snapshot.nodes.map((node) => node.id);
+  if (order.length !== rows.size || new Set(order).size !== rows.size)
+    throw new Error("Invalid tree delta order");
+  return order.map((id) => {
+    const row = rows.get(id);
+    if (!row) throw new Error("Missing tree delta row");
+    return row;
+  });
+}
+
 export class BackendTree {
   status: TreeStatus = "loading";
-  private body: string | null = null;
+  private remoteBody: string | null = null;
+  private homeSnapshot: HomeSnapshot | null = null;
   private generation = 0;
   private retryDelay = 0;
   private retryAt = 0;
@@ -151,33 +172,61 @@ export class BackendTree {
           return apply({ nodes: [], changed: true });
         }
       }
+      const prior = this.homeSnapshot;
+      const opts: RequestInit = { signal };
+      if (!label) {
+        if (prior?.etag) opts.cache = "no-store";
+        opts.headers = { "x-recurse-tree-base": prior?.etag ?? "snapshot" };
+      }
       // Invariant: apiJson keeps the body read under the request's timeout
       // and this read's abort signal.
-      const { response, data: wire } = await this.backend.apiJson<TreeNode[]>(
-        "/api/tree",
-        { signal },
-        { availability: "core" },
-      );
-      if (!response.ok) throw new Error(String(response.status));
+      const { response, data } = await this.backend.apiJson<
+        TreeNode[] | TreeUpdate<TreeNode>
+      >("/api/tree", opts, { availability: "core" });
       if (generation !== this.generation) return false;
-      const body = JSON.stringify(wire);
-      read = {
-        nodes: label
-          ? wire.map((node) => ({
-              ...node,
-              id: conversationId(label, node.id),
-              parent: node.parent ? conversationId(label, node.parent) : null,
-              // Spec: A backend older than the taken_over rename sends
-              // `pinned`; drop this one release after the rename.
-              taken_over: node.taken_over ?? node.pinned,
-            }))
-          : wire,
-        changed: body !== this.body || this.status !== "connected",
-      };
+      if (!response.ok) throw new Error(String(response.status));
+      let wire: TreeNode[];
+      if (label) {
+        if (!Array.isArray(data)) throw new Error("Invalid remote tree");
+        wire = data;
+        const body = JSON.stringify(wire);
+        read = {
+          nodes: wire.map((node) => ({
+            ...node,
+            id: conversationId(label, node.id),
+            parent: node.parent ? conversationId(label, node.parent) : null,
+            // Spec: A backend older than the taken_over rename sends
+            // `pinned`; drop this one release after the rename.
+            taken_over: node.taken_over ?? node.pinned,
+          })),
+          changed: body !== this.remoteBody,
+        };
+        this.remoteBody = body;
+      } else {
+        const etag = response.headers.get("etag");
+        this.homeSnapshot = null;
+        if (Array.isArray(data)) wire = data;
+        else if (prior?.etag && etag && data) {
+          if ("unchanged" in data) {
+            if (etag !== prior.etag)
+              throw new Error("Wrong unchanged tree ETag");
+            wire = prior.nodes;
+          } else wire = applyDelta(prior, data);
+        } else throw new Error("Invalid home tree response");
+        read = {
+          // Invariant: UI edits must not mutate the retained wire base.
+          nodes: structuredClone(wire),
+          changed:
+            etag && prior?.etag
+              ? etag !== prior.etag
+              : JSON.stringify(wire) !== JSON.stringify(prior?.nodes),
+        };
+        this.homeSnapshot = { etag, nodes: wire };
+      }
+      read.changed ||= this.status !== "connected";
       for (const [cid, afterRead] of this.pendingCreations)
         if (generation > afterRead || wire.some((node) => node.id === cid))
           this.pendingCreations.delete(cid);
-      this.body = body;
     } catch {
       if (signal.aborted || generation !== this.generation) return false;
       const status =

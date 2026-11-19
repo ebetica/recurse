@@ -1,10 +1,7 @@
 // Box crops use owner-scoped uploads. Work starts when the box is drawn;
 // prepared sources and crops survive the viewer and failed upload attempts.
-import {
-  backendFor,
-  parseConversationId,
-  resolveUrl,
-} from "../backends/backend.js";
+import { backendFor, resolveUrl } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { holdPdfPage } from "../pdf-view.js";
 import { encodeRasterCrop } from "./crop-encoder.js";
 import type { CommentBox } from "./artifact-state.js";

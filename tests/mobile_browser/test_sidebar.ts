@@ -438,9 +438,9 @@ export const tests: BrowserTest[] = [
     await page.unrouteAll({ behavior: "wait" });
     const latest = await seed(1);
     await page.waitForResponse(async (response) => {
-      if (!response.url().endsWith("/api/tree")) return false;
-      const nodes = await response.json();
-      return nodes.some(
+      if (!response.ok() || !response.url().endsWith("/api/tree")) return false;
+      const payload = await response.json();
+      return (payload.unchanged ? [] : (payload.changed ?? payload)).some(
         (node: any) =>
           node.id === "operator-recent" && node.operator_message_at === latest,
       );
@@ -616,7 +616,7 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await context.close();
   },
-  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3289 retry a sidebar script run that timed out; #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
+  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3448 show the draft row in its listed agent's place; #3289 retry a sidebar script run that timed out; #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
   async function test_sidebar_sections(browser, base) {
     let context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -723,30 +723,29 @@ export const tests: BrowserTest[] = [
     const laterHeld = new Promise<void>((resolve) => (releaseLater = resolve));
     let pinnedRead!: () => void;
     const stale = new Promise<void>((resolve) => (pinnedRead = resolve));
-    let staleTaken = false;
     let staleRequest: Request | undefined;
     const failedReads = new Set<Request>();
     let cancelled!: () => void;
-    const staleCancelled = new Promise<void>(
-      (resolve) => (cancelled = resolve),
-    );
+    const staleCancelled = new Promise<void>((r) => (cancelled = r));
     page.on("requestfailed", (request) => {
       failedReads.add(request);
       if (request === staleRequest) cancelled();
     });
     await page.route(/\/api\/tree(\?|$)/, async (route) => {
       const response = await route.fetch();
-      const rows = (await response.json()) as any[];
-      if (staleTaken) await laterHeld;
-      else if (rows.find((row) => row.id === ids.fresh)?.tags?.pinned) {
-        staleTaken = true;
+      const payload = await response.json();
+      const rows: any[] = payload.unchanged ? [] : (payload.changed ?? payload);
+      const pinned = rows.find(
+        (row) => row.id === ids.fresh && row.tags?.pinned,
+      );
+      if (staleRequest) await laterHeld;
+      else if (pinned) {
         staleRequest = route.request();
         if (failedReads.has(staleRequest)) cancelled();
         pinnedRead();
-        for (const row of rows)
-          if (row.id === ids.stale) row.title = "Stale read applied";
+        pinned.title = "Stale read applied";
         await staleHeld;
-        return route.fulfill({ response, json: rows });
+        return route.fulfill({ response, json: payload });
       }
       await route.fulfill({ response });
     });
@@ -1101,6 +1100,21 @@ async function typedTags(
   await showAgentList(page);
   await header(page, "recurse-dev").waitFor();
   const row = page.locator(`.agent[data-id="${ids.fresh}"]`);
+  const openHoldMenu = async (target: Locator) => {
+    await target.scrollIntoViewIfNeeded();
+    const touch = await context.newCDPSession(page);
+    const box = (await target.boundingBox())!;
+    await touch.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [{ x: box.x + 50, y: box.y + box.height / 2 }],
+    });
+    await page.locator("#hold-menu").getByRole("menu").waitFor();
+    await touch.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await touch.detach();
+  };
   const act = async (label: string) => {
     if (width === 1280) {
       await row.hover();
@@ -1108,23 +1122,11 @@ async function typedTags(
         .getByRole("button", { name: `${label} Fresh idle`, exact: true })
         .click();
     } else {
-      await row.scrollIntoViewIfNeeded();
-      const touch = await context.newCDPSession(page);
-      const box = (await row.boundingBox())!;
-      await touch.send("Input.dispatchTouchEvent", {
-        type: "touchStart",
-        touchPoints: [{ x: box.x + 50, y: box.y + box.height / 2 }],
-      });
-      await page.locator("#hold-menu").getByRole("menu").waitFor();
-      await touch.send("Input.dispatchTouchEvent", {
-        type: "touchEnd",
-        touchPoints: [],
-      });
+      await openHoldMenu(row);
       await page
         .locator("#hold-menu")
         .getByRole("menuitem", { name: label, exact: true })
         .tap();
-      await touch.detach();
     }
   };
   const input = page.getByRole("textbox", { name: "Tag name", exact: true });
@@ -1323,7 +1325,37 @@ async function typedTags(
     await showAgentList(page);
     return agent.id as string;
   };
+  let deliveredFrom!: (rows: string[]) => void;
+  const rowsWhileDelivering = new Promise<string[]>(
+    (resolve) => (deliveredFrom = resolve),
+  );
+  await page.route(
+    "**/api/conversations/*/deliver",
+    async (route) => {
+      const id = new URL(route.request().url()).pathname.split("/")[3];
+      const rows = await page.waitForFunction((id) => {
+        let section = null;
+        const rows = [];
+        for (const el of (globalThis as any).document.querySelectorAll(
+          "#agent-list .tree-section-header, #agent-list .agent",
+        )) {
+          if (el.dataset.section)
+            section = JSON.parse(el.dataset.sectionKey).slice(1).join("/");
+          else if (el.dataset.id === id) rows.push(`agent in ${section}`);
+          else if (el.classList.contains("draft-row"))
+            rows.push(`draft in ${section}`);
+        }
+        return rows.some((row) => !row.endsWith(" in null")) && rows;
+      }, id);
+      deliveredFrom((await rows.jsonValue()) as string[]);
+      await route.continue();
+    },
+    { times: 1 },
+  );
   const newId = await sendDraft("New agent inside recurse-dev");
+  const [draftRow, ...duplicates] = await rowsWhileDelivering;
+  expect(draftRow).toMatch(/^draft in recurse-dev\/(Active|Inbox)$/);
+  expect(duplicates).toEqual([]);
   await takeScreenshot(page, `new-agent-tagged-${width}.png`);
   const sectionAction = async (
     title: string,
@@ -1332,28 +1364,8 @@ async function typedTags(
   ) => {
     const section = header(page, title);
     if (width === 1280) await section.hover();
-    else {
-      await section.scrollIntoViewIfNeeded();
-      const touch = await context.newCDPSession(page);
-      const box = (await section.boundingBox())!;
-      await touch.send("Input.dispatchTouchEvent", {
-        type: "touchStart",
-        touchPoints: [{ x: box.x + 50, y: box.y + box.height / 2 }],
-      });
-      await page.locator("#hold-menu").getByRole("menu").waitFor();
-      await touch.send("Input.dispatchTouchEvent", {
-        type: "touchEnd",
-        touchPoints: [],
-      });
-      await touch.detach();
-    }
-    if (screenshot && process.env.RECURSE_SCREENSHOT_DIR)
-      await page.screenshot({
-        path: join(
-          process.env.RECURSE_SCREENSHOT_DIR,
-          `${screenshot}-${width}.png`,
-        ),
-      });
+    else await openHoldMenu(section);
+    if (screenshot) await takeScreenshot(page, `${screenshot}-${width}.png`);
     if (width === 1280)
       await section.getByRole("button", { name: label, exact: true }).click();
     else

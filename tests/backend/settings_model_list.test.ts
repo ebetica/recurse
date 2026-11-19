@@ -116,7 +116,7 @@ test("the Settings list holds only logged-in routes and custom providers, in rou
       {
         id: "openai/gpt-6-sol",
         label: "GPT-6 Sol",
-        route: "OpenAI API",
+        route: "OpenAI API key",
         context_window: 272_000,
         reasoning_levels: ["low", "high"],
       },

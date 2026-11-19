@@ -66,8 +66,10 @@ remain refused. Homes require revision 8 before forwarding those reads.
 
 ## Source files
 
-- `schema.ts` defines the JSON schemas and TypeScript types.
-- `agent.ts` is the shared Agent builder for v1 reads and sidebar snapshots.
+- [schema/](schema/) defines the shared JSON
+  schemas, API version constants and TypeScript types without application imports.
+- [Shared agent metadata](../../agent_metadata/README.md) builds Agents for v1
+  reads and sidebar snapshots through its public entry.
 - `routes.ts` serves cached tree state and live shells using that builder.
 
 ## Rules for changes

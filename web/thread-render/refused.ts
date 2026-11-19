@@ -1,8 +1,7 @@
-// A refused reply's note: the reason, and Resend, which puts the operator's
-// text, with its upload links, back in the composer. Durable leaves the
-// refused turn out of later model requests (src/agents/durable/refusals.ts).
+// A refused reply's reason and Resend button; the caller owns composer actions.
+// This template has no orchestration dependency. Durable omits refused turns
+// from later model requests (src/agents/durable/refusals.ts).
 import { html, nothing, type TemplateResult } from "lit";
-import { resendText } from "../composer.js";
 import type { MessageEntry } from "../types.js";
 
 const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
@@ -10,6 +9,7 @@ const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
 export function refusedNoteT(
   entry: MessageEntry,
   full: string,
+  resendText: (text: string) => void,
 ): TemplateResult {
   const text = entry.refused_text?.replace(/^\[recurse-origin: [^\]]*\]\n/, "");
   return html`<div

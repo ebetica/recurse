@@ -1,9 +1,17 @@
 # HTTP boundary
 
+Shared matching, query coercion and response primitives live in
+[router/](router/), without application dependencies.
+
 `app.ts` composes Config, instance services, routes and authentication without
 listening or starting work. Before listening, startup prepares storage/logging,
 cleans owned processes, checks the target and loads the runtime. Until the
 projection is ready, mutations/tree/views return 503 with retry guidance.
+[Tree deltas](tree_delta.ts) use `X-Recurse-Tree-Base: snapshot` to bootstrap
+with ordinary array reads and 304s. Later reads send the exact weak ETag and
+bypass HTTP caches. They get changed rows, deletions, order if changed, or
+an unchanged marker. A missing base or larger patch gets the full array.
+History is bounded; legacy and remote reads stay unchanged.
 After listening, startup resolves commit identity for the agents' Git clone in
 the background, including legacy `recurse-agent` migration. Neither startup nor
 conversation loading waits for identity lookup; failures reach `recurse.log`.
@@ -33,6 +41,10 @@ server; excess clients receive 429 with Retry-After and retain polling fallback.
 Follower retries and resumed connections add jitter; the first end or failure per
 follower is logged without credentials or response content.
 Unavailable conversation models return an actionable 422 after authentication.
+The shared [model validation](../agents/durable/model_selection/) and
+[shutdown refusal](../agents/durable/stopping_error/) contracts let HTTP recognize
+those failures without importing the Durable host. Shutdown refusals return 503
+with Retry-After; model choices never fall back to another provider.
 Direct server startup probes loopback and the configured address for an existing
 listener before initializing state. This prevents wildcard and 127.0.0.1
 listeners from shadowing each other, but cannot detect every overlapping
@@ -41,6 +53,7 @@ starting its replacement.
 
 ## Authentication and provenance
 
+`app.ts` registers `login.ts` and `two_factor.ts` as sibling route groups.
 `request_auth.ts` authenticates before body decoding. Service requests are
 bounded and audited, never operator-authorized. Loopback checks use the
 proxy-resolved peer and constant-time token comparison. Joined duplicate
@@ -58,7 +71,13 @@ that part; other prompt reads retain their existing authentication and content.
 The backend proxy preserves this restriction without asserting caller identity.
 Settings (including MCP), provider authentication and login/password routes
 refuse all agent markers, including empty and joined duplicate values.
+OpenAI Settings mutations replace or remove one route at a time. The ChatGPT
+subscription uses the subscription route and its own usage counters; platform
+API-key changes do not reset them. Codex CLI sign-in can auto-import once, but
+only before either credential is saved or removed in Settings.
 Agent settings tools use Config/theme files directly instead of these routes.
+Successful MCP sign-in responses wait for connection-check admission, not its
+execution, so the next status read sees the check or its completed result.
 Raw file-provider model selections on create, spawn and model changes require
 operator authentication and reject agent markers. Agents use these models only
 through a saved Settings effort level. Spawn receipts retain server-owned model
@@ -73,7 +92,8 @@ Agent-finished notification devices are saved through
 `/api/settings/notifications/*` (`notifications.ts`), so the same refusal
 applies; sending lives in [../push_notifications.ts](../push_notifications.ts).
 The manifest and named brand icons are public GET/HEAD resources, including the
-custom icon and name. Other static files remain authenticated. Default icon URLs
+custom icon and name. The manifest uses standalone display rather than immersive
+fullscreen on Android. Other static files remain authenticated. Default icon URLs
 carry a hash of their bytes; icon and manifest responses revalidate, while custom
 icon responses are no-store.
 

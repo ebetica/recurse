@@ -6,9 +6,10 @@ import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { PEN_ICON, actionIcon } from "../icons.js";
 import type { TreeNode } from "../types.js";
-import { parseConversationId } from "../backends/backend.js";
-import { runAction, shownTags } from "./actions.js";
-import { startNewAgent } from "../composer.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
+import { runAction } from "./actions.js";
+import { shownTags } from "./index.js";
+import { startDraft } from "./action-handlers.js";
 import defaultSidebar from "./default_sidebar.js";
 import { arrangedScriptRows, scriptOutput } from "./script.js";
 import {
@@ -17,7 +18,7 @@ import {
   sidebarRows,
   type Action,
   type Section,
-} from "./arrangement.js";
+} from "../../src/sidebar_script/index.js";
 import type { HoldItem } from "./hold.js";
 
 const FOLDS_KEY = "recurse.sidebarFolds";
@@ -92,7 +93,7 @@ export function rowActions(section: Section, id: string): Action[] {
 
 const runSectionAction = (action: Action, section: Section, anchor: DOMRect) =>
   action.start
-    ? startNewAgent(anchor, section.backend, action.set)
+    ? startDraft(section.backend, action.set)
     : runAction(action, action.ids, anchor, true);
 
 const anchorOf = (e: Event) =>

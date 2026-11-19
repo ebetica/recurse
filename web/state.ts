@@ -1,7 +1,7 @@
 // Shared state contains only cross-module mutable view state/constants. Private
 // caches, retry counts and ranks stay with their owning module.
 import type { TreeNode, Conversation, Draft } from "./types.js";
-import { ConversationCache } from "./conversation/cache.js";
+import { ConversationCache } from "./conversation/cache/index.js";
 import type { PendingManualTitle } from "./title-actions.js";
 
 export const DRAFT = "__draft__";
@@ -37,6 +37,8 @@ export interface AppState {
   pendingTakeovers: Record<string, boolean>;
   pendingSafety: Record<string, boolean>;
   pendingStops: Record<string, boolean>;
+  // Only the browser's Stop POST is in flight; /view owns run status.
+  stopPostInFlightId: string | null;
 }
 
 export const state: AppState = {
@@ -53,6 +55,7 @@ export const state: AppState = {
   pendingTakeovers: {},
   pendingSafety: {},
   pendingStops: {},
+  stopPostInFlightId: null,
 };
 
 // Only own tree keys are selectable; inherited constructor/prototype keys from

@@ -269,7 +269,7 @@ export const tests: BrowserTest[] = [
       expect(pixels.pixel[1]).toBeGreaterThanOrEqual(250);
       expect(pixels.pixel[2]).toBeLessThanOrEqual(5);
       await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await page.locator('#settings-nav button[data-cat="agents"]').click();
       await page
         .locator(".settings-cat:not([hidden])")
         .getByText(/HTTPS/)

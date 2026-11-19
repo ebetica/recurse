@@ -1,13 +1,26 @@
-// Selection comments: quote offers and snapshot binding.
+// Selection comments own quote offers and snapshots; viewers supply rendering.
 // Cmd/Ctrl+Enter stages a draft and focuses the viewer; the next press sends.
 // Adding a comment focuses its rendered card before any later reader input.
 // Pre-gesture queued scrolls do not cancel the selection's comment offer.
-import { selectionCommentRange } from "../comments/selection-text.js";
+import { selectionCommentRange } from "../comments/selection-text/index.js";
+import {
+  commentMount,
+  selectionCommentOwner,
+  selectionDraft,
+  setSelectionDraft,
+  type SelectionDraft,
+  type SelectionSource,
+} from "../comments/selection-draft/index.js";
 import { resizeTextarea } from "../composer/textarea.js";
-import { displayedInfo, renderBar, renderComments } from "./comment-bar.js";
-import { prepareCommentCrop, type PreparedCrop } from "./comment-crops.js";
-import { commentMount } from "./artifact-state.js";
-import type { Comment, CommentBox, CommentPane } from "./artifact-state.js";
+import { placeBox } from "../files/index.js";
+import { prepareCommentCrop } from "./comment-crops.js";
+import { displayedInfo } from "./artifact-state.js";
+import type {
+  Comment,
+  CommentBox,
+  CommentPane,
+  CommentRendering,
+} from "./artifact-state.js";
 
 // ---- selection comments --------------------------------------------------
 export const comments = new Map<string, Map<string, Comment>>();
@@ -105,22 +118,6 @@ export function boxFrame(root: Element, page?: number): HTMLElement | null {
     ? (root as HTMLElement)
     : root.querySelector(selector);
 }
-/** Show `box` as a highlight over its frame. */
-export function placeBox(
-  frame: Element,
-  box: CommentBox,
-  mark = frame.ownerDocument.createElement("mark"),
-): HTMLElement {
-  mark.className = "report-cmark report-cbox";
-  Object.assign(mark.style, {
-    left: `${box.x * 100}%`,
-    top: `${box.y * 100}%`,
-    width: `${box.w * 100}%`,
-    height: `${box.h * 100}%`,
-  });
-  if (mark.parentNode !== frame) frame.append(mark);
-  return mark;
-}
 function unwrapMark(mark: Element): void {
   const parent = mark.parentNode!;
   while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
@@ -160,35 +157,6 @@ export function orderedComments(
   });
 }
 
-interface SelectionSource {
-  doc: Document;
-  pane: CommentPane | null;
-  agentId: string | null;
-  artifactId: string | null;
-  version: string | null;
-  generation: number;
-  active: boolean;
-  pointerIds: Set<number>;
-  interactionStarted: number;
-  touch: boolean;
-  changed: boolean;
-  blocked: boolean;
-  blockedRange: Range | null;
-  offerToken: number;
-}
-
-interface SelectionDraft {
-  key: string;
-  version: string;
-  root: Element;
-  source: SelectionSource;
-  range: Range;
-  quote: string;
-  box?: CommentBox;
-  crop?: PreparedCrop;
-  mark?: HTMLElement;
-}
-let selectionDraft: SelectionDraft | null = null;
 const popover = document.createElement("div");
 popover.className = "menu form report-comment-popover";
 popover.setAttribute("role", "dialog");
@@ -216,15 +184,6 @@ popoverComment.textContent = "Comment";
 popoverActions.append(popoverCancel, popoverComment);
 popover.append(popoverLabel, popoverInput, popoverActions);
 document.body.appendChild(popover);
-/** The viewer owning the floating selection-comment draft. */
-export function selectionCommentOwner(): HTMLElement | null {
-  if (!selectionDraft) return null;
-  return (
-    selectionDraft.source.pane ||
-    selectionDraft.root.closest<HTMLElement>(".pane-body") ||
-    commentMount.current
-  );
-}
 export function cancelSelectionComment(owner?: HTMLElement): void {
   if (owner && selectionCommentOwner() !== owner) return;
   // Invariant: Only clear the page selection when this popover owned one:
@@ -234,7 +193,7 @@ export function cancelSelectionComment(owner?: HTMLElement): void {
   const owned = selectionDraft !== null || !popover.hidden;
   selectionDraft?.mark?.remove();
   selectionDraft?.crop?.release();
-  selectionDraft = null;
+  setSelectionDraft(null);
   popover.hidden = true;
   popoverInput.value = "";
   if (!owned) {
@@ -243,7 +202,8 @@ export function cancelSelectionComment(owner?: HTMLElement): void {
   }
   window.getSelection()?.removeAllRanges();
   selectionRoot = null;
-  if (commentMount.current) renderBar(commentMount.current);
+  if (commentMount.current)
+    commentPanes.get(commentMount.current)!.renderBar(commentMount.current);
 }
 popoverCancel.addEventListener("click", () => cancelSelectionComment());
 popoverInput.addEventListener("input", () => {
@@ -416,18 +376,18 @@ function offerSelectionComment(source: SelectionSource): void {
   if (!same) {
     selectionDraft?.mark?.remove();
     selectionDraft?.crop?.release();
-    selectionDraft = {
+    setSelectionDraft({
       key: id,
       version,
       root: selected.root,
       source,
       range: selected.range.cloneRange(),
       quote,
-    };
+    });
     popoverInput.value = "";
   }
   positionPopover(selected.range);
-  renderBar(pane);
+  commentPanes.get(pane)!.renderBar(pane);
 }
 function selectionInteractionActive(source: SelectionSource): boolean {
   return source.pointerIds.size > 0 || source.touch;
@@ -465,7 +425,7 @@ export function offerBoxComment(
   if (selectionDraft?.mark !== mark) cancelSelectionComment();
   const range = frame.ownerDocument.createRange();
   range.selectNode(mark);
-  selectionDraft = {
+  setSelectionDraft({
     key: id,
     version,
     root: frame,
@@ -475,7 +435,7 @@ export function offerBoxComment(
     box,
     crop: prepareCommentCrop(pane, box),
     mark,
-  };
+  });
   positionPopover(range);
   popoverInput.focus({ preventScroll: true });
 }
@@ -506,12 +466,15 @@ export function handleCommentShortcut(
   event.stopPropagation();
   button.click();
 }
-const commentPanes = new WeakSet<Element>();
+const commentPanes = new WeakMap<Element, CommentRendering>();
 /** Let `pane` take selection comments when a press starts in it, and now
  * unless another shown pane holds them. */
-export function claimComments(pane: CommentPane): void {
+export function claimComments(
+  pane: CommentPane,
+  rendering: CommentRendering,
+): void {
   if (!commentPanes.has(pane)) {
-    commentPanes.add(pane);
+    commentPanes.set(pane, rendering);
     pane.addEventListener("keydown", (event) =>
       handleCommentShortcut(event, pane),
     );
@@ -687,7 +650,7 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
   });
   draft.crop = undefined;
   cancelSelectionComment();
-  renderComments(commentMount.current);
+  commentPanes.get(commentMount.current)!.renderComments(commentMount.current);
   if (focusCard)
     commentMount.current
       ?.querySelector<HTMLTextAreaElement>(

@@ -14,7 +14,8 @@ function visibleFocusable(container: HTMLElement): HTMLElement[] {
     (element) =>
       !element.hidden &&
       !element.closest("[inert]") &&
-      element.getClientRects().length > 0,
+      element.getClientRects().length > 0 &&
+      getComputedStyle(element).visibility !== "hidden",
   );
 }
 

@@ -52,13 +52,13 @@ export const disclosuresTests: BrowserTest[] = [
       await page.locator(".prompt-banner-row").click();
       expect(
         await page.locator(".prompt-block-head").first().innerText(),
-      ).toContain("LATEST CAPTURED REQUEST");
-      expect(
-        await page.locator(".prompt-block-head").nth(1).innerText(),
-      ).toContain("MESSAGE 1 · BASELINE");
+      ).toContain("System messages · latest captured request");
+      expect(await page.locator(".prompt-block-head").nth(1).innerText()).toBe(
+        "Message 1 · baseline",
+      );
       const delta = page.locator(".system-message").last();
-      expect(await delta.locator(".prompt-block-head").innerText()).toContain(
-        `MESSAGE ${systemMessages.length} · DELTA`,
+      expect(await delta.locator(".prompt-block-head").innerText()).toBe(
+        `Message ${systemMessages.length} · delta`,
       );
       expect(await delta.locator(".prompt-msg").innerText()).toBe(
         "Sets: project_context, cwd",
@@ -105,7 +105,7 @@ export const disclosuresTests: BrowserTest[] = [
         .getByText("Legacy turn-start prompt", { exact: true })
         .waitFor();
       expect(await page.locator(".prompt-block-head").innerText()).toContain(
-        "SYSTEM MESSAGES UNAVAILABLE",
+        "Turn-start prompt · system messages unavailable",
       );
       expect(errors).toEqual([]);
       await page.close();

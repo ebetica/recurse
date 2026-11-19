@@ -1,7 +1,7 @@
-// Operator routes for agent-finished notification devices, under
-// /api/settings/ so request_auth refuses agent-marked requests; only the
-// VAPID public key is returned. Also serves the root-scope worker
-// (web/push-worker.ts) and the manifest iOS needs for Home Screen Web Push.
+// Operator notification routes refuse agent-marked requests and expose only the
+// VAPID public key. Also serves the root push worker and install manifest.
+// Standalone avoids cutout-sized jumps during live updates in installed
+// Android fullscreen apps, not seen in Chrome tabs.
 
 import { readFile } from "node:fs/promises";
 import { brandResponse, defaultIconUrl, readBrand } from "../branding";
@@ -52,7 +52,7 @@ export function registerNotificationRoutes(
         short_name: brand.name,
         start_url: "/",
         scope: "/",
-        display: "fullscreen",
+        display: "standalone",
         icons: brand.icon
           ? [
               {

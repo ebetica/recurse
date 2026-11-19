@@ -182,7 +182,7 @@ export const tests: BrowserTest[] = [
         .toBe(false);
     }
   },
-  // Feature: #2991 installed fullscreen apps keep controls below the display cutout.
+  // Regression: #3512 #2991 installed apps avoid fullscreen cutout jumps and keep controls clear of safe areas.
   async function test_fullscreen_safe_area(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 412, height: 915 },
@@ -203,7 +203,7 @@ export const tests: BrowserTest[] = [
     expect(
       (await (await page.request.get(new URL(manifest!, base).href)).json())
         .display,
-    ).toBe("fullscreen");
+    ).toBe("standalone");
     const cdp = await context.newCDPSession(page);
     await cdp.send("Emulation.setSafeAreaInsetsOverride", {
       insets: { top: 60, bottom: 24 },
@@ -514,18 +514,15 @@ export const tests: BrowserTest[] = [
         await page.locator("#settings-btn").focus();
         await page.keyboard.press("Tab");
         expect(
-          await page
-            .locator("#trash-btn")
-            .evaluate(
-              (element) => element.ownerDocument.activeElement === element,
-            ),
-        ).toBeTrue();
-        await page.keyboard.press("Tab");
-        expect(
           await page.evaluate(
             "document.activeElement?.closest('#sidebar') === null",
           ),
         ).toBeTrue();
+        await page.locator("#pane-rail-panels .rail-btn").last().focus();
+        await page.keyboard.press("Tab");
+        await browserExpect(
+          page.locator("#pane-rail > #trash-btn"),
+        ).toBeFocused();
         await page.locator('.rail-btn[data-pane="report"]').click();
         await assertArtifactVersionMenuEscape(page);
         await visibleAndUncovered(page, ".agent");
@@ -1174,7 +1171,8 @@ export const tests: BrowserTest[] = [
     for (const selector of ["#menu-btn", "#pane-fab"])
       misses.push(...(await short(selector)));
     await page.locator("#input").fill("A message");
-    for (const selector of ["#attach", "#send"]) {
+    const corners = ["#attach", "#send", "#safety-btn:not(:disabled)"];
+    for (const selector of [...corners, "#model-row.on #model-trigger"]) {
       const hits = await page.locator(selector).evaluate((element) => {
         const document = (globalThis as any).document;
         const box = element.getBoundingClientRect();
@@ -1189,10 +1187,8 @@ export const tests: BrowserTest[] = [
           ),
         );
       });
-      expect(hits).toEqual([true, true, true, true]);
+      expect([selector, ...hits]).toEqual([selector, true, true, true, true]);
     }
-    expect(await page.locator("#menu-btn").isVisible()).toBeTrue();
-    expect(await page.locator("#pane-fab").isVisible()).toBeTrue();
     await page.locator("#send").tap();
     await page
       .locator(".msg.assistant .content", { hasText: "Acknowledged." })

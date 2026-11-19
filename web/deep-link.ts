@@ -2,7 +2,7 @@
 // Fragments never reach HTTP and remain separate from generation query keys.
 // sidebar.ts wires history; conversation.ts chooses the boot view.
 
-import { parseConversationId } from "./backends/backend.js";
+import { parseConversationId } from "./backends/conversation-id/index.js";
 
 export const AGENT_LINK_KEY = "agent";
 export const TREE_LINK_KEY = "trees";

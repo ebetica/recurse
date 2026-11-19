@@ -17,7 +17,7 @@ import {
 import { releaseLabel, type Release } from "../../release";
 import { HttpError, jsonResponse, type Handler, type Router } from "../router";
 import { API_MAJOR, API_REVISION, apiSchema, type AgentStatus } from "./schema";
-import { agent, agentStatus } from "./agent";
+import { agent, agentStatus } from "../../agent_metadata/index";
 
 interface Shell {
   id: string;

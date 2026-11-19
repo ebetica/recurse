@@ -94,6 +94,7 @@ async function discover(signal: AbortSignal): Promise<void> {
   if (discovering) return;
   discovering = true;
   discoveryRequested = false;
+  let listed = false;
   try {
     const response = await api("/api/backends", { signal });
     if (!response.ok) return;
@@ -138,9 +139,13 @@ async function discover(signal: AbortSignal): Promise<void> {
       registerBackend(backend);
       treeOf(backend, row.last_contact);
     }
+    listed = true;
   } catch {
   } finally {
-    if (!signal.aborted) discovered = true;
+    // Invariant: Only an answered listing counts as discovery, so boot
+    // restore keeps a linked remote through a failed one; the next poll
+    // retries it.
+    if (listed && !signal.aborted) discovered = true;
     discovering = false;
     changed();
     if (discoveryRequested) setTimeout(queueDiscovery, 0);
@@ -188,7 +193,7 @@ export function remoteSectionHeader(backend: Backend): TemplateResult {
             class="backend-settings"
             @click=${() =>
               window.dispatchEvent(
-                new CustomEvent("recurse:open-settings", { detail: "account" }),
+                new CustomEvent("recurse:open-settings", { detail: "remotes" }),
               )}
           >
             ${message} — Remotes

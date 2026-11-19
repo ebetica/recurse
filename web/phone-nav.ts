@@ -82,7 +82,10 @@ export function syncPhoneSelection(
   if (!phoneNavigation()) return false;
   seed();
   if (pendingSelection || (phoneListEntry() && correction)) return true;
-  const layers = Number(history.state?.settings || 0) + paneDepth();
+  const layers =
+    Number(history.state?.settings || 0) +
+    paneDepth() +
+    (history.state?.artifactView?.depth || 0);
   if (!correction && layers) {
     pendingSelection = { view, url };
     history.go(-layers - Number(!phoneListEntry()));
@@ -91,6 +94,7 @@ export function syncPhoneSelection(
   const {
     settings: _settings,
     phonePane: _pane,
+    artifactView: _artifact,
     ...base
   } = history.state ?? {};
   const next = {
@@ -169,7 +173,7 @@ export function installPhonePaneHistory(
       history.state?.phonePane &&
       !history.state?.settings
     )
-      history.back();
+      history.go(-paneDepth() - (history.state?.artifactView?.depth || 0));
   };
   syncPaneSelection = () => {
     wasOpen = false;
@@ -181,6 +185,7 @@ export function installPhonePaneHistory(
   });
   addEventListener("popstate", () => {
     const pane = history.state?.phonePane;
+    if (pane) paneUrl = location.href;
     if (
       phoneNavigation() &&
       pane &&

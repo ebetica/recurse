@@ -22,8 +22,11 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { mountPdf, releasePdfs } from "./pdf-view.js";
 import { backendFor } from "./backends/backend.js";
 import { attachmentSize } from "./agent-attachments.js";
-import { jumpToFile, jumpToMessage } from "./conversation/navigation.js";
-import { scrollToLatest } from "./conversation/controls.js";
+import {
+  jumpToFile,
+  jumpToMessage,
+  scrollToLatest,
+} from "./conversation/navigation.js";
 import { canDraw, drawOn } from "./image-preview/drawing.js";
 import {
   installImageWheelNavigation,
@@ -36,8 +39,12 @@ import {
   drawingEditorOpen,
 } from "./image-preview/editor.js";
 import { state } from "./state.js";
-import { commentMount, type CommentPane } from "./artifacts/artifact-state.js";
-import { discardCurrent, renderComments } from "./artifacts/comment-bar.js";
+import { commentMount } from "./comments/selection-draft/index.js";
+import {
+  createCommentState,
+  type CommentPane,
+} from "./artifacts/artifact-state.js";
+import { commentRendering, discardCurrent } from "./artifacts/comment-bar.js";
 import {
   claimComments,
   commentKey,
@@ -62,12 +69,13 @@ import { copyText } from "./tool_details.js";
 import { highlightSource } from "./source-preview.js";
 import { scrollDocumentFragment } from "./document-markdown.js";
 import { changesStamp, filesMarkdown, noteReviewed } from "./files/markdown.js";
-import { installBoxComments, touchDrewBox } from "./files/box-comments.js";
+import { installBoxComments, touchDrewBox } from "./files/index.js";
 import { diffPending, diffPreview, isDiff } from "./files/diff-preview.js";
 import {
   currentFilesRequest,
   ensureFilePreview,
   fileKindLabel,
+  fileTypeLabel,
   filesPaneAvailable,
   filesRefreshDue,
   mergeSessionFiles,
@@ -1291,10 +1299,7 @@ function unavailableLabel(file: SessionFile): string | null {
 
 function metaLine(file: SessionFile, extra: string[]): string {
   return [
-    file.preview === "document" &&
-    (!file.media_type || file.media_type === "application/octet-stream")
-      ? ""
-      : file.media_type || "application/octet-stream",
+    fileTypeLabel(file.name, file.media_type || ""),
     file.size > 0 ? attachmentSize(file.size) : "",
     fileKindLabel(file.storage),
     ...extra,
@@ -1511,15 +1516,7 @@ function syncComments(element: FilesEl, cid: string, file: SessionFile | null) {
   const doc = file?.id && element.querySelector(".report-doc") ? file : null;
   // Invariant: Mutated in place: an in-flight send clears the flags on the
   // object it started with.
-  element._rs ??= {
-    deleting: false,
-    sending: false,
-    sendFailed: false,
-    sendSeq: 0,
-    agentId: cid,
-    selId: null,
-    contentInfo: null,
-  };
+  element._rs ??= createCommentState(cid);
   Object.assign(element._rs, {
     agentId: cid,
     selId: doc?.id ?? null,
@@ -1534,9 +1531,9 @@ function syncComments(element: FilesEl, cid: string, file: SessionFile | null) {
   }
   const source = element.querySelector(".files-source");
   if (source) highlightSource(source, doc.name);
-  claimComments(pane);
+  claimComments(pane, commentRendering);
   reanchor(pane, doc.id!);
-  renderComments(pane);
+  commentRendering.renderComments(pane);
 }
 
 function observePreviews(element: FilesEl, id: string): void {

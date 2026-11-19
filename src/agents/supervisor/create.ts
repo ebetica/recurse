@@ -4,7 +4,7 @@
 // DurableHost owns Harness admission; cancellation bypasses failure cleanup.
 
 import type { Config } from "../../config";
-import type { Tags } from "../conversation_tags";
+import type { Tags } from "../../agent_metadata/index";
 import {
   WARNING,
   logEvent,

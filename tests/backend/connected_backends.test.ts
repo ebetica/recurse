@@ -289,6 +289,15 @@ test("home connects to password and open backends without exposing credentials",
         return new Response("not a backend");
       },
     });
+    let elsewhereHits = 0;
+    const elsewhere = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch() {
+        elsewhereHits++;
+        return new Response("not a backend");
+      },
+    });
     const agentHeaders = {
       "x-loopback-token": token,
       "x-recurse-agent": cid,
@@ -318,6 +327,36 @@ test("home connects to password and open backends without exposing credentials",
       const loaded = await ConnectedBackends.load(piDir, "home", warn);
       await loaded.refreshStale();
       expect(hits).toBe(0);
+      const elsewhereUrl = `http://127.0.0.1:${elsewhere.port}`;
+      for (const [sent, status, detail] of [
+        [
+          elsewhereUrl,
+          409,
+          `dismiss is now at ${url}, not ${elsewhereUrl}; check the address and sign in again`,
+        ],
+        [
+          undefined,
+          422,
+          "The sign-in did not say which address it was for; reload the page and sign in again",
+        ],
+        [
+          `ftp://127.0.0.1:${elsewhere.port}`,
+          422,
+          "URL must use HTTPS (or HTTP on loopback), without credentials, query or fragment",
+        ],
+      ] as const) {
+        const refused = await call("/api/backends/dismiss/sign-in", "POST", {
+          url: sent,
+          password: PASSWORD,
+        });
+        expect(refused.status).toBe(status);
+        expect(await refused.json()).toEqual({ detail });
+        expect(
+          store.list().find((row) => row.label === "dismiss"),
+        ).toMatchObject({ url, state: "pending" });
+        expect(hits).toBe(0);
+        expect(elsewhereHits).toBe(0);
+      }
       for (const [path, method, body] of [
         ["/api/backends/dismiss/sign-in", "POST", { password: PASSWORD }],
         ["/api/backend-keys", "GET", undefined],
@@ -340,6 +379,7 @@ test("home connects to password and open backends without exposing credentials",
       expect(
         (
           await call("/api/backends/requested/sign-in", "POST", {
+            url: remoteUrl,
             password: "wrong",
           })
         ).status,
@@ -350,6 +390,7 @@ test("home connects to password and open backends without exposing credentials",
       expect(
         (
           await call("/api/backends/requested/sign-in", "POST", {
+            url: remoteUrl,
             password: PASSWORD,
           })
         ).status,
@@ -405,6 +446,7 @@ test("home connects to password and open backends without exposing credentials",
       expect(hits).toBe(0);
     } finally {
       listener.stop(true);
+      elsewhere.stop(true);
     }
     expect((await connect("invalid label", remoteUrl)).status).toBe(422);
     for (const label of [".", "..", "...", "........"]) {
@@ -412,6 +454,7 @@ test("home connects to password and open backends without exposing credentials",
       expect(
         (
           await call(`/api/backends/${label}/sign-in`, "POST", {
+            url: remoteUrl,
             password: PASSWORD,
           })
         ).status,
@@ -420,7 +463,7 @@ test("home connects to password and open backends without exposing credentials",
         expect([403, 404]).toContain(
           (await call(`/api/backends/${label}/tree`)).status,
         );
-      expect(() => store.signIn(label, PASSWORD)).toThrow(
+      expect(() => store.signIn(label, remoteUrl, PASSWORD)).toThrow(
         "invalid backend label",
       );
       expect(
@@ -681,6 +724,7 @@ test("home connects to password and open backends without exposing credentials",
     try {
       await store.request("stalled", `http://127.0.0.1:${stalled.port}`, cid);
       const timedOut = await call("/api/backends/stalled/sign-in", "POST", {
+        url: `http://127.0.0.1:${stalled.port}`,
         password: PASSWORD,
       });
       expect(timedOut.status).toBe(504);

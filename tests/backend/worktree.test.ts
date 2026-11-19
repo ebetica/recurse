@@ -36,14 +36,15 @@ async function runCli(
   args: string[],
   cwd: string,
   env: NodeJS.ProcessEnv,
-): Promise<number> {
+): Promise<{ code: number; stderr: string }> {
   const child = Bun.spawn([process.execPath, ...args], {
     cwd,
     env,
     stdout: "ignore",
-    stderr: "ignore",
+    stderr: "pipe",
   });
-  return child.exited;
+  const stderr = await new Response(child.stderr).text();
+  return { code: await child.exited, stderr };
 }
 async function sourceRepo(path: string): Promise<void> {
   mkdirSync(path, { recursive: true });
@@ -173,21 +174,53 @@ test("sweep preserves creation before Git returns and admits the completed check
   }
 });
 
-test("enter creates a real worktree; unknown options fail", async () => {
+// Regression: #3479 worktrees from the install checkout broke on deploy.
+test("enter creates a real worktree, never from the install checkout; unknown options fail", async () => {
   const root = mkdtempSync(join(tmpdir(), "worktree-cli-"));
   const source = join(root, "source");
+  const install = join(root, "install");
+  const installWorktree = join(root, "install-worktree");
+  const flatInstall = join(root, "flat-install");
   await sourceRepo(source);
+  await sourceRepo(install);
+  await git(install, "worktree", "add", "--detach", installWorktree);
+  mkdirSync(flatInstall);
+  await git(flatInstall, "init", "--bare", "-b", "main");
+  await git(flatInstall, "config", "core.bare", "false");
+  await git(flatInstall, "config", "core.worktree", flatInstall);
+  await git(flatInstall, "config", "user.name", "fixture");
+  await git(flatInstall, "config", "user.email", "fixture@example.invalid");
+  await git(flatInstall, "commit", "--allow-empty", "-m", "fixture");
   const env = {
     ...HERMETIC_ENV,
     CHAT_DATA_DIR: join(root, "data"),
     RECURSE_AGENT_ID: "fixture-agent",
+    RECURSE_SRC: install,
   };
   try {
-    expect(await runCli([tool, "enter", "cli-worktree"], source, env)).toBe(0);
+    for (const [cwd, src] of [
+      [install, install],
+      [installWorktree, install],
+      [flatInstall, flatInstall],
+    ] as const)
+      expect(
+        await runCli([tool, "enter", "from-install"], cwd, {
+          ...env,
+          RECURSE_SRC: src,
+        }),
+      ).toEqual({
+        code: 1,
+        stderr: `Recurse's install checkout ($RECURSE_SRC) is replaced on update, which breaks worktrees made from it; run from ${join(root, "data", "repo")} or a worktree made from it.\n`,
+      });
+    expect(existsSync(join(root, "data/worktrees/from-install"))).toBe(false);
+    expect(await runCli([tool, "enter", "cli-worktree"], source, env)).toEqual({
+      code: 0,
+      stderr: "",
+    });
     expect(existsSync(join(root, "data/worktrees/cli-worktree/.git"))).toBe(
       true,
     );
-    expect(await runCli([tool, "--unknown"], source, env)).not.toBe(0);
+    expect((await runCli([tool, "--unknown"], source, env)).code).not.toBe(0);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

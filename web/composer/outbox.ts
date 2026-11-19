@@ -3,10 +3,10 @@
 // cross-tab lost updates; the shared browser lock fences delivery and removal.
 // Retries retain the server's idempotency key and serialize each recipient.
 import { html } from "lit";
-import { parseConversationId } from "../backends/backend.js";
-import { withCommentLock } from "../artifacts/comment-lock.js";
-import { userBubble } from "../thread-render/user-bubble.js";
-import { pendingMessageRemoveButton } from "../pending-queue/pending-message.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
+import { withBrowserSendLock } from "../artifacts/send-lock/index.js";
+import { userBubble } from "../thread-render/index.js";
+import { pendingMessageRemoveButton } from "../pending-queue/index.js";
 
 export interface SavedSend {
   convId: string;
@@ -116,11 +116,14 @@ export function withSendLock(
   convId: string,
   work: () => Promise<void>,
 ): Promise<void> {
-  return withCommentLock("recurse-composer-send:" + convId, async (check) => {
-    check();
-    await work();
-    check();
-  });
+  return withBrowserSendLock(
+    "recurse-composer-send:" + convId,
+    async (check) => {
+      check();
+      await work();
+      check();
+    },
+  );
 }
 
 export function outboxBubbles(convId: string) {

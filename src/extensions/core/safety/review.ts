@@ -636,8 +636,11 @@ export async function reviewAction(
             (attempt > 0 && !sentinelReported
               ? `\n\n${REFORMAT_INSTRUCTION}`
               : "");
+          // Invariant: From-scratch reviews send append-stable evidence
+          // messages: Codex caches only whole earlier messages, so this lets
+          // reviews too large to keep in history reuse cached evidence.
           const texts =
-            inputs.history && attempt === 0
+            inputs.history && attempt === 0 && !initial
               ? [evidence + actionPrompt]
               : [...evidenceMessages(evidence), actionPrompt];
           return texts.map(
@@ -659,7 +662,9 @@ export async function reviewAction(
           : undefined;
       const messages = pending?.messages ?? render(transcript, true);
       const lastEvidenceMessage = (
-        inputs.history ? messages.at(-1) : messages.at(-2)
+        messages.some((message) => message.role === "assistant")
+          ? messages.at(-1)
+          : messages.at(-2)
       ) as UserMessage;
       const lastEvidence =
         typeof lastEvidenceMessage.content === "string"
@@ -690,7 +695,7 @@ export async function reviewAction(
         const answer = response.answers?.safety;
         if (response.stopReason !== "stop")
           return failedVerdict(
-            `Safety reviewer did not finish cleanly (${response.stopReason}).`,
+            `Safety reviewer did not finish cleanly (${response.stopReason})${response.errorMessage ? `: ${response.errorMessage}` : ""}.`,
             reviewAttempts,
           );
         if (

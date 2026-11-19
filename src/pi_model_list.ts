@@ -32,7 +32,7 @@ async function requestList(
     { timeoutMs: update ? 60_000 : 30_000, maxOutputBytes: MAX_LIST_BYTES },
   );
   if (result.kind !== "models" || !Array.isArray(result.models))
-    throw new Error("Pi returned no model list");
+    throw new Error("No model list was returned");
   const catalogErrors = Array.isArray(result.catalog_errors)
     ? result.catalog_errors
     : [result.catalog_error];

@@ -62,11 +62,24 @@ function script(
   verdict = (_action: string) => "OK",
 ) {
   const reviews: string[] = [];
+  const reviewTurns: string[][] = [];
   const requests: string[] = [];
   let next = 0;
   const step: FauxResponseStep = async (request, ...rest) => {
     if (JSON.stringify(request).includes("untrusted record of a user's")) {
       const action = JSON.stringify(request.messages.at(-1)?.content);
+      const turns = request.messages.filter(
+        (message) => message.role === "user",
+      );
+      reviewTurns.push(
+        turns.map((message) =>
+          typeof message.content === "string"
+            ? message.content
+            : message.content
+                .map((block) => (block.type === "text" ? block.text : ""))
+                .join(""),
+        ),
+      );
       reviews.push(
         JSON.stringify(
           request.messages
@@ -81,7 +94,7 @@ function script(
     return typeof answer === "function" ? answer(request, ...rest) : answer;
   };
   faux.setResponses(Array(60).fill(step));
-  return { reviews, requests };
+  return { reviews, reviewTurns, requests };
 }
 
 const codemode = (code: string) =>
@@ -811,7 +824,7 @@ describe("codemode on Durable", () => {
 
   test("a nested review sees the same evidence as a direct review of the same round", async () => {
     const { host, faux, work } = setup("cm-evidence");
-    const { reviews } = script(faux, [
+    const { reviews, reviewTurns } = script(faux, [
       fauxAssistantMessage(
         [fauxToolCall("bash", { command: "echo earlier" }, { id: "b0" })],
         { stopReason: "toolUse" },
@@ -837,18 +850,17 @@ describe("codemode on Durable", () => {
       await until(() => existsSync(join(work, "nested.txt")));
       await until(idle(host));
       expect(existsSync(join(work, "direct.txt"))).toBe(true);
-      const evidence = (review: string) =>
-        /CONVERSATION EVIDENCE START([\s\S]*)CONVERSATION EVIDENCE END/.exec(
-          JSON.parse(review)[0].text,
-        )![1];
       expect(reviews).toHaveLength(2);
+      const [direct, nested] = reviewTurns as [string[], string[]];
+      expect(direct).toHaveLength(2);
+      expect(direct[1]).toStartWith("\n>>> CONVERSATION EVIDENCE END");
+      expect(direct[0]).not.toContain(">>> PROPOSED ACTION START");
+      expect(nested).toHaveLength(3);
+      expect(nested.slice(0, 2)).toEqual(direct);
+      expect(nested[2]).toContain("(no new evidence)");
       expect(reviews[0]).not.toContain("calledBy");
-      expect(evidence(reviews[1]!)).toBe(evidence(reviews[0]!));
-      expect(JSON.parse(reviews[1]!).at(-1).text).toContain(
-        "(no new evidence)",
-      );
-      expect(evidence(reviews[0]!)).toContain("first done");
-      expect(evidence(reviews[0]!)).toContain("echo earlier");
+      expect(direct[0]).toContain("first done");
+      expect(direct[0]).toContain("echo earlier");
     } finally {
       await host.close();
     }

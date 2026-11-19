@@ -82,7 +82,7 @@ agent to send a reply. The [subagent tool](../../tools/subagent.ts) documents co
 Nothing syncs automatically. **Sync settings from home** previews a one-way copy
 of effort levels (including the default level), default efforts, maximum context
 window and theme. Confirm with **Apply settings to …**. Models unavailable on the
-remote are refused. The [sync inventory](settings_sync.ts) is the
+remote are refused. The [sync inventory](settings_sync/) is the
 complete list: passwords, provider sign-ins, connection keys and MCP configuration
 are not copied. Sign in to providers separately on each instance.
 

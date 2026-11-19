@@ -4,7 +4,8 @@
 // Escaping paths render an error without issuing file requests.
 import { html, render } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { backendFor, parseConversationId } from "../backends/backend.js";
+import { backendFor } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { openFileTab } from "../panes.js";
 import { registerFileTabSource } from "../panes/file-tabs.js";
 import { ATTACHMENT_FILE_ICON, FILE_DOWNLOAD_ICON } from "../icons.js";
@@ -16,11 +17,16 @@ import {
 } from "../document-markdown.js";
 import { artifactFileUrl } from "./model.js";
 import { artifactWorkingPath } from "../../src/artifacts/working_path.js";
-import { discardCurrent, renderComments } from "./comment-bar.js";
+import {
+  commentRendering,
+  discardCurrent,
+  renderComments,
+} from "./comment-bar.js";
 import { claimComments, reanchor } from "./selection-comments.js";
-import { commentMount, type CommentPane } from "./artifact-state.js";
+import type { CommentPane } from "./artifact-state.js";
+import { commentMount } from "../comments/selection-draft/index.js";
 import { installImageZoom } from "../image-preview/zoom.js";
-import { installBoxComments } from "../files/box-comments.js";
+import { installBoxComments } from "../files/index.js";
 import { requestUiStatus } from "../ui-events.js";
 import { highlightSource } from "../source-preview.js";
 
@@ -122,7 +128,7 @@ registerFileTabSource("artifact", (key, id) => {
   );
   const commentId = `${target.artifact}/${target.version}/${target.path}`;
   const comments = (element: CommentPane) => {
-    claimComments(element);
+    claimComments(element, commentRendering);
     reanchor(element, commentId);
     renderComments(element);
   };

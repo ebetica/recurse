@@ -2,7 +2,7 @@
 // (explorer.ts handles the click). Paths are recognized by shape only; nothing
 // is read until a click. Plain clicks open in Recurse; modified clicks
 // download through the same operator-only file route.
-import { parseConversationId } from "./backends/backend.js";
+import { parseConversationId } from "./backends/conversation-id/index.js";
 
 const UNSAFE_PATH = /[\p{Cc}\p{Cf}]/u;
 const SEGMENT = String.raw`[\w.@+-]+`;

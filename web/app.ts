@@ -4,7 +4,8 @@
 // Capture dispatch precedes local input handlers; unclaimed keys stay native.
 import { startMainThreadTiming } from "./main-thread-timing.js";
 import { installPhonePaneHistory } from "./phone-nav.js";
-import { rowThreads } from "./row-thread-state.js";
+import * as threadState from "./row-thread-state.js";
+import { rowThreads } from "./row-thread-state/index.js";
 import { startBackendDiscovery } from "./backends/discovery.js";
 import { backends } from "./backends/backend.js";
 import { treeOf } from "./backends/tree.js";
@@ -17,7 +18,28 @@ import {
   primaryPointerIsCoarse,
 } from "./state.js";
 import { startInteractionTiming } from "./interaction-timing.js";
+import { configureAgentFocus } from "./sidebar/focus.js";
+import { configureSidebarActions } from "./sidebar/index.js";
+import { configureArtifactRendering } from "./artifacts/artifact-state.js";
+import { renderContent } from "./artifacts/content-view.js";
+import { configureDisclosure } from "./conversation/disclosure.js";
+import { configureBoxCommentOffer } from "./files/index.js";
 
+configureAgentFocus(renderSidebar);
+configureArtifactRendering(renderContent);
+configureBoxCommentOffer(offerBoxComment);
+configureDisclosure(threadState, {
+  paint,
+  anchoredPaint,
+  loadOlder: threadState.loadOlder,
+});
+configureOperatorSendScroll(prepareOperatorSendScroll);
+configureSidePane(poll);
+configureSidebarActions({ refreshTags: poll, startDraft: startNewAgent });
+$("#panes")!.addEventListener("keydown", (event) => {
+  const pane = paneForTarget(event.target);
+  if (pane) handleCommentShortcut(event, pane);
+});
 startInteractionTiming(() => state.selectedId);
 startMainThreadTiming(
   () => ({
@@ -35,7 +57,6 @@ startMainThreadTiming(
 );
 startBackendDiscovery();
 import { openEffortMenu } from "./models.js";
-import { closeSafetyConfirmation, safetyConfirmationOpen } from "./safety.js";
 import { closePowerbarOverflow } from "./panes/powerbar.js";
 import type { PaneNavigation, TreeNode } from "./types.js";
 import type { WindowCommand } from "./dock/commands.js";
@@ -96,7 +117,12 @@ import {
   shellSurfaceOpen,
   workingActivityOpen,
 } from "./conversation/shell-surface.js";
-import { toggleLatestTurnEye } from "./conversation/thread.js";
+import {
+  anchoredPaint,
+  paint,
+  prepareOperatorSendScroll,
+  toggleLatestTurnEye,
+} from "./conversation/thread.js";
 import {
   poll,
   startPolling,
@@ -104,16 +130,20 @@ import {
 } from "./conversation/poll.js";
 import { requestStop, stopPublicationPending } from "./conversation/stop.js";
 import {
+  closeSafetyConfirmation,
+  configureOperatorSendScroll,
   requestTakeoverToggle,
+  safetyConfirmationOpen,
   scrollToLatest,
   type TakeoverToggleResult,
-} from "./conversation/controls.js";
+} from "./conversation/index.js";
 import {
   send,
   hasUnsentComposerWork,
-  focusComposerAtEnd,
   preserveUnsentForLogin,
+  startNewAgent,
 } from "./composer.js";
+import { focusComposerAtEnd } from "./composer/index.js";
 import { startConnectionMonitoring } from "./connection.js";
 installPhonePaneHistory(
   () => closeFocusedPaneFromKeyboard(undefined, true, true),
@@ -169,12 +199,14 @@ import {
   closeArtifactVersionMenuKeyboardLayer,
 } from "./artifacts/pane.js";
 import { openPullRequestFinder } from "./diff.js";
-import { relaySideKey } from "./side-pane.js";
+import { configureSidePane, relaySideKey } from "./side-pane.js";
 import { closeImageFromKeyboard } from "./files.js";
 import { explorerSearchOwnsKey } from "./explorer.js";
 import {
   closeSelectionCommentFromKeyboard,
+  handleCommentShortcut,
   hasStagedCommentsIn,
+  offerBoxComment,
 } from "./artifacts/selection-comments.js";
 import { handleDownloadClick } from "./download.js";
 import { UI_STATUS_EVENT } from "./ui-events.js";
@@ -251,6 +283,12 @@ function paintKeyState(): void {
   const label = keymapModeLabel(keyState);
   modeEl.textContent = label;
   modeEl.style.display = keyState.mode === "dialog" ? "none" : "";
+  // Spec: Thread shortcuts and typing are the resting modes: their badge is
+  // only announced; other modes (a focused pane, a prefix) show themselves.
+  modeEl.classList.toggle(
+    "sr-only",
+    keyState.mode === "normal" || keyState.mode === "insert",
+  );
   modeEl.classList.toggle(
     "pending",
     ["t-prefix", "g-prefix", "w-prefix"].includes(keyState.mode),
@@ -310,6 +348,7 @@ installKeyboardModeController((mode) => setKeyState(initialKeymapState(mode)));
 function flashKeyStatus(text: string): void {
   modeEl.textContent = text;
   modeEl.style.display = "";
+  modeEl.classList.remove("sr-only");
   setTimeout(() => paintKeyState(), 900);
 }
 window.addEventListener(UI_STATUS_EVENT, (event) => {

@@ -22,7 +22,7 @@ import {
   validateExternalKey,
 } from "../agents/conversation_store";
 import { linkedPrList } from "../agents/conversation_prs";
-import type { Tags } from "../agents/conversation_tags";
+import type { Tags } from "../agent_metadata/index";
 import { TreeLifecycleBusy } from "../agents/mutation_guard";
 import { AttachmentError } from "../agents/runtime/attachments/base";
 import { pyTruthy } from "../agents/runtime/turn_prep";

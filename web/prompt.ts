@@ -7,7 +7,7 @@ import { html, render, nothing, type TemplateResult } from "lit";
 import { responseDetails, responseSelectorName } from "./model-response.js";
 import { $ } from "./dom.js";
 import { toolDetailStore } from "./tool_details.js";
-import { copyButtonT } from "./conversation/copy.js";
+import { copyButtonT } from "./conversation/copy-button/index.js";
 import { requestKeyboardMode } from "./modal-mode.js";
 import {
   activityTotalCostLabel,

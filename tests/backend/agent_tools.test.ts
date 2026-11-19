@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { copyFile, mkdir, mkdtemp, rmdir } from "node:fs/promises";
+import { copyFile, cp, mkdir, mkdtemp, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { retire, sweep } from "../../src/utils/trash";
@@ -25,6 +25,9 @@ test("live CLI help and prompt budget match across checkout paths", async () => 
   try {
     await mkdir(join(relocated, "tools"));
     await mkdir(join(relocated, ".git"));
+    await cp(join(repo, ".agents"), join(relocated, ".agents"), {
+      recursive: true,
+    });
     await Promise.all(
       ["AGENTS.md", "tools/subagent.ts", "tools/worktree.ts"].map((path) =>
         copyFile(join(repo, path), join(relocated, path)),

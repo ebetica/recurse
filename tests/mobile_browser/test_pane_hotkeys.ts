@@ -7,6 +7,7 @@ import {
   rootAgentId,
   runBrowserTests,
   startNewAgent,
+  visibleAndUncovered,
   waitForLayout,
   type BrowserTest,
 } from "./common";
@@ -281,6 +282,23 @@ export const tests: BrowserTest[] = [
     const explorer = page.locator('.pane-col[data-pane="explorer"]');
     await explorer.waitFor();
     const modeBadge = page.locator("#key-mode");
+    const badgeNode = (await modeBadge.elementHandle())!;
+    const badgeState = async (text: string) => {
+      const status = page.getByRole("status").and(modeBadge);
+      await browserExpect(status).toHaveText(text);
+      return status.evaluate((badge: any, held: any) => {
+        const rect = badge.getBoundingClientRect();
+        const top = (globalThis as any).document.elementFromPoint(
+          rect.left + rect.width / 2,
+          rect.top + rect.height / 2,
+        );
+        return [
+          badge === held,
+          badge.getAttribute("aria-live"),
+          Boolean(top && badge.contains(top)),
+        ];
+      }, badgeNode);
+    };
     await page.locator("#model-trigger").click();
     await page.locator("#model-menu").waitFor();
     await focused("#model-menu");
@@ -306,8 +324,7 @@ export const tests: BrowserTest[] = [
           ?.getAttribute("data-id") !== before,
       cursor,
     );
-    expect(await page.locator("#key-mode").innerText()).toBe("Normal");
-    expect(await modeBadge.isVisible()).toBeTrue();
+    expect(await badgeState("Normal")).toEqual([true, "polite", false]);
     expect(await page.locator("#dock .dv-groupview").count()).toBe(windows);
     await page.keyboard.press("k");
     await page.keyboard.press("i");
@@ -343,7 +360,8 @@ export const tests: BrowserTest[] = [
     ).toEqual([5, 9]);
     await explorerTab.click();
     await focused('.pane-col[data-pane="explorer"] .pane-body');
-    expect(await page.locator("#key-mode").innerText()).toBe("Pane");
+    expect(await badgeState("Pane")).toEqual([true, "polite", true]);
+    await visibleAndUncovered(page, "#key-mode");
     await page.keyboard.press("h");
     expect(await explorer.isVisible()).toBeTrue();
     await page.keyboard.press("q");
@@ -828,7 +846,7 @@ export const tests: BrowserTest[] = [
     await page.keyboard.press("i");
     await focused("#input");
     expect(await pane.getAttribute("class")).not.toContain("fullscreen");
-    expect(await page.locator("#key-mode").textContent()).toBe("Insert");
+    expect(await badgeState("Insert")).toEqual([true, "polite", false]);
     await page.keyboard.press("Escape");
     await pane.locator(".pane-body").focus();
     await page.keyboard.press("h");

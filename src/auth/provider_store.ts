@@ -1,6 +1,9 @@
 // Settings-owned credential-store interface shared by provider login flows.
 // OAuthStore implements it; providers receive the store as an explicit input.
 
+/** Reserved auth.json marker, not a provider ID. */
+export const OPENAI_CHOICE_MARKER = "$recurse.openai-choice";
+
 export interface ProviderCredentialStore {
   /** oauth.stored_api_key: [whether a selection exists, its usable key]. */
   storedApiKey(provider: string): Promise<[boolean, string | null]>;
@@ -10,7 +13,7 @@ export interface ProviderCredentialStore {
   replaceCredentials(
     provider: string,
     credential: Record<string, unknown>,
-    opts?: { remove?: string[]; onlyIfMissing?: boolean },
+    opts?: { onlyIfMissing?: boolean },
   ): Promise<boolean>;
   /** oauth.remove_credentials. */
   removeCredentials(providers: string[]): Promise<void>;

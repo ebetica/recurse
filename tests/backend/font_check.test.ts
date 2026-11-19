@@ -8,7 +8,12 @@ const values = (text: string) =>
 
 test("accepts the scale, relative sizes, keywords and the font tokens", () => {
   const css = [
-    ".badge { font-size: 10.5px; } .meta { font-size: 11.5px; }",
+    ".badge { font-size: 11px; } .meta { font-size: 11.5px; }",
+    ".label { font-size: 0.6875rem; } .row { font: 600 0.78125rem/1.4 var(--font-sans); }",
+    ".calc { font-size: calc( 0.75rem + 0.03125rem ); } .lh { font: 1em / 0.9rem var(--font-sans); }",
+    ".upper { font-size: 0.6875REM; }",
+    '.grid { font: 1em "Grid 14rem", var(--font-sans); }',
+    '.mix { font: 1em/var(--lh) "Grid 14rem Sans", var(--font-sans); }',
     ".tool { font: 12.5px/1.5 var(--font-mono); } .menu { font-size: 13.5px; }",
     "body { font: 15px/1.6 var(--font-sans); } input { font-size: 16px; }",
     ".dialog h2 { font: 700 17px/1.2 inherit; } .page h2 { font-size: 20px; }",
@@ -33,7 +38,7 @@ test("accepts the scale, relative sizes, keywords and the font tokens", () => {
 test("reports weights off the 400/600/700 scale", () => {
   const text = [
     ".agent .title { font-size: 13.5px; font-weight: 550; }",
-    ".kbd { font: 650 10.5px/1.2 var(--font-mono); }",
+    ".kbd { font: 650 11px/1.2 var(--font-mono); }",
     ".copy { font: 500 11.5px/1.4 var(--font-sans); }",
     '  Object.assign(el.style, { fontWeight: "800" });',
     ".x { font-weight: bolder; } .y { font-weight:300 }",
@@ -47,7 +52,7 @@ test("reports weights off the 400/600/700 scale", () => {
   ].join("\n");
   expect(values(text)).toEqual([
     "1:weight:550",
-    "2:weight:650 10.5px/1.2 var(--font-mono)",
+    "2:weight:650 11px/1.2 var(--font-mono)",
     "3:weight:500 11.5px/1.4 var(--font-sans)",
     "4:weight:800",
     "5:weight:bolder",
@@ -63,8 +68,8 @@ test("reports weights off the 400/600/700 scale", () => {
     "12:weight:550",
   ]);
   expect(
-    checkFiles([{ file: "index.html", text: ".z { font-weight: 650; }" }]),
-  ).toEqual(["index.html:1: font weight 650 is off the 400/600/700 scale"]);
+    checkFiles([{ file: "web/index.html", text: ".z { font-weight: 650; }" }]),
+  ).toEqual(["web/index.html:1: font weight 650 is off the 400/600/700 scale"]);
 });
 
 test("reports off-scale sizes and written-out monospace and sans-serif stacks", () => {
@@ -85,6 +90,10 @@ test("reports off-scale sizes and written-out monospace and sans-serif stacks", 
     ".chip { font-family: system-ui; }",
     '  Object.assign(el.style, { fontFamily: "sans-serif" });',
     '  el.style.setProperty("font-family", "\\"Arial\\", sans-serif");',
+    ".time { font-size: 10.5px; } .chip { font-size: 0.65625rem; }",
+    ".head { font: 600 0.8125rem/1.3 var(--font-sans); }",
+    ".up { font-size: 0.8125REM; }",
+    ".bang { font-size:0.8125rem!important; } .zero { font-size:0rem; }",
   ].join("\n");
   expect(values(text)).toEqual([
     "1:size:12px",
@@ -102,6 +111,12 @@ test("reports off-scale sizes and written-out monospace and sans-serif stacks", 
     "14:sans:system-ui",
     "15:sans:sans-serif",
     '16:sans:"Arial", sans-serif',
+    "17:size:10.5px",
+    "17:size:0.65625rem",
+    "18:size:600 0.8125rem/1.3 var(--font-sans)",
+    "19:size:0.8125REM",
+    "20:size:0.8125rem!important",
+    "20:size:0rem",
   ]);
 });
 
@@ -117,11 +132,11 @@ test("comments and allowed lines are exempt", () => {
     checkFiles([
       { file: "web/app.css", text: ".x { font-size: 13px; }" },
       { file: "web/diff/style.css", text: ".y { font-family: monospace; }" },
-      { file: "index.html", text: ".z { font: 600 12.5px/1 system-ui; }" },
+      { file: "web/index.html", text: ".z { font: 600 12.5px/1 system-ui; }" },
     ]),
   ).toEqual([
-    "web/app.css:1: font size 13px is off the 10.5/11.5/12.5/13.5/15/16/17/20px scale",
+    expect.stringMatching(/^web\/app\.css:1: font size 13px is off the /),
     "web/diff/style.css:1: monospace font monospace should use var(--font-mono)",
-    "index.html:1: sans-serif font 600 12.5px/1 system-ui should use var(--font-sans)",
+    "web/index.html:1: sans-serif font 600 12.5px/1 system-ui should use var(--font-sans)",
   ]);
 });

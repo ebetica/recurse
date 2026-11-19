@@ -161,10 +161,12 @@ describe("corpus", () => {
       ...common,
       tokenUrl: `${fake.url}/claude/token`,
     });
-    const codex = new CodexAuth({
-      ...common,
-      tokenUrl: `${fake.url}/codex/token`,
-    });
+    const createCodex = () =>
+      new CodexAuth({
+        ...common,
+        tokenUrl: `${fake.url}/codex/token`,
+      });
+    const codex = createCodex();
     const muse = new MuseAuth({
       store,
       config,
@@ -235,6 +237,9 @@ describe("corpus", () => {
       ...seed.expected_files,
       "pi-agent/auth.json": seed.auth,
     };
+    const authPath = join(agent, "auth.json");
+    const authBytes = () => readFileSync(authPath).toString("base64");
+    let authBeforeStatus: string | undefined;
     let checked = 0;
     try {
       const problems = await runRefCases(
@@ -242,7 +247,7 @@ describe("corpus", () => {
         corpus.cases as unknown as SettingsCase[],
         refs,
         {
-          setup: (spec) => {
+          setup: async (spec) => {
             fake.responses.push(...((spec.reply ?? []) as [number, string][]));
             for (const [rel, text] of Object.entries(
               (spec.files ?? {}) as Record<string, string>,
@@ -252,8 +257,14 @@ describe("corpus", () => {
             }
             for (const rel of (spec.remove ?? []) as string[])
               unlinkSync(join(root, rel));
+            if (spec.restart_codex) await createCodex().importCodexCliLogin();
+            if (spec.unchanged_auth) authBeforeStatus = authBytes();
           },
           expect: (item, got) => {
+            if (authBeforeStatus !== undefined) {
+              expect(authBytes() === authBeforeStatus, item.name).toBe(true);
+              authBeforeStatus = undefined;
+            }
             const current = (item as SettingsCase).current;
             expect(got.status, item.name).toBe(current.status);
             Object.assign(expectedFiles, current.files);
@@ -316,7 +327,7 @@ describe("corpus", () => {
         },
       );
       expect(problems).toEqual([]);
-      expect(checked).toBe(82);
+      expect(checked).toBe(90);
       const url = `http://127.0.0.1:${running.port}/api/settings/update`;
       const status = await fetch(url);
       expect(status.status).toBe(200);

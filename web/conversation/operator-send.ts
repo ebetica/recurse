@@ -1,9 +1,15 @@
 // Foreground operator messages start here so enqueueing always applies the
-// open thread's send-scroll behaviour. Delivery retries and restored outbox
-// entries use the transport directly, without starting another viewport jump.
+// thread scroll policy supplied by the app. Retries and restored outbox entries
+// use the transport directly, without starting another viewport jump.
 import { backendFor } from "../backends/backend.js";
-import { state } from "../state.js";
-import { holdQueuedSend, pinOperatorSend } from "./thread.js";
+
+let applySendScroll: (recipient: string | null) => void;
+
+export function configureOperatorSendScroll(
+  prepare: (recipient: string | null) => void,
+): void {
+  applySendScroll = prepare;
+}
 
 type DeliveryOptions = Parameters<ReturnType<typeof backendFor>["jpost"]>[2];
 interface OperatorMessage {
@@ -17,12 +23,7 @@ export function startOperatorSend<T>(
   recipient: string | null,
   enqueue: () => T,
 ): T {
-  const conv = state.currentConv;
-  if (recipient && conv?.id === recipient) {
-    if (["running", "interrupting"].includes(conv.status))
-      holdQueuedSend(recipient);
-    else pinOperatorSend(recipient);
-  }
+  applySendScroll(recipient);
   return enqueue();
 }
 

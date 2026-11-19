@@ -25,11 +25,8 @@ import {
   updateFullscreenControl,
 } from "./panes/powerbar.js";
 import { $, inputEl, scrollEl } from "./dom.js";
-import { pendingCommentCount } from "./comments.js";
-import {
-  handleCommentShortcut,
-  selectionCommentOwner,
-} from "./artifacts/selection-comments.js";
+import { guardLeaveComments, pendingCommentCount } from "./comments.js";
+import { selectionCommentOwner } from "./comments/selection-draft/index.js";
 import {
   ArtifactPaneAutoOpenPolicy,
   type ArtifactAutoOpenObservation,
@@ -37,8 +34,7 @@ import {
 import { storedPanesWidth, ensurePanesGrip } from "./resize.js";
 import { DesktopDock } from "./dock/desktop.js";
 import type { WindowCommand } from "./dock/commands.js";
-import { guardLeaveComments } from "./comments.js";
-import { mobileSidebarOpen, restoreAgentFocus } from "./sidebar.js";
+import { restoreAgentFocus } from "./sidebar/focus.js";
 import {
   paneFocusIndicatorId,
   paneIsActionable,
@@ -112,10 +108,6 @@ const fabEl = $("#pane-fab")!,
 const announcerEl = $("#pane-announcer");
 
 installPaneChrome(panesEl);
-panesEl.addEventListener("keydown", (event) => {
-  const pane = paneForTarget(event.target);
-  if (pane) handleCommentShortcut(event, pane);
-});
 panesEl.addEventListener("comments-submitting", (event) => {
   const pane = paneForTarget(event.target);
   const id = pane?.dataset.pane;
@@ -695,7 +687,7 @@ function focusables(root: HTMLElement): HTMLElement[] {
   );
 }
 addEventListener("keydown", (event: KeyboardEvent) => {
-  if (mobileSidebarOpen()) return;
+  if (phoneListEntry()) return;
   if (menuEl.classList.contains("on")) {
     const items = focusables(menuEl);
     if (
@@ -1108,15 +1100,15 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     $("#takeover-btn")!,
     $("#share-link-btn")!,
   ];
-  // Spec: Phones keep Delete in More; desktop places it beside Settings.
-  const foot = $("#agent-list-foot")!;
-  if (actions[0].parentElement !== (mobile ? menuEl : foot)) {
+  // Spec: Delete sits last, apart from routine actions: after a line in
+  // the phone More menu, at the foot of the desktop rail.
+  if (actions[0].parentElement !== (mobile ? menuEl : railEl)) {
     if (mobile) {
-      $("#pane-menu-divider")!.before(actions[0], actions[1]);
-      $("#pane-menu-divider")!.after(actions[2]);
+      $("#pane-menu-divider")!.before(actions[2], actions[1]);
+      $("#pane-menu-divider")!.after(actions[0]);
     } else {
-      foot.append(actions[0]);
       railEl.prepend(actions[2], actions[1]);
+      railEl.append(actions[0]);
     }
     for (const action of actions) {
       if (mobile) action.setAttribute("role", "menuitem");
@@ -1265,12 +1257,12 @@ function inRect(x: number, y: number, el: HTMLElement | null): boolean {
   const r = el.getBoundingClientRect();
   return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
 }
+// Invariant: Only a painted item counts; rows the menu clips never match.
 function menuItemAt(x: number, y: number): HTMLElement | null {
-  for (const el of menuEl.querySelectorAll<HTMLButtonElement>(
-    ".pane-menu-item:not(:disabled)",
-  ))
-    if (inRect(x, y, el)) return el;
-  return null;
+  const item = document
+    .elementFromPoint(x, y)
+    ?.closest<HTMLElement>(".pane-menu-item:not(:disabled)");
+  return item && menuEl.contains(item) ? item : null;
 }
 
 let fabActive = false,

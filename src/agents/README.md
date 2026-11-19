@@ -11,6 +11,8 @@ conversation views through [view/README.md](view/README.md).
 [runtime/agent_node.ts](runtime/agent_node.ts) owns one agent's admission and
 controls; [agent_store.ts](agent_store.ts) and
 [conversation_store.ts](conversation_store.ts) store agent state;
+[conversation_model_choices.ts](conversation_model_choices.ts) freezes existing
+model choices during startup;
 [reconciler.ts](reconciler.ts) retries deferred work;
 [reap_history.ts](reap_history.ts) retains deleted history; and
 [worktree_holders.ts](worktree_holders.ts) tracks worktree holders.
@@ -26,8 +28,9 @@ file discovery and closes its descriptors before returning. The caller fences
 recreation until retirement completes. Generated tool
 instructions check repository paths asynchronously at request boundaries.
 Presentation reads
-detached snapshots rather than live owners. Sidebar rows reuse the API v1
-Agent projection and cached PR, model and effort metadata without record reads.
+detached snapshots rather than live owners. Sidebar rows reuse the
+[shared Agent projection](../agent_metadata/README.md) and cached PR, model and
+effort metadata without record reads.
 The tree projection notifies visible browsers when admitted tags change. Tag
 mutations publish that in-memory change before awaiting their durable flush;
 HTTP success still means the flush completed. The same projection pushes unread
@@ -73,6 +76,13 @@ attempts/releases; promise completion and guard/retry waits remain excluded. See
 [supervisor/lifecycle.ts](supervisor/lifecycle.ts),
 [supervisor/reap.ts](supervisor/reap.ts) and
 [../process_lifecycle.ts](../process_lifecycle.ts).
+
+Each agent records its model and reasoning when its effort level is chosen,
+including creation. Ladder edits affect new agents and later level choices;
+choosing the same level again refreshes the recorded pair. Turns and compaction
+use that pair without falling back. The recorded startup model-choice migration
+freezes existing agents from the then-current ladder, resuming partial writes
+without retuning them. Safety review and automatic naming still follow live level 1.
 
 File-defined provider models require an operator-selected model or a saved
 Settings effort level. Child defaults never inherit a file-provider model pin.

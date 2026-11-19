@@ -1,5 +1,6 @@
 import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
+import { tests as artifactHistory } from "./test_artifact_history";
 import {
   gotoRoot,
   postFixture,
@@ -11,6 +12,7 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
+  ...artifactHistory,
   // Regression: #3397 Artifact section links must scroll the document without changing the route.
   async function test_artifact_section_links(browser, base) {
     const paragraphs = Array.from(

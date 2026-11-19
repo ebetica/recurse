@@ -158,15 +158,27 @@ export async function safetyReviewUnavailable(
   return state?.off ? undefined : state?.unavailable;
 }
 
+type SavedFailure = ReturnType<typeof classifyReviewFailure> & {
+  usageLimit?: true;
+};
+
+/** Bounded fields of a failure reason; the raw provider text is not kept. */
+function savedFailure(reason: string, journalFailure: boolean): SavedFailure {
+  return {
+    ...classifyReviewFailure(reason, journalFailure),
+    ...(/usage|quota|rate.limit|\b429\b/i.test(reason)
+      ? { usageLimit: true as const }
+      : {}),
+  };
+}
+
 function unavailableReason(outcome: Outcome): string {
   if (outcome.configurationFailure) return "reviewer configuration error";
-  const failure = classifyReviewFailure(
-    outcome.reason,
-    Boolean(outcome.journalFailure),
-  );
+  const failure =
+    outcome.failure ??
+    savedFailure(outcome.reason, Boolean(outcome.journalFailure));
   if (failure.stage === "journal") return "reviewer journal error";
-  if (/usage|quota|rate.limit|\b429\b/i.test(outcome.reason))
-    return "usage limit";
+  if (failure.usageLimit) return "usage limit";
   if (failure.category === "auth") return "no reviewer login";
   if (failure.category === "unavailable") return "model unavailable";
   if (failure.category === "invalid") return "invalid reviewer response";
@@ -222,6 +234,7 @@ type Outcome = {
   procedural?: boolean;
   configurationFailure?: boolean;
   journalFailure?: boolean;
+  failure?: SavedFailure;
   attempts?: SafetyReviewAttempt[];
   safetyWaitMs?: number;
 };
@@ -590,10 +603,15 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       reviewers && !journalFailure
         ? positiveElapsedMs(safetyStartedMs, now())
         : undefined;
+    const failure =
+      verdict.procedural && !configurationFailure
+        ? savedFailure(verdict.reason, Boolean(journalFailure))
+        : undefined;
     if (verdict.procedural) {
-      const failure = configurationFailure
-        ? { stage: "configuration", category: configurationCategory }
-        : classifyReviewFailure(verdict.reason, Boolean(journalFailure));
+      const logged = failure ?? {
+        stage: "configuration",
+        category: configurationCategory,
+      };
       const reviewer =
         verdict.reviewer ??
         (reviewers?.[0]
@@ -605,8 +623,8 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       try {
         host.log?.("safety_review_failed", {
           cid: conversationId,
-          stage: failure.stage,
-          category: failure.category,
+          stage: logged.stage,
+          category: logged.category,
           ...(reviewer ?? {}),
           elapsed_ms: positiveElapsedMs(safetyStartedMs, now()) ?? 0,
           attempts: verdict.reviewAttempts?.length ?? 0,
@@ -615,9 +633,11 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         // Invariant: Diagnostics never reverse the fail-open decision.
       }
     }
+    // Invariant: The memo keeps classified fields, never provider error text.
     return {
       decision: configurationFailure ? "allow" : verdict.decision,
-      reason: verdict.reason,
+      reason: failure ? failure.summary : verdict.reason,
+      ...(failure ? { failure } : {}),
       ...(verdict.procedural ? { procedural: true } : {}),
       ...(configurationFailure ? { configurationFailure: true } : {}),
       ...(journalFailure ? { journalFailure: true } : {}),

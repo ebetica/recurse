@@ -15,12 +15,17 @@ on the built app, or data recorded from real runs. Read the
 
 `bun tests/live/reviewer_cache.ts [provider/model]` checks reviewer cache reads
 on a private server using existing sign-ins read-only, without OAuth refresh.
-It sends one real message for three reviewed scratch writes and requires cache
-reads on reviews two and three. It stops the whole private instance after three
-reviews, six completed acting requests, or 60,000 uncached input tokens, then
+It sends one real message for seven reviewed scratch writes and requires cache
+reads on at least four of the six follow-up reviews: the provider misses its
+cache on a small share of identical-prefix requests, so one miss is not a
+regression. It stops the whole private instance after seven reviews, ten
+completed acting requests, or 90,000 uncached input tokens, then
 checks final recorded usage across its conversations. Crossing a cap during
 shutdown is FAIL. Signals clean up its private server and state; an independent
-three-minute lifetime also bounds the server.
+three-minute lifetime also bounds the server. A failed review line names
+which check failed, such as `command-other-target` when the acting model's
+command lacks the expected target path; it never prints the model's command or
+the target's contents.
 SKIPPED (exit 2) is not a promotion pass.
 
 `bun tests/live/safety_decisions.ts --output DIRECTORY` compares the default
@@ -31,7 +36,7 @@ are rejected before authentication. Optional `--openai-key-file FILE` loads a
 bare API key into memory only for Luna measurement. The caller owns deleting that input file. Full fixture requests,
 probabilities, usage and timings stay in the output directory. `--resume` skips
 recorded calls only with unchanged evaluator, fixture and policy hashes. A $1
-per-model cap bounds spend. `--update-results` records complete-corpus pass counts, false allows and median/p90 latency in the safety module's checked-in decision results for Settings. Missing records display “Not tested”. The ship gate fails if Jev makes any mistake the
+per-model cap bounds spend. The ship gate fails if Jev makes any mistake the
 default does not, either model returns no decision, or coverage is incomplete.
 `--case GROUP/ID` reruns one fixture while preserving its earlier evidence and
 reports a selected-case gate, not a full-corpus ship pass. This manual live
@@ -99,6 +104,10 @@ tag directly above the same named test. Missing ids, including rewritten or
 removed tags on surviving tests, need `Removes-feature:` or `Removes-regression:`
 for the original tag kind (see `test_check.ts --help` for the exact line).
 Changing tag kind while keeping the ids does not remove their protection.
+`import_graph.ts` checks file and folder-module cycles, entry bypasses and thin
+named-export-only entries against shrinking baselines. Nested folders are separate
+modules; root `src/` and `web/` files stand alone. `--modules` dumps module debt;
+`--height` reports a longest condensed module chain without enforcing a cap.
 `browser_import_check.ts` bundles the browser
 entries from `package.json` in memory and checks Bun's resolved import graph,
 including literal dynamic imports and dependencies, without writing `web/dist`.

@@ -50,7 +50,7 @@ extension decision override or separate warming status UI. Pi's model registry,
 streaming and cost calculation are reused directly. Models without known TTL
 or sufficient savings are not warmed.
 
-Settings > Models registers **Keep prompt cache warm while agents work**,
+Settings > Models registers **Keep context cached while agents work**,
 enabled by default. Disabling it cancels scheduled and in-flight warming.
 **Compact long idle conversations before their cache expires** is off by default
 in the same section. Enabling it shows **Minimum conversation length for idle

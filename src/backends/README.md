@@ -3,7 +3,8 @@
 `connected.ts` owns approved connections, private keys and cached health;
 `remote_client.ts` owns bounded calls and streaming transport. Keys never enter
 agent environments or proxy responses. The receiving backend enforces its key
-policy in `src/auth/backend_keys.ts`.
+policy in `src/auth/backend_keys.ts`. API version constants come from the
+[shared contract](../web/api_v1/schema/), without importing HTTP route registration.
 Prompt reads preserve raw agent-marker restrictions through the proxy, including
 operator-authenticated requests with a marker. The forwarded empty marker asserts
 no identity; the receiving backend omits reviewer data without hiding other prompt
@@ -14,7 +15,8 @@ queue to keep labels unique. Passwords and optional two-factor codes are exchang
 once, never saved. A remote's code-required response opens the code field in
 Settings; existing keys do not require codes. Logout leaves
 connections intact. Agent-requested addresses persist pending without keys;
-only operator sign-in contacts them. Pending entries are not health-checked,
+only operator sign-in contacts them, and only at the address the operator saw
+(a different stored address refuses it). Pending entries are not health-checked,
 including after restart; failed sign-in stays pending. Older records without
 request fields remain connected. Unreadable stores require repair and restart.
 Sign-in budgets are 10s for status and 60s for password verification/key creation;
@@ -172,9 +174,10 @@ delivery.
   activity and callback registration on the home.
 - `home_callbacks.ts`: callback registrations and relay notices on the remote.
 - `remote_client.ts`: bounded calls and streaming transport.
-- `settings_sync.ts`: the settings sync inventory.
-- `label.ts`: connection label validation and the keyed labels a remote
-  stamps on senders relayed by each home's key.
+- [settings_sync/](settings_sync/): the shared
+  non-secret settings-sync inventory.
+- [label/](label/): shared label validation and the
+  keyed labels a remote stamps on senders relayed by each home's key.
 
 Bun fetch keeps its default process-wide connection pool: separate CLI invocations
 reuse the home server's outbound connections. Each outbound call emits one

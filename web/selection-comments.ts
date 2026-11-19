@@ -1,11 +1,11 @@
 // Quote selected agent text into the main composer. Touch
 // Reserve 28px for native handles below, or 64px for the toolbar above.
-import { autosize } from "./composer.js";
+import { autosize } from "./composer/index.js";
 import { inputEl } from "./dom.js";
 import {
   appendSelectionQuote,
   selectionCommentRange,
-} from "./comments/selection-text.js";
+} from "./comments/selection-text/index.js";
 
 interface PendingSelection {
   selection: string;

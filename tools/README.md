@@ -119,6 +119,9 @@ A **managed worktree** is a Git checkout under the instance's `worktrees/`,
 made by `worktree.ts enter` or `subagent.ts create --worktree`. Each has a marker,
 `.markers/<name>.json`, listing the agents that hold it. Make baseline checkouts
 with these tools or under your `$RECURSE_AGENT_TMPDIR`, which is removed with you.
+Git keeps each worktree's link in its source checkout, so both tools refuse
+Recurse's install checkout (`$RECURSE_SRC`) and worktrees made from it: updates
+replace it. Create worktrees from `$CHAT_DATA_DIR/repo` or a worktree made from it.
 
 Creation never waits for cleanup. Creating a worktree and `subagent rm` each
 launch `worktree.ts sweep` as a detached process; a kernel lock allows one

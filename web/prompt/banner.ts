@@ -1,13 +1,15 @@
 // Per-conversation system-prompt disclosure: refetch on every reveal and
 // refresh during running turns, including refreshes scheduled during render.
+// The thread supplies repainting; read and refresh state stay here.
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "../backends/backend.js";
-import { copyButtonT } from "../conversation/copy.js";
-import { paint } from "../conversation/thread.js";
+import { copyButtonT } from "../conversation/copy-button/index.js";
 import { DISCLOSURE_ICON } from "../icons.js";
 import { state } from "../state.js";
 import type { Conversation, PromptView } from "../types.js";
+
+type Repaint = (conv: Conversation) => void;
 
 const disclosureCaret = html`<span class="disclosure-caret" aria-hidden="true"
   >${unsafeHTML(DISCLOSURE_ICON)}</span
@@ -25,17 +27,21 @@ function fetchPrompt(cid: string): Promise<PromptView | null> {
     .catch(() => null);
 }
 
-function scheduleBannerRefresh(cid: string, delay = 500): void {
+function scheduleBannerRefresh(
+  cid: string,
+  repaint: Repaint,
+  delay = 500,
+): void {
   if (bannerRefresh.has(cid)) return;
   bannerRefresh.set(
     cid,
     setTimeout(() => {
       bannerRefresh.delete(cid);
-      if (bannerOpen.has(cid)) loadBanner(cid);
+      if (bannerOpen.has(cid)) loadBanner(cid, repaint);
     }, delay),
   );
 }
-function loadBanner(cid: string): void {
+function loadBanner(cid: string, repaint: Repaint): void {
   if (bannerLoading.has(cid)) return;
   bannerLoading.add(cid);
   fetchPrompt(cid).then((v) => {
@@ -47,12 +53,16 @@ function loadBanner(cid: string): void {
       // captured, a slow check still notices an infrastructure relaunch that
       // clears/replaces it while the logical turn remains "running" in the
       // tree.
-      scheduleBannerRefresh(cid, v?.system_messages?.length ? 5000 : 500);
+      scheduleBannerRefresh(
+        cid,
+        repaint,
+        v?.system_messages?.length ? 5000 : 500,
+      );
     }
-    if (current) paint(current);
+    if (current) repaint(current);
   });
 }
-function toggleBanner(cid: string): void {
+function toggleBanner(cid: string, repaint: Repaint): void {
   if (bannerOpen.has(cid)) {
     bannerOpen.delete(cid);
     const timer = bannerRefresh.get(cid);
@@ -60,9 +70,9 @@ function toggleBanner(cid: string): void {
     bannerRefresh.delete(cid);
   } else {
     bannerOpen.add(cid);
-    loadBanner(cid);
+    loadBanner(cid, repaint);
   }
-  if (state.currentConv) paint(state.currentConv);
+  if (state.currentConv) repaint(state.currentConv);
 }
 
 function capturedSystemMessages(messages: unknown[]): TemplateResult[] {
@@ -120,7 +130,10 @@ function capturedSystemMessages(messages: unknown[]): TemplateResult[] {
 
 // The top-of-thread "System prompt" banner: the standing instructions the model
 // runs under for this agent, collapsed by default and revealed inline.
-export function promptBanner(conv: Conversation): TemplateResult {
+export function promptBanner(
+  conv: Conversation,
+  repaint: Repaint,
+): TemplateResult {
   const cid = conv.id;
   const open = bannerOpen.has(cid);
   const data = bannerData.get(cid);
@@ -131,7 +144,7 @@ export function promptBanner(conv: Conversation): TemplateResult {
     conv.status === "running" &&
     (previousStatus !== "running" || data?.capture_status !== "captured")
   ) {
-    scheduleBannerRefresh(cid);
+    scheduleBannerRefresh(cid, repaint);
   }
   const transcript = Boolean(data?.system_messages?.length);
   const text = transcript
@@ -148,7 +161,7 @@ export function promptBanner(conv: Conversation): TemplateResult {
       class="prompt-banner-row"
       type="button"
       aria-expanded=${open ? "true" : "false"}
-      @click=${() => toggleBanner(cid)}
+      @click=${() => toggleBanner(cid, repaint)}
     >
       ${disclosureCaret}
       <span class="lead">System prompt</span>

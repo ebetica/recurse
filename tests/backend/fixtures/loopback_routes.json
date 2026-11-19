@@ -147,6 +147,7 @@
   "POST /api/pi/auth/logout web",
   "POST /api/pi/auth/token-json web",
   "POST /api/pi/codex-auth/api-key web",
+  "POST /api/pi/codex-auth/api-key/remove web",
   "POST /api/pi/codex-auth/code web",
   "POST /api/pi/codex-auth/login-url web",
   "POST /api/pi/codex-auth/logout web",

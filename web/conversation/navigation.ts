@@ -1,43 +1,27 @@
-// Owns whole-turn older pages, row jumps and viewport filling, not rendering.
-// Pages never split turns; thread.ts paints after hidden targets expand.
+// Owns row/latest jumps and the viewport bindings that request older pages.
+// Thread paint follows expansion of hidden jump targets.
 
 import { state } from "../state.js";
-import { msgsEl, scrollEl } from "../dom.js";
+import { msgsEl, scrollBtn, scrollEl } from "../dom.js";
 import {
-  isDeletingConversation,
+  fillViewport,
+  loadOlder,
   loadOlderRows,
   loaded,
   loadingOlder,
   renderedConvId,
   renderedLogGeneration,
   rowThreadOlder,
-  rowThreads,
-  topCursor,
 } from "../row-thread-state.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import { rowIdFromMessageId } from "../row-thread-state/row-thread.js";
-import { boundaryHasHiddenActivity } from "../thread-render/activity-boundary.js";
-import { turnGroupBlocks } from "../thread-render/turn-groups.js";
-import { revealActivityBoundary } from "./disclosure.js";
-import { paint, releaseBottomFollow } from "./thread.js";
+import { renderedMessageEntries, revealRowMessage } from "./disclosure.js";
+import { followLatestReply, paint, releaseBottomFollow } from "./thread.js";
 import {
   jumpThreadScroll,
   queueThreadJump,
   threadJumpAwaited,
 } from "./scroll-ledger.js";
-import {
-  messageDisclosures,
-  messageDisclosureIdentity,
-} from "./message-disclosure.js";
-import { isAgentActivityMessage } from "../thread-render/turn-view.js";
-
-export async function loadOlder(fill = true): Promise<void> {
-  if (loadingOlder || !scrollEl.clientHeight || !scrollEl.clientWidth) return;
-  const conv = state.currentConv;
-  if (!conv || conv.id !== renderedConvId) return;
-  if (isDeletingConversation(conv.id)) return;
-  if (rowThreadOlder.get(conv.id) === false) return;
-  await loadOlderRows(conv, fill);
-}
 
 // Completion and retained context are different places: resolve the summary's
 // boundary, then reuse the row jump to load/reveal/focus the kept message.
@@ -162,10 +146,13 @@ async function jumpToRowMessage(
     if (now <= held) return false;
     held = now;
   }
-  if (nextVisibleMessage && !renderedEntries().some((e) => e.id === wanted)) {
+  if (
+    nextVisibleMessage &&
+    !renderedMessageEntries().some((e) => e.id === wanted)
+  ) {
     const rows = rowThreads.get(cid)!.rows;
     const cut = rows.findIndex((row) => row.id === rowId);
-    const visible = new Set(renderedEntries().map((entry) => entry.id));
+    const visible = new Set(renderedMessageEntries().map((entry) => entry.id));
     const target = rows.slice(cut).find((row) => visible.has(`row:${row.id}`));
     if (target) wanted = `row:${target.id}`;
   }
@@ -190,45 +177,6 @@ async function jumpToRowMessage(
   } finally {
     queueThreadJump(false);
   }
-}
-
-function renderedEntries() {
-  return loaded.flatMap((turn) =>
-    turn.segments.flatMap((segment) => [
-      ...segment.user,
-      ...(segment.assistant?.content ? [segment.assistant] : []),
-    ]),
-  );
-}
-
-/** Opens the folds hiding a loaded message; false when it is not loaded. */
-export function revealRowMessage(cid: string, wanted: string): boolean {
-  const generation = renderedLogGeneration;
-  const turn = loaded.find((candidate) =>
-    candidate.segments.some(
-      (segment) =>
-        segment.user.some((entry) => entry.id === wanted) ||
-        segment.assistant?.id === wanted,
-    ),
-  );
-  if (!turn) return false;
-  const block = turnGroupBlocks(loaded, state.currentConv?.parent ?? null).find(
-    (candidate) => candidate.slices.some((slice) => slice.turn === turn),
-  );
-  if (block && boundaryHasHiddenActivity(block)) {
-    revealActivityBoundary(cid, block);
-    const inner = block.wakeTurns?.find((unit) =>
-      unit.slices.some((slice) => slice.turn === turn),
-    );
-    if (inner) revealActivityBoundary(cid, inner);
-  }
-  const entry = renderedEntries().find((candidate) => candidate.id === wanted);
-  if (entry?.kind === "user" && isAgentActivityMessage(entry)) {
-    const identity = `agent:${generation}:${messageDisclosureIdentity(entry)}`;
-    if (!messageDisclosures.isOpen(cid, identity))
-      messageDisclosures.toggle(cid, identity);
-  }
-  return true;
 }
 
 let endJumpHighlight = (): void => {};
@@ -286,19 +234,16 @@ function settleJumpTarget(target: HTMLElement | null, focus = true): boolean {
   return true;
 }
 
-// Fill until scrollable or at log start; one turn may leave no scroll-up path.
-let fillFrame = 0;
-export function fillViewport(): void {
-  if (fillFrame) return;
-  fillFrame = requestAnimationFrame(() => {
-    fillFrame = 0;
-    const height = scrollEl.clientHeight;
-    if (
-      topCursor > 0 &&
-      height > 0 &&
-      scrollEl.clientWidth > 0 &&
-      scrollEl.scrollHeight <= height + 1
-    )
-      void loadOlder();
-  });
+new ResizeObserver(fillViewport).observe(scrollEl, { box: "content-box" });
+scrollEl.addEventListener(
+  "scroll",
+  () => {
+    if (scrollEl.scrollTop < 300) loadOlder();
+  },
+  { passive: true },
+);
+export function scrollToLatest(): void {
+  followLatestReply();
+  jumpThreadScroll(scrollEl.scrollHeight, "smooth");
 }
+scrollBtn.addEventListener("click", scrollToLatest);

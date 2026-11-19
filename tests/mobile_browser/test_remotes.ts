@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import type { Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,6 +11,7 @@ import {
   stopServer,
   type BrowserTest,
   openSettingsPanel,
+  expectHitCorners,
 } from "./common";
 
 export const tests: BrowserTest[] = [
@@ -129,31 +131,47 @@ export const tests: BrowserTest[] = [
       const token = JSON.parse(
         await readFile(join(data, "data", "server.json"), "utf8"),
       ).token;
-      const requested = await context.request.post(base + "api/backends", {
-        headers: {
-          "x-loopback-token": token,
-          "x-recurse-agent": rootAgentId(),
-          "x-recurse-bundled-tool": "subagent",
-        },
-        data: { label: "Requested", url: `http://127.0.0.1:${port}` },
-      });
-      expect(requested.ok()).toBe(true);
+      const requestRemote = async (label: string, url: string) => {
+        const requested = await context.request.post(base + "api/backends", {
+          headers: {
+            "x-loopback-token": token,
+            "x-recurse-agent": rootAgentId(),
+            "x-recurse-bundled-tool": "subagent",
+          },
+          data: { label, url },
+        });
+        expect(requested.ok()).toBe(true);
+      };
+      const address = `http://127.0.0.1:${port}`;
+      for (const label of ["Requested", "Second", "Moved"])
+        await requestRemote(label, address);
       await page.goto(base);
       await page.locator(".agent").first().waitFor();
       await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      const homesUrl = `${base}api/backend-keys`;
+      await page.route(homesUrl, (route) =>
+        route.fulfill({ status: 500, json: { error: "unavailable" } }),
+      );
+      const remotesNav = page.locator(
+        '#settings-nav button[data-cat="remotes"]',
+      );
+      await remotesNav.click();
       const section = page.locator(".remotes-settings");
+      const homes = section.locator(".remote-incoming");
+      const homesRead = homes.locator('.group[aria-busy="false"]');
+      await homesRead.waitFor({ state: "attached" });
+      await browserExpect(homesRead).toHaveText(
+        "Could not load incoming connections. Reopen Settings to retry.",
+      );
+      await browserExpect(homesRead).toBeVisible();
+      await page.unroute(homesUrl);
+      await page.locator(".settings-cat:not([hidden]) .settings-back").click();
+      await remotesNav.click();
       await browserExpect(
         page.getByRole("heading", { name: "Connected homes", exact: true }),
       ).toHaveCount(0);
-      await browserExpect(
-        section.getByRole("heading", {
-          name: "Homes with access to this instance",
-        }),
-      ).toBeVisible();
-      await browserExpect(
-        section.getByText("No homes have access."),
-      ).toBeVisible();
+      await homesRead.waitFor({ state: "attached" });
+      await browserExpect(homes).toBeHidden();
       await browserExpect(section.locator('input[name="url"]')).toBeHidden();
       await section.getByRole("button", { name: /^Requested/ }).click();
       const requestedDetails = page.getByRole("dialog", {
@@ -178,10 +196,9 @@ export const tests: BrowserTest[] = [
         .click();
       for (const width of [1280, 390]) {
         await page.setViewportSize({ width, height: 1000 });
-        if (width <= 700)
-          await section
-            .getByRole("button", { name: "Add a remote", exact: true })
-            .click();
+        await section
+          .getByRole("button", { name: "Add a remote", exact: true })
+          .click();
         const addDetails = page.getByRole("region", {
           name: "Add a remote",
           exact: true,
@@ -211,113 +228,271 @@ export const tests: BrowserTest[] = [
             exact: true,
           }),
         ).toBeVisible();
-        if (width <= 700) {
-          await page
-            .getByRole("button", { name: "Close Add a remote", exact: true })
-            .click();
-          await browserExpect(addDetails).not.toBeVisible();
-        }
+        await page
+          .getByRole("button", {
+            name: width <= 700 ? "Close Add a remote" : "Back to Remotes",
+            exact: true,
+          })
+          .click();
+        await browserExpect(addDetails).not.toBeVisible();
       }
+      const addRemote = section.getByRole("button", {
+        name: "Add a remote",
+        exact: true,
+      });
+      const rowLabels = section.locator(
+        ".remote-entry > .settings-row .settings-row-label",
+      );
+      const modal = page.locator("dialog:modal");
+      const second = page.getByRole("dialog", { name: "Second", exact: true });
+      const secondPassword = second.getByLabel("Password for Second");
+      const moved = page.getByRole("dialog", { name: "Moved", exact: true });
+      const movedPassword = moved.getByLabel("Password for Moved");
+      const movedAddress = `${address}/moved`;
+      const moveRemote = async (url: string) => {
+        expect(
+          (await context.request.delete(base + "api/backends/Moved")).ok(),
+        ).toBe(true);
+        await requestRemote("Moved", url);
+      };
+      const heldReads: Route[] = [];
+      let readArrived: (() => void) | null = null;
+      await page.route(`${base}api/backends`, (route) => {
+        if (
+          !readArrived ||
+          route.request().method() !== "GET" ||
+          route.request().headers()["x-test-read"] === "refresh"
+        )
+          return route.fallback();
+        heldReads.push(route);
+        return readArrived();
+      });
+      const holdReads = () =>
+        new Promise<void>((resolve) => (readArrived = resolve));
+      const releaseReads = async () => {
+        readArrived = null;
+        for (const route of heldReads.splice(0)) await route.continue();
+      };
+      await section.getByRole("button", { name: /^Second/ }).click();
+      await secondPassword.fill("typed");
+      let readHeld = holdReads();
+      await moveRemote(movedAddress);
+      await readHeld;
+      await browserExpect(
+        section.getByText(movedAddress, { exact: true }),
+      ).toHaveCount(0);
+      await releaseReads();
+      await browserExpect(
+        section.getByText(movedAddress, { exact: true }),
+      ).toHaveCount(1);
+      await browserExpect(rowLabels).toHaveText([
+        "Requested",
+        "Second",
+        "Moved",
+      ]);
+      await browserExpect(secondPassword).toBeFocused();
+      await browserExpect(secondPassword).toHaveValue("typed");
+      await browserExpect(modal).toHaveAccessibleName("Second");
+      await second
+        .getByRole("button", { name: "Close Second", exact: true })
+        .click();
+      await section.getByRole("button", { name: /^Moved/ }).click();
+      await movedPassword.fill("old draft");
+      readHeld = holdReads();
+      await moveRemote(address);
+      await readHeld;
+      await browserExpect(movedPassword).toBeFocused();
+      await browserExpect(movedPassword).toHaveValue("old draft");
+      await releaseReads();
+      await browserExpect(moved).toBeHidden();
+      await browserExpect(addRemote).toBeVisible();
+      await browserExpect(addRemote).toBeFocused();
+      await section.getByRole("button", { name: /^Moved/ }).click();
+      await browserExpect(
+        moved.getByText(address, { exact: true }),
+      ).toBeVisible();
+      await browserExpect(movedPassword).toHaveValue("");
+      let dismiss = (_route: Route) => {};
+      const dismissHeld = new Promise<Route>((resolve) => (dismiss = resolve));
+      await page.route(`${base}api/backends/Moved`, (route) => dismiss(route));
+      await moved.getByRole("button", { name: "Dismiss", exact: true }).click();
+      const heldDismiss = await dismissHeld;
+      await moved
+        .getByRole("button", { name: "Close Moved", exact: true })
+        .click();
+      await section.getByRole("button", { name: /^Second/ }).click();
+      await secondPassword.fill("typed again");
+      await page.evaluate(() => {
+        const browser = globalThis as any;
+        browser.addEventListener(
+          "recurse:refresh-remotes",
+          () => {
+            const read = browser.fetch;
+            browser.fetch = (input: unknown, init: any) => {
+              browser.fetch = read;
+              const headers = new browser.Headers(init?.headers);
+              headers.set("x-test-read", "refresh");
+              return read(input, { ...init, headers });
+            };
+          },
+          { once: true },
+        );
+      });
+      const refreshRead = page.waitForResponse(
+        (response) => response.request().headers()["x-test-read"] === "refresh",
+      );
+      readHeld = holdReads();
+      await heldDismiss.continue();
+      await refreshRead;
+      await browserExpect(rowLabels).toHaveText(["Requested", "Second"]);
+      await browserExpect(secondPassword).toBeFocused();
+      await browserExpect(secondPassword).toHaveValue("typed again");
+      await browserExpect(modal).toHaveAccessibleName("Second");
+      await releaseReads();
+      await page.unroute(`${base}api/backends/Moved`);
+      await page.unroute(`${base}api/backends`);
+      await second
+        .getByRole("button", { name: "Close Second", exact: true })
+        .click();
+      let signIn = (_route: Route) => {};
+      const signInHeld = new Promise<Route>((resolve) => (signIn = resolve));
+      await page.route(`${base}api/backends/Requested/sign-in`, (route) =>
+        signIn(route),
+      );
       await section.getByRole("button", { name: /^Requested/ }).click();
       await password.fill(LOGIN);
       await requestedDetails
         .getByRole("button", { name: "Sign in", exact: true })
         .click();
+      const heldSignIn = await signInHeld;
+      await requestedDetails
+        .getByRole("button", { name: "Close Requested", exact: true })
+        .click();
+      await section.getByRole("button", { name: /^Second/ }).click();
+      await secondPassword.fill("typed");
+      await heldSignIn.continue();
+      await browserExpect(rowLabels).toHaveText(["Second", "Requested"]);
+      await browserExpect(secondPassword).toBeFocused();
+      await browserExpect(secondPassword).toHaveValue("typed");
+      await browserExpect(modal).toHaveAccessibleName("Second");
+      await page.unroute(`${base}api/backends/Requested/sign-in`);
+      await secondPassword.fill(LOGIN);
+      await second
+        .getByRole("button", { name: "Sign in", exact: true })
+        .click();
+      await browserExpect(
+        second.getByRole("button", {
+          name: "Sync settings from home",
+          exact: true,
+        }),
+      ).toBeVisible();
+      await browserExpect(secondPassword).toHaveCount(0);
+      await browserExpect(modal).toHaveAccessibleName("Second");
+      await browserExpect(rowLabels).toHaveText(["Requested", "Second"]);
+      await second
+        .getByRole("button", { name: "Disconnect", exact: true })
+        .click();
+      await browserExpect(second).toBeHidden();
+      await browserExpect(rowLabels).toHaveText(["Requested"]);
+      await browserExpect(addRemote).toBeVisible();
+      await browserExpect(addRemote).toBeFocused();
+      await section.getByRole("button", { name: /^Requested/ }).click();
+      await browserExpect(
+        requestedDetails.getByRole("button", {
+          name: "Sync settings from home",
+          exact: true,
+        }),
+      ).toBeVisible();
+      await requestedDetails
+        .getByRole("button", { name: "Close Requested", exact: true })
+        .click();
       await browserExpect(requestedDetails).not.toBeVisible();
       await page.setViewportSize({ width: 1280, height: 1000 });
-      const layout = await section.evaluate((section) => {
-        const browser = globalThis as any;
-        const remote = section.querySelector(".remote-entry")!;
-        const add = section
-          .querySelector(".remote-add")!
-          .closest(".settings-detail")!;
-        const summary = add.querySelector(".settings-detail-summary")!;
-        const field = add.querySelector(".item.field")!;
-        const action = remote.querySelector(".remote-buttons button")!;
-        const address = remote.querySelector(".remote-info")!;
-        const title = remote.querySelector(
-          ".settings-detail-summary .settings-row-label",
-        )!;
-        const left = (el: any) =>
-          el.getBoundingClientRect().left +
-          parseFloat(browser.getComputedStyle(el).paddingLeft);
-        return {
-          gap:
-            add.getBoundingClientRect().top -
-            remote.getBoundingClientRect().bottom,
-          radius: browser.getComputedStyle(add).borderRadius,
-          groupRadius: browser.getComputedStyle(remote.parentElement)
-            .borderRadius,
-          fieldInset: left(field) - left(summary),
-          actionInset: left(action) - left(address),
-          titleGap:
-            address.getBoundingClientRect().top -
-            title.getBoundingClientRect().bottom,
-          actionGap:
-            action.getBoundingClientRect().top -
-            address.getBoundingClientRect().bottom,
-          repeatedName: remote.querySelector(".remote-info strong") !== null,
-        };
-      });
-      expect(layout.gap).toBe(24);
-      expect(layout.radius).toBe(layout.groupRadius);
-      expect(layout.fieldInset).toBe(0);
-      expect(layout.actionInset).toBe(0);
-      expect(layout.repeatedName).toBeFalse();
-      expect(layout.titleGap).toBe(4);
-      expect(layout.actionGap).toBe(8);
-      await page.locator('#settings-nav button[data-cat="models"]').click();
-      const ladder = page.getByRole("region", {
-        name: "Effort ladder",
+      const [remotes, adding] = await section.evaluate((section) =>
+        [
+          section.querySelector(".remote-entry")!.parentElement!,
+          section.querySelector(".remote-add")!.closest(".settings-detail")!,
+        ].map((part) => {
+          const box = part.getBoundingClientRect();
+          return {
+            left: box.left,
+            right: box.right,
+            top: box.top,
+            bottom: box.bottom,
+          };
+        }),
+      );
+      expect(adding!.left).toBe(remotes!.left);
+      expect(adding!.right).toBe(remotes!.right);
+      expect(adding!.top).toBeGreaterThan(remotes!.bottom);
+      await expectHitCorners(
+        section.getByRole("button", { name: /^Requested / }),
+      );
+      await expectHitCorners(addRemote);
+      await section.getByRole("button", { name: /^Requested / }).click();
+      const entry = page.getByRole("region", {
+        name: "Requested",
         exact: true,
       });
-      await browserExpect(ladder.locator(".model-box-input")).toHaveCount(5);
-      const ladderLayout = await ladder.evaluate((content) => {
-        const heading = content.parentElement!.querySelector(
-          ".settings-detail-summary .settings-row-label",
-        )!;
-        const update = content.querySelector(".model-list-update-button")!;
-        const level = content.querySelector(
-          ".effort .settings-detail-summary .settings-row-label",
-        )!;
-        const input = content.querySelector(".model-box-input")!;
-        const row = level.parentElement!;
+      await browserExpect(entry).toBeVisible();
+      const layout = await entry.evaluate((content) => {
+        const textLeft = (element: any) => {
+          const range = element.ownerDocument.createRange();
+          range.selectNodeContents(element);
+          return range.getBoundingClientRect().left;
+        };
+        const action = content.querySelector(".remote-buttons button")!;
+        const address = content.querySelector(".remote-info")!;
         return {
-          left: [heading, update, level, input].map(
-            (el) => el.getBoundingClientRect().left,
-          ),
-          rowGap:
-            row.getBoundingClientRect().top -
-            update.getBoundingClientRect().bottom,
-          editorGap:
-            input.getBoundingClientRect().top -
-            row.getBoundingClientRect().bottom,
+          actionInset: textLeft(action) - textLeft(address),
+          below:
+            action.getBoundingClientRect().top >=
+            address.getBoundingClientRect().bottom,
+          repeatedName: content.querySelector(".remote-info strong") !== null,
         };
       });
-      expect(new Set(ladderLayout.left).size).toBe(1);
-      expect(ladderLayout.rowGap).toBe(0);
-      expect(ladderLayout.editorGap).toBe(0);
+      expect(layout.actionInset).toBeCloseTo(0, 0);
+      expect(layout.below).toBe(true);
+      expect(layout.repeatedName).toBeFalse();
+      await expectHitCorners(entry.locator(".remote-buttons button").first());
+      await page.locator('#settings-nav button[data-cat="models"]').click();
+      const ladder = page.locator(".settings-section").filter({
+        has: page.getByRole("heading", { name: "Effort levels", exact: true }),
+      });
+      await browserExpect(
+        ladder.getByRole("button", { name: /^Level [1-5] / }),
+      ).toHaveCount(5);
+      const safetyRows = ladder.getByRole("button", {
+        name: /^Safety review\b/,
+        includeHidden: true,
+      });
+      await browserExpect(safetyRows).toHaveCount(1);
+      await browserExpect(safetyRows).toBeVisible();
+      await browserExpect(safetyRows).toHaveAccessibleName(
+        "Safety review Same as level 1",
+      );
+      const labelLefts = await ladder
+        .locator("h3, .settings-row-label:visible")
+        .evaluateAll((labels) =>
+          labels.map((label) => label.getBoundingClientRect().left),
+        );
+      expect(labelLefts).toHaveLength(8);
+      expect(new Set(labelLefts).size).toBe(1);
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page.getByRole("button", { name: /^MCP servers / }).click();
       await browserExpect(
         page.getByText("No MCP servers configured.", { exact: true }),
       ).toBeVisible();
       const mcpInsets = await page
-        .getByRole("region", { name: "MCP servers", exact: true })
-        .evaluate((content) => {
-          const title = content.parentElement!.querySelector(
-            ".settings-detail-summary .settings-row-label",
-          )!;
-          const list = content.querySelector(".mcp-status")!;
-          return [
-            title.getBoundingClientRect().left,
-            list.getBoundingClientRect().left +
-              parseFloat(
-                (globalThis as any).getComputedStyle(list).paddingLeft,
-              ),
-          ];
-        });
-      expect(mcpInsets[0]).toBe(mcpInsets[1]);
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+        .getByRole("dialog", { name: "MCP servers", exact: true })
+        .evaluate((page) =>
+          [
+            page.querySelector("h2")!,
+            page.querySelector(".settings-detail-content")!,
+          ].map((part) => part.getBoundingClientRect().left),
+        );
+      expect(new Set(mcpInsets).size).toBe(1);
+      await page.locator('#settings-nav button[data-cat="remotes"]').click();
       await context.request.post(remote.base + "login", {
         form: { password: LOGIN },
       });
@@ -326,23 +501,31 @@ export const tests: BrowserTest[] = [
       await incomingPage.goto(remote.base);
       await incomingPage.locator(".agent").first().waitFor();
       await openSettingsPanel(incomingPage);
+      await incomingPage
+        .locator('#settings-nav button[data-cat="remotes"]')
+        .click();
       const incoming = incomingPage.locator(".remote-incoming .remote-entry");
       await browserExpect(incoming).toHaveCount(1);
+      await incoming.locator(":scope > .settings-row").click();
+      await browserExpect(incoming.locator(".remote-info")).toBeVisible();
       const incomingLayout = await incoming.evaluate((entry) => {
+        const textLeft = (element: any) => {
+          const range = element.ownerDocument.createRange();
+          range.selectNodeContents(element);
+          return range.getBoundingClientRect().left;
+        };
         const button = entry.querySelector("button.danger")!;
         const info = entry.querySelector(".remote-info")!;
         return {
-          inset:
-            button.getBoundingClientRect().left +
-            parseFloat(
-              (globalThis as any).getComputedStyle(button).paddingLeft,
-            ) -
-            info.getBoundingClientRect().left,
-          height: button.getBoundingClientRect().height,
+          inset: textLeft(button) - textLeft(info),
+          below:
+            button.getBoundingClientRect().top >=
+            info.getBoundingClientRect().bottom,
         };
       });
-      expect(incomingLayout.inset).toBe(0);
-      expect(incomingLayout.height).toBe(44);
+      expect(incomingLayout.inset).toBeCloseTo(0, 0);
+      expect(incomingLayout.below).toBe(true);
+      await expectHitCorners(incoming.locator("button.danger"));
       await incomingPage.close();
       await page.setViewportSize({ width: 390, height: 1000 });
       await section.getByRole("button", { name: /^Requested/ }).click();
@@ -366,8 +549,16 @@ export const tests: BrowserTest[] = [
       endpoint.stop(true);
       await remoteSection.getByText(/^Offline · last seen /).waitFor();
       await browserExpect(agent).toBeVisible();
+      await browserExpect
+        .poll(
+          async () =>
+            (
+              await (await context.request.get(base + "api/backends")).json()
+            ).find((row: { label: string }) => row.label === "Requested").state,
+        )
+        .toBe("unreachable");
       await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await page.locator('#settings-nav button[data-cat="remotes"]').click();
       await section.getByRole("button", { name: /^Requested/ }).click();
       const offline = requestedDetails.getByText(/^Offline · last seen /);
       await browserExpect(offline).toHaveText(
@@ -540,7 +731,7 @@ export const tests: BrowserTest[] = [
       const treeRead = held.find((entry) => entry.kind === "tree")!;
       release("conversation");
       await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await page.locator('#settings-nav button[data-cat="remotes"]').click();
       await section.getByRole("button", { name: /^Requested/ }).click();
       await requestedDetails
         .getByRole("button", { name: "Disconnect", exact: true })
@@ -724,13 +915,62 @@ export const tests: BrowserTest[] = [
       await page.reload();
       await page.locator(".agent").first().waitFor({ state: "attached" });
       await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await page.locator('#settings-nav button[data-cat="remotes"]').click();
       await section.getByRole("button", { name: /^Revoked/ }).click();
       await browserExpect(
         page
           .getByRole("dialog", { name: "Revoked", exact: true })
           .getByText("Sign-in revoked. Disconnect and add this remote again."),
       ).toBeVisible();
+      await page
+        .getByRole("button", { name: "Close Revoked", exact: true })
+        .click();
+      await requestRemote("Moved", address);
+      let dismissAgain = (_route: Route) => {};
+      const dismissAgainHeld = new Promise<Route>(
+        (resolve) => (dismissAgain = resolve),
+      );
+      await page.route(`${base}api/backends/Moved`, (route) =>
+        dismissAgain(route),
+      );
+      await page.route(`${base}api/backends`, (route) => {
+        if (!readArrived || route.request().method() !== "GET")
+          return route.fallback();
+        heldReads.push(route);
+        return readArrived();
+      });
+      await section.getByRole("button", { name: /^Moved/ }).waitFor();
+      readHeld = holdReads();
+      await section.getByRole("button", { name: /^Moved/ }).click();
+      const dismissMoved = moved.getByRole("button", {
+        name: "Dismiss",
+        exact: true,
+      });
+      await dismissMoved.click();
+      const heldDismissAgain = await dismissAgainHeld;
+      const dismissed = await heldDismissAgain.fetch();
+      expect(dismissed.ok()).toBe(true);
+      await browserExpect(dismissMoved).toBeDisabled();
+      await browserExpect(modal).toHaveAccessibleName("Moved");
+      await browserExpect
+        .poll(() =>
+          page.evaluate(() => {
+            const document = (globalThis as any).document;
+            return document.activeElement === document.body;
+          }),
+        )
+        .toBe(true);
+      await readHeld;
+      await releaseReads();
+      await browserExpect(moved).toBeHidden();
+      await browserExpect(rowLabels).toHaveText(["Revoked"]);
+      await browserExpect(addRemote).toBeVisible();
+      await browserExpect(addRemote).toBeFocused();
+      await heldDismissAgain.fulfill({ response: dismissed });
+      await browserExpect(rowLabels).toHaveText(["Revoked"]);
+      await browserExpect(addRemote).toBeFocused();
+      await page.unroute(`${base}api/backends/Moved`);
+      await page.unroute(`${base}api/backends`);
     } finally {
       release("conversation");
       release("tree");

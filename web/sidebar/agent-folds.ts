@@ -2,7 +2,7 @@
 // l/Right keeps selected children open; opening another row is temporary.
 // Restore drops unversioned opens once, keeping the saved h/Left fold.
 // Saved ids are capped; authoritative home reads prune deleted agents.
-import { parseConversationId } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { sharedTrees } from "../shared-trees.js";
 import { embedded, state } from "../state.js";
 

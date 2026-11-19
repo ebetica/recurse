@@ -1,5 +1,5 @@
 // Renders the live panel outside the thread; owns title/tool-label timers.
-// Invariant: the thread renders before the live bar, so thinkingStore marks
+// Invariant: the thread renders before the live bar, so its template marks
 // thinking text already rendered there before workingT reads it.
 import { html, nothing, type TemplateResult } from "lit";
 import {
@@ -7,9 +7,10 @@ import {
   oneLine,
 } from "../../src/tool_projection/redaction.js";
 import { activeAgentSummary, activeDescendantCount } from "../active-agents.js";
-import { rowThreads } from "../row-thread-state.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import { state } from "../state.js";
 import { thinkingStore } from "./thinking.js";
+import { showsCommittedStep } from "./thinking-paint.js";
 import type { ActivityBoundary } from "../thread-render/activity-boundary.js";
 import {
   shellSummary,
@@ -31,7 +32,6 @@ import {
 import type { Conversation } from "../types.js";
 import { thinkingElapsedT } from "./live-elapsed.js";
 import { activeShells, agentChipT, shellChipT } from "./shell-surface.js";
-import { stoppingId } from "./stop.js";
 import { paint } from "./thread.js";
 
 // The one thinking banner's shared box: pulsing dot, label slot, and the
@@ -61,7 +61,11 @@ function panelBoxT(
         <div class="live-panel-head">
           <span class="live-dot" aria-hidden="true"></span>
           ${label}
-          ${shellChipT(conv, shellLabel)}${agentChipT(conv, agentLabel)}
+          ${shellChipT(conv, shellLabel, paint)}${agentChipT(
+            conv,
+            agentLabel,
+            paint,
+          )}
         </div>
         ${summary}
       </div>
@@ -83,7 +87,7 @@ export function liveToolLabelVisible(
     elapsedMs >= TOOL_LABEL_DELAY_MS &&
     !liveActivityState(rowThreads.get(conv.id)?.rows ?? []).hasThinking &&
     conv.status === "running" &&
-    stoppingId !== conv.id &&
+    state.stopPostInFlightId !== conv.id &&
     !conv.retry_notice
   );
 }
@@ -108,7 +112,8 @@ export function workingT(
           if (state.currentConv?.id === conv.id) paint(state.currentConv);
         }, TOOL_LABEL_DELAY_MS - longest)
       : null;
-  const stopping = conv.status === "interrupting" || stoppingId === conv.id;
+  const stopping =
+    conv.status === "interrupting" || state.stopPostInFlightId === conv.id;
   const overlay = stopping ? "Interrupting this turn…" : null;
   const pillKey = thinkingStore.syncPill(
     conv,
@@ -122,7 +127,7 @@ export function workingT(
   const thinkingExpanded = !!thinkingEntry?.open;
   const thinkingText =
     thinkingExpanded &&
-    !thinkingStore.showsCommittedStep(pillKey) &&
+    !showsCommittedStep(pillKey) &&
     typeof thinkingFull === "string"
       ? thinkingSummaryBody(thinkingFull, panel.title)
       : "";

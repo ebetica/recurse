@@ -6,7 +6,7 @@ import { html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { live } from "lit/directives/live.js";
 import { openAgentFinderNavigate } from "../agent-finder/ui.js";
-import { parseConversationId } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { startNewAgent } from "../composer.js";
 import { $, inputEl } from "../dom.js";
 import { TIPS_ICON } from "../icons.js";
@@ -48,7 +48,7 @@ const CONTROL_LABELS: Record<TipControl, string> = {
   artifacts: "Open Artifacts",
   shortcuts: "Show shortcuts",
   "settings-appearance": "Open Settings",
-  "settings-account": "Open Settings",
+  "settings-remotes": "Open Settings",
 };
 
 const phone = matchMedia("(max-width: 700px)");
@@ -187,7 +187,7 @@ function typeIntoComposer(
 function ask(tip: Tip): void {
   if (!tip.ask) return;
   if (tip.ask.where === "new") {
-    startNewAgent(new DOMRect());
+    startNewAgent();
     if (appState.selectedId !== DRAFT) return;
   } else closeOnPhone();
   typeIntoComposer(tip.ask.request, "line");
@@ -226,7 +226,7 @@ function runControl(control: TipControl): void {
     default:
       window.dispatchEvent(
         new CustomEvent("recurse:open-settings", {
-          detail: control === "settings-account" ? "account" : "appearance",
+          detail: control === "settings-remotes" ? "remotes" : "appearance",
         }),
       );
   }

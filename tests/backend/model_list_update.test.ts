@@ -15,7 +15,7 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true });
 });
 
-type Reply = { models: unknown[]; errors?: unknown[] } | Error;
+type Reply = { models?: unknown[]; errors?: unknown[] } | Error;
 
 function world(replies: Reply[]) {
   const root = mkdtempSync(join(tmpdir(), "model-list-update-"));
@@ -56,7 +56,7 @@ function world(replies: Reply[]) {
 }
 
 test("POST starts the update with 202 and GET reads its status", async () => {
-  const w = world([{ models: TEST_PI_MODELS.slice(0, 1) }]);
+  const w = world([{ models: TEST_PI_MODELS.slice(0, 1) }, {}]);
   const router = new Router();
   registerSettingsRoutes(router, {
     config: w.config,
@@ -85,6 +85,19 @@ test("POST starts the update with 202 and GET reads its status", async () => {
       updated_at: 1_790_000_000,
       count: 1,
       error: null,
+    });
+    const missing = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: running.url },
+      body: "{}",
+    });
+    expect(missing.status).toBe(202);
+    await w.updater.settled();
+    expect(await (await fetch(url)).json()).toEqual({
+      updating: false,
+      updated_at: 1_790_000_000,
+      count: 1,
+      error: "No model list was returned",
     });
   } finally {
     await running.close();

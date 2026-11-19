@@ -151,6 +151,32 @@ export class OAuthStore implements ProviderCredentialStore {
     return [true, null];
   }
 
+  /** Stored provider sign-ins, without refreshing or returning credentials. */
+  async storedModelProviders() {
+    const signIns = new Map<string, "api_key" | "oauth">();
+    const auth = await this.readAuth().catch(() => ({}));
+    for (const [provider, credential] of Object.entries(auth)) {
+      if (!isRecord(credential)) continue;
+      if (
+        credential.type === "api_key" &&
+        typeof credential.key === "string" &&
+        credential.key.trim() &&
+        !credential.key.trimStart().startsWith("!")
+      )
+        signIns.set(provider, "api_key");
+      if (
+        credential.type === "oauth" &&
+        typeof credential.access === "string" &&
+        credential.access &&
+        typeof credential.refresh === "string" &&
+        credential.refresh &&
+        typeof credential.expires === "number"
+      )
+        signIns.set(provider, "oauth");
+    }
+    return signIns;
+  }
+
   packageRoot(): string {
     const override = this.options.ambient.RECURSE_PI_PACKAGE_ROOT;
     if (override) return override;
@@ -339,13 +365,12 @@ export class OAuthStore implements ProviderCredentialStore {
   async replaceCredentials(
     provider: string,
     credential: Json,
-    opts: { remove?: string[]; onlyIfMissing?: boolean } = {},
+    opts: { onlyIfMissing?: boolean } = {},
   ): Promise<boolean> {
     const result = await this.nativeRequest({
       action: "replace",
       provider,
       credential,
-      remove: [...(opts.remove ?? [])],
       only_if_missing: opts.onlyIfMissing ?? false,
       custom_providers: this.customProviderIds(),
     });

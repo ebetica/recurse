@@ -6,7 +6,6 @@ import { html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "./backends/backend.js";
-import { poll } from "./conversation/poll.js";
 import { agentLinkUrl } from "./deep-link.js";
 import {
   BACK_ICON,
@@ -181,6 +180,12 @@ export function showSide(parent: string, id: string): void {
   syncPanes();
 }
 
+let refreshAfterAction: () => Promise<void>;
+
+export function configureSidePane(refresh: () => Promise<void>): void {
+  refreshAfterAction = refresh;
+}
+
 async function act(work: () => Promise<string>): Promise<void> {
   busy = true;
   notice = "";
@@ -192,7 +197,7 @@ async function act(work: () => Promise<string>): Promise<void> {
   } finally {
     busy = false;
     syncPanes();
-    void poll();
+    void refreshAfterAction();
   }
 }
 

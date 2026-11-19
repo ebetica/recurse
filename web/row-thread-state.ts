@@ -1,5 +1,5 @@
-// Held /view row threads: per-conversation holder maps, Clear/epoch staleness
-// guards, and the tail/older fetch plus fold into the presented thread.
+// Held /view row threads: per-conversation holder maps, Clear/epoch and newer
+// readiness guards, and tail/older fetch folds into the presented thread.
 import { backendFor } from "./backends/backend.js";
 import { scrollEl } from "./dom.js";
 import { state } from "./state.js";
@@ -10,13 +10,16 @@ import {
   readSerialApplies,
   rowThreadHasActiveTurn,
   rowsToTurns,
-  type ClearedMarker,
   type RowThread,
 } from "./row-thread-state/row-thread.js";
 import type { ViewPage } from "./row-thread-state/view-blocks.js";
-import { pruneOptimistic } from "./pending-queue.js";
+import {
+  rowThreads,
+  rowThreadEpoch,
+  rowThreadCleared,
+} from "./row-thread-state/index.js";
+import { pruneOptimistic } from "./pending-queue/index.js";
 import { cancelRevealTimer } from "./conversation/disclosure.js";
-import { fillViewport } from "./conversation/navigation.js";
 import { writeThreadScroll } from "./conversation/scroll-ledger.js";
 import { paint } from "./conversation/thread.js";
 import { invalidateFiles, noteRowsRead, noteTurns } from "./files.js";
@@ -26,29 +29,13 @@ export let loaded: Turn[] = [];
 export let renderedConvId: string | null = null;
 export let renderedLogGeneration = 0;
 export let topCursor = 0;
-// Held rows own loaded turns once /view succeeds; polls retain chrome only.
-export const rowThreads = new Map<string, RowThread>();
 export const rowReadStatus = new Map<string, string>();
+const rowReadVersion = new Map<string, symbol>();
 export const rowThreadOlder = new Map<string, boolean>();
 const liveTails = new Map<string, { owner: string; turn: string }>();
 // Never-reused read serials fence in-flight pages across drops and eviction.
-const rowThreadEpoch = new Map<string, number>();
 let rowThreadDropSerial = 0;
-
-export function rowThreadContextKey(id: string): string {
-  return JSON.stringify([
-    rowThreads.get(id)?.instanceId,
-    rowThreadEpoch.get(id),
-  ]);
-}
-// Clear tombstones require a new session, not a rebuilt view instance.
-const rowThreadCleared = new Map<string, ClearedMarker>();
 const MAX_ROW_THREADS = 100;
-
-/** A confirmed Clear is still waiting for a fresh-session view. */
-export function rowThreadClearPending(id: string): boolean {
-  return rowThreadCleared.has(id);
-}
 
 // True when the page carries nothing newer than a confirmed Clear: the drop
 // already emptied this thread, so applying the page would resurrect history.
@@ -81,6 +68,7 @@ function pruneRowCaches(except?: string): void {
       rowThreads,
       rowThreadOlder,
       rowReadStatus,
+      rowReadVersion,
       rowThreadEpoch,
       rowThreadCleared,
       liveTails,
@@ -119,11 +107,19 @@ export function applyFocusedEventPage(id: string, page: ViewPage): void {
   if (isClearedStale(id, page)) return;
   if (page?.status === "stale") return;
   if (id !== state.selectedId) return;
+  const previous = rowThreads.get(id);
+  if (
+    page &&
+    previous?.instanceId === page.instance_id &&
+    previous.revision > page.revision
+  )
+    return;
   const priorStatus = rowReadStatus.get(id);
   const status = page?.status === "ready" ? "ready" : "unavailable";
   rowReadStatus.set(id, status);
+  rowReadVersion.set(id, Symbol());
+  pruneRowCaches(id);
   if (!page) return;
-  const previous = rowThreads.get(id);
   const fold = foldRowThread(previous, page);
   if (fold.gap) {
     if (fold.state) rowThreads.set(id, fold.state);
@@ -151,7 +147,6 @@ function rememberRowThread(
   rowThreads.set(id, thread);
   noteRowsRead(id);
   if (reset) rowThreadOlder.set(id, older);
-  pruneRowCaches(id);
 }
 
 // Confirmed Clear drops exactly this thread, including unavailable retries.
@@ -183,6 +178,7 @@ export function dropRowThread(id: string): void {
     rowThreadOlder.delete(id);
   }
   rowReadStatus.delete(id);
+  rowReadVersion.delete(id);
   cancelRevealTimer(id);
   rowThreadEpoch.set(id, ++rowThreadDropSerial);
   // Invariant: A thread-less drop still adds an epoch key: prune here, not just
@@ -191,6 +187,7 @@ export function dropRowThread(id: string): void {
   if (renderedConvId === id) {
     loaded = [];
     rowThreadInst = null;
+    rowThreadSession = undefined;
   }
 }
 
@@ -210,6 +207,7 @@ export function catchUpRowThread(id: string): void {
 }
 
 let rowThreadInst: string | null = null;
+let rowThreadSession: string | undefined;
 export let loadingOlder = false;
 
 const coldReads = new Map<
@@ -243,6 +241,7 @@ export function refreshRowThread(id: string): Promise<boolean> {
 
 async function readRowThread(id: string): Promise<boolean> {
   const held = rowThreads.get(id);
+  const version = rowReadVersion.get(id);
   // Invariant: Per-request identity (row-thread.readSerialApplies, unit-tested
   // there): apply only on exact serial match. A drop stores a fresh
   // never-reused serial; a missing entry never matches.
@@ -268,12 +267,24 @@ async function readRowThread(id: string): Promise<boolean> {
   if (!readSerialApplies(epoch, rowThreadEpoch.get(id))) return false;
   if (isClearedStale(id, page)) return false;
   if (page?.status === "stale") return false;
+  const previous = rowThreads.get(id);
+  if (held && previous?.instanceId !== held.instanceId) return false;
+  // Invariant: A late fallback cannot replace newer readiness. It may only
+  // advance the current instance with a strictly newer ready page.
+  if (
+    version !== rowReadVersion.get(id) &&
+    (!page ||
+      page.status !== "ready" ||
+      page.instance_id !== previous?.instanceId ||
+      page.revision <= previous.revision)
+  )
+    return false;
   const priorStatus = rowReadStatus.get(id);
   const status = page?.status === "ready" ? "ready" : "unavailable";
   rowReadStatus.set(id, status);
+  rowReadVersion.set(id, Symbol());
+  pruneRowCaches(id);
   if (!page) return priorStatus !== status;
-  if (held && rowThreads.get(id)?.instanceId !== held.instanceId) return false;
-  const previous = rowThreads.get(id);
   const fold = foldRowThread(previous, page);
   if (fold.gap) {
     if (!fold.state || held?.revision === -1) return false;
@@ -285,6 +296,32 @@ async function readRowThread(id: string): Promise<boolean> {
   rememberRowThread(id, thread, fold.reset, page.older === true);
   invalidatePublishedFiles(id, page, previous, fold.changed);
   return fold.changed || priorStatus !== status;
+}
+
+export async function loadOlder(fill = true): Promise<void> {
+  if (loadingOlder || !scrollEl.clientHeight || !scrollEl.clientWidth) return;
+  const conv = state.currentConv;
+  if (!conv || conv.id !== renderedConvId) return;
+  if (isDeletingConversation(conv.id)) return;
+  if (rowThreadOlder.get(conv.id) === false) return;
+  await loadOlderRows(conv, fill);
+}
+
+// Fill until scrollable or at log start; one turn may leave no scroll-up path.
+let fillFrame = 0;
+export function fillViewport(): void {
+  if (fillFrame) return;
+  fillFrame = requestAnimationFrame(() => {
+    fillFrame = 0;
+    const height = scrollEl.clientHeight;
+    if (
+      topCursor > 0 &&
+      height > 0 &&
+      scrollEl.clientWidth > 0 &&
+      scrollEl.scrollHeight <= height + 1
+    )
+      void loadOlder();
+  });
 }
 
 // Prepends one bounded older page without changing newer state. Empty
@@ -339,26 +376,29 @@ export async function loadOlderRows(
   }
 }
 
-// Folds held rows into loaded, returning false before /view ever answers.
-// Selection/generation or new-instance resets replace the thread. Stable
-// row-derived turn ids preserve keyed DOM on repeat polls.
+// Folds held rows into loaded. Conversation/session changes reset render keys;
+// same-session projection rebuilds retain the settled keyed DOM.
 function reconcileRows(conv: Conversation): boolean {
   const thread = rowThreads.get(conv.id);
   if (!thread) return false;
   const sameView =
-    renderedConvId === conv.id && rowThreadInst === thread.instanceId;
+    renderedConvId === conv.id &&
+    (thread.sessionKey !== undefined
+      ? rowThreadSession === thread.sessionKey
+      : rowThreadSession === undefined && rowThreadInst === thread.instanceId);
   if (!sameView) {
     renderedConvId = conv.id;
     renderedLogGeneration += 1;
-    rowThreadInst = thread.instanceId;
   }
+  rowThreadInst = thread.instanceId;
+  rowThreadSession = thread.sessionKey;
   loaded = rowsToTurns(thread.rows, rowThreadOlder.get(conv.id) !== false);
   conv.retry_notice = thread.retryNotice ?? null;
   markRowsOpen(conv, thread.rows);
   noteTurns(conv.id, loaded);
   // Invariant: Rows page by id: top is "no older rows", not byte offset 0.
   topCursor = rowThreadOlder.get(conv.id) === false ? 0 : 1;
-  pruneOptimistic(conv);
+  pruneOptimistic(conv, loaded);
   return true;
 }
 
@@ -393,6 +433,7 @@ export function reconcile(conv: Conversation): void {
     loaded = [];
     renderedConvId = conv.id;
     rowThreadInst = null;
+    rowThreadSession = undefined;
   }
 }
 
@@ -402,6 +443,7 @@ export function resetThreadView(): void {
   renderedConvId = null;
   renderedLogGeneration = 0;
   rowThreadInst = null;
+  rowThreadSession = undefined;
   loaded = [];
   topCursor = 0;
 }

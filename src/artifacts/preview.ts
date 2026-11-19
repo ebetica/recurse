@@ -2,7 +2,8 @@
 // iframe. This changes neither immutable artifact bytes nor the sandbox/CSP.
 // Inline scripts are already permitted; the parent validates the message
 // source.
-import { prependToHead, themedHtml } from "./theme";
+import { themedHtml } from "./theme";
+import { prependToHead } from "./page/index";
 import { ARTIFACT_KEY_RELAY } from "./key_relay";
 
 export function artifactPreview(html: string, css: string): string {

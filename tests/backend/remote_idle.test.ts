@@ -819,7 +819,7 @@ test("passive probes allow sleep and revoked connections stay stopped until sign
     const signedIn = await fetch(homeServer!.url + "/api/backends/R/sign-in", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ password: PASSWORD }),
+      body: JSON.stringify({ url: gateway.url.origin, password: PASSWORD }),
     });
     expect(signedIn.status).toBe(200);
     const resumed = seen.filter(

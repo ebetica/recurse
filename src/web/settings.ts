@@ -3,8 +3,8 @@
 // Provider credentials and instance storage retain separate ownership.
 // Home sync uses only settings_sync's route inventory.
 
-import { THINKING_LEVELS, type Config } from "../config";
-import safetyResults from "../extensions/core/safety/decision-results.json";
+import { PI_MODEL_ROUTES, THINKING_LEVELS, type Config } from "../config";
+import type { StoredModelSignIns } from "../safety_review_models";
 import {
   brandingFile,
   brandResponse,
@@ -98,7 +98,7 @@ function ladderModels(
 }
 
 /** Every model a Settings model box offers: logged-in routes and configured
- * custom providers only, Anthropic, ChatGPT subscription, OpenAI API,
+ * custom providers only, Anthropic, ChatGPT subscription, OpenAI API key,
  * OpenRouter, then custom, each in Pi's order. `reasoning_levels` is null
  * when Pi's list does not give a model's levels; any level is then allowed. */
 function settingsModelList(config: Config): Rec[] {
@@ -136,6 +136,7 @@ export interface SettingsRoutesDeps {
   readonly credentials: {
     replaceCredentials(provider: string, credential: Rec): Promise<unknown>;
     removeCredentials(providers: string[]): Promise<void>;
+    storedModelProviders(): Promise<StoredModelSignIns>;
   };
   readonly providers: Pick<ProviderSnapshot, "refresh">;
   /** The subscription usage limits model responses last reported. */
@@ -263,7 +264,7 @@ export function registerMcpServerRoutes(
           PRIVATE,
         );
       }
-      void deps.mcpChecks?.start(name).catch(() => {});
+      await deps.mcpChecks?.start(name).catch(() => {});
       return new Response(null, {
         status: 303,
         headers: { ...PRIVATE, location: "/" },
@@ -286,7 +287,7 @@ export function registerMcpServerRoutes(
           resolve,
         );
       });
-      void deps.mcpChecks?.start(name).catch(() => {});
+      await deps.mcpChecks?.start(name).catch(() => {});
       return jsonResponse({ signedIn: true });
     },
     { longRunning: true },
@@ -515,19 +516,25 @@ export function registerSettingsRoutes(
 
   router.get("/api/settings/safety-review-model", async () => {
     const model = config.safetyReviewModel();
+    const route = PI_MODEL_ROUTES.find(
+      ([id]) => id === model?.split("/")[0],
+    )?.[1];
     return json({
       model: model ?? null,
       invalid: model === undefined,
-      default_model: config.effortLevels()[1]!.model,
-      models: await config.safetyReviewModels(),
-      results: safetyResults,
+      ...(route && { route }),
+      models: await config.safetyReviewModels(
+        await deps.credentials.storedModelProviders(),
+      ),
     });
   });
   router.post("/api/settings/safety-review-model", async (ex) => {
     const body = await jsonDictBody(ex);
     return json({
       model: await mutate(() =>
-        config.setSafetyReviewModel(field(body, "model")),
+        config.setSafetyReviewModel(field(body, "model"), () =>
+          deps.credentials.storedModelProviders(),
+        ),
       ),
     });
   });
@@ -639,6 +646,14 @@ export function registerSettingsRoutes(
 
   registerMcpServerRoutes(router, deps);
 
+  async function withUsage<T extends object>(
+    subscription: UsageProvider,
+    status: T,
+  ) {
+    const usage = await deps.usageLimits.read(subscription);
+    return { ...status, ...(usage && { usage_limits: usage }) };
+  }
+
   /** The code-exchange routes of Claude and Codex share one error mapping. */
   function oauthRoutes(
     prefix: string,
@@ -655,8 +670,7 @@ export function registerSettingsRoutes(
       const imported = await importAmbient();
       let status = await auth.authStatus();
       if (imported) status = await providerAuthUpdated(status);
-      const usage = await deps.usageLimits.read(subscription);
-      return json({ ...status, ...(usage && { usage_limits: usage }) });
+      return json(await withUsage(subscription, status));
     });
 
     router.post(`${prefix}/login-url`, async () =>
@@ -674,7 +688,7 @@ export function registerSettingsRoutes(
         try {
           return json(
             await providerAuthUpdated(
-              await changeLogin(() => auth.completeLogin(code)),
+              await changeLogin<object>(() => auth.completeLogin(code)),
             ),
           );
         } catch (error) {
@@ -707,7 +721,7 @@ export function registerSettingsRoutes(
         try {
           return json(
             await providerAuthUpdated(
-              await changeLogin(() =>
+              await changeLogin<object>(() =>
                 auth.completeLoginWithToken(field(body, "token", "") as string),
               ),
             ),
@@ -722,24 +736,6 @@ export function registerSettingsRoutes(
     );
 
     router.post(
-      `${prefix}/api-key`,
-      async (ex) => {
-        const body = await jsonDictBody(ex);
-        try {
-          await changeLogin(() =>
-            auth.setApiKey(field(body, "key", "") as string),
-          );
-        } catch (error) {
-          if (isValueError(error))
-            throw new HttpError(422, (error as Error).message);
-          throw error;
-        }
-        return json(await providerAuthUpdated(await auth.authStatus()));
-      },
-      long,
-    );
-
-    router.post(
       `${prefix}/logout`,
       async () => {
         await changeLogin(() => auth.logout());
@@ -749,19 +745,64 @@ export function registerSettingsRoutes(
     );
   }
 
+  function apiKeyRoute(prefix: string, save: (key: string) => Promise<object>) {
+    router.post(
+      `${prefix}/api-key`,
+      async (ex) => {
+        const body = await jsonDictBody(ex);
+        try {
+          return json(
+            await providerAuthUpdated(
+              await save(field(body, "key", "") as string),
+            ),
+          );
+        } catch (error) {
+          if (isValueError(error))
+            throw new HttpError(422, (error as Error).message);
+          throw error;
+        }
+      },
+      long,
+    );
+  }
+
+  const claude = "/api/pi/auth";
+  const openai = "/api/pi/codex-auth";
   oauthRoutes(
-    "/api/pi/auth",
+    claude,
     "Claude",
     deps.anthropic,
     () => deps.anthropic.importClaudeCodeLogin(),
     "anthropic",
   );
   oauthRoutes(
-    "/api/pi/codex-auth",
-    "Codex",
+    openai,
+    "ChatGPT",
     deps.codex,
     () => deps.codex.importCodexCliLogin(),
     "openai-codex",
+  );
+  apiKeyRoute(claude, async (key) => {
+    await deps.usageLimits.changeLogin("anthropic", () =>
+      deps.anthropic.setApiKey(key),
+    );
+    return deps.anthropic.authStatus();
+  });
+  apiKeyRoute(openai, async (key) => {
+    await deps.codex.setApiKey(key);
+    return withUsage("openai-codex", await deps.codex.authStatus());
+  });
+  router.post(
+    `${openai}/api-key/remove`,
+    async () => {
+      await deps.codex.removeApiKey();
+      return json(
+        await providerAuthUpdated(
+          await withUsage("openai-codex", await deps.codex.authStatus()),
+        ),
+      );
+    },
+    long,
   );
 
   router.get("/api/pi/muse-auth", async () =>

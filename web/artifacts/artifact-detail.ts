@@ -1,6 +1,7 @@
 // Artifact content loading. This module owns fetching an artifact's
 // version history and revision content into the pane: version listing,
 // request sequencing, and loading notices.
+// App startup supplies content rendering through the shared contract.
 import { backendFor } from "../backends/backend.js";
 import {
   artifactFileUrl,
@@ -8,7 +9,6 @@ import {
   normalizeArtifactVersions,
 } from "./model.js";
 import type { ArtifactInfo } from "./model.js";
-import { renderShell } from "./pane.js";
 import { setPaneLoading } from "../panes.js";
 import {
   reanchor,
@@ -18,10 +18,16 @@ import {
   commentKey,
 } from "./selection-comments.js";
 import { errorText, refreshList, selectedInfo } from "./list-cache.js";
-import { renderContent } from "./content-view.js";
 import { scrollDocumentFragment } from "../document-markdown.js";
+import { artifactScroller } from "./pane-state.js";
 import { renderComments } from "./comment-bar.js";
-import { contentCache, type ArtifactEl } from "./artifact-state.js";
+import {
+  contentCache,
+  renderArtifactContent,
+  setNotice,
+  type ArtifactEl,
+} from "./artifact-state.js";
+export { setNotice };
 import { reviewedVersion, type DocumentChanges } from "../document-review.js";
 
 export async function loadVersions(
@@ -61,7 +67,7 @@ export async function loadVersions(
     : [];
   rs.versionsLoading = true;
   rs.versionsError = false;
-  renderShell(pane);
+  pane.renderShell();
   try {
     const response = await backendFor(requestedAgent).api(
       artifactVersionsUrl(requestedAgent, requestedId),
@@ -75,7 +81,7 @@ export async function loadVersions(
   } finally {
     if (current()) {
       rs.versionsLoading = false;
-      renderShell(pane);
+      pane.renderShell();
     }
   }
 }
@@ -113,12 +119,12 @@ async function changesFor(
       since,
       onReviewed: () => {
         rs.changes = null;
-        renderShell(pane);
+        pane.renderShell();
       },
       onCompare: () => {
         rs.changes = null;
         rs.shownKey = null;
-        renderShell(pane);
+        pane.renderShell();
         void showArtifact(pane);
       },
     };
@@ -155,11 +161,15 @@ export async function refreshArtifact(pane: ArtifactEl): Promise<void> {
 }
 
 function scrollLinkedSection(pane: ArtifactEl): void {
-  const section = pane._rs.linkedSection;
-  if (!section || section.artifact !== pane._rs.selId) return;
-  const body = pane.querySelector<HTMLElement>(".report-doc");
-  if (body) scrollDocumentFragment(body, section.fragment, true);
-  pane._rs.linkedSection = undefined;
+  const rs = pane._rs;
+  const section = rs.linkedSection;
+  if (section?.artifact === rs.selId) {
+    const body = pane.querySelector<HTMLElement>(".report-doc");
+    if (body) scrollDocumentFragment(body, section.fragment, true);
+    rs.linkedSection = undefined;
+  } else if (rs.linkedScrollTop !== undefined)
+    artifactScroller(pane).scrollTop = rs.linkedScrollTop;
+  rs.linkedScrollTop = undefined;
 }
 
 export async function showArtifact(pane: ArtifactEl): Promise<void> {
@@ -236,7 +246,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
       return;
     }
     rs.contentInfo = snapshot.info;
-    const displayed = await renderContent(
+    const displayed = await renderArtifactContent(
       pane,
       snapshot.info,
       snapshot.content,
@@ -259,7 +269,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
     }
     rs.failedKey = null;
     rs.shownKey = key;
-    renderShell(pane);
+    pane.renderShell();
     reanchor(pane, snapshot.info.id);
     renderComments(pane);
     setNotice(pane, rs.justRestored ? "Published version restored" : "", false);
@@ -303,21 +313,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
       )
     ) {
       rs.loadingKey = null;
-      renderShell(pane);
+      pane.renderShell();
     }
   }
-}
-
-export function setNotice(
-  pane: ArtifactEl,
-  text: string,
-  error: boolean,
-): void {
-  // Invariant: artifact-shell is wholly owned by Lit. Mutating its rendered
-  // notice node destroys Lit's ChildPart markers and makes the next poll crash
-  // while patching missing siblings; update state and let the single owner
-  // render.
-  pane._rs.notice = text;
-  pane._rs.noticeError = error;
-  renderShell(pane);
 }

@@ -1,30 +1,27 @@
 // Owns thread assembly, paint state, change keys and saved reading viewports.
-// Chrome/fetch invoke paint/renderConv but never mutate presentation state.
+// Focused reads render the thread after updating chrome; other callers repaint.
 // Holds keep rows or bottom; unrecorded offsets (scroll-ledger.ts) release.
 // Phone thread drags blur the field; scrolling/composer gestures do not.
 import { commentOutbox } from "../artifacts/comment-outbox.js";
 import { outboxBubbles } from "../composer/outbox.js";
 import { showModelResponse } from "../model-response.js";
 import { activeDescendantCount } from "../active-agents.js";
+import { backendFor } from "../backends/index.js";
+import { refreshConv } from "./fetch.js";
 import {
   boundaryHasHiddenActivity,
   boundaryIsLive,
   planVEyePress,
 } from "../thread-render/activity-boundary.js";
 import { turnGroupBlocks } from "../thread-render/turn-groups.js";
-import { updateChrome } from "./chrome.js";
-import { thinkingStore } from "./thinking.js";
-import {
-  cancelThreadBottom,
-  followThreadBottom,
-  updateScrollBtn,
-} from "./controls.js";
+import { resetCommittedStep } from "./thinking-paint.js";
 import {
   activityBoundaryKey,
   backfillOldestBoundary,
   expandedActivityBoundaries,
   prepareLiveReveal,
   revealActivityBoundary,
+  revealRowMessage,
 } from "./disclosure.js";
 import { liveBarEl, msgsEl, scrollEl } from "../dom.js";
 import { phoneNavigation } from "../phone-nav.js";
@@ -37,35 +34,42 @@ import {
   withScrollAnchor,
 } from "./scroll-anchor.js";
 import {
+  cancelThreadBottom,
+  followThreadBottom,
   recordThreadScroll,
   threadJumping,
   threadScrolledByReader,
+  updateScrollBtn,
   writeThreadScroll,
 } from "./scroll-ledger.js";
 import { renderMermaidIn } from "../mermaid.js";
 import { renderMathIn } from "../math.js";
-import { fillViewport, revealRowMessage } from "./navigation.js";
 import {
+  RETRY_QUEUED_MESSAGE_LABEL,
   acceptedOptimisticEntries,
+  canRemovePendingMessage,
+  discardOptimisticPending,
   hasSendablePending,
   isDeliveryReceipt,
-  visibleOptimisticEntries,
-} from "../pending-queue/pending-message.js";
-import {
-  acceptedBubble,
+  isFailedPending,
   optPending,
-  optimisticBubble,
-  pendingBubble,
-} from "../pending-queue.js";
+  pendingMessageDismissButton,
+  pendingMessageRemoveButton,
+  recordOptimisticPending,
+  sendFailureCopy,
+  visibleOptimisticEntries,
+  type OptimisticEntry,
+} from "../pending-queue/index.js";
 import {
+  fillViewport,
   loadOlderRows,
   loaded,
   reconcile,
   renderedLogGeneration,
   rowReadStatus,
   rowThreadOlder,
-  rowThreads,
 } from "../row-thread-state.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import {
   activeShells,
   agentSurfaceAgent,
@@ -79,8 +83,12 @@ import {
 import { contextUsageKey } from "../context/tokens.js";
 import { conversationPainted } from "../show-timing.js";
 import { state } from "../state.js";
-import { stoppingId } from "./stop.js";
-import { activityBoundaryT, pendingActionT } from "../thread-render.js";
+import {
+  activityBoundaryT,
+  activityMessageT,
+  pendingActionT,
+} from "../thread-render.js";
+import { userBubble } from "../thread-render/index.js";
 import {
   queuedT,
   shellUnavailableT,
@@ -90,7 +98,7 @@ import {
 import { promptBanner } from "../prompt/banner.js";
 import { activityStatusKind } from "../thread-render/tool_activity.js";
 import { copyText, toolDetailStore } from "../tool_details.js";
-import { type Conversation } from "../types.js";
+import type { Conversation, Message } from "../types.js";
 import { type ViewBlock } from "../row-thread-state/view-blocks.js";
 import { type TemplateResult, html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
@@ -289,6 +297,15 @@ function sendsAfter(row: HTMLElement | null): [HTMLElement[], HTMLElement[]] {
     after.filter((bubble) => !bubble.dataset.rowId),
   ];
 }
+export function prepareOperatorSendScroll(recipient: string | null): void {
+  const conv = state.currentConv;
+  if (recipient && conv?.id === recipient) {
+    if (["running", "interrupting"].includes(conv.status))
+      holdQueuedSend(recipient);
+    else pinOperatorSend(recipient);
+  }
+}
+
 /**
  * Follows a send to the viewport top without scrolling past it: the newest
  * operator message after the last stored row at send time, until a queued send.
@@ -314,7 +331,7 @@ export function pinOperatorSend(conversation: string): void {
  * A send queued behind a running turn keeps the reader's view: their topmost
  * row is held in place, as on returning to a thread, until they scroll.
  */
-export function holdQueuedSend(conversation: string): void {
+function holdQueuedSend(conversation: string): void {
   if (conversation !== toolDetailConversation) return;
   if (threadScrolledByReader()) releaseBottomFollow();
   disclosureHold = null;
@@ -573,6 +590,101 @@ if (typeof ResizeObserver !== "undefined") {
   bottomFollowResize.observe(scrollEl, { box: "content-box" });
 }
 
+function pendingBubble(conv: Conversation, m: Message): TemplateResult {
+  const cancel = async (e: Event) => {
+    const el = (e.currentTarget as HTMLElement).closest<HTMLElement>(".msg");
+    if (el) el.style.display = "none";
+    const r = await backendFor(conv.id).api(
+      `/api/conversations/${conv.id}/messages/${m.id}`,
+      {
+        method: "DELETE",
+      },
+    );
+    if (r.ok && m.id) discardOptimisticPending(conv.id, m.id);
+    if (el && !r.ok) el.style.display = "";
+    state.openConvHash = "";
+    refreshConv();
+  };
+  const retry = async () => {
+    const r = await backendFor(conv.id).api(
+      `/api/conversations/${conv.id}/messages/${m.id}/retry`,
+      { method: "POST" },
+    );
+    state.openConvHash = "";
+    refreshConv();
+    return r.ok;
+  };
+  const btn = canRemovePendingMessage(m)
+    ? pendingMessageRemoveButton(cancel)
+    : nothing;
+  const bubble = html`<div class="bubble">${userBubble(m.content)}</div>`;
+  const failed = isFailedPending(m);
+  // Invariant: Failed sends retain Retry under the same id and Dismiss, never
+  // auto-resend. The cancellation × belongs only to queued rows.
+  const detail = sendFailureCopy(
+    typeof m.error === "string" && m.error.trim() ? m.error.trim() : null,
+  );
+  const full =
+    typeof m.error_detail === "string" && m.error_detail.trim()
+      ? m.error_detail.trim()
+      : detail;
+  const retryBtn = html`<button
+    class="btn sm pending-retry"
+    type="button"
+    title=${RETRY_QUEUED_MESSAGE_LABEL}
+    aria-label=${RETRY_QUEUED_MESSAGE_LABEL}
+    @click=${retry}
+  >
+    Retry
+  </button>`;
+  const failure = html`<div class="pending-failure" role="alert">
+    <span class="pending-failure-text" title=${full}>${detail}</span>
+    ${retryBtn}${canRemovePendingMessage(m)
+      ? pendingMessageDismissButton(cancel)
+      : nothing}
+  </div>`;
+  const activity =
+    Boolean(m.from) ||
+    ["agent", "platform"].includes(m.origin ?? m.source ?? "");
+  if (failed && !activity)
+    return html`<div class="msg user pending failed">${bubble}${failure}</div>`;
+  if (!activity)
+    return html`<div class="msg user pending">${btn}${bubble}</div>`;
+
+  return html`<div class="msg pending agent">
+    ${activityMessageT(
+      conv,
+      { ...m, kind: "user", offset: 0 },
+      false,
+      false,
+      btn,
+    )}
+    ${failed ? failure : nothing}
+  </div>`;
+}
+
+// A faded queued bubble for a not-yet-echoed send. Current servers return the
+// durable inbox id with the enqueue response, so this can use pendingBubble's
+// remove control immediately; the id-less fallback supports an older server
+// during a rolling frontend/backend replacement.
+function optimisticBubble(
+  conv: Conversation,
+  o: OptimisticEntry,
+): TemplateResult {
+  return o.id
+    ? pendingBubble(conv, { role: "user", content: o.content, id: o.id })
+    : html`<div class="msg user pending">
+        <div class="bubble">${userBubble(o.content)}</div>
+      </div>`;
+}
+
+// A delivered bubble for an accepted send awaiting its committed row.
+function acceptedBubble(o: OptimisticEntry): TemplateResult {
+  return html`<div class="msg user">
+    <div class="bubble">${userBubble(o.content)}</div>
+  </div>`;
+}
+
 // Keys loaded turns and pending bubbles by identity to preserve their DOM.
 // Working turns remain visible before turn_start; cancelling a pending item
 // cannot transfer its hidden DOM node to a queued sibling. The live bar is
@@ -672,7 +784,7 @@ function threadTemplate(
     : running && !queuedPanel && !currentTurnOpen
       ? () => workingT(conv)
       : null;
-  const thread = html` ${promptBanner(conv)} ${piHistoryNotice}
+  const thread = html` ${promptBanner(conv, paint)} ${piHistoryNotice}
   ${repeat(
     blocks,
     (block) => `${renderedLogGeneration}:${block.key}`,
@@ -783,7 +895,7 @@ export function paint(conv: Conversation): void {
   if (followBottom) bottomFollowConversation = conv.id;
   // Invariant: the thread renders before the live bar, which reads the
   // committed thinking step recorded while building the thread template.
-  thinkingStore.beginThreadPaint();
+  resetCommittedStep();
   const [threadT, liveBar] = threadTemplate(conv);
   render(threadT, msgsEl);
   render(liveBar ? liveBar() : nothing, liveBarEl);
@@ -807,8 +919,22 @@ export function paint(conv: Conversation): void {
   fillViewport();
 }
 
-export function renderConv(conv: Conversation): void {
-  updateChrome(conv);
+// Show a just-sent message without reconciling rows, and clear openConvHash
+// so the next read re-renders and prunes it against the server view.
+export function addOptimisticPending(
+  cid: string,
+  content: string,
+  sinceOffset: number,
+  id?: string,
+): void {
+  recordOptimisticPending(cid, content, sinceOffset, id);
+  if (state.currentConv && state.currentConv.id === cid) {
+    state.openConvHash = "";
+    paint(state.currentConv);
+  }
+}
+
+export function renderThread(conv: Conversation): void {
   reconcile(conv);
   lastAgentChipKey = `${conv.id}:${activeDescendantCount(state.nodes, conv.id)}`;
   paint(conv);
@@ -856,7 +982,7 @@ export function convHash(conv: Conversation): string {
     conv.shells?.truncated,
     shellItems,
     activeDescendantCount(state.nodes, conv.id),
-    stoppingId === conv.id,
+    state.stopPostInFlightId === conv.id,
     (conv.pending || []).map((m) => [
       m.id,
       m.from,

@@ -10,7 +10,7 @@ Call `recurse_settings` directly, or `tools.recurse_settings({action: ..., ...})
 ## Models
 
 - `levels` lists effort levels and reachability. `set_level` uses `level`, an exact Pi `model` id and `reasoning`. Copy ids from Pi's model list; never invent them. Unreachable levels fail until their provider/model is available.
-- `set_level` retunes every conversation on that level from its next turn, including the level-1 safety reviewer.
+- `set_level` applies to new agents and agents whose level is chosen again. Existing agents keep their recorded model and reasoning. The level-1 safety reviewer and automatic naming still follow the current ladder.
 
 ## Remotes
 

@@ -13,6 +13,7 @@ import {
 } from "../../src/observability/runtime_logging";
 import { composeApp, startServer, type RunningServer } from "../../src/server";
 import { registerLoginRoutes } from "../../src/web/login";
+import { registerTwoFactorRoutes } from "../../src/web/two_factor";
 import {
   LoginThrottle,
   publishLoopbackToken,
@@ -101,21 +102,17 @@ export async function buildAuthApp(
   const backendKeys = options.backendKeys
     ? new BackendKeys(dataDir)
     : undefined;
-  if (backendKeys)
-    registerBackendKeyRoutes(router, {
-      operator,
-      throttle,
-      logger: web,
-      sleep: options.sleep,
-      backendKeys,
-    });
-  registerLoginRoutes(router, {
+  const loginDeps = {
     backendKeys,
     operator,
     throttle,
     logger: web,
     sleep: options.sleep,
-  });
+  };
+  if (backendKeys)
+    registerBackendKeyRoutes(router, { ...loginDeps, backendKeys });
+  registerTwoFactorRoutes(router, loginDeps);
+  registerLoginRoutes(router, loginDeps);
   const calls = { count: 0 };
   options.extraRoutes?.(router);
   for (const [methods, template] of spec.routes as [string[], string][])

@@ -1,4 +1,4 @@
-// Settings > Account: per-browser opt-in for agent-finished pushes. Turning on
+// Settings > Agents: per-browser opt-in for agent-finished pushes. Turning on
 // asks permission, registers /push-worker.js and saves the push subscription;
 // turning off removes both. Insecure origins cannot register workers or receive
 // pushes; the disabled setting explains that HTTPS is required.

@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { renderThemeCss, themePalettes } from "../../src/themes";
 import {
@@ -23,11 +23,12 @@ async function screenshot(page: Page, name: string) {
   await page.screenshot({ path: `${dir}/${stage}-${name}.png` });
 }
 
-async function assertTouchTarget(page: Page, selector: string) {
-  const hits = await page.locator(selector).evaluate((element) => {
+async function assertTouchTarget(target: Locator, reach = 19) {
+  const selector = String(target);
+  const hits = await target.evaluate((element, reach) => {
     const box = element.getBoundingClientRect();
-    return [-19, 19].flatMap((x) =>
-      [-19, 19].map((y) =>
+    return [-reach, reach].flatMap((x) =>
+      [-reach, reach].map((y) =>
         element.contains(
           element.ownerDocument.elementFromPoint(
             box.x + box.width / 2 + x,
@@ -36,7 +37,7 @@ async function assertTouchTarget(page: Page, selector: string) {
         ),
       ),
     );
-  });
+  }, reach);
   expect({ selector, hits }).toEqual({
     selector,
     hits: [true, true, true, true],
@@ -76,26 +77,24 @@ export const tests: BrowserTest[] = [
       const actions = page.locator("#pane-rail > button");
       expect(
         await actions.evaluateAll((els) => els.map((el) => el.id)),
-      ).toEqual(["new-top", "share-link-btn", "takeover-btn"]);
+      ).toEqual(["new-top", "share-link-btn", "takeover-btn", "trash-btn"]);
       expect(
         await page
           .locator("#agent-list-foot > button")
           .evaluateAll((els) => els.map((el) => el.id)),
-      ).toEqual(["settings-btn", "trash-btn"]);
-      expect(
-        await page
-          .locator("#agent-list-foot")
-          .getByRole("button", { name: "Delete", exact: true })
-          .count(),
-      ).toBe(1);
+      ).toEqual(["settings-btn"]);
+      const trash = page.locator("#pane-rail > #trash-btn:last-child");
+      await browserExpect(trash).toHaveAccessibleName("Delete agent");
+      const rail = (await page.locator("#pane-rail").boundingBox())!;
+      const foot = (await trash.boundingBox())!;
+      expect(rail.y + rail.height - foot.y - foot.height).toBeLessThan(16);
       expect(
         await page.locator("#settings-btn .settings-label").isVisible(),
       ).toBe(false);
       expect(
         await page.locator('#pane-rail [aria-label="Agents"]').count(),
       ).toBe(0);
-      for (const selector of ["#settings-btn", "#trash-btn"])
-        await assertTouchTarget(page, selector);
+      await assertTouchTarget(page.locator("#settings-btn"));
       const newBox = (await page.locator("#new-top").boundingBox())!;
       const linkBox = (await page.locator("#share-link-btn").boundingBox())!;
       expect({
@@ -196,6 +195,35 @@ export const tests: BrowserTest[] = [
       await page.setViewportSize({ width: 1280, height: 320 });
       for (const button of await railStates("#pane-rail button"))
         expect(button.circle).toBe(true);
+      const line = await trash.evaluate((button) => {
+        const panes = button.ownerDocument.querySelector("#pane-rail-panels")!;
+        panes.scrollTop = panes.scrollHeight;
+        const box = button.getBoundingClientRect();
+        const before = (globalThis as any).getComputedStyle(button, "::before");
+        const y = box.top + button.clientTop + parseFloat(before.top) + 0.5;
+        const last = [...panes.querySelectorAll(".rail-btn")].at(-1)!;
+        const lastBottom = last.getBoundingClientRect().bottom;
+        return {
+          scrolled: panes.scrollTop > 0,
+          gap: box.top - lastBottom,
+          clearance: y - lastBottom,
+          x: box.left + box.width / 2,
+          y,
+        };
+      });
+      expect(line.scrolled).toBe(true);
+      expect(line.gap).toBeGreaterThanOrEqual(16);
+      expect(line.clearance).toBeGreaterThanOrEqual(8);
+      const deletes: string[] = [];
+      page.on("request", (request) => {
+        if (request.method() === "DELETE") deletes.push(request.url());
+      });
+      await trash.click();
+      await page.locator("#trash-btn.armed").waitFor();
+      await page.mouse.click(line.x, line.y);
+      await page.mouse.click(line.x, line.y);
+      expect(await page.locator("#trash-btn.armed").count()).toBe(0);
+      expect(deletes).toEqual([]);
       await page.setViewportSize({ width: 1280, height: 915 });
       await page.evaluate(
         () =>
@@ -285,7 +313,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#window-key-hints").waitFor({ state: "visible" });
       await page.keyboard.press("f");
       await page.locator("#main.fullscreen #top-actions #new-top").waitFor();
-      await assertTouchTarget(page, "#new-top");
+      await assertTouchTarget(page.locator("#new-top"));
       await page.keyboard.press("w");
       await page.locator("#window-key-hints").waitFor({ state: "visible" });
       await page.keyboard.press("f");
@@ -323,7 +351,7 @@ export const tests: BrowserTest[] = [
       expect(await page.locator(".hold-tip.on").isVisible()).toBe(true);
       expect(
         await page
-          .locator("#agent-list-foot")
+          .locator("#pane-rail")
           .getByRole("button", {
             name: "Confirm delete agent and descendants",
             exact: true,
@@ -611,10 +639,17 @@ export const tests: BrowserTest[] = [
       );
       await fullscreen.focus();
       await page.setViewportSize({ width: 412, height: 915 });
-      await page
-        .locator("#pane-menu #trash-btn")
-        .waitFor({ state: "attached" });
-      expect(await page.locator("#pane-menu #trash-btn").count()).toBe(1);
+      const menuItem = {
+        name: "Delete agent",
+        exact: true,
+        includeHidden: true,
+      };
+      const anyTrash = page.locator("#trash-btn");
+      const menuTrash = page.locator("#pane-menu > #trash-btn");
+      await browserExpect(
+        menuTrash.and(page.getByRole("menuitem", menuItem)),
+      ).toHaveCount(1);
+      await browserExpect(anyTrash).toHaveCount(1);
       expect(await page.locator(".pane-col").count()).toBe(1);
       expect(await page.locator(".dock-window-actions").count()).toBe(0);
       expect(
@@ -633,10 +668,9 @@ export const tests: BrowserTest[] = [
       await page.locator("#panes").waitFor({ state: "hidden" });
       expect(await page.locator("#main").isVisible()).toBeTrue();
       await page.setViewportSize({ width, height: 915 });
-      await page
-        .locator("#agent-list-foot #trash-btn")
-        .waitFor({ state: "attached" });
-      expect(await page.locator("#agent-list-foot #trash-btn").count()).toBe(1);
+      await browserExpect(trash).toHaveRole("button");
+      await browserExpect(trash).toHaveAccessibleName("Delete agent");
+      await browserExpect(anyTrash).toHaveCount(1);
       await browserExpect
         .poll(() => page.locator("#agent-list-foot #settings-btn").count())
         .toBe(1);
@@ -669,9 +703,9 @@ export const tests: BrowserTest[] = [
       await parentBox.dispose();
       if (!parentGeometry) throw new Error("Parent rail button is not visible");
       expect(childTop - parentGeometry.y).toBe(44);
-      expect(
-        await page.locator("#agent-list-foot #trash-btn").isVisible(),
-      ).toBe(true);
+      await browserExpect(
+        page.locator("#pane-rail > #trash-btn"),
+      ).toBeVisible();
       await screenshot(page, `${width}-rail-root`);
       await context.close();
     }
@@ -746,8 +780,7 @@ export const tests: BrowserTest[] = [
           };
         });
       });
-      expect(styles[0].color).toBe(styles[2].color);
-      expect(styles[1].color).toBe(styles[0].color);
+      expect(styles[1].color).toBe(styles[2].color);
       expect(styles[1].background).toBe(styles[0].background);
       for (const style of styles)
         expect(style.height).toBeGreaterThanOrEqual(44);
@@ -1026,7 +1059,7 @@ export const tests: BrowserTest[] = [
         "#conv-title",
         ...(width < 700 ? ["#menu-btn", "#pane-fab"] : []),
       ])
-        await assertTouchTarget(page, id);
+        await assertTouchTarget(page.locator(id));
       await shot("closed");
       if (width === 1280) {
         expect(
@@ -1046,7 +1079,7 @@ export const tests: BrowserTest[] = [
           "#chip-kids",
           "#new-top",
         ]);
-        await assertTouchTarget(page, "#new-top");
+        await assertTouchTarget(page.locator("#new-top"));
         await shot("chat-fullscreen");
         await page.keyboard.press("w");
         await page.locator("#window-key-hints").waitFor({ state: "visible" });
@@ -1054,7 +1087,7 @@ export const tests: BrowserTest[] = [
         await page.locator("#pane-rail > #new-top:first-child").waitFor();
         await page.keyboard.press("Shift+H");
         expect(await page.locator("#sidebar").isVisible()).toBe(false);
-        await assertTouchTarget(page, "#menu-btn");
+        await assertTouchTarget(page.locator("#menu-btn"));
         expect(
           await page.locator("#menu-btn").getAttribute("aria-expanded"),
         ).toBe("false");
@@ -1069,9 +1102,9 @@ export const tests: BrowserTest[] = [
         ).toBe("true");
         expect(await page.locator("#pane-fab").isVisible()).toBe(false);
         expect(await page.locator("#menu-btn").isVisible()).toBe(false);
-        expect(
-          await page.locator("#agent-list-foot #trash-btn").isVisible(),
-        ).toBe(true);
+        await browserExpect(
+          page.locator("#pane-rail > #trash-btn"),
+        ).toBeVisible();
         await context.close();
         continue;
       }
@@ -1122,19 +1155,13 @@ export const tests: BrowserTest[] = [
         belowHeader: true,
         topEdgeHits: [true, true, true],
       });
-      await assertTouchTarget(page, "#trash-btn");
       const menuTop = (await page.locator("#pane-menu").boundingBox())!.y;
       const items = page.locator("#pane-menu .pane-menu-item:visible");
+      await browserExpect(items.last()).toHaveId("trash-btn");
       const iconBoxes = [];
       for (const item of await items.all()) {
         await item.scrollIntoViewIfNeeded();
-        const id = await item.getAttribute("id");
-        await assertTouchTarget(
-          page,
-          id
-            ? `#${id}`
-            : `#pane-menu [data-pane="${await item.getAttribute("data-pane")}"]`,
-        );
+        await assertTouchTarget(item, 21);
         const icon = item.locator("svg");
         expect(await icon.count()).toBe(1);
         expect(await icon.getAttribute("aria-hidden")).toBe("true");
@@ -1160,23 +1187,31 @@ export const tests: BrowserTest[] = [
       await page.locator("#pane-fab").click();
       await page.locator("#pane-menu").waitFor({ state: "hidden" });
       await page.locator("#pane-fab").click();
-      await assertTouchTarget(page, "#trash-btn");
+      await page.locator("#trash-btn").scrollIntoViewIfNeeded();
+      await assertTouchTarget(page.locator("#trash-btn"), 21);
       const labels = await items.allTextContents();
-      expect(labels.slice(0, 3).map((s) => s.trim())).toEqual([
-        "Delete",
-        "Take control",
+      const panels = await page
+        .locator("#pane-menu-panels .pane-menu-item")
+        .allTextContents();
+      expect(labels.map((s) => s.trim())).toEqual([
+        ...panels,
         "Share link",
+        "Take control",
+        "Delete agent",
       ]);
-      expect(
-        await page
-          .locator("#pane-menu-panels .pane-menu-item")
-          .allTextContents(),
-      ).toEqual(labels.slice(3));
+      await browserExpect(
+        page.locator("#takeover-btn + #pane-menu-divider + #trash-btn"),
+      ).toBeVisible();
+      await browserExpect(page.locator("#pane-menu-divider")).toBeVisible();
       await shot("menu");
       await page.locator("#trash-btn").click();
       expect(deletes).toBe(0);
-      expect(await page.locator("#trash-btn").innerText()).toBe(
-        "Confirm delete agent and descendants",
+      const armed = "Confirm delete agent and descendants";
+      await browserExpect(page.locator("#trash-btn")).toHaveText(armed, {
+        useInnerText: true,
+      });
+      await browserExpect(page.locator("#trash-btn")).toHaveAccessibleName(
+        armed,
       );
       expect(await page.locator(".hold-tip.on").count()).toBe(0);
       const itemBox = (await page.locator("#trash-btn").boundingBox())!;

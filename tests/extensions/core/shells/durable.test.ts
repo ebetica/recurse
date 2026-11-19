@@ -1,6 +1,7 @@
 import { afterAll, expect, test } from "bun:test";
 import { spawn } from "node:child_process";
 import {
+  constants,
   mkdtempSync,
   readdirSync,
   readFileSync,
@@ -8,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
@@ -360,6 +362,60 @@ test("a background completion wakes the idle conversation exactly once", async (
   expect(last?.role).toBe("assistant");
   await harness.close(context);
   await shells.shutdown();
+});
+
+// Regression: #3463 a queued command placed with a later notice still runs.
+test("a queued command runs when a shell notice is placed after it", async () => {
+  const go = join(root, "queued-command-go");
+  expect(await Bun.spawn(["mkfifo", go]).exited).toBe(0);
+  const gate = await open(go, constants.O_RDWR | constants.O_NONBLOCK);
+  const { harness, conversation, shells, holding, release } =
+    await openShellHarness(new MemoryStorage(), {
+      cwd: root,
+      config: { ...config(), foregroundWaitMs: 10_000 },
+    });
+  try {
+    await run(
+      conversation,
+      { command: `read -r _ < ${JSON.stringify(go)}`, background: true },
+      "bg",
+    );
+    await conversation.submit(
+      { type: "input", content: "HOLD", requestId: "hold" },
+      context,
+    );
+    await holding;
+    const queued = await conversation.submit(
+      {
+        type: "input",
+        content: `RUN ${JSON.stringify({ command: "printf queued" })}`,
+        requestId: "queued",
+      },
+      context,
+    );
+    await gate.write("\n");
+    await until(
+      async () => (await shellTasks(harness)).length === 0,
+      "the shell notice to queue",
+    );
+    release();
+    expect((await queued.wait(context)).status).toBe("done");
+    await harness.waitForIdle(context);
+    const tail = (await conversation.context(context)).messages.slice(-5);
+    expect(tail.map((message) => message.role)).toEqual([
+      "user",
+      "user",
+      "assistant",
+      "toolResult",
+      "assistant",
+    ]);
+    expect(tail[3]!.content).toEqual([{ type: "text", text: "queued" }]);
+  } finally {
+    release();
+    await harness.close(context);
+    await shells.shutdown();
+    await gate.close();
+  }
 });
 
 // Regression: #2520 wait for real monitor batches before releasing the producer.

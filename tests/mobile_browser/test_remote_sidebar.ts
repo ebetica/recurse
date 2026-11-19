@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { retire } from "../../src/utils/trash";
 import { installDependencies } from "../../src/local_dependencies";
+import type { Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   LOGIN,
@@ -13,11 +14,13 @@ import {
   runBrowserTests,
   type BrowserTest,
   openSettingsPanel,
+  expectHitCorners,
 } from "./common";
 import { enableTagSidebar } from "./test_sidebar";
+import { loadRecording } from "../backend/fixtures/model_response/replay";
 
 export const tests: BrowserTest[] = [
-  // Regression: #3112 cancel stalled discovery bodies after headers; #3067 keep the remote Stop generation live until cancellation. (also Feature #2702 connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures; #2793 remote sends work through ingresses that reject chunked bodies; #2729 the optimistic Queued panel precedes keyboard Stop; #3002 remote sections, tags and tag actions.)
+  // Regression: #3445 a failed remote listing keeps the linked remote; #3112 cancel stalled discovery bodies after headers; #3067 keep the remote Stop generation live until cancellation. (also Feature #2702 connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures; #2793 remote sends work through ingresses that reject chunked bodies; #2729 the optimistic Queued panel precedes keyboard Stop; #3002 remote sections, tags and tag actions.)
   async function test_remote_sidebar(browser, base) {
     const remote = await startServer({ auth: true });
     let omitTagSupport = false;
@@ -215,8 +218,9 @@ export const tests: BrowserTest[] = [
       const remoteDefault = [1, 2, 3].find(
         (level) => level !== homeLadder.default_level && level !== defaultLevel,
       )!;
+      const recording = await loadRecording();
       remoteLadder.levels["4"] = {
-        model: remoteLadder.levels[String(defaultLevel)].model,
+        model: `${recording.provider}/${recording.requestedModel}`,
         reasoning: remoteReasoning,
       };
       remoteLadder.levels[String(remoteDefault)] =
@@ -234,19 +238,48 @@ export const tests: BrowserTest[] = [
           )
         ).ok(),
       ).toBe(true);
-      const pickRemoteLevel4 = async () => {
+      const { models: remoteModels } = await (
+        await remoteContext.request.get(
+          remote.base + "api/settings/effort-levels",
+        )
+      ).json();
+      const labelFor = (models: { id: string; label: string }[], id: string) =>
+        models.find((model) => model.id === id)!.label;
+      const remoteLabel = labelFor(
+        remoteModels,
+        remoteLadder.levels["4"].model,
+      );
+      expect(remoteLabel).not.toBe(
+        labelFor(homeLadder.models, homeLadder.levels["4"].model),
+      );
+      const pickRemoteLevel4 = async (owner: "draft" | "conversation") => {
         await browserExpect(page.locator("#model-row")).toHaveClass(/\bon\b/);
         await browserExpect(page.locator("#model-row")).not.toHaveAttribute(
           "aria-disabled",
           "true",
         );
-        await page.locator("#model-trigger").click();
-        await page.locator("#effort-range").focus();
+        const trigger = page.locator("#model-trigger");
+        const range = page.locator("#effort-range");
+        await trigger.click();
+        await range.focus();
         for (let level = defaultLevel; level < 4; level++)
           await page.keyboard.press("ArrowRight");
-        await browserExpect(page.locator("#effort-range")).toHaveValue("4");
+        await browserExpect(range).toHaveValue("4");
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          `Level 4: ${remoteLabel}`,
+        );
         await browserExpect(page.locator("#effort-model")).toHaveText(
-          new RegExp(` ${remoteReasoning}$`),
+          remoteLabel,
+        );
+        await browserExpect(trigger.locator(".model-name")).toHaveText(
+          remoteLabel,
+        );
+        const pending =
+          owner === "conversation" ? "switches on your next message; " : "";
+        await browserExpect(trigger).toHaveAttribute(
+          "aria-label",
+          `Level 4: ${remoteLabel}: ${pending}choose effort level`,
         );
       };
       const connected = await context.request.post(base + "api/backends", {
@@ -340,7 +373,7 @@ export const tests: BrowserTest[] = [
           );
         }
         const level = size === "desktop" ? 4 : remoteDefault;
-        if (size === "desktop") await pickRemoteLevel4();
+        if (size === "desktop") await pickRemoteLevel4("draft");
         else
           await browserExpect(page.locator("#effort-range")).toHaveValue(
             String(remoteDefault),
@@ -385,7 +418,10 @@ export const tests: BrowserTest[] = [
         expect(conversation.parent).toBeNull();
         expect(conversation.tags.project).toMatchObject({ by: "operator" });
         expect(conversation.safety_off).not.toBe(true);
-        expect(conversation.level).toBe(level);
+        expect(conversation).toMatchObject({
+          level,
+          effort: remoteLadder.levels[String(level)].reasoning,
+        });
         const createdView = await (
           await remoteContext.request.get(
             `${remote.base}api/conversations/${id}/view`,
@@ -577,10 +613,40 @@ export const tests: BrowserTest[] = [
             0,
           );
           omitTagSupport = false;
+          await page.addInitScript(() => {
+            const w = globalThis as any;
+            const original = w.fetch;
+            w.fetch = (input: unknown, init?: RequestInit) => {
+              if (w.top !== w || String(input) !== "/api/backends")
+                return original(input, init);
+              const headers = new Headers(init?.headers);
+              headers.set("x-reloaded-document", "1");
+              return original(input, { ...init, headers });
+            };
+          });
+          const listings: number[] = [];
+          const listing = (url: URL) => url.pathname === "/api/backends";
+          await page.route(listing, async (route) => {
+            if (!route.request().headers()["x-reloaded-document"])
+              return route.continue();
+            if (!listings.length) {
+              listings.push(502);
+              return route.fulfill({ status: 502 });
+            }
+            const response = await route.fetch();
+            listings.push(response.status());
+            return route.fulfill({ response });
+          });
           await page.reload();
+          await browserExpect(row).toHaveClass(/\bselected\b/);
+          expect(listings.slice(0, 2)).toEqual([502, 200]);
+          expect(new URL(page.url()).hash).toBe(
+            `#agent=${encodeURIComponent(qualified)}`,
+          );
           await browserExpect(row.locator(".row-actions button")).toHaveCount(
             3,
           );
+          await page.unroute(listing);
         }
         await page.screenshot({
           path: join(tmpdir(), `remote-new-agent-${size}.png`),
@@ -751,7 +817,7 @@ export const tests: BrowserTest[] = [
           .url()
           .endsWith(`/api/backends/Laptop/conversations/${writable.id}/model`),
       );
-      await pickRemoteLevel4();
+      await pickRemoteLevel4("conversation");
       expect((await switched).ok()).toBe(true);
       await page.keyboard.press("Escape");
       await page.locator("#input").fill("Reply only REMOTE_TEXT_OK");
@@ -936,15 +1002,79 @@ export const tests: BrowserTest[] = [
             ).status,
         )
         .not.toBe("running");
+      const localUpdates: Route[] = [];
+      let localArrived = () => {};
+      await page.route(`${base}api/settings/update`, (route) => {
+        localUpdates.push(route);
+        localArrived();
+      });
+      const nextLocalUpdate = async () => {
+        while (!localUpdates.length)
+          await new Promise<void>((resolve) => (localArrived = resolve));
+        return localUpdates.shift()!;
+      };
+      const updateReads: string[] = [];
+      const recordUpdateRead = (request: { url(): string }) => {
+        if (new URL(request.url()).pathname.endsWith("/settings/update"))
+          updateReads.push(request.url());
+      };
+      page.on("request", recordUpdateRead);
+      await page.route(`${base}api/backends/Laptop/version`, (route) =>
+        route.fulfill({
+          json: { release: { version: "9.9.9", commit: "remote1" } },
+        }),
+      );
+      const localStatus = (checking: boolean) => ({
+        json: {
+          release: { version: "0.1.0", commit: null },
+          skipped: null,
+          checking,
+          channel: "release",
+          installed: checking ? null : "v0.1.0",
+          available: checking ? null : "v0.2.0",
+          checked_at: 1,
+          error: null,
+          update: null,
+        },
+      });
+      const footer = page.locator("#settings-release");
+      const switchToRemote = async (held: Route) => {
+        const cancelled = page.waitForEvent(
+          "requestfailed",
+          (request) => request === held.request(),
+        );
+        updateReads.length = 0;
+        await page.locator("#settings-backend").selectOption("Laptop");
+        await cancelled;
+        await browserExpect(footer.locator(".settings-version")).toHaveText(
+          "Recurse 9.9.9 (remote1)",
+        );
+        expect(updateReads).toEqual([]);
+        await held.fulfill(localStatus(false));
+        await browserExpect(footer.locator(".settings-version")).toHaveText(
+          "Recurse 9.9.9 (remote1)",
+        );
+        await browserExpect(footer.locator(".settings-version")).toBeVisible();
+        await browserExpect(footer.getByRole("status")).toHaveText("");
+        await browserExpect(footer.locator(".update-now")).toBeHidden();
+      };
       await openSettingsPanel(page);
       const settingsNav = page.locator("#settings-nav button");
       await browserExpect(settingsNav).toHaveCount(6);
-      await page.locator("#settings-backend").selectOption("Laptop");
+      await switchToRemote(await nextLocalUpdate());
+      await page.locator("#settings-backend").selectOption("");
+      await (await nextLocalUpdate()).fulfill(localStatus(true));
+      await browserExpect(footer.getByRole("status")).toHaveText(
+        "Checking for updates…",
+      );
+      await switchToRemote(await nextLocalUpdate());
+      expect(localUpdates).toHaveLength(0);
+      page.off("request", recordUpdateRead);
+      await page.unroute(`${base}api/settings/update`);
       await browserExpect(settingsNav).toHaveText([
-        "Authentication",
+        "Providers",
         "Models",
-        "Safety",
-        "MCPs",
+        "Agents",
       ]);
       const loginUrl = `${base}api/backends/Laptop/pi/auth/login-url`;
       let releaseLogin!: () => void;
@@ -961,11 +1091,12 @@ export const tests: BrowserTest[] = [
         await loginHeld;
         await route.fulfill({ response });
       });
-      await settingsNav.getByText("Authentication", { exact: true }).click();
+      await settingsNav.getByText("Providers", { exact: true }).click();
       const claudeDetails = page.getByRole("region", {
         name: "Claude",
         exact: true,
       });
+      await page.getByRole("button", { name: /^Claude / }).click();
       await claudeDetails.locator(".sub").click();
       await loginSeen;
       await page.locator("#settings-backend").selectOption("");
@@ -979,6 +1110,9 @@ export const tests: BrowserTest[] = [
       await page.unroute(loginUrl);
       await page.locator("#settings-backend").selectOption("Laptop");
       await settingsNav.getByText("Models", { exact: true }).click();
+      await page
+        .getByRole("button", { name: /^Maximum context window / })
+        .click();
       const windowDetails = page.getByRole("region", {
         name: "Maximum context window",
         exact: true,
@@ -993,9 +1127,7 @@ export const tests: BrowserTest[] = [
             .url()
             .endsWith("/api/backends/Laptop/settings/maximum-context-window"),
       );
-      await windowDetails
-        .getByRole("button", { name: "Save", exact: true })
-        .click();
+      await windowInput.press("Enter");
       expect((await savedWindow).ok()).toBe(true);
       const windowOf = async (request: typeof context.request, at: string) =>
         (
@@ -1005,7 +1137,11 @@ export const tests: BrowserTest[] = [
         ).maximum_context_window;
       expect(await windowOf(remoteContext.request, remote.base)).toBe(123456);
       expect(await windowOf(context.request, base)).not.toBe(123456);
-      await settingsNav.getByText("MCPs", { exact: true }).click();
+      await settingsNav.getByText("Agents", { exact: true }).click();
+      await browserExpect(page.locator(".settings-section h3")).toHaveText([
+        "MCP servers",
+      ]);
+      await page.getByRole("button", { name: /^MCP servers / }).click();
       const mcpDetails = page.getByRole("region", {
         name: "MCP servers",
         exact: true,
@@ -1015,6 +1151,29 @@ export const tests: BrowserTest[] = [
           exact: false,
         })
         .waitFor();
+      const customKeysUrl = `${base}api/backends/Laptop/pi/custom-provider-auth`;
+      for (const failure of [
+        (route: Route) =>
+          route.fulfill({ status: 403, json: { error: "Forbidden" } }),
+        (route: Route) => route.abort("failed"),
+      ]) {
+        await page.route(customKeysUrl, failure, { times: 1 });
+        await settingsNav.getByText("Agents", { exact: true }).click();
+        const read = page.waitForRequest(customKeysUrl);
+        await settingsNav.getByText("Providers", { exact: true }).click();
+        await read;
+        const customKeys = page.locator('.customkeys[aria-busy="false"]');
+        await customKeys.waitFor({ state: "attached" });
+        await browserExpect(
+          page.getByRole("heading", { name: "Custom model keys", exact: true }),
+        ).toBeVisible();
+        await browserExpect(customKeys.locator("> *")).toHaveCount(0);
+        const message = page.locator(".customkeys + .msg");
+        await browserExpect(message).toHaveText(
+          "Couldn't load custom model keys.",
+        );
+        await browserExpect(message).toBeVisible();
+      }
       await page.locator("#settings-backend").selectOption("");
       await browserExpect(settingsNav).toHaveCount(6);
       await page.locator("#settings-close").click();
@@ -1023,14 +1182,41 @@ export const tests: BrowserTest[] = [
       await page.evaluate(() => {
         (globalThis as any).remoteSidebarNoReload = true;
       });
+      for (const name of ["spare-home", "spare-two", "spare-three"])
+        expect(
+          (
+            await remoteContext.request.post(`${remote.base}api/backend-keys`, {
+              data: { password: LOGIN, name },
+            })
+          ).status(),
+        ).toBe(200);
       await openSettingsPanel(remotePage);
       await remotePage
-        .locator('#settings-nav button[data-cat="account"]')
+        .locator('#settings-nav button[data-cat="remotes"]')
         .click();
       const incoming = remotePage.locator(".remotes-settings .remote-incoming");
-      const homeName = await incoming
-        .locator(".settings-detail-summary .settings-row-label")
+      const homesList = incoming.locator(".group");
+      const homes = incoming.locator(".remote-entry");
+      const homeLabels = homes.locator(
+        ":scope > .settings-row .settings-row-label",
+      );
+      await browserExpect(homes).toHaveCount(4);
+      const homeName = await homeLabels
+        .filter({ hasNotText: /^spare-/ })
         .innerText();
+      await browserExpect(homeLabels).toHaveText([
+        homeName,
+        "spare-home",
+        "spare-two",
+        "spare-three",
+      ]);
+      const openHome = (name: string) =>
+        incoming.getByRole("button", { name: new RegExp(`^${name} `) }).click();
+      const backToRemotes = remotePage.getByRole("button", {
+        name: "Back to Remotes",
+        exact: true,
+      });
+      await openHome(homeName);
       const homeDetails = remotePage.getByRole("region", {
         name: homeName,
         exact: true,
@@ -1061,11 +1247,109 @@ export const tests: BrowserTest[] = [
           );
         }),
       ).toBe(true);
-      await revoke.click();
-      await browserExpect(homeDetails).not.toBeVisible();
+      const held: Route[] = [];
+      let arrived = () => {};
+      await remotePage.route(/\/api\/backend-keys(\/[^/]+)?$/, (route) => {
+        held.push(route);
+        arrived();
+      });
+      const nextRequest = async (method: string) => {
+        while (!held.length)
+          await new Promise<void>((resolve) => (arrived = resolve));
+        const route = held.shift()!;
+        expect(route.request().method()).toBe(method);
+        return route;
+      };
+      const revokeHome = (name: string) =>
+        remotePage
+          .getByRole("region", { name, exact: true })
+          .getByRole("button", { name: "Revoke access", exact: true })
+          .click();
+      await backToRemotes.click();
+      await remotePage.setViewportSize({ width: 412, height: 800 });
+      await openHome("spare-three");
+      await revokeHome("spare-three");
+      await (await nextRequest("DELETE")).continue();
+      await (await nextRequest("GET")).continue();
+      await browserExpect(homeLabels).toHaveText([
+        homeName,
+        "spare-home",
+        "spare-two",
+      ]);
+      const focusedRow = remotePage.locator(
+        ".settings-cat:not([hidden]) .settings-row:focus",
+      );
+      await browserExpect(focusedRow).toBeVisible();
+      await expectHitCorners(focusedRow);
+      await remotePage.setViewportSize({ width: 1280, height: 720 });
+      await openHome("spare-two");
+      await revokeHome("spare-two");
+      const twoDelete = await nextRequest("DELETE");
+      await backToRemotes.click();
+      await openHome(homeName);
+      await browserExpect(backToRemotes).toBeFocused();
+      await twoDelete.continue();
+      const twoRead = await nextRequest("GET");
+      const listed = await (await twoRead.fetch()).json();
+      await twoRead.fulfill({
+        json: listed.map((home: { name: string }) =>
+          home.name === homeName ? { ...home, label: "renamed-home" } : home,
+        ),
+      });
+      await browserExpect(homeLabels).toHaveText([homeName, "spare-home"]);
+      await browserExpect(homesList).toHaveAttribute("aria-busy", "false");
+      await browserExpect(homeDetails).toBeVisible();
       await browserExpect(
-        incoming.getByText("No homes have access."),
+        homeDetails.getByText(/ · agents here reach it as @renamed-home$/),
       ).toBeVisible();
+      await browserExpect(backToRemotes).toBeVisible();
+      await browserExpect(backToRemotes).toBeFocused();
+      await backToRemotes.click();
+      await openHome("spare-home");
+      await revokeHome("spare-home");
+      const spareDelete = await nextRequest("DELETE");
+      await backToRemotes.click();
+      await openHome(homeName);
+      await revoke.click();
+      const homeDelete = await nextRequest("DELETE");
+      await spareDelete.continue();
+      const olderRead = await nextRequest("GET");
+      await browserExpect(homesList).toHaveAttribute("aria-busy", "true");
+      await browserExpect(homeLabels).toHaveText([homeName, "spare-home"]);
+      const olderCancelled = remotePage.waitForEvent(
+        "requestfailed",
+        (request) => request === olderRead.request(),
+      );
+      await homeDelete.continue();
+      const newerRead = await nextRequest("GET");
+      await olderCancelled;
+      await browserExpect(homesList).toHaveAttribute("aria-busy", "true");
+      await browserExpect(homesList).toBeVisible();
+      await browserExpect(homeLabels).toHaveText([homeName, "spare-home"]);
+      await newerRead.continue();
+      await browserExpect(homesList).toHaveAttribute("aria-busy", "false");
+      await browserExpect(incoming).toBeHidden();
+      await browserExpect(
+        remotePage.getByRole("button", { name: "Add a remote", exact: true }),
+      ).toBeFocused();
+      await olderRead.fulfill({
+        json: [
+          {
+            id: "stale",
+            name: "stale-home",
+            created: 1_790_000_000,
+            last_used: null,
+            last_client: null,
+            url: null,
+            label: "stale-home",
+          },
+        ],
+      });
+      await browserExpect(homesList).toHaveAttribute("aria-busy", "false");
+      await browserExpect(homesList).toHaveText("");
+      await browserExpect(incoming).toBeHidden();
+      expect(held).toHaveLength(0);
+      await remotePage.unroute(/\/api\/backend-keys(\/[^/]+)?$/);
       await remotePage.locator("#settings-close").click();
       await page.locator("#input").fill("This send must fail visibly");
       await page.locator("#send").click();
@@ -1073,6 +1357,14 @@ export const tests: BrowserTest[] = [
       await section
         .getByText("key revoked", { exact: true })
         .waitFor({ timeout: 20_000 });
+      await section.locator(".backend-settings").click();
+      await browserExpect(
+        page.locator('#settings-nav button[data-cat="remotes"]'),
+      ).toBeFocused();
+      await browserExpect(
+        page.getByRole("heading", { name: "Remotes", exact: true }),
+      ).toBeVisible();
+      await page.locator("#settings-close").click();
       await browserExpect(create).toBeDisabled();
       expect(
         await page.evaluate(() => (globalThis as any).remoteSidebarNoReload),

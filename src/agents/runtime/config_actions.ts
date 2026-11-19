@@ -145,40 +145,22 @@ export class ConfigActions {
 
   /** Apply and consume the durable composer model intent on admission. */
   applyPendingModel(conv: ConversationRecord): boolean {
-    const { config, store } = this.deps;
+    const { store } = this.deps;
     const raw = conv.pending_model;
     if (!isDict(raw)) return false;
     const value = raw.model;
     if (typeof value !== "string") return false;
-    let desired: string;
-    try {
-      desired = config.chatModel(value).id;
-    } catch {
-      return false;
-    }
-    const effort = raw.effort ?? null;
-    if (effort !== null && typeof effort !== "string") return false;
-    let wantReasoning: string | null = null;
-    if (effort !== null && effort !== "default") {
-      wantReasoning = thinking(effort);
-      if (wantReasoning === null) return false;
-    }
-    // Invariant: A level captured with the request is authoritative while it
-    // still resolves to the requested model/reasoning; otherwise use the home.
+    const desired = value;
+    const wantReasoning =
+      typeof raw.effort === "string" ? thinking(raw.effort) : null;
+    if (wantReasoning === null)
+      throw new Error(
+        "No recorded reasoning for the selected model. Pick an effort level again for this conversation.",
+      );
+    // Invariant: Admission preserves the model resolved at level selection.
     const selectedLevel = validLevel(raw.level);
-    let home: [number, string, string] | null = null;
-    if (selectedLevel !== null) {
-      const [levelModel, levelReasoning] =
-        config.resolveEffortLevel(selectedLevel);
-      if (
-        levelModel === desired &&
-        (effort === null ||
-          effort === "default" ||
-          levelReasoning === wantReasoning)
-      )
-        home = [selectedLevel, levelModel, levelReasoning];
-    }
-    if (home === null) home = config.ladderHome(desired, wantReasoning);
+    const home: [number, string, string] | null =
+      selectedLevel !== null ? [selectedLevel, desired, wantReasoning] : null;
 
     const before = store.conversationSettings(conv);
     if (home !== null) {
@@ -192,7 +174,7 @@ export class ConfigActions {
       if (typeof previous === "string" && previous !== desired)
         conv.legacy_model = previous;
       conv.model = desired;
-      conv.effort = wantReasoning ?? config.chatSettings(desired)[1];
+      conv.effort = wantReasoning;
     }
     delete conv.pending_model;
     conv[CLEAR_PENDING_MODEL_MARKER] = true;
@@ -243,7 +225,7 @@ export class ConfigActions {
         if (validLevel(level) === null) return null;
         const [levelModel, levelReasoning] = config.resolveEffortLevel(level);
         if (levelModel !== resolved) return null;
-        if (effort === null) effort = levelReasoning;
+        if (effort === null || effort === "default") effort = levelReasoning;
       }
       const payload: Record<string, unknown> = { model: resolved };
       if (effort !== null) {
@@ -259,8 +241,13 @@ export class ConfigActions {
           resolved,
           wanted === undefined || wanted === "default" ? null : wanted,
         );
-        if (home !== null) selectedLevel = home[0];
+        if (home !== null) {
+          selectedLevel = home[0];
+          payload.effort = home[2];
+        }
       }
+      if (payload.effort === undefined || payload.effort === "default")
+        payload.effort = config.chatSettings(resolved)[1];
       if (selectedLevel !== null) payload.level = selectedLevel;
       conv!.pending_model = payload;
       // Invariant: Save carries this request forward over stale runner

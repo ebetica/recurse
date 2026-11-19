@@ -5,6 +5,7 @@
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createHash } from "node:crypto";
 import { ConfigFiles } from "./config_files";
+import type { StoredModelSignIns } from "./safety_review_models";
 import { recordMessage } from "./observability/runtime_logging";
 import fs from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -320,7 +321,7 @@ const PI_BUILTIN_PROVIDERS = new Set<string>(getBuiltinProviders());
 export const PI_MODEL_ROUTES: readonly (readonly [string, string])[] = [
   ["anthropic", "Claude"],
   ["openai-codex", "ChatGPT subscription"],
-  ["openai", "OpenAI API"],
+  ["openai", "OpenAI API key"],
   ["openrouter", "OpenRouter"],
 ];
 // Schema version; unknown stored lists permit all until relisted.
@@ -850,12 +851,10 @@ export class Config {
       : model;
   }
 
-  private modelParts(model: string): [string, string] {
-    const canonical = this.canonicalModelId(model);
-    const slash = canonical.indexOf("/");
-    return slash < 0
-      ? ["", canonical]
-      : [canonical.slice(0, slash), canonical.slice(slash + 1)];
+  private modelParts(model: string, useAlias = true): [string, string] {
+    const id = useAlias ? this.canonicalModelId(model) : model;
+    const slash = id.indexOf("/");
+    return slash < 0 ? ["", id] : [id.slice(0, slash), id.slice(slash + 1)];
   }
 
   modelPolicy(model: string): ModelPolicy {
@@ -890,8 +889,9 @@ export class Config {
       fallbacks = [];
       summary = { ...CODEX_LUNA_ROUTE };
     } else if (provider === "openai") {
-      [reviewer, fallbacks] = this.codexFirstRoute(this.lunaRoute(provider));
-      summary = this.lunaRoute(provider);
+      reviewer = route(provider, "gpt-5.6-luna", "low");
+      fallbacks = [];
+      summary = { ...reviewer };
     } else {
       [reviewer, fallbacks] = this.codexFirstRoute(current);
       summary = current;
@@ -917,7 +917,7 @@ export class Config {
     const choice = this.safetyReviewModel();
     if (choice === undefined) return "null";
     const pin = choice
-      ? route(...this.modelParts(choice), "low")
+      ? route(...this.modelParts(choice, false), "low")
       : await this.ladderReviewer();
     const selected = this.pinLadderReviewer(
       this.routePolicy(provider, modelId, modelId, provider, "high"),
@@ -944,10 +944,6 @@ export class Config {
       true,
       true,
     );
-  }
-
-  private lunaRoute(provider: string): ModelRoute {
-    return route(provider, "gpt-5.6-luna", "low");
   }
 
   private codexFirstRoute(current: ModelRoute): [ModelRoute, ModelRoute[]] {
@@ -1290,7 +1286,7 @@ export class Config {
     if (ids === null || ids.has(canonical)) return null;
     return level === null
       ? `Model ${canonical} is not in Pi's model list. Choose an effort level for this conversation.`
-      : `Model ${canonical} is not in Pi's model list. Choose another model for level ${level} in Settings > Effort ladder.`;
+      : `Model ${canonical} is not in Pi's model list. Choose another model for level ${level} in Settings > Effort levels.`;
   }
 
   suggestedEffort(model: string): Thinking {
@@ -1566,25 +1562,21 @@ export class Config {
       : undefined;
   }
 
-  async safetyReviewModels(): Promise<{ id: string; label: string }[]> {
-    const { builtinProviders } =
-      await import("@earendil-works/pi-ai/providers/all");
-    const authed = this.authedModelProviders();
-    return builtinProviders()
-      .filter((provider) => authed.has(provider.id))
-      .flatMap((provider) => provider.getAllModels?.() ?? [])
-      .filter((model) => model.type === "classifier")
-      .map((model) => ({
-        id: `${model.provider}/${model.id}`,
-        label: model.name,
-      }));
+  async safetyReviewModels(signedIn: StoredModelSignIns) {
+    const { signedInReviewModels } = await import("./safety_review_models");
+    return signedInReviewModels(signedIn, PI_MODEL_ROUTES);
   }
 
-  async setSafetyReviewModel(value: unknown): Promise<string | null> {
+  async setSafetyReviewModel(
+    value: unknown,
+    storedProviders: () => Promise<StoredModelSignIns>,
+  ): Promise<string | null> {
     if (
       value !== null &&
       (typeof value !== "string" ||
-        !(await this.safetyReviewModels()).some((model) => model.id === value))
+        !(await this.safetyReviewModels(await storedProviders())).some(
+          (model) => model.id === value,
+        ))
     )
       throw valueError("Choose an available safety review model");
     await this.writePrivateJson(
@@ -2192,7 +2184,11 @@ export class Config {
     return out;
   }
 
-  async noteLevelTurnFailure(level: unknown, reason: unknown): Promise<void> {
+  async noteLevelTurnFailure(
+    level: unknown,
+    reason: unknown,
+    expectedModel?: string,
+  ): Promise<void> {
     if (
       typeof level !== "number" ||
       !Number.isInteger(level) ||
@@ -2203,6 +2199,7 @@ export class Config {
     )
       return;
     const model = this.effortLevels()[level]!.model;
+    if (expectedModel !== undefined && expectedModel !== model) return;
     await this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, () => {
       const marks = this.readTurnMarks();
       marks[String(level)] = {
@@ -2213,7 +2210,10 @@ export class Config {
     });
   }
 
-  async noteLevelTurnSuccess(level: unknown): Promise<void> {
+  async noteLevelTurnSuccess(
+    level: unknown,
+    expectedModel?: string,
+  ): Promise<void> {
     if (
       typeof level !== "number" ||
       !Number.isInteger(level) ||
@@ -2223,7 +2223,12 @@ export class Config {
       return;
     await this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, () => {
       const marks = this.readTurnMarks();
-      if (!Object.hasOwn(marks, String(level))) return;
+      if (
+        !Object.hasOwn(marks, String(level)) ||
+        (expectedModel !== undefined &&
+          marks[String(level)]?.model !== expectedModel)
+      )
+        return;
       delete marks[String(level)];
       return { ...this.availableModelsSnapshot(), turn_marks: marks };
     });

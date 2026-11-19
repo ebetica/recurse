@@ -73,7 +73,10 @@ async function build(env: Record<string, string>): Promise<Instance> {
   const instance = await buildInstance({
     config: new Config({ env }),
     sink: {
-      write: (r: RuntimeLogRecord) => void logs.push(`${r.name} ${r.message}`),
+      write: (r: RuntimeLogRecord) =>
+        void logs.push(
+          [r.name, r.message, r.exception].filter(Boolean).join(" "),
+        ),
     },
   });
   live.push(instance);
@@ -365,9 +368,11 @@ test("settings and Artifacts have native schemas and remain discoverable and cal
   expect(discovered).toContain("recurse_settings");
   expect(discovered).toContain("artifact");
   expect(described).toContain("Ghostty palette file");
-  expect(described).toContain("including the level-1 safety reviewer");
   expect(described).toContain(
-    "View or change Recurse settings; returns the requested settings or action result.",
+    "Existing agents keep their recorded model and reasoning. The level-1 safety reviewer and automatic naming still follow the current ladder.",
+  );
+  expect(described).toContain(
+    "View or change Recurse settings. set_level applies to new agents and agents whose level is chosen again.",
   );
   expect(described).toContain("set_level");
   expect(described).toContain("from_file");

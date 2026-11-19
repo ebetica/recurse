@@ -79,10 +79,9 @@ export const tests: BrowserTest[] = [
         await setAuthTime(now);
         await openSettingsPanel(page);
         await page.locator('#settings-nav button[data-cat="account"]').click();
-        if (name === "phone")
-          await page
-            .getByRole("button", { name: /^Two-factor sign-in / })
-            .click();
+        await page
+          .getByRole("button", { name: /^Two-factor sign-in / })
+          .click();
         const editor = page.getByRole("region", {
           name: "Two-factor sign-in",
           exact: true,
@@ -163,6 +162,11 @@ export const tests: BrowserTest[] = [
         await hitCorners(enable);
         await enable.click();
         await enabling;
+        await page.evaluate(() =>
+          (globalThis as any).dispatchEvent(
+            new Event("recurse:refresh-remotes"),
+          ),
+        );
         await polling;
         const enabled = page.waitForResponse(
           (response) =>
@@ -189,13 +193,13 @@ export const tests: BrowserTest[] = [
             exact: true,
           }),
         );
-        if (name === "phone")
-          await page
-            .getByRole("button", {
-              name: "Close Two-factor sign-in",
-              exact: true,
-            })
-            .click();
+        await page
+          .getByRole("button", {
+            name:
+              name === "phone" ? "Close Two-factor sign-in" : "Back to Account",
+            exact: true,
+          })
+          .click();
         await setAuthTime(now + 30);
         await Promise.all([
           page.waitForNavigation({ waitUntil: "domcontentloaded" }),

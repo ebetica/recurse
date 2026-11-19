@@ -5,6 +5,8 @@
 
 /** Cap for a displayed failure reason: the row names the failure. */
 const SENTENCE_MAX = 200;
+export const PICK_EFFORT_LEVEL_AGAIN =
+  "Pick an effort level again for this conversation.";
 
 /** Python's Unicode `\w`, for use inside a character class. */
 const W = String.raw`\p{L}\p{N}_`;
@@ -62,6 +64,7 @@ const AUTH_MARKERS = [
   "api key is missing",
   "missing api key",
   "provider not configured",
+  "provider is not configured",
   "not logged in",
   "no credentials",
   "missing credentials",
@@ -429,5 +432,10 @@ export function describeTurnFailure(
   raw: unknown,
   context: FailureContext = {},
 ): string {
-  return describe(stripErrorClass(raw), "The turn failed.", context);
+  const text = stripErrorClass(raw);
+  const sentence = describe(text, "The turn failed.", context);
+  if (!text.endsWith(PICK_EFFORT_LEVEL_AGAIN)) return sentence;
+  return `${Array.from(sentence)
+    .slice(0, SENTENCE_MAX - PICK_EFFORT_LEVEL_AGAIN.length - 1)
+    .join("")} ${PICK_EFFORT_LEVEL_AGAIN}`;
 }

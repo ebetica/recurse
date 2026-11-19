@@ -138,6 +138,7 @@ function harness(overrides: Partial<LifecycleDeps> = {}): Harness {
       noteProjectionReady: () => void (projectionReady = true),
       refreshProjection: async () => ({}),
       migrateTakenOverNames: async () => 0,
+      migrateModelChoices: async () => 0,
     },
     assertLegacyImported: async () => {},
     nodes: {

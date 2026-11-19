@@ -6,7 +6,7 @@ import {
   artifactImagePreviewTarget,
   artifactPageUrl,
 } from "./model.js";
-import { nextArtifactFrameDescriptionId } from "./embed.js";
+import { nextArtifactFrameDescriptionId } from "../document-media/index.js";
 import {
   imagePlaceholder,
   revealArtifactImage,

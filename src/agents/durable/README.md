@@ -1,10 +1,10 @@
 # Turns, prompts and compaction (Pi Durable)
 
-Pi Durable runs agent turns inside the Recurse server. This directory connects
-the agent tree to a Harness for each conversation: it opens storage, admits
-input, builds and captures requests, and reports finished work.
+Pi Durable connects one Harness per conversation to the tree for storage,
+admission, captured requests and run reports.
 
 **Source files:** [host.ts](host.ts) and [host/](host/) own Harness lifecycles;
+[shared refusal](stopping_error/) fences admission;
 [sqlite_worker.ts](sqlite_worker.ts) owns storage execution;
 [prompt_resources.ts](prompt_resources.ts), [prompt_sections.ts](prompt_sections.ts),
 [../runtime/prompts.ts](../runtime/prompts.ts) and [request_capture.ts](request_capture.ts) and its
@@ -21,7 +21,8 @@ manages context summaries.
 report cursor without constructing a Harness. Only unfinished tasks, queued
 input, undelivered reports, pending clears, revivals or promotions reopen;
 idle conversations remain lazy. Unknown or older storage opens normally so
-inspection failures never suppress recovery. Pi owns the turn, tool calls and
+inspection failures never suppress recovery. Send and clear share
+[submission.ts](host/submission.ts). Pi owns the turn, tool calls and
 request boundaries; Recurse admits input and projects live state. Runs outlive HTTP requests. Explicit interrupt sends check the committed request
 ledger inside serialized admission before stopping a run; retrying an accepted
 request cannot abort its replacement. Input held by a clear is appended and
@@ -139,7 +140,8 @@ codemode section, without schemas. `artifact` and `recurse_settings` are native
 model tools and remain callable from scripts; on-demand MCP tools appear only
 by server in `mcp_servers`. Discovery is unchanged. Message provenance is separate from user text
 ([../runtime/prompt_stamp.ts](../runtime/prompt_stamp.ts)).
-[models.ts](models.ts)/[model_selection.ts](model_selection.ts) resolve models;
+[models.ts](models.ts) resolves models; [choices](model_selection/)
+never fall back;
 Settings owns credentials. The [loader](../../pi_model_config.worker.ts) shares
 Pi's built-ins/store across listing, turns and internal requests. Regular files
 (1 MiB/128 entries) load off-thread within 2s, or keep built-ins. Only new IDs

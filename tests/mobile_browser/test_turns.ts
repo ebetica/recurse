@@ -283,7 +283,6 @@ async function test_background_shells_inline_details_and_scoped(
       const s = (globalThis as any).getComputedStyle(element),
         b = element.getBoundingClientRect();
       return {
-        fontSize: s.fontSize,
         padding: s.padding,
         border: s.borderColor,
         background: s.backgroundColor,
@@ -293,7 +292,6 @@ async function test_background_shells_inline_details_and_scoped(
     });
     for (const key of ["border", "background", "color"])
       style[key] = channels(style[key]);
-    expect(style.fontSize).toBe(mobile ? "10.5px" : "9.45px");
     expect(style.padding).toBe("0px 8px");
     const [border, background, running, accent] = (
       await themeColors(

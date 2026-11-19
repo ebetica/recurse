@@ -75,7 +75,7 @@ export function registerBackendRoutes(
       )?.requested_by;
     let text = `Backend ${label} is now connected`;
     try {
-      await store.signIn(label, body.password, body.code);
+      await store.signIn(label, body.url, body.password, body.code);
     } catch (error) {
       text = `Signing in to backend ${label} failed: ${error instanceof HttpError ? error.message : "Sign-in failed"}`;
       throw error;

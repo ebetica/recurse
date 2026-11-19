@@ -2,6 +2,7 @@ import { expect } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Browser, Page } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import captured from "../backend/fixtures/pull_request_diff.json";
 import {
   captureErrors,
@@ -72,10 +73,13 @@ async function test_changes_base(browser: Browser, base: string) {
     "a.txt",
     ...untrackedNames,
   ]);
-  expect(await pane.locator(".diff-group-label").allTextContents()).toEqual([
-    "Changed files",
-    "Untracked",
-  ]);
+  await browserExpect(pane.locator(".diff-group-label")).toHaveText(
+    ["Changed files", "Untracked"],
+    { useInnerText: true },
+  );
+  await browserExpect(pane.locator(".diff-stat")).toHaveText(
+    "1 file changed +2 −0",
+  );
   const defaultTip = await label.getAttribute("title");
   expect(defaultTip).toContain(String(start).slice(0, 7));
   await shoot(page, "changes-default-untracked-desktop");
@@ -149,6 +153,10 @@ async function test_changes_base(browser: Browser, base: string) {
     "Show the changes of",
     "Change target",
   ]);
+  await browserExpect(pane.locator(".diff-base-kind")).toHaveText(
+    ["", "Branch", "Branch", "Branch", "Commit", ""],
+    { useInnerText: true },
+  );
   await shoot(page, "changes-since-commit-finder-desktop");
   const defaultPatch = page.waitForResponse((response) => {
     const url = new URL(response.url());
@@ -259,8 +267,31 @@ async function test_changes_base(browser: Browser, base: string) {
   await phonePane
     .getByRole("option", { name: "Changes on this branch (default)" })
     .click();
-  expect(errors).toEqual([]);
+  await phonePane
+    .locator(".diff-base-btn", { hasText: "Changes since main" })
+    .waitFor();
   await phone.close();
+  await writeFile(join(cwd, "a.txt"), "branch line\nuncommitted line\n");
+  await Bun.$`git -C ${cwd} add untracked-0.txt`.quiet();
+  const reopen = async () =>
+    openChanges(
+      await browser.newPage({ viewport: { width: 1280, height: 844 } }),
+      base,
+      cid,
+    );
+  const totals = await reopen();
+  await browserExpect(totals.locator(".diff-stat")).toHaveText(
+    "2 files changed +3 −1",
+  );
+  await totals.page().close();
+  await Bun.$`git -C ${cwd} add -A`.quiet();
+  const capped = await reopen();
+  await browserExpect(capped.locator(".diff-trunc")).toHaveText([
+    "The diff hit the server’s size cap — some content below is partial.",
+  ]);
+  expect(await capped.locator(".diff-stat").count()).toBe(0);
+  await capped.page().close();
+  expect(errors).toEqual([]);
   await page.close();
 }
 

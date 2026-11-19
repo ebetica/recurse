@@ -19,7 +19,7 @@ import {
 } from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
-import { APP_ENTRY, buildPage } from "./artifacts/app";
+import { APP_ENTRY, buildPage } from "./artifacts/page/index";
 import * as startupMetrics from "./observability/startup_metrics";
 import { slowSpan } from "./observability/slow_span";
 import { timed, timingDetail, timingId } from "./observability/request_timing";
@@ -95,11 +95,7 @@ function ownedBytes(value: ArrayLike<number>): FileBytes {
   return Uint8Array.from(value);
 }
 
-export const ARTIFACT_ACTIVE_CSP =
-  "default-src 'none'; sandbox allow-scripts; " +
-  "script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; " +
-  "connect-src 'none'; font-src data:; media-src data:; frame-src 'none'; " +
-  "child-src 'none'; object-src 'none'; worker-src 'none'; form-action 'none'; base-uri 'none'";
+export { ARTIFACT_ACTIVE_CSP } from "./artifact_frame_policy.js";
 
 /** Base class for safe, user-presentable artifact failures. */
 export class ArtifactError extends Error {

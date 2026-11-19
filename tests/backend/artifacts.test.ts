@@ -9,7 +9,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
-import { run } from "../../src/artifacts/app";
+import { run } from "../../src/artifacts/page/index";
 import * as artifacts from "../../src/artifacts";
 import { makeContext } from "./fixtures/artifacts/operations";
 

@@ -83,6 +83,10 @@ its [header](../../tests/checks/prompt_budget.ts) defines the measured prompt. O
 [static gate](../../tests/checks/static.ts) defines source-size limits and exclusions;
 simplify large files by deleting dead, duplicated or parallel code and giving each
 module one job, not by mechanically splitting files.
+The [import graph check](../../tests/checks/import_graph.ts) ratchets runtime file
+and folder-module cycles, imports bypassing module entries, and missing/non-thin
+entries. Nested folders are separate modules; root source files stand alone.
+Use `--dot --modules` for the module graph and `--height` for a longest chain.
 Changes to what the web UI downloads (polling, event streams, images, Artifact
 loading, caching, compression) run the bytes-over-the-wire budget:
 `bun run build && bun tests/dev/wire_budget.ts`. It starts its own private

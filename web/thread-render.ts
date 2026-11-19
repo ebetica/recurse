@@ -4,6 +4,7 @@ import { enrich } from "./thread-render/reply-html.js";
 import { html, nothing, type TemplateResult } from "lit";
 import { SERVER_COMPACTION_MARKER } from "../src/extensions/core/context/server-compaction.js";
 import { keyed } from "lit/directives/keyed.js";
+import { resendText } from "./composer/index.js";
 import { refusedNoteT } from "./thread-render/refused.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { state } from "./state.js";
@@ -15,7 +16,7 @@ import {
   turnGroups,
   type TurnGroupItem,
 } from "./thread-render/turn-groups.js";
-import { userBubble, userBubbleParts } from "./thread-render/user-bubble.js";
+import { userBubble, userBubbleParts } from "./thread-render/index.js";
 import {
   shouldToggleToolRow,
   toolDetailPanel,
@@ -49,7 +50,8 @@ import {
   liveActivityState,
   type ActivityStatusKind,
 } from "./thread-render/tool_activity.js";
-import { copyButtonT, messageCopyScope } from "./conversation/copy.js";
+import { copyButtonT } from "./conversation/copy-button/index.js";
+import { messageCopyScope } from "./conversation/copy.js";
 import { openActivityUsageModal, openTurnPromptModal } from "./prompt.js";
 import {
   boundaryDisplayedReply,
@@ -117,7 +119,8 @@ import {
   toolSeriesKey,
 } from "./conversation/disclosure.js";
 import { anchoredPaint, paint } from "./conversation/thread.js";
-import { renderedLogGeneration, rowThreads } from "./row-thread-state.js";
+import { renderedLogGeneration } from "./row-thread-state.js";
+import { rowThreads } from "./row-thread-state/index.js";
 
 /** The one disclosure caret; app.css turns it down while its toggle is open. */
 const disclosureCaret = html`<span class="disclosure-caret" aria-hidden="true"
@@ -565,7 +568,7 @@ function assistantT(
       </div>
       ${assistantAttachments(conv.id, attachments)}
       ${entry.refused_text !== undefined
-        ? refusedNoteT(entry, full)
+        ? refusedNoteT(entry, full, resendText)
         : entry.error
           ? html`<div
               class="error-note"

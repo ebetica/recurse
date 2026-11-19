@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import type { Locator } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   closeWithRoutes,
@@ -11,11 +12,20 @@ import {
 } from "./common";
 import {
   filePage,
+  fileShot,
   showFilesList,
   openListedFile,
   openReplyFile,
   closeFileTab,
 } from "./files_support";
+import {
+  complexHtml,
+  expectHtmlSourceFallback,
+  expectInlineSeries,
+  expectPhoneTapArea,
+  htmlModes,
+  watchResourceHints,
+} from "./fixtures/html_preview";
 
 async function waitForDrawn(target: Locator): Promise<void> {
   await target
@@ -60,6 +70,211 @@ async function codeStyle(pre: Locator) {
 }
 
 export const tests: BrowserTest[] = [
+  // Feature: #3494 ordinary HTML renders with working inline assets, without reaching Recurse or loading separate resources.
+  async function test_html_files_open_in_an_offline_preview(browser, base) {
+    await using hints = await watchResourceHints();
+    const api = `${base}api/tree?html-preview-probe=api`;
+    const external = `${base}html-preview-probe/`;
+    const hintMarkup = `
+<link rel="preconnect" href="${hints.origin}">
+<link rel="dns-prefetch" href="${hints.origin.replace("127.0.0.1", "localhost")}">
+<link rel="prefetch" href="${hints.origin}/prefetch.html">
+<link rel="prerender" href="${hints.origin}/prerender.html">
+<link rel="preload" as="style" href="${hints.origin}/preload.css">
+<Link REL="module&#112;reload" HREF="${hints.origin}/module.js">`;
+    const dot =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACklEQVQImWNgAAIAAAUAAYXKMgwAAAAASUVORK5CYII=";
+    const resources: Record<
+      string,
+      { contentType: string; body: string | Buffer }
+    > = {
+      "script.js": {
+        contentType: "text/javascript",
+        body: "document.documentElement.dataset.externalScript = 'ran'",
+      },
+      "style.css": {
+        contentType: "text/css",
+        body: "#stylesheet-result { display: none }",
+      },
+      "import.css": {
+        contentType: "text/css",
+        body: "#import-result { display: none }",
+      },
+      "image.png": {
+        contentType: "image/png",
+        body: Buffer.from(dot, "base64"),
+      },
+    };
+    const markup = `<!doctype html><html><head>${hintMarkup}
+<link rel="stylesheet" href="${external}style.css">
+<style>@import url('${external}import.css'); #series { display: flex; gap: 1em; } h1 { color: #156fa1; }</style>
+<script src="${external}script.js"></script>
+</head><body><h1>Quarterly report</h1>
+<div id="series"><div id="stylesheet-result">Revenue</div><div id="import-result">Costs</div></div>
+<p>Revenue increased across all regions.</p>
+<button id="open-top">Open outside preview</button>
+<a href="#report-details">Report details</a>
+<p id="report-details"></p>
+<img alt="Separate dot" src="${external}image.png"><img alt="Embedded dot" src="data:image/png;base64,${dot}">
+<script>
+const result = document.getElementById('report-details');
+const denied = (read) => { try { read(); return false; } catch { return true; } };
+result.textContent = 'Chart data prepared';
+result.dataset.parent = String(denied(() => parent.document.body));
+result.dataset.cookie = String(denied(() => document.cookie));
+result.dataset.origin = origin;
+result.dataset.localBase = String(document.baseURI.startsWith('data:text/html;'));
+result.dataset.referrer = document.referrer;
+fetch(${JSON.stringify(api)}).then(
+  () => { result.dataset.fetch = 'allowed'; },
+  () => { result.dataset.fetch = 'blocked'; },
+);
+document.getElementById('open-top').onclick = () => {
+  try { top.location.href = ${JSON.stringify(`${external}top.html`)}; }
+  catch {}
+  result.dataset.topAttempt = 'done';
+};
+window.addEventListener('hashchange', () => { result.dataset.section = location.hash; });
+</script>
+</body></html>`;
+    const fallbackFiles = {
+      "complex.html": complexHtml(hints.origin),
+      "hint-notes.html": `${hintMarkup}\n<!-- Resource notes: ReL = 'help PRECONNECT' -->\n<h1>Resource notes</h1>`,
+    };
+    const { demo } = await postFixture(base, "seed-html-files", {
+      html: markup,
+      fallbackFiles,
+    });
+    for (const width of [1280, 412]) {
+      const { context, page, errors } = await filePage(
+        browser,
+        width,
+        850,
+        width === 412,
+      );
+      try {
+        const outbound: string[] = [];
+        hints.watch(page);
+        await page.route("**/*html-preview-probe*", (route) => {
+          const url = route.request().url();
+          outbound.push(url);
+          const resource = resources[url.slice(external.length)];
+          return url.startsWith(external) && resource
+            ? route.fulfill(resource)
+            : route.continue();
+        });
+        await page.goto(`${base}#agent=${demo}`, {
+          waitUntil: "domcontentloaded",
+        });
+        await page
+          .getByRole("button", {
+            name: "Open report.html in Files",
+            exact: true,
+          })
+          .waitFor();
+        const details = await openReplyFile(page, "report.html");
+        const { source, preview } = htmlModes(details);
+        const frame = details.frameLocator(
+          'iframe[title="Preview of report.html"]',
+        );
+        const heading = frame.getByRole("heading", {
+          name: "Quarterly report",
+        });
+        await browserExpect(heading).toBeVisible();
+        await expectInlineSeries(frame);
+        await browserExpect(frame.locator("html")).not.toHaveAttribute(
+          "data-external-script",
+        );
+        await browserExpect(
+          frame.getByRole("img", { name: "Separate dot" }),
+        ).toHaveJSProperty("naturalWidth", 0);
+        await browserExpect(
+          frame.locator('link:not([rel="stylesheet"])'),
+        ).toHaveCount(0);
+        await browserExpect(preview).toHaveAttribute("aria-pressed", "true");
+        await browserExpect(
+          frame.getByRole("img", { name: "Embedded dot" }),
+        ).toHaveJSProperty("naturalWidth", 1);
+        const chart = frame.getByText("Chart data prepared");
+        await browserExpect(chart).toHaveAttribute("data-origin", "null");
+        await browserExpect(chart).toHaveAttribute("data-parent", "true");
+        await browserExpect(chart).toHaveAttribute("data-cookie", "true");
+        await browserExpect(chart).toHaveAttribute("data-local-base", "true");
+        await browserExpect(chart).toHaveAttribute("data-referrer", "");
+        await browserExpect(chart).toHaveAttribute("data-fetch", "blocked");
+        const location = page.url();
+        await frame.getByRole("link", { name: "Report details" }).click();
+        await browserExpect(chart).toHaveAttribute(
+          "data-section",
+          "#report-details",
+        );
+        expect(page.url()).toBe(location);
+        await frame
+          .getByRole("button", { name: "Open outside preview" })
+          .click();
+        await browserExpect(chart).toHaveAttribute("data-top-attempt", "done");
+        expect(page.url()).toBe(location);
+        expect(outbound).toEqual([]);
+        if (width === 412) {
+          await expectPhoneTapArea(source);
+          await expectPhoneTapArea(preview);
+        }
+        await fileShot(page, `${width}-files-html-preview.png`);
+        await source.press("Enter");
+        const code = details.locator(".files-source code");
+        await browserExpect(code).toHaveAttribute(
+          "data-source-syntax",
+          "highlighted",
+        );
+        expect(await code.textContent()).toBe(markup);
+        await browserExpect(heading).toHaveCount(0);
+        await browserExpect(source).toBeFocused();
+        await fileShot(page, `${width}-files-html-source.png`);
+        await page.keyboard.press("Tab");
+        await browserExpect(preview).toBeFocused();
+        await page.keyboard.press("Space");
+        await heading.waitFor();
+        await showFilesList(page);
+        await openListedFile(page, "uploaded.htm");
+        await details
+          .frameLocator('iframe[title="Preview of uploaded.htm"]')
+          .getByRole("heading", { name: "Quarterly report" })
+          .waitFor();
+        await showFilesList(page);
+        await openListedFile(page, "large.html");
+        await browserExpect(
+          details.getByRole("button", { name: "Preview" }),
+        ).toBeDisabled();
+        await details
+          .getByText("This file is too large to preview.", { exact: false })
+          .waitFor();
+        await browserExpect(details.locator(".files-source")).toContainText(
+          "<h1>Large file</h1>",
+        );
+        await browserExpect(details.locator("iframe")).toHaveCount(0);
+        for (const [name, text] of Object.entries(fallbackFiles)) {
+          await showFilesList(page);
+          await expectHtmlSourceFallback(details, code, text, () =>
+            openListedFile(page, name),
+          );
+          hints.expectQuiet();
+        }
+        expect(outbound).toEqual([]);
+        expect(
+          errors.filter(
+            (error) =>
+              !(
+                error.includes("html-preview-probe") &&
+                (error.includes("Content Security Policy") ||
+                  error.includes("Unsafe attempt to initiate navigation"))
+              ),
+          ),
+        ).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
+  },
   async function test_pdf_pages_draw_in_the_detail_view(browser, base) {
     const { context, page, errors } = await filePage(browser, 1280, 800);
     const { demo } = (await postFixture(base, "seed-published-pdf")) as {

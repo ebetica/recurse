@@ -63,7 +63,7 @@ export function registerSideRoutes(router: Router, deps: SideRoutesDeps) {
     try {
       await deps.fork(cid);
     } catch (error) {
-      void deps.reap(cid).catch(() => undefined);
+      await deps.reap(cid).catch(() => undefined);
       throw new HttpError(
         409,
         error instanceof Error ? error.message : "the fork failed",
@@ -75,7 +75,7 @@ export function registerSideRoutes(router: Router, deps: SideRoutesDeps) {
       .sort((a, b) => Number(a.created ?? 0) - Number(b.created ?? 0));
     for (const old of sides.slice(0, Math.max(0, sides.length - MAX_SIDES)))
       if (old.id !== cid)
-        void deps.reap(String(old.id)).catch((error: unknown) =>
+        await deps.reap(String(old.id)).catch((error: unknown) =>
           deps.log("side_conversation_cap_reap_failed", {
             cid: old.id,
             error: String(error),

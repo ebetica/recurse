@@ -1,6 +1,6 @@
 // Tracks whether cached content is refreshing or a cold switch is loading.
 // Failed reads end refreshing, but cold switches wait for a correct thread.
-// conversation.ts owns the indicator, dimming, and chrome.
+// Owns focused read state; chrome.ts paints its indicator and dimming.
 
 export type FreshnessPhase = "fresh" | "refreshing" | "loading";
 
@@ -11,6 +11,12 @@ export interface FreshnessState {
 }
 
 export const FRESH: FreshnessState = { id: null, phase: "fresh" };
+
+export const focusedRead: {
+  freshness: FreshnessState;
+  /** Stop stays detached until the focused read applies. */
+  stopReadAuthoritativeId: string | null;
+} = { freshness: FRESH, stopReadAuthoritativeId: null };
 
 /** Opening `id`, having painted (or not) its cached thread. */
 export function conversationSwitched(
@@ -34,6 +40,14 @@ export function refreshFailed(
   id: string,
 ): FreshnessState {
   return current.id === id && current.phase === "refreshing" ? FRESH : current;
+}
+
+export function noteRefreshFailed(id: string): void {
+  focusedRead.freshness = refreshFailed(focusedRead.freshness, id);
+}
+
+export function noteRefreshApplied(id: string): void {
+  focusedRead.freshness = refreshApplied(focusedRead.freshness, id);
 }
 
 /** What to show for the conversation currently selected. */

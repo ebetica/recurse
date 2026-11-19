@@ -2,9 +2,13 @@
 // API v1 Agent fields retain their contract; other fields are experimental.
 // Pure sidebar(rows, now) omits usage and side conversations.
 // Tags are opt-in; newAgent = { ask: "tag" } adds the draft control.
-import type { Agent } from "../../src/web/api_v1/schema.js";
-import type { ScriptSection } from "./arrangement.js";
-export type { ScriptAction, ScriptSection, NewAgent } from "./arrangement.js";
+import type { Agent } from "../../src/agent_metadata/index.js";
+import type { ScriptSection } from "../../src/sidebar_script/index.js";
+export type {
+  ScriptAction,
+  ScriptSection,
+  NewAgent,
+} from "../../src/sidebar_script/index.js";
 
 export interface SidebarRow extends Agent {
   /** API v1 Agent: conversation id. */

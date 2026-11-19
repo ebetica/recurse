@@ -8,14 +8,23 @@ migration. Recurse updates may require editing a custom script.
 - `default_sidebar.js` keeps roots in Pinned, Inbox, Active and Archive,
   hiding each section when it is empty;
   `default_sidebar.d.ts` documents every script row field.
-- `rows.ts` projects local and connected remote conversations from cached tree snapshots, using
-  the same Agent builder as API v1. API v1 fields retain their contract; sidebar
-  extras are experimental.
-- `sandbox.ts` runs the pure, stateless `sidebar(rows, now)` in a fresh sandbox.
-- `arrangement.ts` checks sections and actions.
+- [Shared row and action contracts](../../src/sidebar_script/README.md) project
+  cached local/remote Agent metadata and check sections and actions. API v1
+  fields retain their contract; sidebar extras remain experimental.
+- [The worker engine](../../src/sidebar_script/engine/README.md) runs the pure,
+  stateless `sidebar(rows, now)` in a fresh sandbox.
+- `index.ts` exposes `events.ts`'s shared change signal, tag views and dialog entry
+  points without loading scripts, mutation actions or the tree renderer.
+- `tag-state.ts` owns optimistic tags until a tree read begun after the answer
+  confirms them. `dialogs.ts` shares one tag, snooze or confirmation popover
+  between sidebar actions and the optional draft control.
 - `sections.ts` draws sections; `script.ts` manages the worker and saved script.
-- `actions.ts` and `hold.ts` handle tag actions and hold menus.
+- `actions.ts` and `hold.ts` handle tag actions and hold menus. App startup
+  supplies `action-handlers.ts` with the tree refresh and the composer draft
+  action used by sidebar sections and remote headers.
 - `drag.ts` owns desktop agent drop targets and feedback.
+- `focus.ts` refreshes the list before focusing its cursor, with the phone menu
+  fallback. App startup supplies rendering; pane exits import only this helper.
 - `agent-folds.ts` remembers, on this device, which agents list their
   subagents (opened with l/Right, folded with h/Left), so the agent list keeps
   its shape across reloads and server restarts. A one-time reset discards saved
@@ -136,4 +145,6 @@ creation request; older backends must be updated to support initial tags.
 ## Rules for changes
 
 Keep browser and server dry-run rows identical. Keep scripts stateless and
-preserve the built-in root-only arrangement.
+preserve the built-in root-only arrangement. Shared change signals, tag reads and
+input dialogs stay independent of mutation requests and the renderer; the module
+entry uses only named exports.

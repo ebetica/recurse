@@ -54,7 +54,7 @@ test("live model selection reads Settings and refuses unlisted routes", async ()
     );
     expect(liveModel("fixture", config).id).toBe(levels[1].model);
     expect(() => liveModel("absent", config)).toThrow(
-      "Settings > Effort ladder",
+      "Settings > Effort levels",
     );
     await writeFile(
       config.paths.PI_MODEL_LIST_FILE,

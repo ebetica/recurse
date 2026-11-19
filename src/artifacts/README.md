@@ -18,7 +18,7 @@ Each publication is an immutable version that can be restored. Failed app
 builds report to the committing shell and leave the last working version shown.
 
 **Source files:** [../artifacts.ts](../artifacts.ts) (create, publish, versions,
-listings) · [app.ts](app.ts) (builds apps) · [check.ts](check.ts) (checks built
+listings) · [page/](page/index.ts) (isolated app builds and head insertion) · [check.ts](check.ts) (checks built
 apps in a browser) · [preview.ts](preview.ts) · [theme.ts](theme.ts) ·
 [key_relay.ts](key_relay.ts) · [working_path.ts](working_path.ts) (portable paths) ·
 [../extensions/core/environment/artifact.ts](../extensions/core/environment/artifact.ts)

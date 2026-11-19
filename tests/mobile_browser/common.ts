@@ -17,6 +17,7 @@ import {
   chromium,
   type Browser,
   type BrowserContext,
+  type Locator,
   type Page,
   type Route,
 } from "playwright";
@@ -59,6 +60,26 @@ export type BrowserTest = (
   data: string,
   serverPid: number,
 ) => Promise<void>;
+
+export async function expectHitCorners(control: Locator, size = 44) {
+  await control.scrollIntoViewIfNeeded();
+  expect(
+    await control.evaluate((el, size) => {
+      const r = el.getBoundingClientRect();
+      const offset = (size - 2) / 2;
+      return [-offset, offset].every((x) =>
+        [-offset, offset].every((y) =>
+          el.contains(
+            el.ownerDocument.elementFromPoint(
+              r.left + r.width / 2 + x,
+              r.top + r.height / 2 + y,
+            ),
+          ),
+        ),
+      );
+    }, size),
+  ).toBe(true);
+}
 
 export async function themeColors(page: Page, ...colors: string[]) {
   return page.evaluate((colors) => {

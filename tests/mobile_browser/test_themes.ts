@@ -33,8 +33,32 @@ async function openDetail(page: Page, label: string) {
 async function closeDetail(page: Page, label: string) {
   await page
     .getByRole("dialog", { name: label, exact: true })
-    .getByRole("button", { name: `Close ${label}`, exact: true })
+    .getByRole("button", {
+      name:
+        page.viewportSize()!.width <= 700
+          ? `Close ${label}`
+          : "Back to Appearance",
+      exact: true,
+    })
     .click();
+}
+
+async function probeInView(target: Locator) {
+  const hit = await themeCornersHit(target);
+  return target.evaluate((element, hit) => {
+    const box = element.getBoundingClientRect();
+    const view = element.ownerDocument.documentElement;
+    return {
+      top: box.top,
+      hit,
+      inView:
+        box.width > 0 &&
+        box.top >= 0 &&
+        box.left >= 0 &&
+        box.bottom <= view.clientHeight &&
+        box.right <= view.clientWidth,
+    };
+  }, hit);
 }
 
 async function themeCornersHit(target: Locator): Promise<boolean> {
@@ -140,11 +164,11 @@ export const tests: BrowserTest[] = [
           await page
             .getByRole("button", { name: "Appearance", exact: true })
             .click();
-          if (width === 412) await openDetail(page, "Custom CSS");
+          await openDetail(page, "Custom CSS");
           return page.locator('textarea[name="custom-css"]');
         };
         const closeCss = async () => {
-          if (width === 412) await closeDetail(page, "Custom CSS");
+          await closeDetail(page, "Custom CSS");
           await page.locator("#settings-close").click();
         };
         try {
@@ -160,6 +184,44 @@ export const tests: BrowserTest[] = [
           await editor
             .getByRole("button", { name: "Cancel", exact: true })
             .click();
+          await browserExpect(input).toHaveValue("");
+          await browserExpect.poll(() => themeCornersHit(input)).toBe(true);
+          await input.fill(preview);
+          for (const size of width === 412 ? [] : [412, 1280]) {
+            await page.setViewportSize({ width: size, height: 915 });
+            await browserExpect(
+              page.locator(
+                size <= 700 ? "dialog:modal" : "dialog.settings-subpage[open]",
+              ),
+            ).toHaveAccessibleName("Custom CSS");
+            if (size > 700)
+              await browserExpect(page.locator("dialog:modal")).toHaveCount(0);
+            await browserExpect(input).toHaveValue(preview);
+            await input.evaluate((element) =>
+              element.scrollIntoView({ block: "nearest" }),
+            );
+            const previewed = await probeInView(input);
+            expect(previewed).toMatchObject({ inView: true, hit: false });
+            await editor
+              .getByRole("button", { name: "Cancel", exact: true })
+              .dispatchEvent("click");
+            await browserExpect(input).toHaveValue("");
+            await browserExpect
+              .poll(() => probeInView(input))
+              .toEqual({ ...previewed, hit: true });
+            await input.fill(preview);
+            await browserExpect.poll(() => themeCornersHit(input)).toBe(false);
+          }
+          await input.focus();
+          await page.keyboard.press("Escape");
+          await browserExpect(
+            page.getByRole("dialog", { name: "Custom CSS", exact: true }),
+          ).toBeHidden();
+          await browserExpect(page.locator("#settings-modal")).toBeVisible();
+          await browserExpect(
+            page.locator(".settings-row").filter({ hasText: /^Custom CSS/ }),
+          ).toBeFocused();
+          await openDetail(page, "Custom CSS");
           await browserExpect(input).toHaveValue("");
           await browserExpect.poll(() => themeCornersHit(input)).toBe(true);
           await input.fill(preview);
@@ -432,6 +494,25 @@ export const tests: BrowserTest[] = [
               ),
             )
             .toBe(true);
+          const [cancelBox, offBox, textBox] = await Promise.all(
+            [
+              confirmation.getByRole("button", { name: "Cancel", exact: true }),
+              confirmOff,
+              confirmation.locator("p"),
+            ].map((target) => target.boundingBox()),
+          );
+          expect({
+            dismissFirst: cancelBox!.x + cancelBox!.width < offBox!.x,
+            oneRow: cancelBox!.y === offBox!.y,
+            confirmTrailing:
+              Math.abs(
+                offBox!.x + offBox!.width - (textBox!.x + textBox!.width),
+              ) < 1,
+          }).toEqual({
+            dismissFirst: true,
+            oneRow: true,
+            confirmTrailing: true,
+          });
           await page.screenshot({
             path: join(shots, `safety-confirm-${width}.png`),
           });

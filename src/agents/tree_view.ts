@@ -5,7 +5,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { ConversationRecord, LiveInputs } from "./conversation_store";
-import { liveTags } from "./conversation_tags";
+import { liveTags } from "../agent_metadata/index";
 import {
   type RuntimeLogger,
   WARNING,

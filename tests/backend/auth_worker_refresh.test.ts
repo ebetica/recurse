@@ -146,6 +146,7 @@ test("a Settings login leaves an existing 0644 auth.json at 0600", async () => {
   expect(JSON.parse(stdout)).toEqual({ kind: "complete", changed: true });
   expect(JSON.parse(readFileSync(authPath, "utf8"))).toEqual({
     "openai-codex": credential,
+    "$recurse.openai-choice": { type: "api_key", env: { RECORDED: "1" } },
   });
   expect((await stat(authPath)).mode & 0o777).toBe(0o600);
 }, 60_000);

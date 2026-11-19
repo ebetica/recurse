@@ -190,12 +190,16 @@ export function classifyReviewFailure(
 }
 
 export function reviewFailureMessage(
-  verdict: SafetyVerdict & { configurationFailure?: boolean },
+  verdict: SafetyVerdict & {
+    configurationFailure?: boolean;
+    failure?: { summary: string };
+  },
   journalFailure = false,
 ): string {
   if (verdict.configurationFailure)
     return `[pi-safety] Safety review was skipped, so this action was allowed without review. ${conciseReason(verdict.reason)}`;
-  const failure = classifyReviewFailure(verdict.reason, journalFailure);
+  const failure =
+    verdict.failure ?? classifyReviewFailure(verdict.reason, journalFailure);
   return `[pi-safety] Safety review failed, so this action was allowed without review. Reviewer error: ${failure.summary}`;
 }
 

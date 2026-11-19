@@ -5,19 +5,19 @@
 import { html, nothing, render } from "lit";
 import { apiJson, jpost } from "../api.js";
 import { embedded, state as app } from "../state.js";
-import { SIDEBAR_CHANGE } from "./actions.js";
+import { SIDEBAR_CHANGE } from "./index.js";
 import {
   checkSections,
   checkNewAgent,
+  LatestRun,
+  type SidebarRow,
+  type ScriptResult,
   type NewAgent,
   type Action,
   type ScriptAction,
   type ScriptSection,
   type Section,
-} from "./arrangement.js";
-import { runRetryingTimeout } from "./retry.js";
-import type { SidebarRow } from "./rows.js";
-import type { ScriptResult } from "./sandbox.js";
+} from "../../src/sidebar_script/index.js";
 
 export interface ScriptVersion {
   at: number;
@@ -47,7 +47,6 @@ let output: unknown = null;
 let checkedIds: Set<string> | null = null;
 let newAgent: NewAgent | undefined;
 let latestRows: SidebarRow[] = [];
-let finished: Promise<void> = Promise.resolve();
 /** Read creation settings after the active script has been checked. */
 export async function newAgentSettings(): Promise<NewAgent | undefined> {
   if (!current) {
@@ -64,7 +63,7 @@ export async function newAgentSettings(): Promise<NewAgent | undefined> {
       rows: latestRows,
       now: Date.now() / 1000,
     });
-    await finished;
+    await runs.finished;
   }
   return current?.script && !failure ? newAgent : undefined;
 }
@@ -148,47 +147,34 @@ export async function changeScript(action: "undo" | "reset"): Promise<void> {
 }
 
 let lastKey = "";
-let next: Input | null = null;
-let running = false;
+const runs = new LatestRun<Input>(runInWorker, (input, result) => {
+  if (input.script !== current?.script) return;
+  // Invariant: a timeout depends on the device's load, not the input, so
+  // the next sidebar update runs the same input again.
+  if ("timeout" in result) lastKey = "";
+  const before = JSON.stringify([output, failure]);
+  let addedRows = false;
+  try {
+    if ("error" in result) throw result;
+    newAgent = checkNewAgent(result.newAgent);
+    [output, failure] = [compact(result.sections, input.rows), null];
+    addedRows = input.rows.some((row) => !checkedIds?.has(row.id));
+    checkedIds = new Set(input.rows.map((row) => row.id));
+    store(LAYOUT_KEY, JSON.stringify(output));
+  } catch (error) {
+    failure = (error as Failure).error
+      ? (error as Failure)
+      : { error: String((error as Error).message), line: null };
+  }
+  if (addedRows || JSON.stringify([output, failure]) !== before) changed();
+});
 /** Queue a run; idle_for alone changes it once a minute. */
 function schedule(input: Input): void {
   const rows = input.rows.map((row) => ({ ...row, idle_for: 0 }));
   const key = JSON.stringify([input.script, rows, Math.floor(input.now / 60)]);
   if (key === lastKey) return;
-  [lastKey, next] = [key, input];
-  if (!running) finished = drain();
-}
-
-async function drain(): Promise<void> {
-  running = true;
-  while (next) {
-    const input: Input = next;
-    next = null;
-    const result = await runRetryingTimeout(
-      () => runInWorker(input),
-      () => !next,
-    );
-    if (next || input.script !== current?.script) continue;
-    // Invariant: a timeout depends on the device's load, not the input, so
-    // the next sidebar update runs the same input again.
-    if ("timeout" in result) lastKey = "";
-    const before = JSON.stringify([output, failure]);
-    let addedRows = false;
-    try {
-      if ("error" in result) throw result;
-      newAgent = checkNewAgent(result.newAgent);
-      [output, failure] = [compact(result.sections, input.rows), null];
-      addedRows = input.rows.some((row) => !checkedIds?.has(row.id));
-      checkedIds = new Set(input.rows.map((row) => row.id));
-      store(LAYOUT_KEY, JSON.stringify(output));
-    } catch (error) {
-      failure = (error as Failure).error
-        ? (error as Failure)
-        : { error: String((error as Error).message), line: null };
-    }
-    if (addedRows || JSON.stringify([output, failure]) !== before) changed();
-  }
-  running = false;
+  lastKey = key;
+  runs.push(input);
 }
 
 /** Checked output with row ids in place of rows, as the device keeps it. */

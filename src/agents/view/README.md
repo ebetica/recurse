@@ -4,7 +4,8 @@ A **view** is the list of rows the browser shows for one conversation: messages,
 tool calls and status lines. This directory builds views from stored history and
 live updates, one bounded page at a time.
 
-**Source files:** [reader.ts](reader.ts) (reads pages) ·
+**Source files:** [index.ts](index.ts) (shared failure guidance) ·
+[reader.ts](reader.ts) (reads pages) ·
 [conversation.ts](conversation.ts) (turns entries into rows) ·
 [session_entries.ts](session_entries.ts) (legacy Pi JSONL pages) ·
 [failure_sentences.ts](failure_sentences.ts) (failure text for the operator) ·
@@ -20,6 +21,9 @@ is no second live transcript. Thinking rows retain a presence flag even when
 the provider supplies only encrypted or redacted thinking; titles remain
 readable text only. Script calls beyond the display cap retain grouped names
 and statistics without their arguments.
+
+Authentication and model-availability failures retain the recorded agent's
+level-reselection guidance in both the visible sentence and raw detail.
 
 The supervisor keeps one collection of resident views. Each entry owns its rows,
 history position, revision and the lock that synchronizes them together; evicting it drops the entry, and the

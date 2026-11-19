@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { nextArtifactFrameDescriptionId } from "../../web/artifacts/embed.js";
+import { nextArtifactFrameDescriptionId } from "../../web/document-media/index.js";
 
 describe("artifact embed identifiers", () => {
   test("stay unique and valid without secure-context UUID support", () => {

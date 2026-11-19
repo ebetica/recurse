@@ -1,7 +1,7 @@
 // The Recurse whose Settings are open: this one or a connected remote. Remote
 // requests go through the home proxy as the operator, and the remote's key
-// policy decides what succeeds. Account and Appearance always describe this
-// Recurse, so only provider sign-in, Models and MCP sections follow the choice.
+// policy decides what succeeds. Only sections marked `remote` in Settings
+// (provider sign-in, Models and MCP servers) follow the choice.
 import { findBackend, homeBackend, type Backend } from "../backends/backend.js";
 
 let target: Backend = homeBackend;

@@ -17,6 +17,7 @@ import { TEMP_ID_RE } from "./conversations";
 import { ReviveRefused } from "../agents/supervisor/revive";
 import { clientIp, isOperator } from "./request_auth";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
+import { TreeDeltaHistory } from "./tree_delta";
 
 type Rec = Record<string, unknown>;
 
@@ -344,11 +345,16 @@ export async function deliverStop(
 }
 
 export function registerTreeRoutes(router: Router, deps: TreeRoutesDeps): void {
+  const history = new TreeDeltaHistory();
   router.get("/api/tree", async (ex) => {
     // Invariant: Until the startup replay applies, an empty tree would read as
     // a fresh install: refuse with the loading signal instead.
     deps.requireActionReady();
-    return conditionalJson(ex.request, await deps.tree());
+    const rows = await deps.tree();
+    const base = ex.request.headers.get("x-recurse-tree-base");
+    return base !== null && Array.isArray(rows)
+      ? history.respond(ex.request, rows, base)
+      : conditionalJson(ex.request, rows);
   });
 
   router.get("/api/subagent-tool/conversations", async (ex) => {

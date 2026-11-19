@@ -10,7 +10,7 @@ export type TipControl =
   | "artifacts"
   | "shortcuts"
   | "settings-appearance"
-  | "settings-account";
+  | "settings-remotes";
 
 export interface Tip {
   /** Stable key for the seen list; never reuse one for different text. */
@@ -79,7 +79,7 @@ export const TIPS: readonly Tip[] = [
     id: "effort",
     area: "Agents and skills",
     title: "Pick the effort level",
-    text: "Each effort level, 1 to 5, is a model plus how much it reasons: lower is faster and cheaper, higher thinks harder. Ask an agent to run its subagents at a lower level for routine work, or to change what a level means (“make level 2 use a faster model”). You can also set this agent's level with the effort button above the message box, or press e.",
+    text: "Choose a level from 1 to 5 with the effort button above the message box, or press e. Change the model and reasoning for each level in Settings.",
     ask: {
       where: "this",
       request: "Start the subagents for routine work at effort level 2.",
@@ -214,7 +214,7 @@ export const TIPS: readonly Tip[] = [
     id: "revive",
     area: "Conversations",
     title: "Bring back a deleted agent",
-    text: "Deleted an agent too soon? Ask an agent to revive it, for example “revive the agent that was fixing the login page”; its history is kept for the days set in Settings → Account. In the message box, /revive does the same, /compact summarises older history so the agent has room to keep going, and /clear starts the conversation fresh.",
+    text: "Deleted an agent too soon? Ask an agent to revive it, for example “revive the agent that was fixing the login page”; its history is kept for the days set in Settings → Agents. In the message box, /revive does the same, /compact summarises older history so the agent has room to keep going, and /clear starts the conversation fresh.",
     ask: {
       where: "new",
       request: "Revive the deleted agent that was working on ",
@@ -251,12 +251,12 @@ export const TIPS: readonly Tip[] = [
     id: "remotes",
     area: "Conversations",
     title: "Connect another Recurse",
-    text: "Running Recurse on another machine too? Ask an agent to add it as a remote, then sign in to it under Settings → Account → Remotes. Its agents appear in your sidebar under its name, and they keep working when you close your laptop.",
+    text: "Running Recurse on another machine too? Ask an agent to add it as a remote, then sign in to it under Settings → Remotes. Its agents appear in your sidebar under its name, and they keep working when you close your laptop.",
     ask: {
       where: "new",
       request: "Add my other Recurse as a remote. Its address is ",
     },
-    control: "settings-account",
+    control: "settings-remotes",
   },
   {
     id: "keyboard",
@@ -277,7 +277,7 @@ export const TIPS: readonly Tip[] = [
     id: "make-it-yours",
     area: "Settings",
     title: "Make it yours",
-    text: "Ask an agent to switch the theme, or to give the app your own name and icon (send it the picture). You can also change these in Settings → Appearance. Notifications are the one thing only you can turn on: Settings → Account → Notifications tells this browser when a top-level agent finishes.",
+    text: "Ask an agent to switch the theme, or to give the app your own name and icon (send it the picture). You can also change these in Settings → Appearance. Notifications are the one thing only you can turn on: Settings → Agents → Notifications tells this browser when a top-level agent finishes.",
     ask: { where: "new", request: "Switch to a light theme." },
     control: "settings-appearance",
   },

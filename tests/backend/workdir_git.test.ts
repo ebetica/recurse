@@ -12,7 +12,7 @@ import {
 import { dirname, join } from "node:path";
 import { WorkdirGit, cleanBaseRef, gitEnv } from "../../src/workdir_git";
 import prDiff from "./fixtures/pull_request_diff.json";
-import { pullRequestFiles } from "../../src/pull_request/patch";
+import { pullRequestFiles } from "../../src/pull_request/index";
 import { measure } from "../../src/observability/startup_metrics";
 import { captureFixture } from "./fixture_subprocess";
 

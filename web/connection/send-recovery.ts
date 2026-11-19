@@ -3,8 +3,8 @@
 // composer.ts; this module only bounds and validates the payload before it can
 // rebuild state.
 
-import { validBackendLabel } from "../../src/backends/label.js";
-import { parseConversationId } from "../backends/backend.js";
+import { validBackendLabel } from "../../src/backends/label/index.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 
 export interface StoredAttachment {
   url: string;

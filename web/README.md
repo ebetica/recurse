@@ -1,68 +1,70 @@
 # Browser app
 
-[index.html](index.html) loads [app.ts](app.ts) and [sidebar-worker.ts](sidebar-worker.ts).
-[conversation/poll.ts](conversation/poll.ts) subscribes to conversations;
-drafts and view state live in the browser.
+[index.html](index.html) loads [app.ts](app.ts)/[sidebar-worker.ts](sidebar-worker.ts).
+[Polls](conversation/poll.ts), drafts and view state run in-browser.
 
 **Source files:**
 
-- [Chat](conversation/), [thread](thread-render.ts),
+- [Chat](conversation/index.ts), [thread actions](thread-render.ts),
   [composer](composer/), [uploads](attachments.ts),
   [tags](conversation/draft-tags.ts), [bubbles](thread-render/user-bubble.ts),
-  [disclosures](conversation/message-disclosure.ts),
-  [reply HTML](thread-render/reply-html.ts).
-- [sidebar/](sidebar/), [sidebar.ts](sidebar.ts), [deep-link.ts](deep-link.ts)
-  and [agent-finder.ts](agent-finder.ts): tree navigation. Sections use the
-  instance's [script](sidebar/script.ts) or the [default](sidebar/default_sidebar.js)
-  Inbox, Active and Archive sections.
+  [disclosure state](conversation/disclosure.ts),
+  [reply HTML](thread-render/reply-html.ts), [view cache](conversation/cache/).
+- [Sidebar](sidebar.ts), [links](deep-link.ts), [agent finder](agent-finder.ts):
+  tree navigation. [Shared script contracts](../src/sidebar_script/README.md)
+  validate [custom](sidebar/script.ts) and [built-in](sidebar/default_sidebar.js)
+  sections.
 - [dock/](dock/README.md), [panes.ts](panes.ts), [artifacts/](artifacts/), [files.ts](files.ts),
   [explorer.ts](explorer.ts), [diff.ts](diff.ts) and [side-pane.ts](side-pane.ts):
   panels and read-only side conversations. [tips/](tips/README.md) shows hourly tips.
-- [models.ts](models.ts), [settings/](settings/) and [keymap.ts](keymap.ts):
-  settings and safety. [pane-finder.ts](pane-finder.ts) fuzzy-searches offered panes.
-- [api.ts](api.ts), [backends/](backends/) and [connection.ts](connection.ts):
-  requests. [prompt.ts](prompt.ts), [prompt/banner.ts](prompt/banner.ts): prompts.
+- [Models](models.ts), [Settings](settings/), [keys](keymap.ts),
+  [defaults](settings/draft-defaults/) and [safety](conversation/chrome.ts).
+  [Pane search](pane-finder.ts).
+- [Requests](api.ts), [backends](backends/index.ts), [connections](connection.ts),
+  [ids](backends/conversation-id/), [prompts](prompt.ts), [banner](prompt/banner.ts),
+  [copy](conversation/copy-button/).
 
 ## Views and connections
 
-Conversation views page server projections. Live polls retain loaded history;
-resetting the resident view/session replaces its served range but keeps earlier
-settled rows. Navigation preserves reading position and fences departed reads
-from the new conversation or draft. Deletes cancel reads. Loading the open conversation takes priority over background work. Departed work is canceled before registering
-new pane probes or warming the parked Side frame.
+View resets keep settled rows. Recreated views keep same-session messages and
+diagrams mounted until Clear or a new session. Navigation preserves reading
+position and fences departed reads; deletes cancel reads. Focused reads come
+first; cancel departed work before pane probes or Side frame warming.
+Startup supplies the Side pane's post-action poll.
 The composer's `/rename <title>` shares the sidebar's ordered optimistic rename
 for local and remote conversations, without sending a message. Bare `/rename`
 shows usage; command-menu selection inserts the title prefix.
 [composer/file-finder.ts](composer/file-finder.ts) completes `#filename` with
 quoted paths. Async finders keep rows until newer responses arrive.
 
-[conversation/operator-send.ts](conversation/operator-send.ts) applies the open
-thread's scroll policy before foreground enqueue/delivery. Composer jobs and
-persisted comments reuse its transport without scrolling on retry/restoration.
-Stops have a separate typed transport without message content.
+[Operator sends](conversation/operator-send.ts) use the app's thread scroll
+policy before foreground enqueue/delivery. Composer jobs and comments reuse
+its transport without scrolling on retry or restore.
+Stops send no message; [reads](conversation/freshness.ts) gate them.
 `tests/checks/operator_send_check.ts` confines delivery and foreground enqueueing
 to their owners. Sends to idle agents follow the reply bottom until the sent
 message reaches the viewport top, then hold. Short replies never add scrolling. Repaints keep the reader's row as replies shrink; layout clamps never
 resume following. Disclosure controls stay fixed through delayed layout. Hidden
 threads retain position and following until visible. Following spans paints
 before a scroll frame. [conversation/scroll-ledger.ts](conversation/scroll-ledger.ts)
-alone moves the thread; offsets it did not record (scrollbar, find-in-page,
-scripts) release every hold.
-The [live panel](conversation/live-panel.ts) above the composer, outside the thread,
-retains the turn's latest
-[thinking](conversation/thinking.ts) title and expandable text through tools, model calls and reloads. Newer
-thinking replaces it, even encrypted/redacted. Its header says Thinking only
-while live, then Waiting with the last readable title. Expanded prose omits the
-repeated title and bold markers. Compacted history uses a plain marker;
-earlier messages and the jump-to-first-kept link remain available.
+owns scrolling and edge controls; other offsets (scrollbar, find-in-page,
+scripts) release holds.
+The [live panel](conversation/live-panel.ts) above the composer retains the
+latest [thinking](conversation/thinking.ts) through tools, model calls and
+reloads. Newer thinking replaces it, even if encrypted or redacted.
+Thinking appears only while live; Waiting shows the last readable title.
+Expanded prose omits the title and bold markers. The panel skips thread text.
+The chips use the panel's repaint on open.
+Compacted history uses a plain marker; earlier messages and the
+jump-to-first-kept link remain available.
 `publish` counts files. Prompt-cache refresh adds turn usage, not replies.
-The context footer stays blank while Clear rotates history. Tree usage must
-match loaded history, or it reads selected usage. Details load on opening.
+[Held rows](row-thread-state/) keep context blank through Clear.
+Tree usage matches loaded history or reads selected usage. Details load on opening.
 Usage names the served model; a downgraded latest reply shows a ! button.
 
-Visible main streams report `viewing=true` to suppress agent-finished pushes.
-Hidden tabs and the phone list close streams; embedded Side views never report
-a viewer or discover panes, even when a tree read finishes after parking.
+Visible main streams send `viewing=true` to suppress completion pushes. Hidden
+threads close streams; embedded views report no viewers and discover no panes.
+Late fallback reads cannot downgrade newer stream readiness.
 Every received push shows a notification. Clicking focuses a root app page and
 selects the conversation, preferring a page already showing it; other same-origin
 documents and embedded views are not app windows. Without a focusable app page,
@@ -70,56 +72,56 @@ the worker opens and focuses an absolute same-origin root URL with the conversat
 fragment. Authenticated boot restores it without an opener. Clients are discoverable
 before worker control; other profiles or discarded tabs may have none to reuse.
 
-Backend-bound requests use the same UI for home and remote conversations.
-Remote health is isolated from home health, and the remote's key policy remains
-the authority. Request cancellation remains active after response headers, so
-abandoned streams close and stalled discovery bodies cannot strand boot restore. [backends/events.ts](backends/events.ts) receives tree-change
-tag-change notices for home and connected remotes over one visible-tab SSE connection.
-Notices fence older reads and start fresh tree reads without waiting for the
-fallback poll. The server multiplexes remote notices to preserve browser
-connection slots. Remote subscriptions pause with the backend's existing sleep
-state and do not themselves count as activity or wake a sleeping backend. [shared-trees.ts](shared-trees.ts) filters the displayed tree
-but does not grant access.
+Remotes isolate health and enforce their own key policy. Cancellation stays
+active through body reads, so abandoned streams and stalled discovery close.
+[Tree and tag notices](backends/events.ts) multiplex over one visible-tab stream,
+superseding older reads without waiting for a poll. Remote subscriptions pause
+with the backend and never wake it. [Home tree reads](backends/tree.ts) patch
+only the exact in-memory ETag behind the same generation fence; remotes keep
+array reads. [Shared trees](shared-trees.ts) filter display, not access.
 
-Artifact and image comments persist for background sending and retry; crop
-storage preserves the original pixels. Comment send controls stay outside native
-text selections, including when they appear after a paragraph is selected.
+Artifact/image comments persist original crops for background send/retry.
+Startup supplies rendering; panes own actions. [Quote text](comments/selection-text/)
+bounds quotes. Source highlighting waits while a selection draft owns the viewer.
+Send controls, even later ones, stay outside native selections.
 Earlier queued scrolls do not cancel selection comment offers.
-Adding a selection comment focuses its card immediately, without overriding a
-later reader focus change. The send bar updates when a selection draft opens or closes, without waiting for
-a pane refresh. Cmd/Ctrl+Enter in a comment popover stages the draft without
-opening the comment list and returns focus to the viewer; the next shortcut
-submits the batch. Artifact submission keeps its pane/tab open; other viewers close.
+Adding a comment focuses its card but respects later focus changes. The send bar
+updates as the draft opens or closes, without a pane refresh. Cmd/Ctrl+Enter in
+a comment popover stages the draft without opening the list and returns focus
+to the viewer; the next press submits. Startup routes pane keys to this handler.
+Artifact submission keeps its pane/tab open; other viewers close.
 Reopening retains position without reloading unchanged documents. See
 [artifacts/comment-outbox.ts](artifacts/comment-outbox.ts) and
 [artifacts/crop-store.ts](artifacts/crop-store.ts).
 [image-preview/README.md](image-preview/README.md) describes preview gestures.
 Thread images keep compact filename footers, full-name tooltips and reserved space
 for lazy loading. Diagrams stage outside the flex row.
-Inline captions read the filename from cached metadata, never Markdown alt text.
+Inline captions use cached filenames, never Markdown alt text.
 Artifact raster previews live in the Artifacts pane, not inline in the thread.
 Artifact discovery never opens its pane; clicks and saved layouts do.
 [Sibling links](artifacts/file-links.ts) reuse viewers and phone Back at the
 selected version; Files shares link handling.
 [Files](files/README.md) opens desktop file tabs beside Chat; phones keep in-place previews.
 
-Phones use the full-screen agent list as root, with New agent and Settings.
-Opening adds one conversation history entry; switching replaces it. Back/title
-arrow return to the list, including after direct links/reloads; root Back belongs
-to the browser. Headers keep New agent/More. More opens at Delete above the fade,
-with counts and Artifacts attention. Composer is full width. Artifact links
-open above the conversation; Files from an image closes the viewer's history step.
-Pane drafts use its history step once; replay preserves text. Tablet/embedded
-navigation is unchanged. Vertical thread touch drags dismiss the keyboard,
-keeping draft/caret; composer, mouse and automatic movement keep focus.
+Phones start at the agent list (New agent, Settings). Opening adds
+a conversation history step; switching replaces it. Back/title arrow return to
+the list after deep links/reloads; root Back belongs to the browser. Headers
+keep New agent/More (above the fade): panes, actions, then Delete agent after
+a line. Composer is full width. Effort shows the model and announces the level.
+Artifact links open above chat; linked Artifacts retain revisions/scroll for browser Back.
+Other selections reset it. Files from an image closes its viewer
+step. Pane drafts reuse that step and retain text. Tablet/embedded navigation
+is unchanged. Thread drags hide the keyboard, keeping draft/caret; composer,
+mouse and automatic movement keep focus.
 
-Desktop Settings is a gear by Delete; the icon rail is right.
-Shift+H toggles the list. No Dialog badge. Body blur keeps `g`/`w`.
+Desktop Settings is a gear; Delete agent ends the right rail.
+Shift+H toggles the list. Normal/Insert badges are screen-reader only;
+no Dialog badge. Body blur keeps `g`/`w`.
 
 ## Changes
 
 Default compares the working tree to the merge-base; HEAD shows local edits.
-Both cap untracked names at 500 (folded above 20) and report that cap.
+Both cap untracked names at 500 (folded above 20), noting the cap.
 Typed refs show committed work; PRs add tracked local edits to GitHub's diff. Neither lists untracked names. See [ref rules](../src/workdir_git_work.ts).
 
 ## Working-folder Explorer
@@ -186,8 +188,8 @@ and IndexedDB also work on HTTP, independently of HTTPS storage for the same hos
 Unavailable or full storage is still a persistence failure, not permission to
 silently discard pending comments.
 
-When Web Locks are unavailable, [artifacts/comment-lock.ts](artifacts/comment-lock.ts)
-serializes comment upload, send and discard across tabs with an IndexedDB
+When Web Locks are unavailable, [artifacts/send-lock/](artifacts/send-lock/)
+serializes composer and comment upload, send and discard across tabs with an IndexedDB
 readwrite transaction kept alive by pending requests. Its separate database does
 not block crop storage. This is transaction ownership, not an expiring lease;
 [artifacts/comment-outbox.ts](artifacts/comment-outbox.ts) rechecks ownership after
@@ -196,9 +198,9 @@ awaits, and server idempotency handles crash recovery.
 ## Settings
 
 Only the open Settings category is mounted; closing removes its controls.
-Desktop uses a sidebar and inline editors; phones use a category list and
-labelled sheets (Escape/Done returns to the row). Resizing preserves open edits.
-Nested model pickers retain unsaved effort edits until Save. Safe preferences
+Desktop rows open sub-pages with a back link; phones use a category list and
+labelled sheets. Escape, Back or Done returns to the row; resizing keeps edits.
+Effort edits wait for Save. Safety review always opens a sheet. Safe preferences
 autosave; credentials, passwords, two-factor and model policy need confirmation.
 Prompt-cache warming saves directly in Models. Updates cover empty/draft pages;
 unsent work marks the gear with a dot and accessible label. Its message and Retry sit below
@@ -209,7 +211,7 @@ categories, not the composer, with a 44px phone target.
 [document-preview.ts](document-preview.ts) lazily mounts Files views.
 [Its worker](document-preview.worker.ts) loads Mammoth, SheetJS, pptxtojson,
 notebookjs and inert LinkeDOM. Conversion is capped, cancellable and worker-only.
-Signature-based ZIP bounds and DOMPurify protect an opaque CSP frame:
+Signature-based ZIP bounds and DOMPurify protect the opaque [CSP frame](document-media/):
 raster data images only; no scripts, network, links, embeds, CSS or same-origin
 access. Failures retain Download.
 
@@ -221,7 +223,7 @@ protected UI/Side chats. Safety-off needs confirmation; parked frames are inert.
 
 [theme.css](theme.css) defines tokens; [icons.ts](icons.ts) supplies inline icons.
 Sidebar overlays fade into their row surface, preserving selection outlines.
-Installed Android apps use fullscreen; mobile controls respect safe-area insets.
+Android installs use standalone to avoid cutout jumps; controls use safe insets.
 [brand/](brand/) holds ouroboros SVGs/PNGs traced from [logo.png](brand/logo.png).
 [../src/branding.ts](../src/branding.ts) replaces marks, favicons and manifest
 icons with the custom icon.

@@ -119,13 +119,16 @@ export const tests: BrowserTest[] = [
       );
       await page.goto(base);
       await page.locator("#settings-btn").click();
-      await page.locator('#settings-nav button[data-cat="account"]').click();
+      await page.locator('#settings-nav button[data-cat="remotes"]').click();
       const overview = page.locator(".settings-section").filter({
         has: page.getByRole("heading", {
-          name: "Remotes",
+          name: "Connected remotes",
           exact: true,
         }),
       });
+      await overview
+        .getByRole("button", { name: "Add a remote", exact: true })
+        .click();
       const add = page.getByRole("region", {
         name: "Add a remote",
         exact: true,
@@ -136,10 +139,13 @@ export const tests: BrowserTest[] = [
       await add
         .getByRole("button", { name: "Connect remote", exact: true })
         .click();
-      await browserExpect(add.locator('input[name="password"]')).toHaveValue(
-        "",
-      );
-      const section = overview.getByRole("region", {
+      const peerRow = overview.getByRole("button", { name: /^SyncPeer / });
+      await browserExpect(peerRow).toBeVisible();
+      await browserExpect(
+        page.locator('.remote-add input[name="password"]'),
+      ).toHaveValue("");
+      await peerRow.click();
+      const section = page.getByRole("region", {
         name: "SyncPeer",
         exact: true,
       });

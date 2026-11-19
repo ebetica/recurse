@@ -67,10 +67,8 @@ function requestRow(response: ModelResponse) {
     <span class=${row.modelChanged ? "model-response-warning" : ""}
       >${row.modelChanged ? "Model changed: " : ""}${row.model}</span
     >
-    ${row.effort
-      ? html`<span class=${row.effortChanged ? "model-response-warning" : ""}
-          >${row.effortChanged ? "Effort changed: " : ""}${row.effort}</span
-        >`
+    ${row.reasoningChanged
+      ? html`<span class="model-response-warning">Reasoning changed</span>`
       : ""}
     ${row.tokens
       ? html`<span class="model-response-tokens">${row.tokens}</span>`

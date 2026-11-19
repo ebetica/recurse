@@ -725,8 +725,14 @@ export class ConnectedBackends {
   ): Promise<void> {
     return this.establish(label, value, password, code);
   }
-  signIn(label: string, password: unknown, code?: unknown): Promise<void> {
-    return this.establish(label, undefined, password, code, true);
+  /** Sign in to the remote `label` at `url`, the address the operator saw. */
+  signIn(
+    label: string,
+    url: unknown,
+    password: unknown,
+    code?: unknown,
+  ): Promise<void> {
+    return this.establish(label, url, password, code, true);
   }
   private establish(
     label: unknown,
@@ -738,7 +744,12 @@ export class ConnectedBackends {
     this.requireAvailable();
     if (!validBackendLabel(label))
       throw new HttpError(422, "invalid backend label");
-    const url = signIn ? undefined : backendUrl(value);
+    if (signIn && typeof value !== "string")
+      throw new HttpError(
+        422,
+        "The sign-in did not say which address it was for; reload the page and sign in again",
+      );
+    const url = backendUrl(value);
     return this.serialized(async () => {
       const pending = this.rows.find((r) => r.label === label);
       if (
@@ -750,9 +761,15 @@ export class ConnectedBackends {
           signIn ? 404 : 409,
           signIn ? "backend needing sign-in not found" : "label taken",
         );
+      // Invariant: The password goes only to the address the operator saw.
+      if (signIn && pending!.url !== url)
+        throw new HttpError(
+          409,
+          `${label} is now at ${pending!.url}, not ${url}; check the address and sign in again`,
+        );
       const row: RecordRow = {
         label,
-        url: url ?? pending!.url,
+        url,
         key: null,
         added: Date.now() / 1000,
       };

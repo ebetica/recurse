@@ -3,12 +3,11 @@
 // disposes. Before the first composer owner, uploads report visible failure.
 import { state } from "./state.js";
 import { $, inputEl } from "./dom.js";
+import { backendFor, resolveUrl } from "./backends/backend.js";
 import {
-  backendFor,
   conversationId,
   parseConversationId,
-  resolveUrl,
-} from "./backends/backend.js";
+} from "./backends/conversation-id/index.js";
 
 const ownerBackend = (owner: AttachmentOwner) => backendFor(owner.id);
 import { CLOSE_ICON, COPY_ERROR_ICON } from "./icons.js";
@@ -19,7 +18,7 @@ import {
   type AttachmentSelection,
 } from "./attachment-flow.js";
 import { canSnapshotMessage } from "./composer/send.js";
-import { setComposerSendState } from "./composer/action.js";
+import { setComposerSendState } from "./composer/index.js";
 import { conversationUiState } from "./conversation-ui-state/store.js";
 import { previewTargetFor } from "./image-preview.js";
 import { setDrawingUploadCapture } from "./image-preview/drawing.js";

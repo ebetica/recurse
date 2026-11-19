@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import {
@@ -10,21 +10,26 @@ import {
 } from "@earendil-works/pi-ai";
 import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
 import { buildApp } from "../../src/web/app";
-import { finishReviewCheck } from "../live/reviewer_cache";
+import {
+  ACTING_REQUEST_CAP,
+  REVIEWS,
+  UNCACHED_INPUT_CAP,
+  finishReviewCheck,
+} from "../live/reviewer_cache";
 import { killDataDirGroups } from "../dev/private_server";
 import { appWorld } from "./web_app_support";
 import { held, until } from "./fixtures/durable_host/host";
 
-// Regression: #3386 the live check trusted a natural-language tool limit and could keep spending.
-test.skipIf(process.platform !== "linux")(
-  "the live check shuts down all work at a threshold and checks final usage",
-  async () => {
-    for (const limit of [
-      "reviews",
-      "acting_requests",
-      "input_tokens",
-      "all_conversations",
-    ] as const) {
+describe.skipIf(process.platform !== "linux")("live check budget", () => {
+  // Regression: #3386 the live check trusted a natural-language tool limit and could keep spending.
+  test.each([
+    "reviews",
+    "acting_requests",
+    "input_tokens",
+    "all_conversations",
+  ] as const)(
+    "the live check shuts down all work at a threshold and checks final usage (%s)",
+    async (limit) => {
       const { root, env } = appWorld();
       env.CHAT_MODEL = "faux/faux-1";
       const app = await buildApp({ env });
@@ -109,9 +114,9 @@ test.skipIf(process.platform !== "linux")(
         const reviewed = limit === "reviews" || limit === "all_conversations";
         const readCount =
           limit === "all_conversations"
-            ? 2
+            ? ACTING_REQUEST_CAP - REVIEWS - 1
             : limit === "acting_requests"
-              ? 6
+              ? ACTING_REQUEST_CAP
               : limit === "input_tokens"
                 ? 1
                 : 0;
@@ -119,7 +124,7 @@ test.skipIf(process.platform !== "linux")(
           ...Array.from({ length: readCount }, () =>
             fauxToolCall("read", { path: seed }),
           ),
-          ...Array.from({ length: reviewed ? 3 : 0 }, (_, index) =>
+          ...Array.from({ length: reviewed ? REVIEWS : 0 }, (_, index) =>
             fauxToolCall(
               "bash",
               index === 0
@@ -153,7 +158,7 @@ test.skipIf(process.platform !== "linux")(
         await api(`conversations/${cid}/deliver`, {
           content:
             limit === "input_tokens"
-              ? "public budget fixture ".repeat(15000)
+              ? "public budget fixture ".repeat(18000)
               : "Run the task-owned fixture tools.",
         });
         await pending.started;
@@ -181,14 +186,14 @@ test.skipIf(process.platform !== "linux")(
           },
         );
         expect(requestsAfterThreshold).toBe(0);
-        expect(result.reviews).toBe(reviewed ? 3 : 0);
+        expect(result.reviews).toBe(reviewed ? REVIEWS : 0);
         expect(result.actingRequests).toBe(
           reviewed
             ? limit === "all_conversations"
-              ? 6
-              : 3
+              ? ACTING_REQUEST_CAP
+              : REVIEWS
             : limit === "acting_requests"
-              ? 6
+              ? ACTING_REQUEST_CAP
               : 1,
         );
         if (limit === "reviews") expect(result.failure).toBeUndefined();
@@ -197,7 +202,7 @@ test.skipIf(process.platform !== "linux")(
             limit === "all_conversations" ? "acting_requests" : limit,
           );
         if (limit === "input_tokens")
-          expect(result.uncachedInput).toBeGreaterThan(60_000);
+          expect(result.uncachedInput).toBeGreaterThan(UNCACHED_INPUT_CAP);
         for (const shell of shells)
           expect(() => process.kill(-shell.pid, 0)).toThrow();
         expect(app.instance.durable.runningCount()).toBe(0);
@@ -207,7 +212,7 @@ test.skipIf(process.platform !== "linux")(
         await Promise.all(app.detached);
         rmSync(root, { recursive: true, force: true });
       }
-    }
-  },
-  30_000,
-);
+    },
+    30_000,
+  );
+});

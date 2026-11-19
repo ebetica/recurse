@@ -1,102 +1,104 @@
-// Server-owned reviewer choice; saved unavailable models remain explicit.
+// Settings saves the reviewer separately from the effort levels. Its row
+// names the model and the route that pays for it, like the level rows.
+import {
+  createModelBox,
+  indexModels,
+  showModelRoute,
+} from "../models/index.js";
+import { settingsDetail } from "./layout.js";
 import { settingsClient } from "./target.js";
 
-type Result = {
-  passed: number;
-  total: number;
-  falseAllows: number;
-  medianMs: number;
-  p90Ms: number;
-};
+const ENDPOINT = "/api/settings/safety-review-model";
+const DEFAULT = "Same as level 1";
+const INVALID = "Invalid saved choice";
 
-export function buildSafetySection(body: HTMLElement): void {
+export function buildSafetyReviewRow(body: HTMLElement): void {
   const { api, jpost } = settingsClient();
-  const field = document.createElement("div");
-  field.className = "field safety-model-field";
-  const select = document.createElement("select");
-  select.setAttribute("aria-label", "Safety review model");
-  select.disabled = true;
-  field.append(select);
-  const warning = document.createElement("p");
-  warning.className = "msg err";
+  let summary = "Checking…";
   const message = document.createElement("p");
   message.className = "msg";
-  body.append(field, warning, message);
-  api("/api/settings/safety-review-model")
+  message.textContent = summary;
+  message.setAttribute("role", "status");
+  body.append(message);
+  const detail = settingsDetail(body, "Safety review", () => summary, {
+    alwaysSheet: true,
+  });
+  const confirmation = document.createElement("p");
+  confirmation.className = "msg ok";
+  confirmation.setAttribute("role", "status");
+  body.append(confirmation);
+  api(ENDPOINT)
     .then(async (response) => {
       if (!response.ok) throw new Error();
       const state = (await response.json()) as {
         model: string | null;
         invalid: boolean;
-        default_model: string;
-        models: { id: string; label: string }[];
-        results: Record<string, Result>;
+        route?: string;
+        models: { id: string; label: string; route?: string }[];
       };
-      const resultText = (id: string) => {
-        const result = state.results[id];
-        return result
-          ? `${result.passed}/${result.total} correct · ${(result.medianMs / 1000).toFixed(1)} s`
-          : "Not tested";
-      };
-      const invalidChoice = "invalid-saved-choice";
-      const selectedValue = () =>
-        state.invalid ? invalidChoice : (state.model ?? "");
-      const choices = [
-        ...(state.invalid
-          ? [{ id: invalidChoice, label: "Invalid saved choice" }]
-          : []),
-        { id: "", label: "Same as level 1" },
-        ...state.models,
-      ];
-      if (state.model && !choices.some((choice) => choice.id === state.model))
-        choices.push({
-          id: state.model,
-          label: `${state.model} (unavailable)`,
-        });
-      for (const choice of choices) {
-        const option = document.createElement("option");
-        option.value = choice.id;
-        option.disabled = choice.id === invalidChoice;
-        option.textContent = `${choice.label} — ${resultText(choice.id || state.default_model)}`;
-        select.append(option);
-      }
-      select.value = selectedValue();
-      const refresh = () => {
-        if (select.value === invalidChoice) {
-          if (!message.textContent)
+      const models = [{ id: "", label: DEFAULT, route: "" }, ...state.models];
+      const labels = new Map(models.map(({ id, label }) => [id, label]));
+      const routes = new Map(models.map(({ id, route }) => [id, route ?? ""]));
+      const row = body.querySelector(":scope > .settings-row")!;
+      const invalid = "invalid-saved-choice";
+      let saved = state.invalid ? invalid : (state.model ?? "");
+      const nameOf = (id: string) =>
+        id === invalid ? INVALID : (labels.get(id) ?? `${id} (unavailable)`);
+      const box = createModelBox({
+        label: "Safety review model",
+        index: indexModels(
+          models.map((model) => ({
+            ...model,
+            route: model.route ?? "",
+            context_window: null,
+            reasoning_levels: null,
+          })),
+        ),
+        value: saved,
+        nameOf,
+        onPick: async ({ id }) => {
+          if (id === saved) {
+            detail.close();
+            return;
+          }
+          box.input.disabled = true;
+          confirmation.textContent = "";
+          message.className = "msg";
+          message.textContent = "Saving…";
+          try {
+            const response = await jpost(ENDPOINT, { model: id || null });
+            if (!response.ok) throw new Error();
+            saved = id;
+            summary = nameOf(saved);
+            detail.refresh();
+            showModelRoute(row, routes.get(saved) ?? "");
+            message.textContent = "Changes apply to the next run.";
+            detail.close();
+            confirmation.textContent = "Saved. Applies to the next run.";
+          } catch {
+            box.setValue(saved);
+            message.className = "msg err";
             message.textContent =
-              "The saved safety review model is invalid. Choose a model to restore review.";
-          warning.textContent = "";
-          return;
-        }
-        const id = select.value || state.default_model;
-        warning.textContent = state.results[id]?.falseAllows
-          ? "This model has allowed risky actions in testing and may let risky actions through."
-          : "";
-      };
-      refresh();
-      select.disabled = false;
-      select.onchange = async () => {
-        select.disabled = true;
-        try {
-          const response = await jpost("/api/settings/safety-review-model", {
-            model: select.value || null,
-          });
-          if (!response.ok) throw new Error();
-          state.model = select.value || null;
-          state.invalid = false;
-          message.textContent = "Saved. Applies to the next run.";
-        } catch {
-          select.value = selectedValue();
-          message.textContent =
-            "Couldn't save the safety review model. Try again.";
-        } finally {
-          refresh();
-          select.disabled = false;
-        }
-      };
+              "Couldn't save the safety review model. Try again.";
+          } finally {
+            box.input.disabled = false;
+          }
+        },
+      });
+      box.input.autofocus = true;
+      message.before(box.element);
+      summary = nameOf(saved);
+      detail.refresh();
+      showModelRoute(row, routes.get(saved) ?? state.route ?? "");
+      message.textContent = state.invalid
+        ? "Choose a model to restore safety review."
+        : "Changes apply to the next run.";
     })
     .catch(() => {
-      message.textContent = "Couldn't load safety review models. Try again.";
+      summary = "Couldn't load";
+      detail.refresh();
+      message.className = "msg err";
+      message.textContent =
+        "Couldn't load safety review models. Reopen Models to try again.";
     });
 }

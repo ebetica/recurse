@@ -1,21 +1,36 @@
 // Settings model combobox picks explicitly; highlights never save accidentally.
 // Escape/Tab/leave restore the chosen name; the inline list stays above phone
-// keyboards rather than floating behind them.
+// keyboards rather than floating behind them. Results are grouped under one
+// heading per route and show only model names; a check marks the chosen one.
 import {
-  contextLabel,
+  MODEL_FINDER_LIMIT,
   modelBoxKeyAction,
-  searchModels,
+  searchModelsByRoute,
   type FinderModel,
   type IndexedModel,
 } from "./finder.js";
 
 let boxes = 0;
 
+/** Show which route pays for a model as a chip after a Settings row's value;
+ * an empty route removes the chip. */
+export function showModelRoute(row: Element, route: string): void {
+  let chip = row.querySelector<HTMLElement>(":scope > .model-route");
+  if (!route) return chip?.remove();
+  if (!chip) {
+    chip = document.createElement("span");
+    chip.className = "model-route";
+    row.querySelector(":scope > .settings-row-value")?.after(chip);
+  }
+  chip.textContent = route;
+}
+
 export interface ModelBox {
   element: HTMLElement;
   input: HTMLInputElement;
   /** The chosen model id: the stored one until the user picks another. */
   value(): string;
+  setValue(id: string): void;
 }
 
 export function createModelBox(options: {
@@ -34,7 +49,12 @@ export function createModelBox(options: {
 
   const element = document.createElement("div");
   element.className = "model-box";
+  const label = document.createElement("label");
+  label.className = "model-box-label";
+  label.textContent = options.label;
   const input = document.createElement("input");
+  input.id = `model-box-input-${n}`;
+  label.htmlFor = input.id;
   input.type = "text";
   input.className = "model-box-input";
   input.setAttribute("role", "combobox");
@@ -57,7 +77,11 @@ export function createModelBox(options: {
   note.setAttribute("role", "status");
   note.setAttribute("aria-live", "polite");
   note.hidden = true;
-  element.append(input, list, note);
+  const current = document.createElement("span");
+  current.id = `${list.id}-current`;
+  current.textContent = "Current model";
+  current.hidden = true;
+  element.append(label, input, list, note, current);
 
   const showValue = () => {
     input.value = options.nameOf(value);
@@ -66,12 +90,9 @@ export function createModelBox(options: {
   showValue();
 
   const paintActive = () => {
-    for (const [i, row] of [...list.children].entries()) {
-      if (
-        !(row instanceof HTMLElement) ||
-        row.getAttribute("role") !== "option"
-      )
-        continue;
+    for (const [i, row] of list
+      .querySelectorAll<HTMLElement>("[role=option]")
+      .entries()) {
       const on = i === active;
       row.setAttribute("aria-selected", on ? "true" : "false");
       row.classList.toggle("active", on);
@@ -84,49 +105,83 @@ export function createModelBox(options: {
   };
 
   const render = (query: string) => {
-    const found = searchModels(options.index, query);
-    matches = found.models;
+    const groups = searchModelsByRoute(
+      options.index,
+      query,
+      MODEL_FINDER_LIMIT,
+      value,
+    );
+    matches = groups.flatMap((group) => group.models);
     list.textContent = "";
-    matches.forEach((model, i) => {
-      const row = document.createElement("div");
-      row.className = "model-box-option";
-      row.id = `${list.id}-${i}`;
-      row.setAttribute("role", "option");
-      row.dataset.id = model.id;
-      const name = document.createElement("span");
-      name.className = "model-box-name";
-      name.textContent = model.label;
-      const route = document.createElement("span");
-      route.className = "model-box-route";
-      route.textContent = model.route;
-      const id = document.createElement("code");
-      id.className = "model-box-id";
-      id.textContent = model.id;
-      const context = document.createElement("span");
-      context.className = "model-box-context";
-      context.textContent = contextLabel(model.context_window);
-      row.append(name, route, id, context);
-      list.append(row);
-    });
+    let hidden = 0;
+    let rows = 0;
+    for (const [g, group] of groups.entries()) {
+      hidden += group.total - group.models.length;
+      const holder = document.createElement("div");
+      holder.className = "model-box-group";
+      holder.setAttribute("role", "group");
+      if (group.route) {
+        const head = document.createElement("div");
+        head.className = "model-box-group-head";
+        head.setAttribute("role", "presentation");
+        const route = document.createElement("span");
+        route.id = `${list.id}-route-${g}`;
+        route.textContent = group.route;
+        const count = document.createElement("span");
+        count.className = "model-box-count";
+        count.textContent =
+          group.total > group.models.length
+            ? `${group.models.length} of ${group.total}`
+            : String(group.total);
+        head.append(route, count);
+        holder.append(head);
+        holder.setAttribute("aria-labelledby", route.id);
+      }
+      for (const model of group.models) {
+        const row = document.createElement("div");
+        row.className = "model-box-option";
+        row.id = `${list.id}-${rows++}`;
+        row.setAttribute("role", "option");
+        row.dataset.id = model.id;
+        row.title = model.id;
+        const name = document.createElement("span");
+        name.className = "model-box-name";
+        name.textContent = model.label;
+        row.append(name);
+        if (model.id === value) {
+          row.setAttribute("aria-describedby", current.id);
+          const check = document.createElement("span");
+          check.className = "model-box-current";
+          check.textContent = "✓";
+          check.setAttribute("aria-hidden", "true");
+          row.append(check);
+        }
+        holder.append(row);
+      }
+      list.append(holder);
+    }
     note.textContent = !matches.length
       ? "No model matches."
-      : found.total > matches.length
-        ? `${found.total - matches.length} more; type to narrow.`
+      : hidden
+        ? `${hidden} more; type to narrow.`
         : "";
     note.hidden = !note.textContent;
     active = matches.length ? 0 : -1;
     paintActive();
   };
 
+  // Invariant: The list is shown before the active row scrolls into view; a
+  // hidden list cannot scroll.
   const openList = (query: string) => {
+    open = true;
+    list.hidden = false;
     render(query);
+    list.hidden = matches.length === 0;
     if (query === "") {
       const chosen = matches.findIndex((model) => model.id === value);
       if (chosen >= 0) active = chosen;
       paintActive();
     }
-    open = true;
-    list.hidden = matches.length === 0;
     input.setAttribute("aria-expanded", "true");
   };
 
@@ -192,5 +247,13 @@ export function createModelBox(options: {
     if (model) pick(model);
   });
 
-  return { element, input, value: () => value };
+  return {
+    element,
+    input,
+    value: () => value,
+    setValue: (id) => {
+      value = id;
+      close();
+    },
+  };
 }

@@ -1,6 +1,6 @@
 // The worker thread for SidebarScript's dry run: runs one script on the rows
 // it is sent, with QuickJS from the installed package, and posts the result.
-import { runSidebarScript } from "../web/sidebar/sandbox.ts";
+import { runSidebarScript } from "./sidebar_script/engine/index.ts";
 
 declare const self: Worker;
 

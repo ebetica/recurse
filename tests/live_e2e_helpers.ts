@@ -25,7 +25,7 @@ export function liveModel(provider: string, config = new Config()) {
     if (unlisted) throw new Error(unlisted);
     return { id, route: { provider, modelId: id.slice(separator + 1) } };
   }
-  throw new Error(`Choose a ${provider} model in Settings > Effort ladder`);
+  throw new Error(`Choose a ${provider} model in Settings > Effort levels`);
 }
 
 export function liveSecondModel(models: LiveJson[], config = new Config()) {

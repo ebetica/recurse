@@ -4,6 +4,7 @@ import { join } from "node:path";
 
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { appWorld } from "./web_app_support";
+import { AgentStore } from "../../src/agents/agent_store";
 
 const chunk = (delta: object, finish: string | null = null) =>
   `data: ${JSON.stringify({ id: "s", object: "chat.completion.chunk", created: 0, model: "scripted", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
@@ -13,6 +14,7 @@ const TEXT =
   "data: [DONE]\n\n";
 
 const seen: string[] = [];
+const turns: string[] = [];
 let provider: ReturnType<typeof Bun.serve>;
 beforeAll(() => {
   provider = Bun.serve({
@@ -21,6 +23,12 @@ beforeAll(() => {
     async fetch(request) {
       const body = (await request.json()) as { model?: string };
       seen.push(String(body.model));
+      if (
+        !JSON.stringify(body).includes(
+          "Name the conversation from the message.",
+        )
+      )
+        turns.push(String(body.model));
       return new Response(TEXT, {
         headers: { "Content-Type": "text/event-stream" },
       });
@@ -48,7 +56,13 @@ test("an off-ladder model create runs its first turn on that model", async () =>
     join(config, "effort-levels.json"),
     JSON.stringify({
       default_level: 3,
-      levels: { 1: level, 2: level, 3: level, 4: level, 5: level },
+      levels: {
+        1: level,
+        2: { ...level, reasoning: "high" },
+        3: level,
+        4: level,
+        5: level,
+      },
       version: 1,
     }),
   );
@@ -70,6 +84,41 @@ test("an off-ladder model create runs its first turn on that model", async () =>
     }),
   );
   env.RECURSE_TEST_KEY = "loopback-only";
+  const seed = new AgentStore(join(env.CHAT_DATA_DIR!, "agents"));
+  for (const record of [
+    {
+      id: "migration-level",
+      level: 3,
+      model: "recurse-test/offladder",
+      effort: "high",
+    },
+    { id: "migration-default" },
+    {
+      id: "migration-pin",
+      model: "recurse-test/offladder",
+      effort: "high",
+      pending_model: {
+        model: "recurse-test/ladder",
+        level: 2,
+        effort: "default",
+      },
+    },
+    {
+      id: "migration-resumed",
+      level: 3,
+      model: "recurse-test/offladder",
+      effort: "high",
+      model_choice_version: 1,
+    },
+  ])
+    seed.enqueueMetadata(record.id, {
+      ...record,
+      backend: "durable",
+      title: record.id,
+      workdir: root,
+      tmp_key: record.id,
+    });
+  expect(await seed.dispose()).toBe(true);
   const app = await buildApp({
     env,
     sink: new WebLogSink(() => {}),
@@ -83,6 +132,34 @@ test("an off-ladder model create runs its first turn on that model", async () =>
         headers: { "content-type": "application/json" },
       });
     await until(async () => (await json(await api("/api/status"))).ready);
+    for (const id of ["migration-level", "migration-default"]) {
+      expect(app.instance.conversations.load(id)).toMatchObject({
+        level: 3,
+        model: "recurse-test/ladder",
+        effort: "low",
+        model_choice_version: 1,
+      });
+      expect(
+        (await app.instance.agentStore.loadPersistedAgent(id))[0],
+      ).toMatchObject({
+        model: "recurse-test/ladder",
+        effort: "low",
+        model_choice_version: 1,
+      });
+    }
+    for (const id of ["migration-pin", "migration-resumed"])
+      expect(app.instance.conversations.load(id)).toMatchObject({
+        model: "recurse-test/offladder",
+        effort: "high",
+      });
+    expect(
+      app.instance.conversations.load("migration-pin")?.pending_model,
+    ).toMatchObject({ model: level.model, level: 2, effort: "high" });
+    expect(
+      await Bun.file(
+        join(env.CHAT_DATA_DIR!, "conversation-model-choices.json"),
+      ).json(),
+    ).toMatchObject({ version: 1, rewritten: 3 });
     const created = await api("/api/conversations", {
       model: "recurse-test/offladder",
     });
@@ -113,26 +190,50 @@ test("an off-ladder model create runs its first turn on that model", async () =>
       async () =>
         (await json(await api(`/api/conversations/${cid}`))).status === "idle",
     );
-    const ladderCreated = await api("/api/conversations", { level: 3 });
+    const ladderCreated = await api("/api/conversations", {
+      level: 3,
+      title: "Existing ladder agent",
+    });
     expect(ladderCreated.status).toBe(200);
     const ladderCid = String((await json(ladderCreated)).id);
-    const deliver = async (model: string) => {
+    const deliver = async (model: string, id = ladderCid) => {
+      const count = turns.length;
       expect(
         (
-          await api(`/api/conversations/${ladderCid}/deliver`, {
+          await api(`/api/conversations/${id}/deliver`, {
             content: "hello",
           })
         ).status,
       ).toBe(200);
       await until(async () => {
-        const prompt = await json(
-          await api(`/api/conversations/${ladderCid}/prompt`),
+        const prompt = await json(await api(`/api/conversations/${id}/prompt`));
+        const row = await json(await api(`/api/conversations/${id}`));
+        return (
+          turns.length > count &&
+          prompt.request?.model.modelId === model &&
+          row.status === "idle"
         );
-        const row = await json(await api(`/api/conversations/${ladderCid}`));
-        return prompt.request?.model.modelId === model && row.status === "idle";
       });
+      expect(turns.slice(count)).toEqual([model]);
+      expect(
+        (await json(await api(`/api/conversations/${id}/prompt`))).request
+          .options.reasoning,
+      ).toBe(model === "ladder" ? "low" : "high");
     };
     await deliver("ladder");
+    const modelOnly = await json(
+      await api("/api/conversations/migration-default/model", {
+        model: level.model,
+      }),
+    );
+    expect(modelOnly.pending_model).toMatchObject({
+      model: level.model,
+      effort: "low",
+    });
+    await deliver("ladder", "migration-default");
+    expect(app.instance.conversations.load("migration-default")?.effort).toBe(
+      "low",
+    );
     const changed = { model: "recurse-test/offladder", reasoning: "high" };
     expect(
       (
@@ -141,7 +242,90 @@ test("an off-ladder model create runs its first turn on that model", async () =>
         })
       ).status,
     ).toBe(200);
+    await deliver("ladder");
+    await deliver("ladder", "migration-level");
+    expect(await app.instance.conversations.migrateModelChoices()).toBe(0);
+    const fresh = await json(
+      await api("/api/conversations", { level: 3, title: "New ladder agent" }),
+    );
+    await deliver("offladder", fresh.id);
+    const selected = await api(`/api/conversations/${ladderCid}/model`, {
+      level: 3,
+    });
+    expect(selected.status).toBe(200);
+    expect((await json(selected)).pending_model).toEqual({
+      level: 3,
+      model: changed.model,
+      effort: changed.reasoning,
+    });
+    expect(
+      (
+        await api("/api/settings/effort-levels", {
+          levels: { 1: level, 2: level, 3: level, 4: level, 5: level },
+        })
+      ).status,
+    ).toBe(200);
     await deliver("offladder");
+    expect(app.instance.conversations.load(ladderCid)).toMatchObject({
+      level: 3,
+      model: changed.model,
+      effort: changed.reasoning,
+    });
+    const turnCount = turns.length;
+    delete env.RECURSE_TEST_KEY;
+    await app.instance.durable.send(
+      ladderCid,
+      "Reply after sign out",
+      "signed-out",
+    );
+    await until(async () =>
+      (
+        await json(await api(`/api/conversations/${ladderCid}/view`))
+      ).blocks.some((block: { error?: string }) =>
+        block.error?.includes("Pick an effort level again"),
+      ),
+    );
+    await until(async () => !app.instance.durable.isRunning(ladderCid));
+    const opened = await app.instance.durable.open(ladderCid);
+    await opened.reporter?.kick();
+    expect(
+      (await Bun.file(app.instance.config.paths.AVAILABLE_MODELS_FILE).json())
+        .turn_marks ?? {},
+    ).not.toHaveProperty("3");
+    expect(turns).toHaveLength(turnCount);
+    env.RECURSE_TEST_KEY = "loopback-only";
+    const spec = app.instance.config.customModelProviders()["recurse-test"]!;
+    writeFileSync(
+      join(config, "model-providers.json"),
+      JSON.stringify({
+        default: "recurse-test/ladder",
+        providers: {
+          "recurse-test": {
+            ...spec,
+            models: [{ id: "ladder", context_window: 100000 }],
+          },
+        },
+      }),
+    );
+    await until(
+      async () =>
+        app.instance.config.customModelProviders()["recurse-test"]!.models
+          .length === 1,
+    );
+    expect(
+      (await app.instance.durable.models()).getModel(
+        "recurse-test",
+        "offladder",
+      ),
+    ).toBeUndefined();
+    await expect(
+      app.instance.durable.send(
+        ladderCid,
+        "Reply after model removal",
+        "removed-model",
+      ),
+    ).rejects.toThrow("Pick an effort level again");
+    expect(turns).toHaveLength(turnCount);
     expect(
       app.instance.conversations.load(ladderCid, {
         withPending: false,

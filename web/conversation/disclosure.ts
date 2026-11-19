@@ -1,5 +1,5 @@
 // Owns generation-scoped, bounded response and tool-series expansion state and
-// live-tail reveal buffers; thread.ts paints, navigation.ts backfills. Folding
+// live-tail reveal buffers. Startup supplies live reads and actions. Folding
 // never clears ToolDetailStore or refetches loaded payloads.
 
 import { state } from "../state.js";
@@ -10,22 +10,14 @@ import {
   turnGroups,
   type TurnGroup,
 } from "../thread-render/turn-groups.js";
-import { anchoredPaint, paint } from "./thread.js";
 import {
   boundaryDisclosureKey,
+  boundaryHasHiddenActivity,
   type ActivityBoundary,
   type ActivitySlice,
 } from "../thread-render/activity-boundary.js";
-import {
-  loaded,
-  loadingOlder,
-  renderedConvId,
-  renderedLogGeneration,
-  rowThreads,
-  topCursor,
-} from "../row-thread-state.js";
 import { pruneCaches, threadHasLive } from "../row-thread-state/row-thread.js";
-import { loadOlder } from "./navigation.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import {
   messageDisclosures,
   messageDisclosureIdentity,
@@ -48,7 +40,30 @@ import {
   isNoticeOnlyAssistant,
   visibleAssistant,
 } from "../thread-render/turn-view.js";
-import type { Conversation, MessageEntry } from "../types.js";
+import type { Conversation, MessageEntry, Turn } from "../types.js";
+
+interface DisclosureReadState {
+  readonly loaded: Turn[];
+  readonly loadingOlder: boolean;
+  readonly renderedConvId: string | null;
+  readonly renderedLogGeneration: number;
+  readonly topCursor: number;
+}
+interface DisclosureActions {
+  paint(conv: Conversation): void;
+  anchoredPaint(conv: Conversation, anchor: ScrollAnchorRow | null): void;
+  loadOlder(fill: boolean): Promise<void>;
+}
+let thread: DisclosureReadState;
+let actions: DisclosureActions;
+// Keep the read view live: async guards must reread it after a page settles.
+export function configureDisclosure(
+  reads: DisclosureReadState,
+  effects: DisclosureActions,
+): void {
+  thread = reads;
+  actions = effects;
+}
 
 const MAX_EXPANDED_TURNS = 256;
 const MAX_TOOL_SERIES_STATES = 512;
@@ -101,7 +116,7 @@ export function toggleActivityGroup(
 ): void {
   const opening = !activityGroupOpen(cid, boundary, group);
   setActivityGroupOpen(cid, boundary, group, opening);
-  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
   if (opening) void backfillOldestBoundary(cid, boundary.key, group);
 }
 // Range eyes open activity, not the compaction marker's own summary.
@@ -119,11 +134,11 @@ export function activityBoundaryKey(
   cid: string,
   boundary: ActivityBoundary,
 ): string {
-  return boundaryDisclosureKey(cid, renderedLogGeneration, boundary);
+  return boundaryDisclosureKey(cid, thread.renderedLogGeneration, boundary);
 }
 
 function structuralDisclosureKey(cid: string, key: string): string {
-  return `${cid}:${renderedLogGeneration}:${key}`;
+  return `${cid}:${thread.renderedLogGeneration}:${key}`;
 }
 
 export function compactionRangeOpen(
@@ -164,7 +179,7 @@ export function toggleToolSeries(
   // Invariant: The clicked control keeps its screen position: expanding or
   // collapsing a series above the viewport would otherwise slide the reader's
   // content.
-  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
 }
 // A hidden-chunk press is the eye plus the chunk's own series: the response
 // disclosure opens and every series the chunk summarizes expands, in one
@@ -183,7 +198,7 @@ export function revealHiddenChunk(
       toolSeriesKey(cid, boundary, slice.turn.turn_id, slice.segmentIndex),
       MAX_TOOL_SERIES_STATES,
     );
-  if (state.currentConv) paint(state.currentConv);
+  if (state.currentConv) actions.paint(state.currentConv);
   if (opening) void backfillOldestBoundary(cid, boundary.key);
 }
 const expandedAllBlocks = new Map<string, Set<string>>();
@@ -211,7 +226,7 @@ export function toggleBlockExpandAll(
     expandedAllBlocks.set(identity, new Set());
   }
   applyBlockSections(cid, boundary, opening, expandedAllBlocks.get(identity));
-  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
   if (opening) void expandOlderPage(cid, boundary);
 }
 // Opening the oldest loaded block pulls one older page, which can re-key the
@@ -223,18 +238,19 @@ async function expandOlderPage(
   const parent = state.currentConv?.parent ?? null;
   const anchor = activityEntryKeys(turnGroups(boundary, parent, true))[0];
   const identity = activityBoundaryKey(cid, boundary);
-  const cursor = topCursor;
+  const cursor = thread.topCursor;
   await backfillOldestBoundary(cid, boundary.key);
   const conv = state.currentConv;
   const covered = expandedAllBlocks.get(identity);
-  if (!anchor || !covered || conv?.id !== cid || topCursor === cursor) return;
-  const next = turnGroupBlocks(loaded, parent).find((block) =>
+  if (!anchor || !covered || conv?.id !== cid || thread.topCursor === cursor)
+    return;
+  const next = turnGroupBlocks(thread.loaded, parent).find((block) =>
     activityEntryKeys(turnGroups(block, parent, true)).includes(anchor),
   );
   if (!next) return;
   expandedAllBlocks.delete(identity);
   expandedAllBlocks.set(activityBoundaryKey(cid, next), covered);
-  paint(conv);
+  actions.paint(conv);
 }
 function applyBlockSections(
   cid: string,
@@ -278,10 +294,10 @@ function applyBlockSections(
   for (const entry of messages) {
     const identity =
       entry.marker === "shell-notice"
-        ? `shell-notice:${renderedLogGeneration}:${entry.offset}`
+        ? `shell-notice:${thread.renderedLogGeneration}:${entry.offset}`
         : isAgentActivityMessage(entry)
-          ? `agent:${renderedLogGeneration}:${messageDisclosureIdentity(entry)}`
-          : `notice:${renderedLogGeneration}:${entry.offset}`;
+          ? `agent:${thread.renderedLogGeneration}:${messageDisclosureIdentity(entry)}`
+          : `notice:${thread.renderedLogGeneration}:${entry.offset}`;
     visit(identity, () => {
       if (messageDisclosures.isOpen(cid, identity) !== opening)
         messageDisclosures.toggle(cid, identity);
@@ -304,6 +320,48 @@ export function revealActivityBoundary(
     MAX_EXPANDED_TURNS,
   );
 }
+export function renderedMessageEntries(): MessageEntry[] {
+  return thread.loaded.flatMap((turn) =>
+    turn.segments.flatMap((segment) => [
+      ...segment.user,
+      ...(segment.assistant?.content ? [segment.assistant] : []),
+    ]),
+  );
+}
+
+/** Opens the folds hiding a loaded message; false when it is not loaded. */
+export function revealRowMessage(cid: string, wanted: string): boolean {
+  const generation = thread.renderedLogGeneration;
+  const turn = thread.loaded.find((candidate) =>
+    candidate.segments.some(
+      (segment) =>
+        segment.user.some((entry) => entry.id === wanted) ||
+        segment.assistant?.id === wanted,
+    ),
+  );
+  if (!turn) return false;
+  const block = turnGroupBlocks(
+    thread.loaded,
+    state.currentConv?.parent ?? null,
+  ).find((candidate) => candidate.slices.some((slice) => slice.turn === turn));
+  if (block && boundaryHasHiddenActivity(block)) {
+    revealActivityBoundary(cid, block);
+    const inner = block.wakeTurns?.find((unit) =>
+      unit.slices.some((slice) => slice.turn === turn),
+    );
+    if (inner) revealActivityBoundary(cid, inner);
+  }
+  const entry = renderedMessageEntries().find(
+    (candidate) => candidate.id === wanted,
+  );
+  if (entry?.kind === "user" && isAgentActivityMessage(entry)) {
+    const identity = `agent:${generation}:${messageDisclosureIdentity(entry)}`;
+    if (!messageDisclosures.isOpen(cid, identity))
+      messageDisclosures.toggle(cid, identity);
+  }
+  return true;
+}
+
 export function toggleCompactionRange(
   cid: string,
   boundary: ActivityBoundary,
@@ -326,7 +384,7 @@ export function toggleCompactionRange(
       boundedAdd(expandedActivityBoundaries, identity, MAX_EXPANDED_TURNS);
     else expandedActivityBoundaries.delete(identity);
   }
-  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
   if (opening && keys[0] !== undefined)
     void backfillOldestBoundary(cid, keys[0]);
 }
@@ -345,7 +403,7 @@ export function toggleActivityBoundary(
   // Invariant: The clicked eye or compacted head keeps its screen position: the
   // repaint inserts or removes content above the viewport while scrollTop
   // stands still, which reads as the viewport jumping away from the click.
-  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
   if (opening) void backfillOldestBoundary(cid, boundary.key);
 }
 export async function backfillOldestBoundary(
@@ -356,11 +414,11 @@ export async function backfillOldestBoundary(
   // Invariant: Backfill is one guarded page per tap, never a loop/focus move.
   // Reassert expansion only on the boundary holding the original activity; a
   // miss stays closed, and an in-flight close wins.
-  if (topCursor <= 0 || loadingOlder) return;
+  if (thread.topCursor <= 0 || thread.loadingOlder) return;
   if (!state.currentConv || state.currentConv.id !== cid) return;
-  if (cid !== renderedConvId) return;
+  if (cid !== thread.renderedConvId) return;
   const parent = state.currentConv.parent ?? null;
-  const first = turnGroupBlocks(loaded, parent).at(0);
+  const first = turnGroupBlocks(thread.loaded, parent).at(0);
   const oldest =
     first?.wakeTurns?.find((unit) => unit.key === boundaryKey) ?? first;
   if (!oldest || oldest.key !== boundaryKey) return;
@@ -379,9 +437,12 @@ export async function backfillOldestBoundary(
   const openIdentity = group
     ? groupIdentity(cid, oldest, group)
     : activityBoundaryKey(cid, oldest);
-  const generation = renderedLogGeneration;
-  await loadOlder(false);
-  if (state.currentConv?.id !== cid || generation !== renderedLogGeneration)
+  const generation = thread.renderedLogGeneration;
+  await actions.loadOlder(false);
+  if (
+    state.currentConv?.id !== cid ||
+    generation !== thread.renderedLogGeneration
+  )
     return;
   if (
     group
@@ -390,7 +451,7 @@ export async function backfillOldestBoundary(
   )
     return;
   if (first && outerGroup && !activityGroupOpen(cid, first, outerGroup)) return;
-  const blocks = turnGroupBlocks(loaded, parent);
+  const blocks = turnGroupBlocks(thread.loaded, parent);
   const candidates = blocks.flatMap((block) =>
     oldest.wakeTurns ? [block] : (block.wakeTurns ?? [block]),
   );
@@ -416,7 +477,7 @@ export async function backfillOldestBoundary(
       if (container) revealActivityBoundary(cid, container);
     }
   } else if (next) revealActivityBoundary(cid, next);
-  if (state.currentConv) paint(state.currentConv);
+  if (state.currentConv) actions.paint(state.currentConv);
 }
 interface RevealSlot {
   state: StreamRevealState;
@@ -454,7 +515,7 @@ function ensureRevealTimer(cid: string): void {
       // chunk, else the whole tail), so a quiet stream still paints within a
       // tick; the next server text re-arms through ingest.
       if (advanceStreamReveal(slot.state)) {
-        paint(conv);
+        actions.paint(conv);
         if (pendingRevealChars(slot.state) > 0) ensureRevealTimer(cid);
       }
     }, STREAM_REVEAL_MS),
@@ -466,7 +527,7 @@ function revealSlot(cid: string): RevealSlot {
   if (!slot) {
     slot = {
       state: createStreamReveal(),
-      generation: renderedLogGeneration,
+      generation: thread.renderedLogGeneration,
       instance: rowThreads.get(cid)?.instanceId ?? null,
       settledChunks: null,
     };
@@ -491,13 +552,13 @@ export function prepareLiveReveal(conv: Conversation): void {
   const instance = rowThreads.get(conv.id)?.instanceId ?? null;
   const instant =
     revealSwitchInstant ||
-    slot.generation !== renderedLogGeneration ||
+    slot.generation !== thread.renderedLogGeneration ||
     slot.instance !== instance;
   revealSwitchInstant = false;
-  slot.generation = renderedLogGeneration;
+  slot.generation = thread.renderedLogGeneration;
   slot.instance = instance;
   const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const last = loaded[loaded.length - 1];
+  const last = thread.loaded[thread.loaded.length - 1];
   const tail =
     conv.status === "running" && last?.open && !last.system
       ? (last.segments[last.segments.length - 1]?.assistant ?? null)

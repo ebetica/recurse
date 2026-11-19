@@ -39,8 +39,8 @@ import {
   applyFocusedEventPage,
   catchUpRowThread,
   isDeletingConversation,
-  rowThreads,
 } from "../row-thread-state.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import {
   type RemovalSelectionSnapshot,
   descendantIds,

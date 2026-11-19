@@ -816,7 +816,7 @@ async function acceptedPage(
  * off-thread.
  */
 function mediaPreview(name: string, size: number): string | null {
-  if (/\.(docx|xlsx|xls|ods|csv|tsv|pptx|ipynb)$/i.test(name))
+  if (/\.(docx|xlsx|xls|ods|csv|tsv|pptx|ipynb|html?)$/i.test(name))
     return "document";
   if (extension(name) === "pdf") return "pdf";
   const media = base.inlineMediaType(name);

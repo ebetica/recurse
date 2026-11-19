@@ -4,7 +4,6 @@
 // No snapshot waits. window_ms excludes diagnostics; spans aren't CPU causes.
 
 import { Worker } from "node:worker_threads";
-import { templateRoute } from "../http_transport";
 import {
   drainSlowSpans,
   drainWorkerReplies,
@@ -12,7 +11,13 @@ import {
   openPhaseCount,
   overlappingOpenPhases,
 } from "./slow_span";
-import { INFO, WARNING, logEvent, type RuntimeLogger } from "./runtime_logging";
+import {
+  INFO,
+  WARNING,
+  logEvent,
+  templateRoute,
+  type RuntimeLogger,
+} from "./runtime_logging";
 
 const SHOWN = 3;
 

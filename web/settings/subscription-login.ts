@@ -13,6 +13,7 @@ interface Options<Status> {
   jpost: (path: string, body?: unknown) => Promise<Response>;
   show: (cls: string, text: string) => void;
   applyStatus: (status: Status) => void;
+  setBusy?: (busy: boolean) => void;
   /** Example token JSON for the rate-limit fallback's field. */
   tokenExample: string;
 }
@@ -87,6 +88,7 @@ export function subscriptionLogin<Status>(
   const finish = async (code: string) => {
     show("", "");
     busy = true;
+    options.setBusy?.(true);
     render();
     try {
       const response = await jpost(`${prefix}/code`, { code });
@@ -109,6 +111,7 @@ export function subscriptionLogin<Status>(
       show("err", "Network error. Try again.");
     } finally {
       busy = false;
+      options.setBusy?.(false);
       render();
     }
   };
@@ -125,6 +128,7 @@ export function subscriptionLogin<Status>(
       return;
     }
     finishLocal.disabled = true;
+    options.setBusy?.(true);
     try {
       const response = await jpost(`${prefix}/token-json`, { token: text });
       if (response.ok) signedIn(await response.json());
@@ -133,6 +137,7 @@ export function subscriptionLogin<Status>(
       show("err", "Network error. Try again.");
     } finally {
       finishLocal.disabled = false;
+      options.setBusy?.(false);
     }
   });
 

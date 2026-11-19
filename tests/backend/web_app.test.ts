@@ -73,7 +73,7 @@ test("Tailscale identity is confined to the private Unix listener", async () => 
   expect(directory.uid).toBe(process.getuid!());
   expect((await lstat(socket)).isSocket()).toBe(true);
   const identity = ["-H", "Tailscale-User-Login:  ReCuRsE@Example.COM  "];
-  for (const path of ["/", "/api/tree"]) {
+  for (const path of ["/", "/api/tree", "/api/settings/two-factor"]) {
     const admitted = await curl([
       "--unix-socket",
       socket,

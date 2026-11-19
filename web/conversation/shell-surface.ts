@@ -21,8 +21,7 @@ import {
   shellStatusText,
   streamShellRows,
 } from "../thread-render/background-shells.js";
-import { rowThreads } from "../row-thread-state.js";
-import { paint } from "./thread.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import {
   activeDescendants,
   activeAgentSummary,
@@ -40,9 +39,12 @@ let shellSurfaceReturnFocus: HTMLElement | null = null;
 export let agentSurfaceAgent: string | null = null;
 let agentSurfaceReturnFocus: HTMLElement | null = null;
 
+type PaintThread = (conv: Conversation) => void;
+
 export function shellChipT(
   conv: Conversation,
   label: string,
+  paintThread: PaintThread,
 ): TemplateResult | typeof nothing {
   if (!label) return nothing;
   const title = conv.shells?.agent_title || conv.title || conv.id;
@@ -58,7 +60,11 @@ export function shellChipT(
     title=${`${label} for ${title}`}
     @click=${(event: Event) => {
       event.stopPropagation();
-      openShellSurface(conv.id, event.currentTarget as HTMLButtonElement);
+      openShellSurface(
+        conv.id,
+        event.currentTarget as HTMLButtonElement,
+        paintThread,
+      );
     }}
   >
     <span class="chip-label">${shellCount}</span>${unsafeHTML(TERMINAL_ICON)}
@@ -71,6 +77,7 @@ export function shellChipT(
 export function agentChipT(
   conv: Conversation,
   label: string,
+  paintThread: PaintThread,
 ): TemplateResult | typeof nothing {
   if (!label) return nothing;
   const title = conv.title || conv.id;
@@ -85,7 +92,11 @@ export function agentChipT(
     title=${`${label} for ${title}`}
     @click=${(event: Event) => {
       event.stopPropagation();
-      openAgentSurface(conv.id, event.currentTarget as HTMLButtonElement);
+      openAgentSurface(
+        conv.id,
+        event.currentTarget as HTMLButtonElement,
+        paintThread,
+      );
     }}
   >
     <span class="chip-label"
@@ -211,7 +222,11 @@ export function closeAgentSurface(restoreFocus = true): boolean {
   return true;
 }
 
-export function openAgentSurface(cid: string, button: HTMLButtonElement): void {
+function openAgentSurface(
+  cid: string,
+  button: HTMLButtonElement,
+  paintThread: PaintThread,
+): void {
   const current = state.currentConv;
   if (!current || current.id !== cid) return;
   if (!activeDescendants(state.nodes, cid).length) return;
@@ -225,7 +240,7 @@ export function openAgentSurface(cid: string, button: HTMLButtonElement): void {
   closeAgentSurface(false);
   agentSurfaceAgent = cid;
   agentSurfaceReturnFocus = button;
-  paint(current);
+  paintThread(current);
   agentSurfaceButton(cid)?.setAttribute("aria-expanded", "true");
   focusShellSurface();
 }
@@ -416,7 +431,11 @@ export function paintAgentSurface(conv?: Conversation | null): void {
   settleSurfacePosition();
 }
 
-export function openShellSurface(cid: string, button: HTMLButtonElement): void {
+function openShellSurface(
+  cid: string,
+  button: HTMLButtonElement,
+  paintThread: PaintThread,
+): void {
   const current = state.currentConv;
   if (!current || current.id !== cid || activeShells(current).shellCount === 0)
     return;
@@ -428,7 +447,7 @@ export function openShellSurface(cid: string, button: HTMLButtonElement): void {
   if (agentSurfaceAgent) closeAgentSurface(false);
   shellSurfaceAgent = cid;
   shellSurfaceReturnFocus = button;
-  paint(current);
+  paintThread(current);
   shellSurfaceButton(cid)?.setAttribute("aria-expanded", "true");
   focusShellSurface();
 }

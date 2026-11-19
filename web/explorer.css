@@ -4,7 +4,7 @@
 }
 .explorer {
   min-width: 0;
-  font-size: 0.8125rem;
+  font-size: 0.84375rem;
 }
 .explorer-row,
 .explorer-status,
@@ -26,8 +26,6 @@
   color: var(--muted);
   font-size: 0.71875rem;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .explorer-head .icon-btn {
   width: 28px;
@@ -181,13 +179,6 @@
   width: 16px;
   height: 16px;
 }
-.explorer-modes {
-  display: flex;
-  gap: var(--space-1);
-}
-.explorer-modes [aria-pressed="true"] {
-  background: var(--panel-2);
-}
 .explorer-preview-mode .explorer-source-only {
   display: none;
 }
@@ -223,7 +214,7 @@
   margin: 0;
   padding: var(--space-4);
   overflow: auto;
-  font: 0.75rem/1.6 var(--font-mono);
+  font: 0.78125rem/1.6 var(--font-mono);
   tab-size: 4;
   color: var(--text);
 }
@@ -238,7 +229,7 @@
   resize: vertical;
   background: var(--bg);
   color: var(--text);
-  font: 0.75rem/1.6 var(--font-mono);
+  font: 0.78125rem/1.6 var(--font-mono);
   tab-size: 4;
 }
 .explorer-editor:focus {

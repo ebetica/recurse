@@ -2,11 +2,8 @@
 // per-agent artifact list, including the stale-selection retry and the
 // out-of-band rediscovery bound. Closed-list completion updates availability
 // for the visible selected conversation without waiting for its next poll.
-import {
-  backendFor,
-  parseConversationId,
-  type Backend,
-} from "../backends/backend.js";
+import { backendFor, type Backend } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import type { ArtifactInfo } from "./model.js";
 import { artifactListUrl, normalizeArtifactList } from "./model.js";
 import {
@@ -16,8 +13,6 @@ import {
 } from "./pane-state.js";
 import { fetchPaneData, syncPanes } from "../panes.js";
 import { phoneListEntry } from "../phone-nav.js";
-import { renderShell } from "./pane.js";
-import { showArtifact } from "./artifact-detail.js";
 import { DRAFT, state } from "../state.js";
 import { reviewedVersion } from "../document-review.js";
 import { commentKey } from "./selection-comments.js";
@@ -109,7 +104,7 @@ export async function refreshList(
     !artifactMount.current?._rs.revalidating &&
     stableArtifactView(artifactMount.current?._rs ?? null, agentId);
   if (artifactMount.current?._rs.agentId === agentId && !preserveBeforeFetch)
-    renderShell(artifactMount.current);
+    artifactMount.current.renderShell();
   const pending = (async () => {
     try {
       const response = await backendFor(agentId).api(artifactListUrl(agentId), {
@@ -161,8 +156,8 @@ export async function refreshList(
         artifactMount.current?._rs.agentId === agentId &&
         !cache.selectionStale
       ) {
-        renderShell(artifactMount.current);
-        void showArtifact(artifactMount.current);
+        artifactMount.current.renderShell();
+        void artifactMount.current.showArtifact();
       }
       if (
         !controller.signal.aborted &&

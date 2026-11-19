@@ -108,7 +108,7 @@ export function createSettings(
       defineTool({
         name: "recurse_settings",
         description:
-          "View or change Recurse settings; returns the requested settings or action result.",
+          "View or change Recurse settings. set_level applies to new agents and agents whose level is chosen again.",
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("add_remote"),

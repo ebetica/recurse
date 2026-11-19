@@ -40,10 +40,11 @@ each other.
 
 ## Product and architecture principles
 
-- **Build the simplest thing that works.** Give each module one job and keep
-  tools small. Extend an existing lifecycle CLI instead of duplicating it.
-  Simplify large files; do not mechanically split them. A change that grows a
-  file to 1,500+ lines needs a [simplification review](docs/agents/simplify-review.md).
+- **Build the simplest thing that works.** Give each folder module one job and a
+  thin `index.ts`; imports between files and modules stay acyclic (exceptions need
+  operator approval). Keep tools small. Extend an existing lifecycle CLI instead
+  of duplicating it. Simplify large files; do not mechanically split them. A
+  change that grows a file to 1,500+ lines needs a [simplification review](docs/agents/simplify-review.md).
 - Pi owns sessions, turns, steering, and aborting; Recurse owns the tree and
   inter-agent messages. Never recheck, retry, or repair successful Pi calls
   without a named, reproducible bug.
@@ -71,11 +72,9 @@ each other.
 - Name observable behaviour, not mechanisms, in settings, APIs, flags, keys,
   and UI. Rename public names that need explanation. Tell users what something
   is; avoid unexplained jargon and metaphors.
-- UI text: label controls. Add a sentence only for consequences a user can't
-  infer (data loss, what is or isn't shared, irreversible actions) or for an
-  actionable error. No implementation names (environment variables, file
-  paths, internal terms). At most one primary (blue) button per section: its
-  main action.
+- UI: before any web UI change, read
+  [the UI design rules](.agents/skills/ui-design/SKILL.md); its Recurse rules
+  bind.
 
 ## Repository map
 

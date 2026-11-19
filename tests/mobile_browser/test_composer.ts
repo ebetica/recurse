@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import type { Route } from "playwright";
+import type { Locator, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
@@ -12,13 +12,18 @@ import {
   type BrowserTest,
 } from "./common";
 
+async function expectVisuallyHidden(status: Locator) {
+  await browserExpect(status).toHaveCSS("position", "absolute");
+  await browserExpect(status).toHaveCSS("clip", "rect(0px, 0px, 0px, 0px)");
+}
+
 const ladder = {
   default_level: 3,
   levels: Object.fromEntries(
     [1, 2, 3, 4, 5].map((level) => [
       String(level),
       {
-        model: level % 2 ? "test/model-b" : "test/model-a",
+        model: level < 4 ? "test/model-b" : "test/model-a",
         reasoning: ["low", "medium", "high", "max", "xhigh"][level - 1],
       },
     ]),
@@ -28,7 +33,7 @@ const ladder = {
       String(level),
       {
         reachable: true,
-        model: level % 2 ? "test/model-b" : "test/model-a",
+        model: level < 4 ? "test/model-b" : "test/model-a",
         reasoning: ["low", "medium", "high", "max", "xhigh"][level - 1],
         reason: "",
       },
@@ -256,12 +261,28 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
         waitUntil: "domcontentloaded",
       });
       await page.locator("#input:enabled").waitFor();
+      const trigger = page.locator("#model-trigger");
+      const name = model || "Unknown model";
+      await browserExpect(trigger.locator(".model-name")).toHaveText(name);
+      await browserExpect(trigger).toHaveAttribute(
+        "aria-label",
+        `${name}: choose effort level`,
+      );
+      await trigger.click();
+      const menu = page.locator("#model-menu:popover-open");
+      await browserExpect(menu.locator("#effort-model")).toHaveText(name);
+      await browserExpect(menu.getByRole("status")).toHaveText(name);
+      await browserExpect(menu.getByRole("slider")).toHaveAttribute(
+        "aria-valuetext",
+        name,
+      );
+      await page.keyboard.press("Escape");
       await page
         .locator("#input")
         .fill("Keep this message while I choose a model");
       await page.locator("#input").press("Enter");
       await page.locator("#send-status.error").waitFor();
-      const detail = `${model ? `Model ${model} is unavailable.` : "No model is selected for this conversation."} Pick another effort level in the model picker, or fix its model in Settings > Effort ladder.`;
+      const detail = `${model ? `Model ${model} is unavailable.` : "No model is selected for this conversation."} Pick an effort level again in the model picker. If needed, update the ladder in Settings first.`;
       expect(await page.locator("#send-status").textContent()).toBe(
         `${detail} — Retry now`,
       );
@@ -625,68 +646,231 @@ export const tests: BrowserTest[] = [
   },
 
   async function test_effort_ladder_rejected_switch_reverts(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await routeArtifacts(page, base);
-    await page.route(`${base}api/settings/effort-levels`, (route) =>
-      route.fulfill({ json: ladder }),
-    );
-    await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
-    await page.waitForFunction(
-      "document.querySelector('#model-trigger .model-name').textContent === 'Test B'",
-    );
-    await page.locator("#model-trigger").tap();
-    await page.waitForFunction(
-      "document.querySelector('#model-menu').matches(':popover-open')",
-    );
-    expect(await page.locator("#effort-range").inputValue()).toBe("3");
-    expect(await page.locator("#effort-value").innerText()).toBe("high");
-    expect(await page.locator("#effort-model").innerText()).toBe("Test B high");
-    const composer = await page.locator("#composer").boundingBox();
-    const box = await page.locator("#model-menu").boundingBox();
-    expect(box!.width).toBeLessThanOrEqual(366);
-    expect(composer).not.toBeNull();
-    expect(await page.locator("#model-trigger").innerText()).toContain(
-      "Test B",
-    );
-    await page.route(`${base}api/conversations/*/model`, (route) =>
-      route.fulfill({ status: 409 }),
-    );
-    const preview = await page.evaluate(
-      "const range=document.querySelector('#effort-range'); range.value='5'; range.dispatchEvent(new Event('input',{bubbles:true})); document.querySelector('#effort-value').textContent",
-    );
-    expect(preview).toBe("max");
-    await page.evaluate(
-      "document.querySelector('#effort-range').dispatchEvent(new Event('change',{bubbles:true}))",
-    );
-    await page.waitForFunction(
-      "document.querySelector('#effort-range').value === '3'",
-    );
-    expect(await page.locator("#effort-value").innerText()).toBe("high");
-    expect(await page.locator("#model-trigger").innerText()).toContain(
-      "Test B",
-    );
-    expect(await page.locator("#model-menu").isVisible()).toBeTrue();
-    expect(await page.locator("#composer").boundingBox()).toEqual(composer);
-    expect(errors).toEqual([]);
-    await context.close();
+    for (const width of [1280, 412, 390]) {
+      const { agent, model, effort } = await postFixture(
+        base,
+        "seed-recorded-effort-choice",
+      );
+      const modelUrl = `${base}api/conversations/${agent}/model`;
+      const mobile = width !== 1280;
+      const context = await browser.newContext({
+        viewport: { width, height: width === 390 ? 844 : 915 },
+        isMobile: mobile,
+        hasTouch: mobile,
+      });
+      const page = await context.newPage();
+      const errors = captureErrors(page);
+      const posts: unknown[] = [];
+      let rejectChange = true;
+      await page.route(modelUrl, (route) => {
+        const request = route.request();
+        if (request.method() !== "POST") return route.fallback();
+        posts.push(request.postDataJSON());
+        return rejectChange ? route.fulfill({ status: 409 }) : route.continue();
+      });
+      const modelResponse = () =>
+        page.waitForResponse(
+          (r) => r.url() === modelUrl && r.request().method() === "POST",
+        );
+      try {
+        await page.goto(`${base}#agent=${agent}`);
+        await page.locator(`.agent.selected[data-id="${agent}"]`).waitFor({
+          state: "attached",
+        });
+        const trigger = page.locator("#model-trigger");
+        const name = trigger.locator(".model-name");
+        const menu = page.locator("#model-menu:popover-open");
+        const range = menu.getByRole("slider", {
+          name: "Effort level",
+          exact: true,
+        });
+        const label = menu.locator("#effort-model");
+        const composer = page.locator("#composer");
+        const recordedAction = `Level 3: ${model}: choose effort level`;
+        await browserExpect(name).toHaveText(model);
+        await browserExpect(trigger).toHaveAttribute(
+          "aria-label",
+          recordedAction,
+        );
+        await waitForLayout(page);
+        expect(
+          await trigger.evaluate((el, touch) => {
+            const { left, right, top, bottom, height } =
+              el.getBoundingClientRect();
+            const center = top + height / 2;
+            const ys = touch
+              ? [center - 21, center + 21]
+              : [top + 3, bottom - 3];
+            const inset = touch ? 6 : 3;
+            return [left + inset, right - inset].every((x) =>
+              ys.every((y) =>
+                el.contains(el.ownerDocument.elementFromPoint(x, y)),
+              ),
+            );
+          }, mobile),
+        ).toBeTrue();
+        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (shots && width !== 390)
+          await page.screenshot({ path: `${shots}/effort-chip-${width}.png` });
+        if (mobile) await trigger.tap();
+        else await trigger.click();
+        await browserExpect(menu).toBeVisible();
+        if (mobile) {
+          await browserExpect
+            .poll(() =>
+              menu.evaluate((el) => {
+                const box = el.getBoundingClientRect();
+                const viewport = el.ownerDocument.documentElement;
+                return (
+                  box.left >= 12 &&
+                  box.right <= viewport.clientWidth - 12 &&
+                  box.top >= 0 &&
+                  box.bottom <= viewport.clientHeight
+                );
+              }),
+            )
+            .toBe(true);
+        }
+        await browserExpect(label).toHaveText(model);
+        const status = menu.getByRole("status");
+        await browserExpect
+          .poll(() => status.ariaSnapshot())
+          .toBe(`- status: ${JSON.stringify(`Level 3: ${model}`)}`);
+        await expectVisuallyHidden(status);
+        await browserExpect(range).toHaveValue("3");
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          `Level 3: ${model}`,
+        );
+        if (mobile) {
+          expect(
+            await range.evaluate((el) => {
+              const { left, right, top, height } = el.getBoundingClientRect();
+              return [left + 3, right - 3].every((x) =>
+                [-21, 21].every(
+                  (dy) =>
+                    el.ownerDocument.elementFromPoint(
+                      x,
+                      top + height / 2 + dy,
+                    ) === el,
+                ),
+              );
+            }),
+          ).toBeTrue();
+        }
+        const response = await page.request.get(
+          `${base}api/settings/effort-levels`,
+        );
+        expect(response.ok()).toBeTrue();
+        const live = (await response.json()) as typeof ladder;
+        const at3 = live.levels["3"]!;
+        const at5 = live.levels["5"]!;
+        expect(at3.model).not.toBe(model);
+        expect(at3.reasoning).not.toBe(effort);
+        expect(at5.model).not.toBe(model);
+        const labelFor = (selector: string) =>
+          live.models.find(({ id }) => id === selector)!.label;
+        const choice3 = labelFor(at3.model);
+        const choice5 = labelFor(at5.model);
+        if (shots && width !== 390)
+          await page.screenshot({ path: `${shots}/effort-open-${width}.png` });
+        await range.evaluate((el: { value: string }) => {
+          el.value = "5";
+        });
+        await range.dispatchEvent("input");
+        await browserExpect(range).toHaveValue("5");
+        await browserExpect(label).toHaveText(choice5);
+        await browserExpect(status).toHaveText(`Level 5: ${choice5}`);
+        await expectVisuallyHidden(status);
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          `Level 5: ${choice5}`,
+        );
+        await browserExpect(name).toHaveText(model);
+        await browserExpect(trigger).toHaveAttribute(
+          "aria-label",
+          recordedAction,
+        );
+        if (shots && width !== 390)
+          await page.screenshot({ path: `${shots}/effort-moved-${width}.png` });
+        await waitForLayout(page);
+        await browserExpect(menu).toBeVisible();
+        const geometry = await composer.boundingBox();
+        expect(geometry).not.toBeNull();
+        expect(posts).toEqual([]);
+        const [rejected] = await Promise.all([
+          modelResponse(),
+          range.dispatchEvent("change"),
+        ]);
+        expect(rejected.status()).toBe(409);
+        await browserExpect(range).toHaveValue("3");
+        await browserExpect(trigger).not.toHaveClass(/pending/);
+        await browserExpect(name).toHaveText(model);
+        await browserExpect(trigger).toHaveAttribute(
+          "aria-label",
+          recordedAction,
+        );
+        await browserExpect(menu).toBeVisible();
+        await browserExpect(label).toHaveText(model);
+        await browserExpect(status).toHaveText(`Level 3: ${model}`);
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          `Level 3: ${model}`,
+        );
+        await browserExpect
+          .poll(() => composer.boundingBox())
+          .toEqual(geometry);
+        expect(posts).toEqual([{ level: 5 }]);
+
+        rejectChange = false;
+        const [accepted] = await Promise.all([
+          modelResponse(),
+          mobile ? range.tap() : range.click(),
+          browserExpect(label).toHaveText(choice3),
+        ]);
+        expect(accepted.status()).toBe(200);
+        expect((await accepted.json()).pending_model).toEqual({
+          level: 3,
+          model: at3.model,
+          effort: at3.reasoning,
+        });
+        await browserExpect(range).toBeEnabled();
+        await browserExpect(trigger).toHaveClass(/pending/);
+        await browserExpect(name).toHaveText(choice3);
+        await browserExpect(trigger).toHaveAttribute(
+          "aria-label",
+          `Level 3: ${choice3}: switches on your next message; choose effort level`,
+        );
+        await browserExpect(label).toHaveText(choice3);
+        await browserExpect(status).toHaveText(`Level 3: ${choice3}`);
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          `Level 3: ${choice3}`,
+        );
+        expect(posts).toEqual([{ level: 5 }, { level: 3 }]);
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
   },
   // Feature: #2009 draft effort picker remains visibly accessible
   async function test_effort_picker_and_draft_level(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 1100, height: 800 },
     });
+    const long =
+      "Anthropic: Test B with a name longer than the chip and the page";
     const page = await context.newPage();
     const errors = captureErrors(page);
     await routeArtifacts(page, base);
     await page.route(`${base}api/settings/effort-levels`, (route) =>
-      route.fulfill({ json: ladder }),
+      route.fulfill({
+        json: {
+          ...ladder,
+          models: [ladder.models[0], { id: "test/model-b", label: long }],
+        },
+      }),
     );
     await page.route(`${base}api/conversations`, (route) =>
       route.fulfill({ status: 422, body: "test" }),
@@ -697,24 +881,103 @@ export const tests: BrowserTest[] = [
     await page.keyboard.press("t");
     await page.keyboard.press("t");
     await page.locator("#draft-model-host").waitFor();
-    await page.waitForFunction(
-      "document.querySelector('#effort-model').textContent === 'Test B high'",
+    const trigger = page.locator("#model-trigger");
+    const chip = trigger.locator(".model-name");
+    const input = page.locator("#input");
+    const fits = (field: Locator) =>
+      field.evaluate(
+        (node) =>
+          node.clientHeight > 0 && node.scrollHeight <= node.clientHeight,
+      );
+    const height = () => input.evaluate((node) => node.clientHeight);
+    await browserExpect(chip).toHaveText(long);
+    await browserExpect.poll(() => fits(input)).toBe(true);
+    const oneLine = await height();
+    for (const width of [1100, 750, 412]) {
+      await page.setViewportSize({ width, height: 800 });
+      await browserExpect
+        .poll(() =>
+          chip.evaluate((name) => {
+            const r = name.getBoundingClientRect();
+            return (
+              name.scrollWidth <= name.clientWidth &&
+              [r.left + 2, r.right - 2].every((x) =>
+                [r.top + 2, r.bottom - 2].every((y) =>
+                  name.contains(name.ownerDocument.elementFromPoint(x, y)),
+                ),
+              )
+            );
+          }),
+        )
+        .toBe(true);
+      await browserExpect.poll(() => fits(input)).toBe(true);
+    }
+    await input.evaluate((field: any) => {
+      field.placeholder =
+        "Describe the first task for this agent, then press Enter to send it";
+    });
+    await browserExpect.poll(() => fits(input)).toBe(true);
+    expect(await height()).toBeGreaterThan(oneLine);
+    await page.setViewportSize({ width: 1100, height: 800 });
+    await browserExpect.poll(height).toBe(oneLine);
+    await browserExpect.poll(() => fits(input)).toBe(true);
+    expect(
+      await page
+        .locator(".draft-hello > *")
+        .first()
+        .evaluate((n) => n.tagName),
+    ).toBe("H2");
+    await browserExpect(trigger).toHaveAttribute(
+      "aria-label",
+      `Level 3: ${long}: choose effort level`,
     );
-    await page.locator("#model-trigger").click();
-    expect(await page.locator("#model-menu").isVisible()).toBeTrue();
-    expect(await page.locator("#model-trigger").isVisible()).toBeTrue();
-    expect(await page.locator("#effort-range").inputValue()).toBe("3");
-    expect(await page.locator("#effort-value").innerText()).toBe("high");
-    expect(await page.locator("#effort-model").innerText()).toBe("Test B high");
+    await trigger.click();
+    const menu = page.getByRole("dialog", {
+      name: "Effort level",
+      exact: true,
+    });
+    const range = menu.getByRole("slider");
+    const label = menu.locator("#effort-model");
+    const status = menu.getByRole("status");
+    await browserExpect(trigger).toBeVisible();
+    await browserExpect(range).toHaveValue("3");
+    await browserExpect(label).toHaveText(long);
+    await browserExpect(status).toHaveText(`Level 3: ${long}`);
+    await expectVisuallyHidden(status);
+    await browserExpect(range).toHaveAttribute(
+      "aria-valuetext",
+      `Level 3: ${long}`,
+    );
     await page.keyboard.press("Escape");
-    await page.locator("#model-trigger").click();
-    await page.locator("#effort-range").focus();
-    await page.keyboard.press("ArrowRight");
-    await page.waitForFunction(
-      "document.querySelector('#effort-range').value === '4'",
+    await trigger.click();
+    await range.press("ArrowRight");
+    await browserExpect(range).toHaveValue("4");
+    await browserExpect(label).toHaveText("Test A");
+    await browserExpect(status).toHaveText("Level 4: Test A");
+    await expectVisuallyHidden(status);
+    await browserExpect(range).toHaveAttribute(
+      "aria-valuetext",
+      "Level 4: Test A",
     );
-    expect(await page.locator("#effort-value").innerText()).toBe("xhigh");
-    expect(await page.locator("#effort-model").innerText()).toBe("Test A max");
+    await browserExpect(chip).toHaveText("Test A");
+    await browserExpect(trigger).toHaveAttribute(
+      "aria-label",
+      "Level 4: Test A: choose effort level",
+    );
+    await menu.focus();
+    await page.keyboard.press("j");
+    await browserExpect(menu).toBeFocused();
+    await browserExpect(label).toHaveText("Test A");
+    await browserExpect
+      .poll(() => status.ariaSnapshot())
+      .toBe('- status: "Level 5: Test A"');
+    await expectVisuallyHidden(status);
+    await browserExpect(range).toHaveAttribute(
+      "aria-valuetext",
+      "Level 5: Test A",
+    );
+    await page.keyboard.press("k");
+    await browserExpect(status).toHaveText("Level 4: Test A");
     await page.locator("#input").fill("Use the selected effort level");
     const req = page.waitForRequest(`${base}api/conversations`);
     await page.locator("#send").click();

@@ -656,7 +656,18 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     await remote.delivery.deliver(cid, "Create review-proof.txt.", {
       origin: "operator",
     });
-    await until(() => remote.durable.runningCount() === 0);
+    const { reviewCaptures } = await remote.durable.open(cid);
+    await until(
+      async () =>
+        (await reviewCaptures.latest(cid))?.json.includes(
+          "review-proof.txt",
+        ) === true,
+    );
+    await until(async () =>
+      JSON.stringify(await remote.durable.view(cid)).includes(
+        "Review capture ready",
+      ),
+    );
     const promptPath = `conversations/${cid}/prompt`;
     const operatorPrompt = await fetch(
       `${homeUrl}/api/backends/B/${promptPath}`,

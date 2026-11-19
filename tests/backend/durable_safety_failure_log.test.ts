@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,7 +21,7 @@ import {
 } from "../../src/observability/runtime_logging";
 import { fauxHost, idle, until } from "./fixtures/durable_host/host";
 
-// Regression: #3379 #3390 capture failures never suppress reviewer denials.
+// Regression: #3379 #3390 #3501 reviewer failures stay bounded and fail open
 test("no-verdict reviews log once without changing allow or denial outcomes", async () => {
   const root = mkdtempSync(join(tmpdir(), "durable-review-failure-"));
   const { host, faux, work } = fauxHost(root, "faux/faux-1", true);
@@ -23,22 +29,54 @@ test("no-verdict reviews log once without changing allow or denial outcomes", as
   const log = logger("agents", sink);
   host.deps.log = (event, fields, level = INFO) =>
     logEvent(log, level, event, { fields });
-  const secret = "sensitive-provider-detail";
+  const secret = "sensitive-provider-detail sk-or-v1-0123456789abcdef";
   const cases = [
-    { category: "failure", reply: "503 provider unavailable", attempts: 1 },
-    { category: "timeout", reply: "Safety review timed out", attempts: 1 },
-    { category: "auth", reply: "401 unauthorized", attempts: 1 },
-    { category: "invalid", reply: "not a verdict", attempts: 2 },
-    { category: "deny", reply: "DENY: action not authorized", attempts: 1 },
-    { category: "allow", reply: "OK", attempts: 1 },
+    {
+      category: "failure",
+      reply: "503 provider unavailable",
+      attempts: 1,
+      label: "provider error",
+    },
+    {
+      category: "failure",
+      reply: "429 usage limit reached",
+      attempts: 1,
+      label: "usage limit",
+    },
+    {
+      category: "timeout",
+      reply: "Safety review timed out",
+      attempts: 1,
+      label: "review timed out",
+    },
+    {
+      category: "auth",
+      reply: "401 unauthorized",
+      attempts: 1,
+      label: "no reviewer login",
+    },
+    {
+      category: "invalid",
+      reply: "not a verdict",
+      attempts: 2,
+      label: "invalid reviewer response",
+    },
+    {
+      category: "deny",
+      reply: "DENY: action not authorized",
+      attempts: 1,
+      label: null,
+    },
+    { category: "allow", reply: "OK", attempts: 1, label: null },
   ];
   try {
     for (const item of cases) {
+      const name = (item.label ?? item.category).replaceAll(" ", "-");
       const main = [
         fauxAssistantMessage(
           [
             fauxToolCall("bash", {
-              command: `touch ${item.category}`,
+              command: `touch ${name}`,
             }),
           ],
           { stopReason: "toolUse" },
@@ -59,13 +97,22 @@ test("no-verdict reviews log once without changing allow or denial outcomes", as
         return main.shift() ?? fauxAssistantMessage("done");
       };
       faux.setResponses(Array(10).fill(step));
-      await host.send("c1", `create ${item.category}`, item.category);
+      await host.send("c1", `create ${name}`, name);
       await until(idle(host));
       expect(reviews).toBe(item.attempts);
-      expect(existsSync(join(work, item.category))).toBe(
-        item.category !== "deny",
-      );
+      expect(existsSync(join(work, name))).toBe(item.category !== "deny");
+      await until(() => host.metadata("c1").safety_unavailable === item.label);
     }
+    const stores = readdirSync(root, { recursive: true, encoding: "utf8" })
+      .filter((path) => /session\.sqlite(-wal)?$/.test(path))
+      .map((path) => readFileSync(join(root, path), "latin1"));
+    expect(stores.some((bytes) => bytes.includes("recurse.safety:"))).toBe(
+      true,
+    );
+    expect(stores.filter((bytes) => bytes.includes("sk-or-v1-")).length).toBe(
+      0,
+    );
+    expect(stores.filter((bytes) => /"status":\d/.test(bytes)).length).toBe(0);
     for (const phase of ["request", "reply"]) {
       const fault = fauxHost(join(root, phase), "faux/faux-1", true);
       fault.host.deps.log = host.deps.log;
@@ -116,7 +163,7 @@ test("no-verdict reviews log once without changing allow or denial outcomes", as
     const lines = readFileSync(sink.path, "utf8")
       .split("\n")
       .filter((line) => line.includes("event=safety_review_failed"));
-    expect(lines).toHaveLength(4);
+    expect(lines).toHaveLength(5);
     for (const [index, line] of lines.entries()) {
       expect(line).toContain("level=WARNING");
       expect(line).toContain("cid=c1");

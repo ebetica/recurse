@@ -1,24 +1,20 @@
 // Comments persist before the viewer closes, with crops and idempotency keys.
-// comment-lock.ts serializes upload/send/discard across tabs even on HTTP,
+// send-lock.ts serializes upload/send/discard across tabs even on HTTP,
 // without a lease expiring and exposing a paused send's crops to deletion.
 // Crop identity and recipient stay fixed; saved bytes are indexed by send.
 import { html, type TemplateResult } from "lit";
-import {
-  backendFor,
-  parseConversationId,
-  resolveUrl,
-} from "../backends/backend.js";
+import { backendFor, resolveUrl } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { state } from "../state.js";
-import { paint } from "../conversation/thread.js";
+import { addOptimisticPending, paint } from "../conversation/thread.js";
 import {
   deliverQueuedOperatorMessage,
   startOperatorSend,
 } from "../conversation/operator-send.js";
-import { addOptimisticPending } from "../pending-queue.js";
 import { refreshConv } from "../conversation/fetch.js";
 import { uploadBlob, type PreparedCrop } from "./comment-crops.js";
 import { readCrop, removeCrop, saveCrop } from "./crop-store.js";
-import { withCommentLock } from "./comment-lock.js";
+import { withBrowserSendLock } from "./send-lock/index.js";
 
 interface Crop {
   token: string;
@@ -195,7 +191,7 @@ function observeLock(send: Send, key: string): void {
   send.failed = false;
   let activity: string | undefined;
   let acquired = false;
-  void withCommentLock(key, async () => {
+  void withBrowserSendLock(key, async () => {
     acquired = true;
     try {
       const data: unknown = JSON.parse(localStorage.getItem(key) || "null");
@@ -352,7 +348,7 @@ async function withSendLock(
       persist(send);
       await work();
     };
-    await withCommentLock(PREFIX + send.data.clientId, locked);
+    await withBrowserSendLock(PREFIX + send.data.clientId, locked);
   } catch {
     send.failed = true;
   } finally {

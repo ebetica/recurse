@@ -8,9 +8,11 @@ import { generateTheme, themePalettes } from "../../src/themes.ts";
 import { checkFiles as colors } from "./color_check.ts";
 import { checkFiles as customProperties } from "./css_var_check.ts";
 import { checkFiles as fonts } from "./font_check.ts";
+import { checkImportGraph } from "./import_graph.ts";
 import { checkFiles as motion } from "./motion_check.ts";
 import { checkFiles as radii } from "./radius_check.ts";
 import { checkFiles as resizeBoxes } from "./resize_box_check.ts";
+import { checkFiles as routeHandlers } from "./route_check.ts";
 import { checkFiles as shadows } from "./shadow_check.ts";
 import { checkFiles as spacing } from "./space_check.ts";
 import { checkFiles as svg } from "./svg_check.ts";
@@ -125,12 +127,12 @@ const BANS: Array<{
     specs: ["src", "web"],
     pattern: /\brunSidebarScript\(/,
     owners: [
-      "web/sidebar/sandbox.ts",
+      "src/sidebar_script/engine/sandbox.ts",
       "web/sidebar-worker.ts",
       "src/sidebar_dry_run.worker.ts",
     ],
     reason:
-      "run sidebar scripts through a worker whose caller uses runRetryingTimeout from web/sidebar/retry.ts, so a timeout on a busy host runs once more",
+      "run sidebar scripts through a worker whose caller uses runRetryingTimeout from src/sidebar_script/index.ts, so a timeout on a busy host runs once more",
   },
 ];
 
@@ -243,9 +245,18 @@ for (const error of styleErrors) console.error(`ERROR: ${error}`);
 timed("web style", started, !styleErrors.length);
 
 started = performance.now();
-const banned = bans();
+const banned = bans().concat(
+  routeHandlers(
+    gitFiles("src")
+      .filter((file) => file.endsWith(".ts"))
+      .map((file) => ({ file, text: readFileSync(file, "utf8") })),
+  ),
+);
 for (const error of banned) console.error(`ERROR: ${error}`);
 timed("source bans", started, !banned.length);
+
+started = performance.now();
+timed("import graph", started, await checkImportGraph());
 
 for (const [name, command] of SCRIPTS) {
   started = performance.now();

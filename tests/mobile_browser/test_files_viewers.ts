@@ -602,6 +602,28 @@ export const tests: BrowserTest[] = [
       const card = page.locator(".files-card", { hasText: "tone.wav" });
       await card.waitFor();
       expect(await card.locator("audio, .files-preview-note").count()).toBe(0);
+      await page.locator(".files-card", { hasText: ".env" }).waitFor();
+      expect(
+        await page.locator(".files-card").evaluateAll((cards: any[]) =>
+          Object.fromEntries(
+            cards.map((item) => [
+              item.querySelector(".files-name").innerText,
+              item
+                .querySelector(".files-meta")
+                .innerText.split(" · ")
+                .filter((part: string) => !/^[\d.]+ [KM]?B$/.test(part))
+                .join(" · "),
+            ]),
+          ),
+        ),
+      ).toEqual({
+        "chart.svg": "SVG image · Published by agent",
+        "tone.wav": "WAV audio · Published by agent",
+        "clip.webm": "WEBM video · Published by agent",
+        "pixel.png": "PNG image · Published by agent",
+        Makefile: "Published by agent",
+        ".env": "Published by agent",
+      });
       expect(errors).toEqual([]);
     } finally {
       await context.close();
@@ -682,8 +704,8 @@ export const tests: BrowserTest[] = [
       const card = pane.locator(".files-card");
       await card.first().waitFor();
       expect(await card.count()).toBe(1);
-      expect(await renderedText(card.locator(".files-meta"))).toContain(
-        "3 versions",
+      expect(await renderedText(card.locator(".files-meta"))).toMatch(
+        /^MD file · .+ · 3 versions$/,
       );
       await card.getByRole("button", { name: "Open report.md" }).click();
       await pane

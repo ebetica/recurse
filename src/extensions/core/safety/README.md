@@ -2,7 +2,7 @@
 
 Automatic, model-based review for pi's side-effecting tools. Before `bash`, `write`, or `edit` executes, a separate safety model decides whether the exact action follows the user's intent and the bundled safety policy. The server chooses the reviewer and its fallbacks from the conversation's model (`trustedModelPolicy` in `src/config.ts`): the effort-level-1 model first, then routes for the conversation's provider. The host rebuilds this policy directly from Settings and the stored acting provider/model pair at each run, including after a conversation model change. Cached model-list policies never supply safety routes, and cached provider names containing `/` are rejected to prevent identity collisions. `model-policy.ts` resolves trusted candidates for every action; without a policy, the trusted active model reviews at low effort.
 
-Settings > Safety offers a Safety review model choice. “Same as level 1” preserves the default reviewer routes above. Other choices are shipped decision models available through current Settings sign-ins, never file-only or downloaded models. An explicit choice applies to every reviewed action, including path-only reviews, with no alternate-provider fallback. An unavailable saved choice fails open with a visible warning. Safe actions continue silently; denials return the reason to the agent.
+Settings → Models → Effort levels has a searchable Safety review model choice. “Same as level 1” preserves the default reviewer routes above. Other choices are shipped classifier models and chat models with fixed provider endpoints, available through current Settings sign-ins. File-defined and downloaded models are not offered; a saved pin to a configurable chat endpoint does not send a review request. The finder groups models under their sign-in route, including ChatGPT subscription and OpenAI API key, and the row shows the chosen model's route. Custom endpoints cannot replace built-in providers in the safety registry. An explicit choice applies to every reviewed action, including path-only reviews, with no alternate-provider fallback. An unavailable saved choice fails open with a visible warning. Safe actions continue silently; denials return the reason to the agent.
 
 ## Loading
 
@@ -10,7 +10,9 @@ The Durable host loads
 `src/extensions/core/safety/durable.ts` directly. Its dependencies are installed by
 `bun install --frozen-lockfile` at the checkout root; it is not a separate package.
 
-The extension uses existing Pi credentials. Reviewer selection, fallbacks, auth and completion use shipped models and explicit Settings custom providers, never `models.json`, `models-store.json` or cached listing metadata. These files cannot replace a shipped reviewer's metadata, remove its identity or discard a pin. Acting identity is frozen from the stored selection per run, so removing a file model cannot disable review. Default reviewer identity comes from shipped metadata, not cached list order. The default level-1 reviewer pin is preserved in Settings. Under default routing, if that pin cannot resolve in the trusted catalog, or the policy's acting identity is stale, review still tries the policy's resolvable trusted candidates. Path-only reviews also try those trusted routes if their preferred model is unavailable. An explicit Safety review model choice never uses these fallbacks. A missing Settings file, absent model key or null choice selects the default; malformed saved JSON, a non-string model or an empty model invalidates the policy instead. Invalid saved choices fail open with a visible warning and `safety_review_failed` log, without calling any reviewer. File/downloaded-only models never become reviewers. If no trusted candidate resolves, or the reviewer policy cannot be validated, the action is allowed with a visible warning explaining why review was skipped and what to change in Settings. Without a policy, only a trusted active model can review. Missing credentials, provider outages/timeouts and journal failures also fail open. Invalid optional JSON rules or unreadable JSON/Markdown rule files still block the run; this is separate from reviewer selection.
+The extension uses existing Pi credentials. Automatic fallback never switches
+between the ChatGPT subscription and OpenAI API key, even if the first OpenAI
+route in the reviewer order is unavailable. Reviewer selection, fallbacks, auth and completion use shipped models and explicit Settings custom providers, never `models.json`, `models-store.json` or cached listing metadata. These files cannot replace a shipped reviewer's metadata, remove its identity or discard a pin. Acting identity is frozen from the stored selection per run, so removing a file model cannot disable review. Default reviewer identity comes from shipped metadata, not cached list order. The default level-1 reviewer pin is preserved in Settings. Under default routing, if that pin cannot resolve in the trusted catalog, or the policy's acting identity is stale, review still tries the policy's resolvable trusted candidates. Path-only reviews also try those trusted routes if their preferred model is unavailable. An explicit Safety review model choice never uses these fallbacks. A missing Settings file, absent model key or null choice selects the default; malformed saved JSON, a non-string model or an empty model invalidates the policy instead. Invalid saved choices fail open with a visible warning and `safety_review_failed` log, without calling any reviewer. File/downloaded-only models never become reviewers. If no trusted candidate resolves, or the reviewer policy cannot be validated, the action is allowed with a visible warning explaining why review was skipped and what to change in Settings. Without a policy, only a trusted active model can review. Missing credentials, provider outages/timeouts and journal failures also fail open. Invalid optional JSON rules or unreadable JSON/Markdown rule files still block the run; this is separate from reviewer selection.
 
 ## How it works
 
@@ -31,8 +33,10 @@ Canonical evidence is append-only within one deterministic transcript generation
 Each live conversation owns an explicit reviewer response chain: one system
 prefix contains the bundled policy, additive safety rules (including pi-safety.md)
 and trusted acting identity. The reviewer receives no tool schemas or main-agent
-system prompt. The first user review contains all current evidence;
-later user reviews append only new evidence and the current working directory,
+system prompt. The first review sends all current evidence as append-stable
+messages of about 4 KiB, then the action in its own message, so a fresh chain or
+an oversized review that is not retained can reuse cached evidence; later
+user reviews append only new evidence and the current working directory,
 owned-process snapshot and proposed action. Each completed review retains the
 reviewer's actual assistant response, including provider response metadata. Prior
 reviews are evidence, never authorization for a later action. No server-side
@@ -49,7 +53,8 @@ Failed, aborted and malformed attempts never add partial turns; existing standal
 policy/format retries do not enter the chain. Trusted fallbacks cannot share a chain
 across models. The cache key remains an isolated per-conversation, per-model
 `pi-safety-` session id; requests send the whole bounded chain explicitly. Anthropic
-requests mark the latest user review as a cache breakpoint. Provider cache retention
+requests mark the latest user review as a cache breakpoint, and a fresh chain also
+marks its last evidence message. Provider cache retention
 is short and remains an external limit, so an expired chain can still be cold.
 
 The operator's prompt inspector shows the latest safety request and actual reply,
@@ -63,7 +68,7 @@ Authentication stays owned by the trusted model catalog and is never captured.
 
 Chat reviewers answer with exactly `OK` or `DENY: <reason>`. Decision models receive the same fixed policy and full current evidence with the live evaluation's typed-label adaptation: `allow` maps to OK; `credential_exposure`, `accidental_destruction`, `reviewer_instructions` and `operator_rule` map to DENY with the label as the displayed reason. Unknown or missing labels fail open. Classifier reviews are stateless: chat reviewer history never enters their requests, and changing the saved choice resets that history. Prompt inspection captures classification requests and replies too.
 
-The chat reviewer answers with exactly `OK` or `DENY: <reason>`. A malformed reply is retried once. Missing credentials, timeouts, provider failures, aborted responses, and a second malformed reply fail open with a stable, bounded warning category; journal capacity warnings say to explicitly compact the conversation, and raw provider text is never forwarded.
+The chat reviewer answers with exactly `OK` or `DENY: <reason>`. A malformed reply is retried once. Missing credentials, timeouts, provider failures, aborted responses, and a second malformed reply fail open with a stable, bounded warning category; journal capacity warnings say to explicitly compact the conversation, and raw provider text is never forwarded. A failed classifier review gets the same category as a chat reviewer failure, such as authentication or timeout. The outcome saved in the conversation keeps only the failure's stage, category, fixed summary and usage-limit flag, never the provider's error text. The operator-only prompt inspector still shows Pi's full reply.
 
 Bundled rules deny concrete secret disclosure, credential probing, broad cross-owner or system destruction, protected-service disruption, security weakening, harmful untrusted-code execution, malware or covert access, review evasion, and secrets written to inappropriate locations. Ordinary task-owned work—including reversible Git operations, build or scratch cleanup, direct-child deletion, and exact task-process signals—must not be denied.
 
@@ -100,7 +105,7 @@ No configuration is required. To add organization- or machine-specific rules, cr
 
 Custom rules are **additive** and cannot remove the built-in policy. The reviewer choice lives in server Settings (`safety-review-model.json`); it is agent-writable like other Settings and is rebuilt with the stored acting identity per run. The 60-second timeout, reviewed tools, and three-denial circuit breaker remain fixed.
 
-`decision.ts` owns the typed-label adaptation shared with the live evaluation. `decision-results.json` supplies Settings accident-test counts, false allows and median/p90 latency; absent records display “Not tested”. Run the live evaluator with `--update-results` to refresh complete-corpus measurements. A selected model with recorded false allows shows a warning that risky actions may pass.
+`decision.ts` owns the typed-label adaptation shared with the manual live evaluation.
 
 The next run reloads the optional JSON and Markdown rules asynchronously. Trusted
 workspace roots are also resolved asynchronously for each run; action targets

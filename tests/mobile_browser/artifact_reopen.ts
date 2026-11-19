@@ -21,9 +21,9 @@ async function observeRevision(page: Page, owner: string): Promise<void> {
       const response = await fetch(...args);
       if (new URL(response.url).pathname === "/api/tree" && response.ok) {
         const tree = await response.clone().json();
-        win.__artifactTreeRevision = tree.find(
-          (node: any) => node.id === agentId,
-        )?.artifacts_revision;
+        const rows = Array.isArray(tree) ? tree : (tree.changed ?? []);
+        const row = rows.find((node: any) => node.id === agentId);
+        if (row) win.__artifactTreeRevision = row.artifacts_revision;
       }
       return response;
     };

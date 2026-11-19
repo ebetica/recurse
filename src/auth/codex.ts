@@ -1,6 +1,6 @@
 // Settings stores ChatGPT OAuth as openai-codex, API keys as openai.
-// Routes never authenticate each other; selection removes the other credential.
-// Without stored selection, a Codex CLI login may import once.
+// The credentials are independent; neither route authenticates the other.
+// Codex CLI import runs only once, before any explicit OpenAI choice.
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 const defaultRandom = (size: number): Uint8Array =>
   new Uint8Array(randomBytes(size));
 import { parsePythonJson } from "../utils/py_compact_json";
-import type { AuthStatus } from "./anthropic";
+import { OPENAI_CHOICE_MARKER } from "./provider_store";
 import {
   AuthInputError,
   OAuthStore,
@@ -39,6 +39,11 @@ const NO_LOGIN =
 const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 
 type Json = Record<string, unknown>;
+
+interface OpenAIAuthStatus {
+  subscription: "signed_in" | "imported" | "detected" | null;
+  api_key: "saved" | "environment" | null;
+}
 
 export interface CodexOptions {
   store: OAuthStore;
@@ -134,22 +139,24 @@ export class CodexAuth {
   async setApiKey(key: string): Promise<void> {
     const trimmed = pyStrip(key ?? "");
     if (!trimmed) throw new AuthInputError("empty API key");
-    await this.store.replaceCredentials(
-      API_PROVIDER,
-      { type: "api_key", key: trimmed },
-      { remove: [PROVIDER] },
-    );
+    await this.store.replaceCredentials(API_PROVIDER, {
+      type: "api_key",
+      key: trimmed,
+    });
   }
 
-  /** The Settings-selected method; a stored choice overrides env fallback. */
-  async storedMethod(data?: Json): Promise<"subscription" | "api_key" | null> {
-    const auth = data ?? (await this.store.readAuth());
-    const subscription = auth[PROVIDER];
-    if (isRecord(subscription) && subscription.type === "oauth")
-      return "subscription";
-    const direct = auth[API_PROVIDER];
-    if (isRecord(direct) && direct.type === "api_key") return "api_key";
-    return null;
+  private async storedSignIns() {
+    const data = await this.store.readAuth();
+    const subscription = data[PROVIDER];
+    const apiKey = data[API_PROVIDER];
+    return {
+      subscription:
+        isRecord(subscription) && subscription.type === "oauth"
+          ? subscription
+          : null,
+      apiKey: isRecord(apiKey) && apiKey.type === "api_key",
+      cliImportBlocked: Object.hasOwn(data, OPENAI_CHOICE_MARKER),
+    };
   }
 
   /** Codex CLI's auth.json tokens mapped to Pi's openai-codex shape. */
@@ -188,13 +195,11 @@ export class CodexAuth {
     };
   }
 
-  async ambientCodexLogin(): Promise<boolean> {
-    return (await this.codexCliCredential()) !== null;
-  }
-
-  /** Import Codex CLI OAuth when neither OpenAI route is selected. */
+  /** Import Codex CLI OAuth once, only with no saved OpenAI choice. */
   async importCodexCliLogin(): Promise<boolean> {
-    if ((await this.storedMethod()) !== null) return false;
+    const { subscription, apiKey, cliImportBlocked } =
+      await this.storedSignIns();
+    if (cliImportBlocked || subscription || apiKey) return false;
     const credential = await this.codexCliCredential();
     if (credential === null) return false;
     return this.store.replaceCredentials(PROVIDER, credential, {
@@ -202,53 +207,46 @@ export class CodexAuth {
     });
   }
 
-  /** Pi providers enabled by the selected OpenAI credential. */
+  /** Pi providers enabled by saved or ambient credentials. */
   async modelProviders(): Promise<Set<string>> {
-    const method = await this.storedMethod();
-    if (method === "subscription") return new Set([PROVIDER]);
-    if (method === "api_key" || this.options.ambient.OPENAI_API_KEY)
-      return new Set([API_PROVIDER]);
-    if (await this.ambientCodexLogin()) return new Set([PROVIDER]);
-    return new Set();
+    const { subscription, api_key } = await this.authStatus();
+    const providers = new Set<string>();
+    if (subscription) providers.add(PROVIDER);
+    if (api_key) providers.add(API_PROVIDER);
+    return providers;
   }
 
-  async authStatus(): Promise<AuthStatus> {
-    const data = await this.store.readAuth();
-    const method = await this.storedMethod(data);
-    if (method === "subscription") {
-      const imported = await this.codexCliCredential();
-      const credential = data[PROVIDER];
-      const detected =
-        imported !== null &&
-        isRecord(credential) &&
-        credential.refresh === imported.refresh;
+  async authStatus(): Promise<OpenAIAuthStatus> {
+    const { subscription, apiKey, cliImportBlocked } =
+      await this.storedSignIns();
+    if (subscription || apiKey) {
+      const imported = subscription ? await this.codexCliCredential() : null;
       return {
-        configured: true,
-        type: "oauth",
-        label: detected
-          ? "Codex CLI login (detected)"
-          : "ChatGPT subscription (OAuth)",
+        subscription: subscription
+          ? imported && subscription.refresh === imported.refresh
+            ? "imported"
+            : "signed_in"
+          : null,
+        api_key: apiKey ? "saved" : null,
       };
     }
-    if (method === "api_key")
-      return { configured: true, type: "api_key", label: "OpenAI API key" };
     if (this.options.ambient.OPENAI_API_KEY)
-      return {
-        configured: true,
-        type: "api_key",
-        label: "OpenAI API key (environment)",
-      };
-    if (await this.ambientCodexLogin())
-      return {
-        configured: true,
-        type: "ambient",
-        label: "Codex CLI login (detected)",
-      };
-    return { configured: false };
+      return { subscription: null, api_key: "environment" };
+    return {
+      subscription:
+        !cliImportBlocked && (await this.codexCliCredential())
+          ? "detected"
+          : null,
+      api_key: null,
+    };
   }
 
   async logout(): Promise<void> {
-    await this.store.removeCredentials([PROVIDER, API_PROVIDER]);
+    await this.store.removeCredentials([PROVIDER]);
+  }
+
+  async removeApiKey(): Promise<void> {
+    await this.store.removeCredentials([API_PROVIDER]);
   }
 
   /** Persist PKCE state; return the authorize URL and the redirect address
@@ -303,7 +301,7 @@ export class CodexAuth {
     };
   }
 
-  async completeLogin(pasted: string): Promise<AuthStatus> {
+  async completeLogin(pasted: string): Promise<OpenAIAuthStatus> {
     const [verifier, code] = await this.verifierAndCode(pasted);
     const token = await (this.options.postForm ?? postForm)(
       this.tokenUrl,
@@ -312,7 +310,7 @@ export class CodexAuth {
     return this.storeFromToken(token);
   }
 
-  private async storeFromToken(token: Json): Promise<AuthStatus> {
+  private async storeFromToken(token: Json): Promise<OpenAIAuthStatus> {
     const access = token.access_token;
     const expiresIn = token.expires_in;
     if (
@@ -333,17 +331,13 @@ export class CodexAuth {
     const expires = Math.trunc(
       (this.options.nowMs ?? Date.now)() + Number(expiresIn) * 1000,
     );
-    await this.store.replaceCredentials(
-      PROVIDER,
-      {
-        type: "oauth",
-        refresh: token.refresh_token,
-        access,
-        expires,
-        accountId: account,
-      },
-      { remove: [API_PROVIDER] },
-    );
+    await this.store.replaceCredentials(PROVIDER, {
+      type: "oauth",
+      refresh: token.refresh_token,
+      access,
+      expires,
+      accountId: account,
+    });
     await this.store.clearPending(PENDING_FILE_NAME);
     return this.authStatus();
   }
@@ -363,7 +357,7 @@ export class CodexAuth {
     return this.localExchangeCommands(code, verifier);
   }
 
-  async completeLoginWithToken(tokenText: string): Promise<AuthStatus> {
+  async completeLoginWithToken(tokenText: string): Promise<OpenAIAuthStatus> {
     await this.pending();
     return this.storeFromToken(parseTokenJson(tokenText, RESTART_HINT));
   }

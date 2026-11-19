@@ -8,6 +8,7 @@ export const tests: BrowserTest[] = [
   // Regression: #3249 usage must name the served model. (also #2408 a recorded pre-clear response must not end the wait.)
   async function test_recorded_stream_changed_served_model_chip(browser, base) {
     const recording = await loadRecording();
+    const reasoningValues = /\b(off|minimal|low|medium|high|xhigh|max)\b/i;
     const page = await browser.newPage({
       viewport: { width: 412, height: 915 },
       isMobile: true,
@@ -133,7 +134,7 @@ export const tests: BrowserTest[] = [
         name: "Provider model downgrade",
       });
       await popover.getByText(explanation, { exact: true }).waitFor();
-      expect(await popover.innerText()).toContain(explanation);
+      await browserExpect(popover).not.toContainText(reasoningValues);
       await popover.locator(".model-response-row time").waitFor();
       expect(await chip.getAttribute("class")).toContain("seen");
       await page.keyboard.press("Escape");
@@ -210,6 +211,9 @@ export const tests: BrowserTest[] = [
       expect(await rows.count()).toBe(3);
       expect(await rows.locator("time").count()).toBe(3);
       expect(await rows.locator(".model-response-tokens").count()).toBe(3);
+      await browserExpect(
+        rows.filter({ hasText: reasoningValues }),
+      ).toHaveCount(0);
       expect((await rows.allInnerTexts()).join(" ")).not.toContain(
         "requested unknown",
       );
@@ -271,6 +275,17 @@ export const tests: BrowserTest[] = [
       expect(controlsAfter).toEqual(controlsBefore);
       const servedExplanation =
         "Model changed: requested Faux Model → served Served model";
+      await page.locator("#downgrade-chip").click();
+      await popover.getByText(servedExplanation, { exact: true }).waitFor();
+      await browserExpect(popover).not.toContainText(/Reasoning changed/);
+      await browserExpect(popover).not.toContainText(reasoningValues);
+      await page.keyboard.press("Escape");
+      await page.locator("#input").fill("Reply with REASONING_MISMATCH_OK.");
+      await page.locator("#send").click();
+      await page
+        .locator(".msg.assistant")
+        .filter({ hasText: "REASONING_MISMATCH_OK" })
+        .waitFor();
       for (const [view, appearance] of [
         [page, "dark"],
         [desktop, "dark"],
@@ -295,19 +310,22 @@ export const tests: BrowserTest[] = [
             path: `${iconShots}/downgrade-icon-${view.viewportSize()!.width}-${appearance}.png`,
           });
         await warning.click();
-        await view
-          .getByRole("dialog", { name: "Provider model downgrade" })
-          .getByText(servedExplanation, { exact: true })
-          .waitFor();
+        const details = view.getByRole("dialog", {
+          name: "Provider model downgrade",
+        });
+        await details.getByText(servedExplanation, { exact: true }).waitFor();
+        await details.getByText("Reasoning changed", { exact: true }).waitFor();
+        await browserExpect(details).not.toContainText(reasoningValues);
         await view.keyboard.press("Escape");
         await view.locator(".turn-tokens.activity-usage").last().click();
         await browserExpect(
           view.locator("#prompt-body .turn-usage-selector"),
         ).toHaveText("Conversation model · Served model");
         await view.locator("#prompt-body .turn-usage-bar").waitFor();
-        expect(
-          await view.locator("#prompt-body .model-response-row").innerText(),
-        ).toContain(servedExplanation);
+        const row = view.locator("#prompt-body .model-response-row");
+        await browserExpect(row).toContainText(servedExplanation);
+        await browserExpect(row).toContainText("Reasoning changed");
+        await browserExpect(row).not.toContainText(reasoningValues);
         const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
         if (shots)
           await view.screenshot({
@@ -361,24 +379,22 @@ export const tests: BrowserTest[] = [
         };
         const ladderGate = gate();
         const namesGate = gate();
-        let ladder: { models: { id: string; label: string }[] } | undefined;
+        let ladderName: string | undefined;
         await page.route(
           `${base}api/settings/effort-levels**`,
           async (route) => {
             await ladderGate.opened;
             const body = await (await route.fetch()).json();
-            ladder ??= body;
-            await route.fulfill({
-              json: {
-                ...body,
-                models: known
-                  ? body.models
-                  : body.models.map((model: { id: string }) => ({
-                      ...model,
-                      label: model.id,
-                    })),
-              },
-            });
+            const models = known
+              ? body.models
+              : body.models.map((model: { id: string }) => ({
+                  ...model,
+                  label: model.id,
+                }));
+            ladderName = models.find(
+              (model: { id: string }) => model.id === body.levels["3"].model,
+            )?.label;
+            await route.fulfill({ json: { ...body, models } });
           },
         );
         await page.route(`${base}api/models**`, async (route) => {
@@ -397,10 +413,15 @@ export const tests: BrowserTest[] = [
             name: "Provider model downgrade",
           });
           await popover.waitFor();
-          const trigger = page.locator("#model-trigger .model-name");
+          const trigger = page.locator("#model-trigger");
+          const name = trigger.locator(".model-name");
           const firstLine = () =>
             popover.locator(".model-response-warning").first().innerText();
-          expect(await trigger.innerText()).toBe("Effort");
+          await browserExpect(name).toHaveText("Effort");
+          await browserExpect(trigger).toHaveAttribute(
+            "aria-label",
+            "Level 3: Effort: choose effort level",
+          );
           expect(await firstLine()).toBe(
             "Model changed: requested … → served …",
           );
@@ -414,11 +435,11 @@ export const tests: BrowserTest[] = [
           );
           ladderGate.open();
           await ladderRead;
-          const names = ladder!.models.map((model) =>
-            known ? model.label : model.id,
-          );
-          await page.waitForFunction(
-            `${JSON.stringify(names)}.includes(document.querySelector("#model-trigger .model-name")?.textContent)`,
+          expect(ladderName).toBeDefined();
+          await browserExpect(name).toHaveText(ladderName!);
+          await browserExpect(trigger).toHaveAttribute(
+            "aria-label",
+            `Level 3: ${ladderName}: choose effort level`,
           );
           expect(await firstLine()).toBe(
             "Model changed: requested … → served …",

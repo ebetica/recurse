@@ -1,8 +1,9 @@
-// The thread scroller's only writer. Every offset the app causes is recorded;
-// any other offset (scrollbar, find-in-page, scripts) is the reader's and
-// releases the thread's holds. Hidden threads record their reset. Modeled by
+// The thread's only offset writer and its batched scroll/edge controls.
+// App offsets are recorded; other offsets (scrollbar, find-in-page, scripts)
+// release the thread's holds. Hidden threads record their reset. Modeled by
 // specs/tla/ViewportHolds.tla; dom.ts types the scroller read-only elsewhere.
-import { scrollEl as readOnly } from "../dom.js";
+import { msgsEl, scrollBtn, scrollEl as readOnly } from "../dom.js";
+import { BOTTOM_FOLLOW_THRESHOLD_PX } from "./scroll-anchor.js";
 
 const scrollEl = readOnly as unknown as HTMLElement;
 
@@ -85,3 +86,39 @@ export function threadScrolledByReader(): boolean {
 scrollEl.addEventListener("scrollend", () => (jumpTarget = null), {
   passive: true,
 });
+
+let scrollFrame = 0;
+let pendingBottom = false;
+export function updateScrollBtn(): void {
+  if (scrollFrame) return;
+  scrollFrame = requestAnimationFrame(() => {
+    scrollFrame = 0;
+    const height = scrollEl.scrollHeight;
+    const viewport = scrollEl.clientHeight;
+    const top = pendingBottom
+      ? Math.max(0, height - viewport)
+      : scrollEl.scrollTop;
+    const fromBottom = height - top - viewport;
+    if (pendingBottom) writeThreadScroll(top);
+    pendingBottom = false;
+    scrollBtn.classList.toggle(
+      "visible",
+      fromBottom > BOTTOM_FOLLOW_THRESHOLD_PX,
+    );
+    scrollEl.classList.toggle("content-above", top > 1);
+    scrollEl.classList.toggle("content-below", fromBottom > 1);
+  });
+}
+/** Coalesces bottom following and edge controls into one read/write batch. */
+export function followThreadBottom(): void {
+  pendingBottom = true;
+  updateScrollBtn();
+}
+export function cancelThreadBottom(): void {
+  pendingBottom = false;
+}
+scrollEl.addEventListener("scroll", updateScrollBtn, { passive: true });
+// Disclosures/composer growth change edge fades without scroll events.
+const edgeObserver = new ResizeObserver(updateScrollBtn);
+edgeObserver.observe(scrollEl, { box: "content-box" });
+edgeObserver.observe(msgsEl, { box: "content-box" });

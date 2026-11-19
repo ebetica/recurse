@@ -420,7 +420,7 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
-  // Regression: #3103 keeps submitted comments in view; preserves #2966 downloads, #2862 drafts, #2858 gestures, #2859 standalone uploads and #2978 compact labels.
+  // Regression: #3103 keeps submitted comments in view; #3510 pans late holds; preserves #2966 downloads, #2862 drafts, #2858 gestures, #2859 standalone uploads and #2978 compact labels.
   async function test_published_images_touch_gallery(browser, base) {
     const fixture = (await postFixture(
       base,
@@ -537,19 +537,25 @@ export const tests: BrowserTest[] = [
     const shown = () => detail.getAttribute("aria-label");
     const touch = await context.newCDPSession(page);
     const dragBox = async (from: { x: number; y: number }, hold = false) => {
+      const start = Date.now() / 1000;
+      const at = (seconds: number) =>
+        hold ? {} : { timestamp: start + seconds };
       await touch.send("Input.dispatchTouchEvent", {
         type: "touchStart",
         touchPoints: [from],
+        ...at(0),
       });
       if (hold) await viewer.locator("mark.files-box-start").waitFor();
       for (const offset of [10, 30])
         await touch.send("Input.dispatchTouchEvent", {
           type: "touchMove",
           touchPoints: [{ x: from.x + offset, y: from.y + offset }],
+          ...at(offset / 1000),
         });
       await touch.send("Input.dispatchTouchEvent", {
         type: "touchEnd",
         touchPoints: [],
+        ...at(0.05),
       });
     };
     const doubleTap = async (at: { x: number; y: number }) => {
@@ -685,6 +691,30 @@ export const tests: BrowserTest[] = [
     const beforeOneFinger = await transform();
     await dragBox(center);
     expect(await transform()).not.toBe(beforeOneFinger);
+    const beforeLateHold = await transform();
+    const zoomArea = (await viewer
+      .locator(".image-zoom-viewport")
+      .boundingBox())!;
+    expect(zoomArea.y).toBeGreaterThan(8);
+    const pressed = Date.now() / 1000;
+    await touch.send("Input.dispatchTouchEvent", {
+      type: "touchStart",
+      touchPoints: [center],
+      timestamp: pressed,
+    });
+    await viewer.locator("mark.files-box-start").waitFor();
+    await touch.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x: center.x, y: zoomArea.y - 4 }],
+      timestamp: pressed + 0.03,
+    });
+    expect(await frame.locator("mark.report-cbox").count()).toBe(0);
+    await touch.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+      timestamp: pressed + 0.05,
+    });
+    expect(await transform()).not.toBe(beforeLateHold);
     expect(await frame.locator("mark.report-cbox").count()).toBe(0);
     expect(await shown()).toBe(order[start]);
     const heldTransform = await transform();

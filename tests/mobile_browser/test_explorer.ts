@@ -4,6 +4,15 @@ import { retire } from "../../src/utils/trash";
 import type { Page, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { waitForPaneTransition } from "./pane_layout";
+import {
+  complexHtml,
+  expectHtmlSourceFallback,
+  expectInlineSeries,
+  expectPhoneTapArea,
+  htmlModes,
+  watchExplorerPreview,
+  watchResourceHints,
+} from "./fixtures/html_preview";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -27,6 +36,7 @@ async function openExplorer(page: Page, width: number): Promise<void> {
 
 export const tests: BrowserTest[] = [
   async function explorer_pages_previews_and_fuzzy_search(browser, base, data) {
+    await using hints = await watchResourceHints();
     const temporary = await mkdtemp(join(data, "data", "browser-explorer-"));
     const root = join(
       temporary,
@@ -46,15 +56,30 @@ export const tests: BrowserTest[] = [
           500,
         );
       await writeFile(join(root, "src", "application.ts"), source);
-      const htmlSource = `<h1>Explorer HTML preview</h1>
-<p>Offline file content</p>
-<script>parent.__explorerHtmlRan = true; fetch('${base}explorer-html-probe');</script>
-<img src="${base}explorer-html-probe" onerror="parent.__explorerHtmlRan = true">
-<iframe src="${base}explorer-html-probe"></iframe>
-<a href="${base}explorer-html-probe">External link</a>
-<form action="${base}explorer-html-probe"><input name="probe"></form>
-<style>body { background: red; }</style>`;
-      await writeFile(join(root, "src", "page.html"), htmlSource);
+      const probe = `${base}explorer-html-probe/`;
+      let htmlSource = `<!doctype html><html><head>
+<link rel="preconnect" href="${hints.origin}">
+<style>h1 { color: #156fa1; } #series { display: flex; gap: 1em; }</style></head><body>
+<h1>Explorer HTML preview</h1>
+<div id="series"><div>Revenue</div><div>Costs</div></div>
+<p id="summary">Offline file content</p>
+<img src="${probe}image.png">
+<iframe title="Nested preview" src="${probe}frame.html"></iframe>
+<form action="${probe}form"><button type="submit">Submit fixture</button></form>
+<script>
+const summary = document.getElementById('summary');
+summary.textContent = 'Chart data prepared';
+try { summary.dataset.parent = parent.document.title; }
+catch { summary.dataset.parent = 'blocked'; }
+document.forms[0].querySelector('button').onclick = () => { summary.dataset.formAttempt = 'done'; };
+</script>
+${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
+<p>End of file</p></body></html>`;
+      const htmlPath = join(root, "src", "page.html");
+      await writeFile(htmlPath, htmlSource);
+      const complexPath = "src/z-complex.html";
+      const complex = complexHtml(hints.origin);
+      await writeFile(join(root, complexPath), complex);
       const pickedPath = "src/pick `quoted`.ts";
       await writeFile(join(root, pickedPath), "export const picked = true;\n");
       await writeFile(
@@ -101,12 +126,10 @@ export const tests: BrowserTest[] = [
           await context.grantPermissions(["clipboard-read", "clipboard-write"]);
         try {
           const page = await context.newPage();
-          const errors = captureErrors(page);
+          hints.watch(page);
+          const boundary = await watchExplorerPreview(page, probe);
           const requests: string[] = [];
-          const htmlRequests: string[] = [];
           page.on("request", (request) => {
-            if (request.url().includes("explorer-html-probe"))
-              htmlRequests.push(request.url());
             if (request.url().includes(`/conversations/${fixture.agent}/tree`))
               requests.push(request.url());
           });
@@ -395,15 +418,75 @@ export const tests: BrowserTest[] = [
                 (globalThis as any).navigator.clipboard.readText(),
               ),
             ).toBe(`${root}/src/application.ts`);
-            const nextText = await readFile(join(root, nextFile), "utf8");
-            await page.keyboard.press("]");
-            const next = fileFor(nextFile);
-            await next
-              .locator(".explorer-source", { hasText: nextText.trim() })
-              .waitFor();
-            expect(await next.locator(".explorer-source").textContent()).toBe(
-              nextText,
+            const htmlTail = (url: Pick<URL, "pathname" | "searchParams">) =>
+              url.pathname.endsWith("/tree/file") &&
+              url.searchParams.get("path")?.endsWith("/page.html") === true &&
+              url.searchParams.has("offset");
+            const release = Promise.withResolvers<void>();
+            await page.route(htmlTail, async (route) => {
+              await release.promise;
+              await route.continue();
+            });
+            const conflict = page.waitForResponse((response) =>
+              htmlTail(new URL(response.url())),
             );
+            const next = fileFor(nextFile);
+            try {
+              await Promise.all([
+                page.waitForRequest((request) =>
+                  htmlTail(new URL(request.url())),
+                ),
+                page.keyboard.press("]"),
+              ]);
+              await browserExpect(
+                next.getByText("Loading preview…", { exact: true }),
+              ).toBeVisible();
+              await browserExpect(
+                next.getByRole("button", { name: "Source", exact: true }),
+              ).toHaveCount(0);
+              await browserExpect(next.locator(".explorer-source")).toHaveCount(
+                0,
+              );
+              await browserExpect(next.locator(".report-bar")).toHaveCount(0);
+              await browserExpect(next.locator("iframe")).toHaveCount(0);
+              htmlSource = htmlSource.replace(
+                "<p>End of file",
+                "<p>Changed between reads</p><p>End of file",
+              );
+              await writeFile(htmlPath, htmlSource);
+            } finally {
+              release.resolve();
+            }
+            expect((await conflict).status()).toBe(409);
+            await browserExpect(next.getByRole("alert")).toContainText(
+              "the file changed; reopen it",
+            );
+            await browserExpect(next.locator("iframe")).toHaveCount(0);
+            await page.unroute(htmlTail);
+            await next
+              .getByRole("button", { name: "Retry", exact: true })
+              .click();
+            const nextRendered = next.frameLocator(
+              ".explorer-html-preview iframe",
+            );
+            await nextRendered
+              .getByRole("heading", { name: "Explorer HTML preview" })
+              .waitFor();
+            await nextRendered
+              .getByText("Changed between reads", { exact: true })
+              .waitFor();
+            await next
+              .getByRole("button", { name: "Source", exact: true })
+              .press("Enter");
+            const nextSource = next.locator(".explorer-source code");
+            await nextSource.waitFor();
+            expect(await nextSource.textContent()).toBe(htmlSource);
+            await next
+              .getByRole("button", { name: "Preview", exact: true })
+              .press("Enter");
+            await nextRendered
+              .getByText("End of file", { exact: true })
+              .waitFor();
             await browserExpect(next.locator(".explorer-filename")).toHaveText(
               join(root, nextFile),
             );
@@ -805,16 +888,50 @@ export const tests: BrowserTest[] = [
           await pane
             .locator(".explorer-row", { hasText: "application.ts" })
             .waitFor();
-          await pane.locator(".explorer-row", { hasText: "page.html" }).click();
+          const complexPane = fileFor(complexPath);
+          await expectHtmlSourceFallback(
+            complexPane,
+            complexPane.locator(".explorer-source"),
+            complex,
+            () =>
+              tree.locator(`.explorer-row[data-path="${complexPath}"]`).click(),
+          );
+          if (width === 1280)
+            await page
+              .getByRole("button", {
+                name: "Close z-complex.html",
+                exact: true,
+              })
+              .click();
+          else
+            await complexPane
+              .locator(".explorer-filebar")
+              .getByRole("button", { name: "Files", exact: true })
+              .click();
+          hints.expectQuiet();
+          await tree
+            .locator('.explorer-row[data-path="src/page.html"]')
+            .click();
           pane = fileFor("src/page.html");
           const htmlCode = pane.locator(".explorer-source");
+          const rendered = pane.frameLocator(".explorer-html-preview iframe");
+          await rendered.getByText("End of file", { exact: true }).waitFor();
+          const { source: sourceMode, preview: previewMode } = htmlModes(pane);
+          await browserExpect(previewMode).toHaveAttribute(
+            "aria-pressed",
+            "true",
+          );
+          if (width === 412) {
+            await expectPhoneTapArea(sourceMode);
+            await expectPhoneTapArea(previewMode);
+          }
+          await sourceMode.click();
           await htmlCode.waitFor();
           expect(await htmlCode.textContent()).toBe(htmlSource);
-          expect(
-            await pane
-              .getByRole("button", { name: "Source", exact: true })
-              .getAttribute("aria-pressed"),
-          ).toBe("true");
+          await browserExpect(sourceMode).toHaveAttribute(
+            "aria-pressed",
+            "true",
+          );
           expect(
             await pane.locator(".explorer-html-preview iframe").count(),
           ).toBe(0);
@@ -835,18 +952,28 @@ export const tests: BrowserTest[] = [
           ).toBe(htmlNote);
           const sourceNode = await htmlCode.elementHandle();
           const beforeToggle = requests.length;
-          await pane
-            .getByRole("button", { name: "Preview", exact: true })
-            .click();
+          await previewMode.click();
           const frame = pane.locator(".explorer-html-preview iframe");
-          const rendered = pane.frameLocator(".explorer-html-preview iframe");
           await rendered
             .getByRole("heading", {
               name: "Explorer HTML preview",
               exact: true,
             })
             .waitFor();
-          expect(await frame.getAttribute("sandbox")).toBe("");
+          await expectInlineSeries(rendered);
+          const summary = rendered.getByText("Chart data prepared");
+          await browserExpect(summary).toHaveAttribute(
+            "data-parent",
+            "blocked",
+          );
+          await browserExpect(
+            rendered.locator("link[rel=preconnect]"),
+          ).toHaveCount(0);
+          await browserExpect(
+            rendered.getByTitle("Nested preview"),
+          ).toHaveAttribute("src", `${probe}frame.html`);
+          await boundary.submitForm(rendered);
+          expect(await frame.getAttribute("sandbox")).toBe("allow-scripts");
           expect(await frame.getAttribute("referrerpolicy")).toBe(
             "no-referrer",
           );
@@ -857,22 +984,12 @@ export const tests: BrowserTest[] = [
                 element.contentDocument === null,
             ),
           ).toBe(true);
-          expect(
-            await rendered
-              .locator("script, iframe, form, input, img, [href], [onerror]")
-              .count(),
-          ).toBe(0);
-          expect(
-            await rendered
-              .locator("style", { hasText: "background: red" })
-              .count(),
-          ).toBe(0);
-          expect(
-            await page.evaluate("window.__explorerHtmlRan"),
-          ).toBeUndefined();
-          expect(htmlRequests).toEqual([]);
+          boundary.expectNoRequests();
           expect(await htmlCode.isVisible()).toBe(false);
           expect(await pane.locator(".report-comment").isVisible()).toBe(false);
+          expect(requests).toHaveLength(beforeToggle);
+          const beforeHtmlReopen = requests.length;
+          await previewMode.focus();
           await page.keyboard.press("Escape");
           await pane.waitFor({ state: "detached" });
           await openExplorer(page, width);
@@ -889,9 +1006,15 @@ export const tests: BrowserTest[] = [
           await page.screenshot({
             path: join(shots, `${width}-html-preview.png`),
           });
-          await pane
-            .getByRole("button", { name: "Source", exact: true })
-            .click();
+          const afterReopen = requests.length;
+          expect(requests.slice(beforeHtmlReopen, afterReopen)).toEqual(
+            width === 1280
+              ? [
+                  `${base}api/conversations/${fixture.agent}/tree/file?path=${encodeURIComponent("src/page.html")}`,
+                ]
+              : [],
+          );
+          await sourceMode.click();
           await pane.locator(".report-comment").waitFor();
           expect(await sourceNode!.evaluate((node) => node.isConnected)).toBe(
             true,
@@ -903,9 +1026,7 @@ export const tests: BrowserTest[] = [
           expect(
             await pane.locator(".report-comment textarea").inputValue(),
           ).toBe(htmlNote);
-          expect(requests).toHaveLength(
-            beforeToggle + (width === 1280 ? 1 : 0),
-          );
+          expect(requests).toHaveLength(afterReopen);
           await pane.locator(".report-comment").scrollIntoViewIfNeeded();
           await page.screenshot({
             path: join(shots, `${width}-html-source-comments.png`),
@@ -1185,7 +1306,9 @@ export const tests: BrowserTest[] = [
           await composer.press("Escape");
           expect(await composer.inputValue()).toBe("#onlyhere");
           expect(await fileMenu.isVisible()).toBe(false);
-          expect(errors).toEqual([]);
+          boundary.expectNoRequests();
+          boundary.expectDenials();
+          hints.expectQuiet();
         } finally {
           await context.close();
         }

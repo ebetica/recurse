@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -13,6 +13,8 @@ import { setSafetyReviewOff } from "../../src/extensions/core/safety/durable";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
 import { appWorld } from "./web_app_support";
 import { fauxHost, until } from "./fixtures/durable_host/host";
+import { runDryRun } from "../../src/sidebar_script";
+import { LatestRun, type ScriptResult } from "../../src/sidebar_script/index";
 
 type Rec = Record<string, any>;
 
@@ -296,3 +298,45 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
     rmSync(root, { recursive: true, force: true });
   }
 }, 60_000);
+
+// Regression: #3453 newer sidebar input ends a timed-out run's retry pause
+test("newer sidebar input ends a timed-out script run's retry pause", async () => {
+  const slow = "export default () => { for (;;) {} }";
+  const quick = "export default () => []";
+  const ran: string[] = [];
+  const reported: [string, ScriptResult][] = [];
+  let timedOut = () => {};
+  const slowAnswered = new Promise<void>((resolve) => (timedOut = resolve));
+  const timers = jest as unknown as {
+    useFakeTimers(): void;
+    useRealTimers(): void;
+    getTimerCount(): number;
+  };
+  timers.useFakeTimers();
+  try {
+    const runs = new LatestRun<string>(
+      async (script) => {
+        ran.push(script);
+        const result = await runDryRun(script, [], 0);
+        if (script === slow) timedOut();
+        return result;
+      },
+      (script, result) => reported.push([script, result]),
+    );
+    runs.push(slow);
+    await slowAnswered;
+    await new Promise((resolve) => setImmediate(resolve));
+    expect({ ran, pending: timers.getTimerCount() }).toEqual({
+      ran: [slow],
+      pending: 1,
+    });
+    runs.push(quick);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(ran).toEqual([slow, quick]);
+    timers.useRealTimers();
+    await runs.finished;
+    expect(reported).toEqual([[quick, { sections: [] }]]);
+  } finally {
+    timers.useRealTimers();
+  }
+});

@@ -1168,14 +1168,17 @@ test.each(["complete", "partial"])(
       );
       expect(reviewTurns.map((message) => message.role)).toEqual([
         "user",
+        "user",
         "assistant",
         "user",
       ]);
-      expect(reviewTurns[0]!.content[0]!.text).toBe(
-        beforeMessages[0]!.content[0]!.text!,
+      const texts = (messages: ReviewBody["messages"]) =>
+        messages.map((message) => message.content.map((block) => block.text));
+      expect(texts(reviewTurns.slice(0, 2))).toEqual(
+        texts(beforeMessages.filter((message) => message.role !== "system")),
       );
       expect(
-        reviewTurns[1]!.content.find((block) => block.type === "text")!.text,
+        reviewTurns[2]!.content.find((block) => block.type === "text")!.text,
       ).toBe("OK");
       expect(JSON.stringify(requests[1]!.body)).not.toContain(
         "literal-header-private-marker",

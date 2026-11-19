@@ -11,18 +11,18 @@ import { isDeepStrictEqual } from "node:util";
 import { ptr } from "bun:ffi";
 import { atomicJson, openPinnedLockFile, readJson } from "./fs_utils";
 import { AgentStore, AgentClosed } from "./agent_store";
-import {
-  Config,
-  EFFORT_MIN_LEVEL,
-  EFFORT_MAX_LEVEL,
-  THINKING_LEVELS,
-  Thinking,
-} from "../config";
+import { Config } from "../config";
 import { flockExclusive } from "../utils/flock";
 import { libc } from "../utils/libc";
 import { slowSpan } from "../observability/slow_span";
 import { pyCompactJson } from "../utils/py_compact_json";
-import { applyTagChange, type TagChange } from "./conversation_tags";
+import { applyTagChange, type TagChange } from "../agent_metadata/index";
+import {
+  conversationModelSettings,
+  migrateConversationModelChoices,
+  validLevel,
+} from "./conversation_model_choices";
+export { validLevel } from "./conversation_model_choices";
 
 export type ConversationRecord = Record<string, unknown>;
 const isRecord = (value: unknown): value is ConversationRecord =>
@@ -45,6 +45,7 @@ export const DURABLE_METADATA_KEYS: ReadonlySet<string> = new Set([
   "model",
   "effort",
   "level",
+  "model_choice_version",
   "pending_model",
   "workdir",
   "muted",
@@ -277,15 +278,6 @@ export function activeRunId(record: ConversationRecord | null): string | null {
     ? "legacy:running"
     : null;
 }
-export function validLevel(value: unknown): number | null {
-  return typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= EFFORT_MIN_LEVEL &&
-    value <= EFFORT_MAX_LEVEL
-    ? value
-    : null;
-}
-
 const missing = (error: unknown): boolean =>
   error instanceof Error && "code" in error && error.code === "ENOENT";
 const unreadable = Symbol("unreadable");
@@ -754,6 +746,26 @@ export class ConversationStore {
     this.legacyTakeOverRows.clear();
     return rows.length;
   }
+  /** Freeze live ladder choices once, before startup admits turns. */
+  migrateModelChoices(): Promise<number> {
+    return migrateConversationModelChoices({
+      dataDir: this.paths.dataDir,
+      complete: this.lastScanComplete,
+      rows: this.projection,
+      config: this.config,
+      save: async (cid, row) => {
+        if (
+          !this.enqueueDurableMetadata(cid, row) ||
+          !(await this.agentStore.flush(cid, 30))
+        )
+          throw new Error(
+            "conversation model choices incomplete; restart to retry",
+          );
+        this.projection.set(cid, row);
+        this.refreshTreeRow(cid);
+      },
+    });
+  }
   noteProjectionStale(): void {
     this.projectionReadyState = false;
   }
@@ -1082,28 +1094,11 @@ export class ConversationStore {
     else if ("model" in record && record.model !== null)
       throw new Error("invalid stored model");
     this.applyLoadDefaults(cid, record, withPending);
-    // Invariant: Fill missing mirrors without rewriting stored state
-    // (_freeze_ladder_fields). A level-less record with a model (an explicit
-    // off-ladder create, or legacy) keeps its model and takes the level-less
-    // turn path; only a model-less, level-less record takes the default level.
-    let level = validLevel(record.level);
-    if (level === null) {
-      if ("model" in record) {
-        if (!("effort" in record)) {
-          const stored = record.model;
-          record.effort = this.config.chatSettings(
-            typeof stored === "string" ? stored : null,
-          )[1];
-        }
-        return;
-      }
-      level = this.config.defaultEffortLevel();
-      if (!("level" in record)) record.level = level;
-    }
-    if (!("model" in record) || !("effort" in record)) {
-      const [model, effort] = this.config.resolveEffortLevel(level);
-      if (!("model" in record)) record.model = model;
-      if (!("effort" in record)) record.effort = effort;
+    if (validLevel(record.level) === null && !("effort" in record)) {
+      const stored = record.model;
+      record.effort = this.config.chatSettings(
+        typeof stored === "string" ? stored : null,
+      )[1];
     }
   }
   private carryForwardChoice(
@@ -1249,6 +1244,7 @@ export class ConversationStore {
       cid,
       async () => {
         const current = this.projection.get(cid);
+        if (!current || setModel) record.model_choice_version = 1;
         if (current) {
           this.carryForwardChoice(
             current,
@@ -1267,7 +1263,12 @@ export class ConversationStore {
             TAKEN_OVER_ORDER_RE,
           );
           if (!setModel && current.backend === record.backend) {
-            for (const key of ["model", "effort", "level"]) {
+            for (const key of [
+              "model",
+              "effort",
+              "level",
+              "model_choice_version",
+            ]) {
               if (key in current) record[key] = structuredClone(current[key]);
               else delete record[key];
             }
@@ -1387,22 +1388,7 @@ export class ConversationStore {
     return out;
   }
   conversationSettings(record: ConversationRecord): [string, string] {
-    const level = validLevel(record.level);
-    if (level !== null) return this.config.resolveEffortLevel(level);
-    // Invariant: A record without a level (an explicit off-ladder model, or
-    // legacy) runs its stored model; a valid stored effort wins, and a corrupt
-    // one resolves live rather than failing the turn (conversation_settings).
-    const stored = record.model;
-    const [model, effort] = this.config.chatSettings(
-      typeof stored === "string" ? stored : null,
-    );
-    const storedEffort = record.effort;
-    if (
-      typeof storedEffort === "string" &&
-      THINKING_LEVELS.includes(storedEffort as Thinking)
-    )
-      return [model, storedEffort];
-    return [model, effort];
+    return conversationModelSettings(this.config, record);
   }
   newConversationId(): string {
     for (let i = 0; i < 100; i++) {

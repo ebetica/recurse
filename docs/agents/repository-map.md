@@ -21,6 +21,8 @@ composes the server; `bun src/server.ts --check` composes it without listening.
 | `src/web/`                                                                        | The authenticated HTTP boundary (`Bun.serve`): routes, login throttling and CSRF. Agent work never runs in handlers                                                                              |
 | [src/web/api_v1/](../../src/web/api_v1/README.md)                                 | The developing HTTP API v1 contract and local read routes                                                                                                                                        |
 | `src/auth/`                                                                       | Login sessions, provider credentials and OAuth, inbound service principals, inbound backend keys (`backend_keys.ts`). Providers load lazily; keep `src/coding_backend/` off the auth import path |
+| [src/agent_metadata/](../../src/agent_metadata/README.md)                         | Shared tag rules and cached Agent projection, without lifecycle or HTTP imports                                                                                                                  |
+| [src/sidebar_script/](../../src/sidebar_script/README.md)                         | Shared sidebar rows, script checks and the separate worker engine                                                                                                                                |
 | `src/backends/`                                                                   | The home's connections to other backends: stored keys, the remote client, cached health. Cross-backend sends are relayed by `src/web/relay.ts`                                                   |
 | `src/coding_backend/`                                                             | Tool environment, safety roots, skills, legacy session checks                                                                                                                                    |
 | [src/artifacts/](../../src/artifacts/README.md)                                   | Artifacts: versioned documents and apps ([src/artifacts.ts](../../src/artifacts.ts))                                                                                                             |
@@ -30,11 +32,15 @@ composes the server; `bun src/server.ts --check` composes it without listening.
 | `src/utils/`                                                                      | Trash retirement (`trash.ts`), file locks, task sets, date-partition expiry                                                                                                                      |
 | `src/themes/`, `src/media/`, `src/pull_request/`                                  | Fonts and palettes, MIME data, patch parsing; each main module sits beside its directory                                                                                                         |
 
-Single modules: [branding.ts](../../src/branding.ts) (instance name and icon),
+Shared modules: [branding.ts](../../src/branding.ts) (instance name and icon),
 [config.ts](../../src/config.ts) (instance settings and model
 policy), [process_lifecycle.ts](../../src/process_lifecycle.ts) (process-group
 cleanup), [deleted_bin.ts](../../src/deleted_bin.ts) (retained deletion),
 [workdir_git.ts](../../src/workdir_git.ts) (Git queries by working folder),
+[../../src/web/router/](../../src/web/router/) (HTTP matching and responses),
+[../../src/web/api_v1/schema/](../../src/web/api_v1/schema/) (shared API contract),
+[../../src/agents/durable/model_selection/](../../src/agents/durable/model_selection/) (model-choice validation),
+[../../src/agents/durable/stopping_error/](../../src/agents/durable/stopping_error/) (shutdown refusal),
 [http_transport.ts](../../src/http_transport.ts) (compression),
 [pi_bg_shell.ts](../../src/pi_bg_shell.ts) (detached-shell liveness),
 [pi_auth.worker.mjs](../../src/pi_auth.worker.mjs) (Pi logins for Settings),

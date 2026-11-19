@@ -98,8 +98,8 @@ body #panes.docked.on {
   );
   --dv-tabs-and-actions-container-background-color: var(--dock-strip);
   --dv-tabs-and-actions-container-height: 36px;
-  --dv-tabs-and-actions-container-font-size: 13px;
-  --dv-tab-font-size: 13px;
+  --dv-tabs-and-actions-container-font-size: 13.5px;
+  --dv-tab-font-size: 13.5px;
   --dv-tab-margin: 0;
   --dv-tab-border-radius: 0px;
   --dv-scrollbar-background-color: var(--scrollbar);
@@ -451,7 +451,7 @@ body:has(#dock .pane-col.fullscreen, #dock #main.fullscreen) #panes.docked {
   background: var(--panel);
   box-shadow: var(--menu-shadow);
   color: var(--text);
-  font-size: 0.75rem;
+  font-size: 0.78125rem;
   pointer-events: none;
 }
 #window-key-hints > div {

@@ -11,7 +11,7 @@ import * as startupMetrics from "./observability/startup_metrics";
 import { timed } from "./observability/request_timing";
 import { slowSpan } from "./observability/slow_span";
 import { prIdentity } from "./pull_request";
-import { pullRequestFiles } from "./pull_request/patch";
+import { pullRequestFiles } from "./pull_request/index";
 import { selectedWork, type SelectedWork } from "./workdir_git_work";
 
 // Python str.isspace() code points (str.strip() and unicode \s).

@@ -146,6 +146,11 @@ export function routes(fx: Fixture): Routes {
       });
       await publishFiles(cid, { "tone.wav": silentWav() });
       await publishFiles(cid, { "clip.webm": "not a real video" });
+      await publishFiles(cid, {
+        "pixel.png": PNG_1X1,
+        Makefile: "all:\n",
+        ".env": "MODE=test\n",
+      });
       return { demo: cid };
     });
   const pdf = () =>
@@ -222,6 +227,23 @@ export function routes(fx: Fixture): Routes {
         "large.ts": "export const value = 1;\n".repeat(2001),
       });
       return {};
+    },
+    "seed-html-files": async (body) => {
+      const { html, fallbackFiles } = body as {
+        html: string;
+        fallbackFiles: Record<string, string>;
+      };
+      const cid = "html-files";
+      await once({ agent: cid }, async () => {
+        await create(cid, "HTML files", rootAgentId());
+        await seedUpload(cid, new TextEncoder().encode(html), "uploaded.htm");
+        await publishFiles(cid, {
+          "report.html": html,
+          ...fallbackFiles,
+          "large.html": `<h1>Large file</h1>${"<p>Large report paragraph.</p>\n".repeat(12_000)}`,
+        });
+      });
+      return { demo: cid };
     },
     "seed-published-markdown": () => published(),
     "seed-linked-markdown": () => published(true),

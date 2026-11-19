@@ -6,7 +6,8 @@
 - [`model.ts`](model.ts): metadata paging, version grouping and text-preview LRU.
 - [`markdown.ts`](markdown.ts): sibling links through shared Markdown and file tabs,
   and what is new since the reviewed version.
-- [`box-comments.ts`](box-comments.ts): image and PDF selection gestures.
+- [`box-comments.ts`](box-comments.ts): image and PDF box gestures and
+  highlights. App startup supplies the popover action for a finished box.
 - [`diff-preview.ts`](diff-preview.ts): inert diff rendering and comment anchors.
 - [`style.css`](style.css): collection and viewer layout.
 
@@ -33,13 +34,31 @@ in-place details, image dialogs and Back navigation. Markdown sibling links open
 file views with a Back step on phones; fragments scroll the opened document.
 Markdown siblings opened from Artifacts use the same reading padding as published
 Markdown files.
+
+Uploaded and published HTML and Explorer HTML use the Artifact app isolation.
+Source shows highlighted markup; Preview runs inline scripts and styles and
+loads embedded data images, fonts and media. Separate files do not load as
+subresources, even when adjacent to the HTML. Its document URL does not inherit
+the enclosing Recurse URL. Preview cannot read the Recurse page, cookies or API,
+open popups, submit forms or navigate the Recurse page.
+Resource hints in the original HTML are removed before rendering. Because the
+filter's parser can interpret markup differently from Chromium, a second check
+scans the remaining text for hint-like `rel` attributes. If it finds one, the
+file opens as Source, even if the match was only in a comment. Scripts can still
+deliberately add hints at runtime, and a link or script can navigate the preview
+frame itself. Either can contact another host and disclose the file's own
+content or that it was opened.
+Files larger than 256 KiB open as source with the first 256 KiB and a Download
+action for the rest. If HTML is too complex to prepare safely, Preview is
+unavailable and the file opens as Source. Live Artifact apps are unchanged.
+
 Modified clicks and unsupported types retain browser navigation. Inline image enlargement
 retains its dialog on both layouts. Single-key shortcuts close image dialogs
 before acting; `i` focuses the composer. Left/Right still step images. The
 contextual `c` shortcut keeps its image comment editor open. Text-entry exclusions and native
 Enter/Space activation share [../../src/keyboard_target.ts](../../src/keyboard_target.ts)
-with the app and Artifact relay. Sealed document previews cannot relay keys;
-modal editors keep their local keys.
+with the app and Artifact relay. Document and HTML file previews do not relay
+keys; modal editors keep their local keys.
 
 Desktop image tabs fit the remaining content area below the file header, in
 both docked and fullscreen windows. Images preserve their aspect ratio, center

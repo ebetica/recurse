@@ -1,7 +1,6 @@
-// The sidebar script worker: a separate bundle that runs the operator's
-// sidebar script in QuickJS (sidebar/sandbox.ts), away from the page. It posts
-// "ready" or "failed" once the engine has loaded, then one result per request.
-import { runSidebarScript } from "./sidebar/sandbox.js";
+// The sidebar script worker runs the shared QuickJS engine away from the page.
+// It posts "ready" or "failed" once loaded, then one result per request.
+import { runSidebarScript } from "../src/sidebar_script/engine/index.js";
 
 const version = new URL(import.meta.url).searchParams.get("v") ?? "";
 const engine = WebAssembly.compileStreaming(

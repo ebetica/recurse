@@ -9,10 +9,12 @@ import {
   ArrangementError,
   checkSections,
   checkNewAgent,
-} from "../web/sidebar/arrangement.ts";
-import { sidebarRows, type RowSource } from "../web/sidebar/rows.ts";
-import { runRetryingTimeout } from "../web/sidebar/retry.ts";
-import { MAX_SCRIPT_BYTES, type ScriptResult } from "../web/sidebar/sandbox.ts";
+  sidebarRows,
+  runRetryingTimeout,
+  type RowSource,
+  type ScriptResult,
+} from "./sidebar_script/index.ts";
+import { MAX_SCRIPT_BYTES } from "./sidebar_script/engine/index.ts";
 
 export const DEFAULT_SCRIPT = join(
   import.meta.dir,
@@ -150,7 +152,8 @@ export class SidebarScript {
   }
 }
 
-async function runDryRun(
+/** Runs `script` once in a fresh dry-run worker. */
+export async function runDryRun(
   script: string,
   rows: unknown[],
   now: number,

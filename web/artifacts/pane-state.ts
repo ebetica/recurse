@@ -1,7 +1,40 @@
-// Pure persisted selection for the Artifacts pane. Historical-version browsing
-// remains transient; pane teardown already returns to the artifact's current
-// version, while the stable artifact id is the operator-requested identity.
-import type { ArtifactState } from "./artifact-state.js";
+// Artifact selection persistence and browser-history snapshots. Saved layouts
+// restore the current revision; linked-document history retains the visited
+// revision and reading position. Phone scrolling belongs to the pane column.
+import type { ArtifactEl, ArtifactState } from "./artifact-state.js";
+
+export interface ArtifactHistory {
+  agent: string;
+  id: string;
+  depth: number;
+  visit: number;
+  version: string | null;
+  followCurrent: boolean;
+  scrollTop: number;
+}
+
+/** The existing pane layout moves phone scrolling onto the column. */
+export function artifactScroller(pane: ArtifactEl): HTMLElement {
+  return matchMedia("(max-width: 700px)").matches ? pane.parentElement! : pane;
+}
+
+/** History belongs to a conversation, not the pane's cached DOM instance. */
+export function readArtifactHistory(
+  agent: string | null,
+): ArtifactHistory | null {
+  const saved = history.state?.artifactView;
+  return saved &&
+    saved.agent === agent &&
+    typeof saved.id === "string" &&
+    Number.isSafeInteger(saved.depth) &&
+    saved.depth >= 0 &&
+    (saved.version === null || typeof saved.version === "string") &&
+    typeof saved.followCurrent === "boolean" &&
+    Number.isFinite(saved.scrollTop) &&
+    saved.scrollTop >= 0
+    ? saved
+    : null;
+}
 
 export interface ArtifactPaneViewState {
   artifactId: string | null;

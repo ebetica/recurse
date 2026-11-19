@@ -376,6 +376,25 @@ export function resolveWorktreeSource(source: string): string {
   return resolved;
 }
 
+// Git keeps a worktree's link in its source's Git directory, so a source
+// inside the replaceable install checkout would orphan the worktree.
+function fromInstallCheckout(source: string): boolean {
+  const install = process.env.RECURSE_SRC;
+  const common = git(
+    ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    source,
+    10_000,
+  );
+  if (!install || common === null || common.returncode !== 0) return false;
+  try {
+    const root = strictRealpath(install);
+    const dir = strictRealpath(common.stdout.trim());
+    return dir === root || isWithin(root, dir);
+  } catch {
+    return false;
+  }
+}
+
 // Refresh remote-tracking refs before resolving explicit start points.
 function worktreeCommit(source: string, ref: string): string {
   const symbolic = git(
@@ -432,6 +451,10 @@ export async function ensureNamedWorktree(
   } catch {
     return null;
   }
+  if (fromInstallCheckout(origin))
+    throw new Error(
+      `Recurse's install checkout ($RECURSE_SRC) is replaced on update, which breaks worktrees made from it; run from ${root.repoDir} or a worktree made from it.`,
+    );
   const checkout = join(root.worktrees, name);
   if (
     exists(checkout) ||
@@ -1097,7 +1120,7 @@ function printHelp(): void {
 
 function printEnterHelp(): void {
   process.stdout.write(
-    `usage: worktree.py enter [-h] [--source dir] name\n\npositional arguments:\n  name          unique directory label\n\noptions:\n  -h, --help    show this help message and exit\n  --source dir  create from this checkout\n`,
+    `usage: worktree.py enter [-h] [--source dir] name\n\npositional arguments:\n  name          unique directory label\n\noptions:\n  -h, --help    show this help message and exit\n  --source dir  create from this checkout (default: cwd; never\n                $RECURSE_SRC, which updates replace)\n`,
   );
 }
 
@@ -1252,9 +1275,14 @@ async function runEnter(args: EnterArgs): Promise<number> {
       startSweep(root);
     }
   } else {
-    path = await ensureNamedWorktree(root, cid, args.name, process.cwd(), {
-      source,
-    });
+    try {
+      path = await ensureNamedWorktree(root, cid, args.name, process.cwd(), {
+        source,
+      });
+    } catch (error) {
+      process.stderr.write(`${exceptionText(error)}\n`);
+      return 1;
+    }
   }
   if (path === null) {
     process.stderr.write("Could not create that worktree; try another name.\n");

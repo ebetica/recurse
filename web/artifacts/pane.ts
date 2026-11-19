@@ -1,7 +1,7 @@
-// Owns Artifact pane shell, selection and version controls. HTML uses an
-// offline opaque-origin sandbox without session access; other formats preview
-// only when safe. Immutable originals remain downloadable.
-// Desktop back opens a filtered list; touch retains the native picker.
+// Artifact pane shell, selection and versions. HTML uses an offline opaque
+// sandbox; immutable originals remain downloadable. Linked documents reuse
+// conversation history replay with revisions and reading positions; other
+// entry points start a fresh trail.
 import { html, render, nothing } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { repeat } from "lit/directives/repeat.js";
@@ -28,12 +28,15 @@ import {
   artifactRestoreListReady,
   parseArtifactPaneViewState,
   restoreArtifactSelection,
+  artifactScroller,
+  readArtifactHistory,
+  type ArtifactHistory,
   type ArtifactPaneViewState,
 } from "./pane-state.js";
+import { commentMount } from "../comments/selection-draft/index.js";
 import {
   ARTIFACTS_PANE_ID,
   artifactMount,
-  commentMount,
   contentCache,
   type ArtifactEl,
 } from "./artifact-state.js";
@@ -46,6 +49,7 @@ import {
 } from "./list-cache.js";
 import { refreshArtifact, setNotice, showArtifact } from "./artifact-detail.js";
 import {
+  commentRendering,
   deleteSelected,
   discardCurrent,
   renderBar,
@@ -80,16 +84,99 @@ coarsePointer.addEventListener("change", () => {
   renderShell(pane);
 });
 
+let pendingArtifactOpen: (() => void) | null = null;
+let artifactVisit = 0;
+let refusedArtifactVisit: number | undefined;
+
+function nextArtifactVisit(): number {
+  const saved = history.state?.artifactView?.visit;
+  artifactVisit =
+    Math.max(artifactVisit, Number.isSafeInteger(saved) ? saved : 0) + 1;
+  return artifactVisit;
+}
+
+function artifactUrl(id: string, section: string | null = null): string {
+  const url = new URL(location.href);
+  const params = new URLSearchParams(url.hash.slice(1));
+  params.set("artifact", id);
+  params.delete("section");
+  if (section !== null) params.set("section", section);
+  url.hash = params.toString();
+  return url.href;
+}
+
+function rememberArtifact(
+  pane: ArtifactEl,
+  depth: number,
+  address = true,
+): void {
+  const rs = pane._rs;
+  if (!rs.selId || !rs.agentId) return;
+  const artifactView: ArtifactHistory = {
+    agent: rs.agentId,
+    id: rs.selId,
+    depth,
+    visit: nextArtifactVisit(),
+    version: rs.selectedVersion,
+    followCurrent: rs.followCurrent,
+    scrollTop: artifactScroller(pane).scrollTop,
+  };
+  history.replaceState(
+    { ...history.state, artifactView },
+    "",
+    address ? artifactUrl(rs.selId) : location.href,
+  );
+  rs.linkedVisit = artifactView.visit;
+}
+
+function startArtifactTrail(open: () => void): void {
+  if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
+  const depth = readArtifactHistory(state.selectedId)?.depth || 0;
+  if (depth) {
+    pendingArtifactOpen = open;
+    history.go(-depth);
+  } else open();
+}
+
 export function openArtifactLink(hash = location.hash): void {
+  if (pendingArtifactOpen) {
+    const open = pendingArtifactOpen;
+    pendingArtifactOpen = null;
+    open();
+    return;
+  }
   const id = readArtifactLink(hash);
-  if (id)
+  if (id) {
+    const saved = readArtifactHistory(state.selectedId);
+    if (refusedArtifactVisit !== undefined) {
+      const refused = refusedArtifactVisit;
+      refusedArtifactVisit = undefined;
+      if (saved?.visit === refused) return;
+    }
+    const pane = artifactMount.current;
+    if (saved && pane && !discardCurrent(pane)) {
+      refusedArtifactVisit = pane._rs.linkedVisit;
+      history.go(saved.depth < (pane._rs.linkedDepth || 0) ? 1 : -1);
+      return;
+    }
     openArtifact(
       id,
       new URLSearchParams(hash.replace(/^#/, "")).get("section"),
+      saved?.id === id
+        ? {
+            ...saved,
+            followCurrent: saved.version === null && saved.followCurrent,
+          }
+        : undefined,
     );
+  }
 }
 
-function openArtifact(id: string, section: string | null = null): void {
+function openArtifact(
+  id: string,
+  section: string | null = null,
+  returning?: ArtifactHistory,
+): void {
   if (!state.selectedId || state.draft) return;
   if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
   linkedAgent = state.selectedId;
@@ -97,7 +184,30 @@ function openArtifact(id: string, section: string | null = null): void {
   if (!openPane(ARTIFACTS_PANE_ID)) return;
   const pane = artifactMount.current;
   if (!pane) return;
+  if (!returning)
+    history.replaceState(
+      {
+        ...history.state,
+        artifactView: {
+          agent: state.selectedId,
+          id,
+          depth: 0,
+          visit: nextArtifactVisit(),
+          version: null,
+          followCurrent: true,
+          scrollTop: 0,
+        } satisfies ArtifactHistory,
+      },
+      "",
+      readArtifactLink(location.hash)
+        ? artifactUrl(id, section)
+        : location.href,
+    );
   pane._rs.browsing = false;
+  pane._rs.returningVersion = returning;
+  pane._rs.linkedScrollTop = returning?.scrollTop;
+  pane._rs.linkedDepth = returning?.depth || 0;
+  pane._rs.linkedVisit = readArtifactHistory(state.selectedId)?.visit;
   pane._rs.linkedArtifactId = id;
   pane._rs.linkedSection =
     section === null
@@ -129,7 +239,41 @@ document.addEventListener("click", (event) => {
     return;
   if (readAgentLink(href).present) return;
   event.preventDefault();
-  openArtifactLink(href);
+  const id = readArtifactLink(href)!;
+  const section = new URLSearchParams(href.slice(1)).get("section");
+  const pane = artifactMount.current;
+  if (pane && !discardCurrent(pane)) return;
+  if (pane?.contains(link!) && link!.closest(".report-doc") && pane._rs.selId) {
+    const depth = readArtifactHistory(state.selectedId)?.depth || 0;
+    if (pane._rs.selId === id) {
+      openArtifact(id, section, {
+        agent: state.selectedId!,
+        id,
+        depth,
+        visit: artifactVisit,
+        version: pane._rs.selectedVersion,
+        followCurrent: pane._rs.followCurrent,
+        scrollTop: artifactScroller(pane).scrollTop,
+      });
+      return;
+    }
+    rememberArtifact(pane, depth);
+    const artifactView: ArtifactHistory = {
+      agent: state.selectedId!,
+      id,
+      depth: depth + 1,
+      visit: nextArtifactVisit(),
+      version: null,
+      followCurrent: true,
+      scrollTop: 0,
+    };
+    history.pushState(
+      { ...history.state, artifactView },
+      "",
+      artifactUrl(id, section),
+    );
+    openArtifact(id, section, artifactView);
+  } else startArtifactTrail(() => openArtifact(id, section));
 });
 
 const HISTORY_ICON = unsafeHTML(ARTIFACT_HISTORY_ICON);
@@ -192,11 +336,17 @@ function applyRestoredArtifactSelection(pane: ArtifactEl): boolean {
       cache.list.map((item) => item.id),
     );
   rs.restoredArtifactId = undefined;
+  const returning = rs.returningVersion;
+  rs.returningVersion = undefined;
+  if (returning) {
+    rs.selectedVersion = returning.version;
+    rs.followCurrent = returning.followCurrent;
+  }
   if (nextId === rs.selId) return true;
   rs.selId = nextId;
   const next = selectedInfo(pane);
-  rs.selectedVersion = next?.version || null;
-  rs.followCurrent = true;
+  rs.selectedVersion = returning?.version || next?.version || null;
+  rs.followCurrent = returning?.followCurrent ?? true;
   rs.headVersion = next?.version || null;
   rs.contentInfo = null;
   rs.shownKey = null;
@@ -242,14 +392,26 @@ function resetContent(pane: ArtifactEl): void {
   rs.failedKey = null;
 }
 
-function selectArtifact(pane: ArtifactEl, id: string, focus = false): boolean {
+function selectArtifact(
+  pane: ArtifactEl,
+  id: string,
+  focus = false,
+  fresh = true,
+): boolean {
   const rs = pane._rs;
   if (rs.sending || rs.restoring || rs.deleting || !discardCurrent(pane))
     return false;
+  if (fresh) {
+    startArtifactTrail(() => selectArtifact(pane, id, focus, false));
+    return true;
+  }
   rs.browsing = false;
   rs.linkedArtifactId = undefined;
   rs.linkedSection = undefined;
+  rs.linkedScrollTop = undefined;
+  rs.linkedDepth = 0;
   if (rs.selId === id && rs.followCurrent) {
+    rememberArtifact(pane, 0, !!readArtifactLink(location.hash));
     renderShell(pane);
     showSelected(pane, focus);
     renderComments(pane);
@@ -264,6 +426,7 @@ function selectArtifact(pane: ArtifactEl, id: string, focus = false): boolean {
   rs.versionsId = null;
   rs.versions = [];
   rs.versionMenuOpen = false;
+  rememberArtifact(pane, 0, !!readArtifactLink(location.hash));
   renderShell(pane);
   showSelected(pane, focus);
   return true;
@@ -710,6 +873,10 @@ function retarget(pane: ArtifactEl, agentId: string): boolean {
   rs.restoredArtifactId = undefined;
   rs.linkedArtifactId = undefined;
   rs.linkedSection = undefined;
+  rs.linkedScrollTop = undefined;
+  rs.linkedDepth = 0;
+  rs.linkedVisit = undefined;
+  rs.returningVersion = undefined;
   rs.selectedVersion = null;
   rs.shownKey = null;
   rs.loadingKey = null;
@@ -764,7 +931,7 @@ registerPane({
         ? entry(state.selectedId).list.map((artifact) => ({
             key: artifact.id,
             name: artifact.title || artifact.filename,
-            open: () => openArtifact(artifact.id),
+            open: () => startArtifactTrail(() => openArtifact(artifact.id)),
           }))
         : [],
   },
@@ -799,6 +966,9 @@ registerPane({
   },
   leave(element: HTMLElement) {
     const pane = element as ArtifactEl;
+    const saved = readArtifactHistory(pane._rs.agentId);
+    if (saved?.id === pane._rs.selId && saved?.visit === pane._rs.linkedVisit)
+      rememberArtifact(pane, saved.depth, !!readArtifactLink(location.hash));
     pane._rs.revalidationSeq++;
     pane._rs.revalidating = false;
     if (artifactMount.current === pane) {
@@ -898,6 +1068,8 @@ registerPane({
   },
   render(element: HTMLElement, ctx: PaneContext) {
     const pane = element as ArtifactEl;
+    pane.renderShell = () => renderShell(pane);
+    pane.showArtifact = () => showArtifact(pane);
     pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div><div class="doc-review-foot"></div></article><div class="report-comments"></div><div class="report-bar"></div>`;
     pane._rs = {
       agentId: null,
@@ -933,7 +1105,7 @@ registerPane({
       imageAbort: null,
     };
     artifactMount.current = pane;
-    claimComments(pane);
+    claimComments(pane, commentRendering);
     const changedAgent = retarget(pane, ctx.agentId);
     entry(ctx.agentId).invalidated = true;
     renderShell(pane);
@@ -952,7 +1124,7 @@ registerPane({
   refresh(element: HTMLElement, ctx: PaneContext) {
     const pane = element as ArtifactEl;
     artifactMount.current = pane;
-    claimComments(pane);
+    claimComments(pane, commentRendering);
     const changedAgent = retarget(pane, ctx.agentId);
     void refreshList(
       ctx.agentId,

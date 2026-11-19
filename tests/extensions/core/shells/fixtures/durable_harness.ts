@@ -1,8 +1,8 @@
 /**
- * A Durable Harness with the shell extension and a faux model: a user message
- * "RUN <json>" makes the model call bash with those arguments, "WAIT" calls
- * wait, and every other
- * input is answered with text. Shells stop through process_lifecycle's stopGroup.
+ * A Durable Harness with the shell extension and a faux model. The newest
+ * "RUN <json>" among trailing user messages (one boundary can place several)
+ * calls bash, "WAIT" calls wait, "HOLD" awaits release(), other input gets
+ * text. Shells stop through process_lifecycle's stopGroup.
  */
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,26 +55,38 @@ export async function openShellHarness(
   } & Partial<ShellsOptions>,
 ) {
   const faux = fauxProvider({ tokensPerSecond: 50_000 });
+  let held!: () => void;
+  let release!: () => void;
+  const holding = new Promise<void>((resolve) => (held = resolve));
+  const released = new Promise<void>((resolve) => (release = resolve));
   faux.setResponses(
     Array.from(
       { length: 500 },
       () =>
-        (request: {
+        async (request: {
           messages: readonly { role: string; content: unknown }[];
         }) => {
           // Durable commits a request's system entries after its newest input.
-          const last = request.messages
-            .filter((message) => message.role !== "system")
-            .at(-1);
-          const run =
-            last?.role === "user"
-              ? /^RUN (.*)$/s.exec(text(last.content))
-              : null;
+          const messages = request.messages.filter(
+            (message) => message.role !== "system",
+          );
+          const last = messages.at(-1);
+          const answered = messages.findLastIndex(
+            (message) => message.role !== "user",
+          );
+          const run = messages
+            .slice(answered + 1)
+            .map((message) => /^RUN (.*)$/s.exec(text(message.content)))
+            .findLast(Boolean);
           if (run)
             return fauxAssistantMessage(
               fauxToolCall("bash", JSON.parse(run[1]!)),
               { stopReason: "toolUse" },
             );
+          if (last?.role === "user" && text(last.content) === "HOLD") {
+            held();
+            await released;
+          }
           if (last?.role === "user" && text(last.content) === "WAIT")
             return fauxAssistantMessage(fauxToolCall("wait", {}), {
               stopReason: "toolUse",
@@ -115,7 +127,7 @@ export async function openShellHarness(
   const conversation: Conversation = await harness.root(context, {
     agent: { model: { provider: model.provider, modelId: model.id } },
   });
-  return { harness, conversation, shells, reports };
+  return { harness, conversation, shells, reports, holding, release };
 }
 
 /** Text of every user entry of the conversation, oldest first. */

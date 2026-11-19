@@ -5,26 +5,11 @@
 import { connectionHealth, createApiClient } from "../api.js";
 import { ConnectionHealth } from "../connection/health.js";
 
-import { validBackendLabel } from "../../src/backends/label.js";
-
-export function parseConversationId(id: string): {
-  label: string;
-  cid: string;
-} {
-  const slash = id.indexOf("/");
-  if (slash === -1) return { label: "", cid: id };
-  const label = id.slice(0, slash);
-  const cid = id.slice(slash + 1);
-  if (!validBackendLabel(label) || !cid || cid.includes("/"))
-    throw new Error("Invalid backend conversation id");
-  return { label, cid };
-}
-
-export function conversationId(label: string, cid: string): string {
-  if (cid.includes("/") || (label && !validBackendLabel(label)))
-    throw new Error("Invalid backend conversation id");
-  return label ? `${label}/${cid}` : cid;
-}
+import { validBackendLabel } from "../../src/backends/label/index.js";
+import {
+  conversationId,
+  parseConversationId,
+} from "./conversation-id/index.js";
 
 export class Backend {
   readonly base: string;

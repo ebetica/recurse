@@ -1,7 +1,8 @@
 // Artifact comment bar and mutations. This module owns the comment
 // list/cards, the message composer, submit, and the version restore and
 // delete actions.
-import { backendFor, parseConversationId } from "../backends/backend.js";
+import { backendFor } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { artifactWorkingPath } from "../../src/artifacts/working_path.js";
 import { html, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
@@ -15,9 +16,6 @@ import {
 } from "./model.js";
 import { confirmDiscard } from "../comments.js";
 import { reviewDocument } from "../document-review.js";
-import { renderShell } from "./pane.js";
-import { showArtifact } from "./artifact-detail.js";
-import { setNotice } from "./artifact-detail.js";
 import { DRAFT, state } from "../state.js";
 import { entry, errorText, refreshList, selectedInfo } from "./list-cache.js";
 import {
@@ -35,18 +33,21 @@ import {
   unmark,
   unmarkAll,
 } from "./selection-comments.js";
-import { contentCache } from "./artifact-state.js";
+import { contentCache, displayedInfo, setNotice } from "./artifact-state.js";
 import { commentBoxCoordinates, prepareCommentCrop } from "./comment-crops.js";
 import { queueComments } from "./comment-outbox.js";
-import { newestCommittedOffset } from "../pending-queue.js";
+import { newestCommittedOffset } from "../row-thread-state/index.js";
 import { newClientMessageId } from "../composer/send.js";
 import { artifactMount } from "./artifact-state.js";
 import type {
   ArtifactEl,
   Comment,
-  CommentDoc,
   CommentPane,
+  CommentRendering,
 } from "./artifact-state.js";
+
+/** Supplied by viewer owners when they register for selection comments. */
+export const commentRendering: CommentRendering = { renderBar, renderComments };
 
 function cardT(pane: CommentPane, comment: Comment): TemplateResult {
   const onInput = (event: Event) => {
@@ -112,16 +113,9 @@ export function renderComments(pane: CommentPane): void {
     artifact._rs.followCurrent &&
     artifact._rs.selectedVersion !== artifact._rs.headVersion
   ) {
-    renderShell(artifact);
-    void showArtifact(artifact);
+    artifact.renderShell();
+    void artifact.showArtifact();
   }
-}
-export function displayedInfo(pane: CommentPane): CommentDoc | null {
-  const info = pane._rs.contentInfo;
-  return info?.id === pane._rs.selId &&
-    (info.noun === "file" || isFullVersion(info.version))
-    ? info
-    : null;
 }
 interface CommentLocation {
   start: number;
@@ -421,7 +415,7 @@ export async function restoreSelected(pane: ArtifactEl): Promise<void> {
     rs.agentId === requestedAgent &&
     rs.selId === requestedId;
   rs.restoring = true;
-  renderShell(pane);
+  pane.renderShell();
   setNotice(pane, "Restoring selected version…", false);
   try {
     const response = await backendFor(requestedAgent).jpost(
@@ -453,8 +447,8 @@ export async function restoreSelected(pane: ArtifactEl): Promise<void> {
     const current = selectedInfo(pane);
     rs.selectedVersion = current?.version || null;
     rs.headVersion = current?.version || null;
-    renderShell(pane);
-    void showArtifact(pane);
+    pane.renderShell();
+    void pane.showArtifact();
   } catch (err) {
     if (currentRequest())
       setNotice(
@@ -467,7 +461,7 @@ export async function restoreSelected(pane: ArtifactEl): Promise<void> {
   } finally {
     if (currentRequest()) {
       rs.restoring = false;
-      renderShell(pane);
+      pane.renderShell();
     }
   }
 }
@@ -534,7 +528,7 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
         rs.loadingKey = null;
         rs.shownKey = null;
         rs.failedKey = null;
-        await showArtifact(pane);
+        await pane.showArtifact();
         if (!currentRequest()) return;
       }
       throw new Error(
@@ -577,7 +571,7 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
     if (!ownsRequest()) return;
     rs.deleting = false;
     setNotice(pane, `Deleted “${info.title}”`, false);
-    void showArtifact(pane);
+    void pane.showArtifact();
     const picker =
       panePowerbar(pane).querySelector<HTMLSelectElement>("#artifact-picker");
     const target =
@@ -605,7 +599,7 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
   } finally {
     if (ownsRequest()) {
       rs.deleting = false;
-      renderShell(pane);
+      pane.renderShell();
       renderComments(pane);
     }
   }

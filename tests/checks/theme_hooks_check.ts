@@ -24,7 +24,7 @@ const protectedSurfaces: Record<string, string[]> = {
   "web/settings.ts": ["change-password"],
   "web/settings/two-factor.ts": ["two-factor-sign-in"],
   "web/side-pane.ts": ["embedded-side"],
-  "web/safety.ts": ["safety-warning"],
+  "web/conversation/chrome.ts": ["safety-warning"],
   "web/sidebar.ts": ["safety-warning"],
   "web/thread-render.ts": ["safety-notice", "safety-denial", "reply-error"],
   "web/thread-render/refused.ts": ["reply-refusal"],

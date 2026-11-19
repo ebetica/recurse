@@ -141,6 +141,21 @@ export function routes(fx: Fixture): Routes {
       agents.set(body.agent, { model: null });
       return { agent: body.agent };
     },
+    "seed-recorded-effort-choice": async () => {
+      const agent = `recorded-effort-${hex(4)}`;
+      const model = "fauxordinary/faux-1";
+      const effort = "low";
+      await create(agent, "Recorded effort");
+      const conv = load(agent)!;
+      Object.assign(conv, {
+        level: 3,
+        model,
+        effort,
+        [SET_MODEL_MARKER]: true,
+      });
+      await save(conv);
+      return { agent, model, effort };
+    },
     "seed-provider-replay": async (body) => {
       body = body as {
         name: RecordingName;
@@ -249,6 +264,11 @@ export function routes(fx: Fixture): Routes {
           {
             ...fauxAssistantMessage("NORMAL_MODEL_OK"),
             responseModel: served.id,
+          },
+          {
+            ...fauxAssistantMessage("REASONING_MISMATCH_OK"),
+            responseModel: served.id,
+            providerThinkingLevel: "low",
           },
         ]);
         durableModels.setProvider({

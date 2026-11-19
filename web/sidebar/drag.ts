@@ -1,7 +1,7 @@
 /** Desktop tree dragging chooses a parent, never a stored sibling position. */
 import { listEl } from "../dom.js";
 import { state, DRAFT } from "../state.js";
-import { parseConversationId } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { canDrop, reparentValidity } from "../reparent.js";
 
 let sourceId: string | null = null;

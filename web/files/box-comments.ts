@@ -2,7 +2,34 @@
 // require a modifier; touch and pen hold before dragging. PDF mouse drag is
 // unchanged. Touch taps explain the gesture; native cancel abandons it.
 import type { CommentBox } from "../artifacts/artifact-state.js";
-import { offerBoxComment, placeBox } from "../artifacts/selection-comments.js";
+
+type BoxCommentOffer = (
+  frame: Element,
+  mark: HTMLElement,
+  box: CommentBox,
+) => void;
+let offerBoxComment: BoxCommentOffer;
+
+export function configureBoxCommentOffer(offer: BoxCommentOffer): void {
+  offerBoxComment = offer;
+}
+
+/** Show `box` as a highlight over its frame. */
+export function placeBox(
+  frame: Element,
+  box: CommentBox,
+  mark = frame.ownerDocument.createElement("mark"),
+): HTMLElement {
+  mark.className = "report-cmark report-cbox";
+  Object.assign(mark.style, {
+    left: `${box.x * 100}%`,
+    top: `${box.y * 100}%`,
+    width: `${box.w * 100}%`,
+    height: `${box.h * 100}%`,
+  });
+  if (mark.parentNode !== frame) frame.append(mark);
+  return mark;
+}
 
 const HOLD_MS = 450;
 const SLOP_PX = 8;
@@ -17,6 +44,7 @@ interface Press {
   frame: HTMLElement;
   from: Point;
   client: Point;
+  time: number;
   timer?: number;
   mark?: HTMLElement;
 }
@@ -101,6 +129,7 @@ export function installBoxComments(pane: HTMLElement): void {
       frame,
       from: pointIn(frame, event),
       client: { x: event.clientX, y: event.clientY },
+      time: event.timeStamp,
     };
     press = current;
     if (
@@ -121,33 +150,34 @@ export function installBoxComments(pane: HTMLElement): void {
       navigator.vibrate?.(10);
     }, HOLD_MS);
   });
-  pane.addEventListener("pointermove", (event) => {
-    if (event.pointerId !== press?.id) return;
-    if (!press.mark) {
-      if (
-        Math.hypot(
-          event.clientX - press.client.x,
-          event.clientY - press.client.y,
-        ) <= SLOP_PX
-      )
-        return;
-      cancel();
-      return;
-    }
-    if (
-      press.mark!.classList.contains("files-box-start") &&
-      Math.hypot(
-        event.clientX - press.client.x,
-        event.clientY - press.client.y,
-      ) <= SLOP_PX
-    )
-      return;
-    placeBox(
-      press.frame,
-      boxOf(press.frame, press.from, pointIn(press.frame, event)),
-      press.mark,
-    );
-  });
+  // Invariant: Capture phase runs before the image viewer's own handler, so
+  // a drag that cancels the hold here pans with this same move.
+  pane.addEventListener(
+    "pointermove",
+    (event) => {
+      if (event.pointerId !== press?.id) return;
+      const { frame, mark, client } = press;
+      if (!mark || mark.classList.contains("files-box-start")) {
+        if (
+          Math.hypot(event.clientX - client.x, event.clientY - client.y) <=
+          SLOP_PX
+        )
+          return;
+        // Invariant: Holds are timed by when the finger moved, so a busy
+        // page that ran the hold timer first still pans a quick drag.
+        if (!mark || event.timeStamp - press.time < HOLD_MS) {
+          touchDrew = false;
+          cancel();
+          frame
+            .closest(".image-zoom-viewport")
+            ?.setPointerCapture(event.pointerId);
+          return;
+        }
+      }
+      placeBox(frame, boxOf(frame, press.from, pointIn(frame, event)), mark);
+    },
+    { capture: true },
+  );
   pane.addEventListener("pointerup", (event) => {
     if (event.pointerId !== press?.id) return;
     const { frame, from, mark, timer } = press;

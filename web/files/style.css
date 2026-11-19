@@ -87,7 +87,7 @@
 .files-summary { padding: var(--space-4) var(--space-5) var(--space-3); color: var(--muted); font-size: 0.78125rem;
   border-bottom: 1px solid var(--border); }
 .files-filter-bar { padding: var(--space-3) var(--space-5); border-bottom: 1px solid var(--border); }
-.files-filter { box-sizing: border-box; width: 100%; min-height: 32px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--text); font: inherit; font-size: 0.8125rem; }
+.files-filter { box-sizing: border-box; width: 100%; min-height: 32px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--text); font: inherit; font-size: 0.84375rem; }
 .files-navigation-status { display: block; color: var(--muted); font-size: 0.71875rem; }
 .files-navigation-status:empty { display: none; }
 @media (pointer: coarse) { .files-filter-bar { display: none; } .files-card.pane-item-cursor { background: none; } }

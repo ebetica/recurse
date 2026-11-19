@@ -16,6 +16,7 @@ import { row as fixtureRow } from "./fixtures";
 import recorded from "./fixtures/durable-compaction-jump.json";
 import recordedThinking from "./fixtures/thinking-stream.json";
 import { renderThemeCss, themeDefaults, themePalettes } from "../../src/themes";
+import type { TreeUpdate } from "../../src/web/tree_protocol";
 
 function withThinkingCleanup(
   test: BrowserTest,
@@ -827,13 +828,19 @@ export const tests: BrowserTest[] = [
     const token = page.locator("#context-token-label");
     await page.route(`${base}api/tree`, async (route) => {
       const response = await route.fetch();
-      const nodes = (await response.json()) as {
-        id: string;
-        agent?: { context?: unknown };
-      }[];
-      for (const node of nodes)
-        if (node.id === agent && node.agent) delete node.agent.context;
-      await route.fulfill({ response, json: nodes });
+      if (!response.ok()) return route.fulfill({ response });
+      type ContextRow = { id: string; agent?: { context?: unknown } };
+      const tree = (await response.json()) as
+        | ContextRow[]
+        | TreeUpdate<ContextRow>;
+      const rows = Array.isArray(tree)
+        ? tree
+        : "changed" in tree
+          ? tree.changed
+          : [];
+      for (const row of rows)
+        if (row.id === agent && row.agent) delete row.agent.context;
+      await route.fulfill({ response, json: tree });
     });
     let previous!: string;
     let tokenWidth!: number;

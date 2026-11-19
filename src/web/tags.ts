@@ -8,7 +8,7 @@ import {
   TagRefused,
   type Tags,
   type TagChange,
-} from "../agents/conversation_tags";
+} from "../agent_metadata/index";
 import { requireLocalAgent } from "./backends";
 import { jsonDictBody } from "./login";
 import { agentMarked } from "./request_auth";

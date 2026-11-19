@@ -158,8 +158,9 @@ export function buildThemeSection(body: HTMLElement): void {
       true,
     );
   };
-  cssBody.querySelector("dialog")!.addEventListener("close", () => {
-    if (matchMedia("(max-width: 700px)").matches) cancelThemeCssPreview();
+  const cssEditor = cssBody.querySelector("dialog")!;
+  cssEditor.addEventListener("close", () => {
+    if (!cssEditor.open) cancelThemeCssPreview();
   });
   const showProblems = (problems: string[]) => {
     for (const message of messages) {

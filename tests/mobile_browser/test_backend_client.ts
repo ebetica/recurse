@@ -53,7 +53,7 @@ export const test_backend_client: BrowserTest = async (browser) => {
     const entry = join(worlds[0]!.root, "browser-client.ts");
     await writeFile(
       entry,
-      `import * as client from ${JSON.stringify(join(ROOT, "web/backends/backend.ts"))}; Object.assign(window, {backendClient: client});`,
+      `import * as client from ${JSON.stringify(join(ROOT, "web/backends/backend.ts"))}; import * as ids from ${JSON.stringify(join(ROOT, "web/backends/conversation-id/index.ts"))}; Object.assign(window, {backendClient: client, conversationIds: ids});`,
     );
     const bundle = await Bun.build({
       entrypoints: [entry],
@@ -67,7 +67,10 @@ export const test_backend_client: BrowserTest = async (browser) => {
       const backend = new client.Backend("B");
       client.registerBackend(backend);
       (globalThis as any).remoteBackend = backend;
-      const id = client.conversationId("B", remoteCid);
+      const id = (globalThis as any).conversationIds.conversationId(
+        "B",
+        remoteCid,
+      );
       const owner = client.backendFor(id);
       const home = await client.homeBackend.api("/api/version");
       const response = await owner.api(

@@ -149,13 +149,9 @@ export class AgentTools {
           : "";
       return `Fixed model: ${this.modelLabel(model)}${reasoning} (no effort level).`;
     }
-    let model: string;
-    let reasoning: string;
-    try {
-      [model, reasoning] = this.config.resolveEffortLevel(level);
-    } catch {
-      return null;
-    }
+    const model = conv.model;
+    const reasoning = conv.effort;
+    if (typeof model !== "string" || typeof reasoning !== "string") return null;
     return (
       `This conversation runs at effort level ${level} ` +
       `(${this.modelLabel(model)}, reasoning ${reasoning}).`
@@ -166,7 +162,7 @@ export class AgentTools {
   async toolsSection(): Promise<string> {
     const toolsDir = this.config.paths.TOOLS_DIR;
     if (toolsDir === null) return "";
-    const out = ["Run Recurse tools from `$RECURSE_SRC`, not your cwd.", ""];
+    const out = ["Run Recurse tools via their `$RECURSE_SRC` paths.", ""];
     const item = (cmd: string, desc: string): void => {
       out.push(`bun ${cmd}`);
       for (const line of desc.split("\n")) out.push(line ? `  ${line}` : "");

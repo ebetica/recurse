@@ -60,6 +60,11 @@ they finish. Evicted tools reopen lazily with the same cwd and flags. Each
 bundle contains at most one cwd index and three external-root indexes. This
 bounds idle cache count, not the size of an individual tree or active searches.
 Git ignores and the native finder's standard exclusions constrain each scan.
+External roots covering the filesystem root, home directory, or Recurse data
+directory are refused before creating an auxiliary index, including symlink
+aliases. Data subdirectories remain searchable; refusals name a narrower path.
+Closing a finder does not interrupt an initial native traversal already in
+progress, so these guards prevent broad scans rather than cancelling them.
 Callers can override refresh and idle intervals through
 [FffFlags](extra/fff/fff_tools.ts); defaults remain unchanged. All memory mapping
 stays disabled, and grep skips files of 256 KiB or more. A native crash rejects
@@ -79,7 +84,7 @@ without an existing conversation connection opens and closes a normal bundle.
 
 ## On-demand MCP tools
 
-Each server in Settings > MCPs accepts `"loadToolsOnDemand": true`. The default
+Each server in Settings > Agents > MCP servers accepts `"loadToolsOnDemand": true`. The default
 is `false`, listing tool names in the codemode section once that server connects.
 With `true`, the server's tool descriptions and schemas stay out of inline
 codemode sections even after connection. Agents discover them with `searchTools`

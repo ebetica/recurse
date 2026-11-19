@@ -64,6 +64,7 @@ export interface LifecycleDeps {
     noteProjectionReady(): void;
     refreshProjection(): Promise<unknown>;
     migrateTakenOverNames(): Promise<number>;
+    migrateModelChoices(): Promise<number>;
   };
   /** conversation_store.assertNoUnimportedLegacyState over the data dir. */
   assertLegacyImported(): Promise<void>;
@@ -420,6 +421,10 @@ export class SupervisorLifecycle {
       logEvent(log, ERROR, "projection_unestablished_no_mutations");
       return;
     }
+    await step("migrate_model_choices", () =>
+      conversations.migrateModelChoices(),
+    );
+    checkAbort(signal);
     try {
       await step("migrate_taken_over_names", () =>
         conversations.migrateTakenOverNames(),

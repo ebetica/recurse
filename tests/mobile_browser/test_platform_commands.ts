@@ -1074,6 +1074,7 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Regression: #3481 the held-read wait no longer times the scrolls too
   async function test_clear_drops_rendered_thread_and_stale_reads(
     browser,
     base,
@@ -1097,12 +1098,10 @@ export const tests: BrowserTest[] = [
     let viewMode = "pass";
     let clearMode = "pass";
     const stalled: Route[] = [];
-    const heldViews = new EventEmitter();
     await page.route(`${viewUrl}*`, (route) => {
       if (viewMode === "abort") return route.abort();
       if (viewMode === "stall") {
         stalled.push(route);
-        heldViews.emit("held");
         return;
       }
       return route.continue();
@@ -1221,32 +1220,29 @@ export const tests: BrowserTest[] = [
       "race",
       true,
     );
-    const heldView = once(heldViews, "held", {
-      signal: AbortSignal.timeout(3000),
-    });
     viewMode = "stall";
-    await Promise.all([
-      heldView,
-      (async () => {
-        await page.evaluate(
-          "document.querySelector('#scroll').scrollTop = document.querySelector('#scroll').scrollHeight",
-        );
-        await waitValue(
-          page,
-          () => page.evaluate("document.querySelector('#scroll').scrollTop"),
-          (v) => v > 1000,
-          "scrolled to bottom",
-        );
-        await page.evaluate("document.querySelector('#scroll').scrollTop = 0");
-        await waitValue(
-          page,
-          () => page.evaluate("document.querySelector('#scroll').scrollTop"),
-          (v) => v < 300,
-          "scrolled to top",
-        );
-      })(),
-    ]);
-    expect(stalled.length).toBeGreaterThan(0);
+    await page.evaluate(
+      "document.querySelector('#scroll').scrollTop = document.querySelector('#scroll').scrollHeight",
+    );
+    await waitValue(
+      page,
+      () => page.evaluate("document.querySelector('#scroll').scrollTop"),
+      (v) => v > 1000,
+      "scrolled to bottom",
+    );
+    await page.evaluate("document.querySelector('#scroll').scrollTop = 0");
+    await waitValue(
+      page,
+      () => page.evaluate("document.querySelector('#scroll').scrollTop"),
+      (v) => v < 300,
+      "scrolled to top",
+    );
+    await waitValue(
+      page,
+      () => stalled.length,
+      (v) => v > 0,
+      "held view read",
+    );
     const oldPage = await (await page.request.get(viewUrl)).json();
     const predrop = [...stalled];
     expect(predrop.length).toBeGreaterThan(0);

@@ -1,7 +1,7 @@
 // Read-only source viewers paint text first, then share bounded, worker-only
 // syntax tokens with Changes' highlighter. DOM construction never parses HTML;
 // Existing marks, selections and pending comment drafts remain unchanged.
-import { selectionCommentOwner } from "./artifacts/selection-comments.js";
+import { selectionCommentOwner } from "./comments/selection-draft/index.js";
 
 export interface SourceToken {
   text: string;

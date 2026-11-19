@@ -1,7 +1,6 @@
 // Owns lazy thinking disclosures and the live pill; open/text FIFO indexes each
 // hold at most 64 keys, avoiding scans of retained live-refresh metadata.
-// The thread renders before the live bar: beginThreadPaint() clears its mark,
-// then thinkingT marks committed shared text before the live bar reads it.
+// thinkingT marks committed shared text before the live bar reads it.
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "../backends/backend.js";
@@ -15,6 +14,7 @@ import type {
 import { enrich } from "../thread-render/reply-html.js";
 import type { Conversation, MessageEntry, ToolEntry } from "../types.js";
 import { thinkingElapsedT } from "./live-elapsed.js";
+import { markCommittedStep } from "./thinking-paint.js";
 import { paint } from "./thread.js";
 
 interface ThinkingEntry {
@@ -44,7 +44,6 @@ export class ThinkingStore {
     open: [],
     text: [],
   };
-  private committedStep: string | null = null;
   pill: {
     key: string;
     entry: MessageEntry;
@@ -62,15 +61,6 @@ export class ThinkingStore {
   private ensure(key: string): ThinkingEntry {
     if (!this.entries.has(key)) this.entries.set(key, {});
     return this.entries.get(key)!;
-  }
-  beginThreadPaint(): void {
-    this.committedStep = null;
-  }
-  markCommittedStep(key: string): void {
-    this.committedStep = key;
-  }
-  showsCommittedStep(key: string | null): boolean {
-    return this.committedStep === key;
   }
   isPill(key: string, cid: string): boolean {
     return this.pill?.key === key && this.pill.conversation === cid;
@@ -366,7 +356,7 @@ export function thinkingT(
   // owns the shared disclosure and text instead, without duplicating prose.
   if (thinkingStore.isPill(key, conv.id)) {
     if (live) return nothing;
-    thinkingStore.markCommittedStep(key);
+    markCommittedStep(key);
   }
   const line = html`<span class="turn-thinking-line">
     ${label}${durationT}${titleT}

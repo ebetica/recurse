@@ -1,5 +1,9 @@
 import { expect } from "bun:test";
 import {
+  getBuiltinClassifierModels,
+  getBuiltinModels,
+} from "@earendil-works/pi-ai/providers/all";
+import {
   captureErrors,
   closeWithRoutes,
   gotoRoot,
@@ -11,6 +15,8 @@ import {
   LOGIN,
   type BrowserTest,
   openSettingsPanel,
+  startNewAgent,
+  expectHitCorners,
 } from "./common";
 import type { Locator, Page } from "playwright";
 import { expect as browserExpect } from "playwright/test";
@@ -18,7 +24,6 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { readRelease, releaseLabel } from "../../src/release";
 import { generateTheme, themePalettes } from "../../src/themes";
-import safetyResults from "../../src/extensions/core/safety/decision-results.json";
 
 const LIST_OPUS = {
   id: "anthropic/claude-opus-5-5",
@@ -28,14 +33,14 @@ const LIST_OPUS = {
   reasoning_levels: ["low", "medium", "high", "xhigh", "max"],
 };
 const LIST_SONNET = {
-  id: "anthropic/claude-sonnet-5",
+  id: "anthropic/test-sonnet",
   label: "Claude Sonnet 5",
   route: "Claude",
   context_window: 1_000_000,
   reasoning_levels: null,
 };
 const LIST_SOL = {
-  id: "openai-codex/gpt-6-sol",
+  id: "openai-codex/test-sol",
   label: "GPT-6 Sol",
   route: "ChatGPT subscription",
   context_window: 272_000,
@@ -55,30 +60,10 @@ type LadderEntry = { model: string; reasoning: string };
 const fontSize = (el: unknown) =>
   (globalThis as any).getComputedStyle(el).fontSize;
 
-async function expectHitCorners(control: Locator, size = 44) {
-  await control.scrollIntoViewIfNeeded();
-  expect(
-    await control.evaluate((el, size) => {
-      const r = el.getBoundingClientRect();
-      const offset = (size - 2) / 2;
-      return [-offset, offset].every((x) =>
-        [-offset, offset].every((y) =>
-          el.contains(
-            el.ownerDocument.elementFromPoint(
-              r.left + r.width / 2 + x,
-              r.top + r.height / 2 + y,
-            ),
-          ),
-        ),
-      );
-    }, size),
-  ).toBe(true);
-}
-
 async function routeLadder(
   page: Page,
   base: string,
-  options: { levels: LadderEntry[]; list: object[] },
+  options: { levels: LadderEntry[]; list: object[]; defaultLevel?: number },
 ) {
   const levels = Object.fromEntries(
     options.levels.map((entry, i) => [String(i + 1), entry]),
@@ -87,7 +72,7 @@ async function routeLadder(
     options.list.map((model) => (model as { id: string }).id),
   );
   const ladder = {
-    default_level: 3,
+    default_level: options.defaultLevel ?? 3,
     levels,
     reachability: Object.fromEntries(
       options.levels.map((entry, i) => [
@@ -108,20 +93,30 @@ async function routeLadder(
     },
     reasoning: ALL_LEVELS,
   };
-  let ladderReads = 0;
-  let listReads = 0;
+  const holds: Record<string, Promise<void> | undefined> = {};
+  let failure: string | null = null;
+  const events: string[] = [];
   const saved: {
     default_level: number;
     levels: Record<string, LadderEntry>;
   }[] = [];
-  await page.route(`${base}api/settings/effort-levels`, (route) => {
-    if (route.request().method() === "POST")
-      saved.push(route.request().postDataJSON());
-    else ladderReads++;
+  await page.route(`${base}api/settings/effort-levels`, async (route) => {
+    if (route.request().method() === "POST" && failure)
+      return route.fulfill({ status: 500, json: { detail: failure } });
+    if (route.request().method() === "POST") {
+      events.push("POST");
+      const body = route.request().postDataJSON();
+      saved.push(body);
+      await holds.POST;
+      Object.assign(levels, body.levels);
+    } else {
+      events.push("GET");
+      await holds.GET;
+    }
     return route.fulfill({ json: ladder });
   });
   await page.route(`${base}api/settings/model-list`, (route) => {
-    listReads++;
+    events.push("LIST");
     return route.fulfill({
       json: { models: options.list, reasoning: ALL_LEVELS },
     });
@@ -129,8 +124,21 @@ async function routeLadder(
   return {
     saved,
     levels,
-    ladderReads: () => ladderReads,
-    listReads: () => listReads,
+    events,
+    ladderReads: () => events.filter((event) => event === "GET").length,
+    listReads: () => events.filter((event) => event === "LIST").length,
+    failSaves(detail: string | null) {
+      failure = detail;
+    },
+    hold(method: "GET" | "POST") {
+      const { promise, resolve } = Promise.withResolvers<void>();
+      holds[method] = promise;
+      return () => {
+        if (method === "POST") events.push("released");
+        holds[method] = undefined;
+        resolve();
+      };
+    },
   };
 }
 
@@ -142,55 +150,64 @@ async function listCapacity(listbox: Locator): Promise<number> {
   });
 }
 
-async function openLadder(page: Page, base: string): Promise<void> {
-  await gotoRoot(page, base);
-  await page.locator(".agent").first().waitFor();
+async function openLadderSettings(page: Page): Promise<void> {
+  await page.locator(".agent").first().waitFor({ state: "attached" });
   await openSettingsPanel(page);
   await page.locator('#settings-nav button[data-cat="models"]').click();
-  await openDetail(page, /^Effort ladder /);
+}
+
+function effortLevels(page: Page): Locator {
+  return page.locator(".settings-section").filter({
+    has: page.getByRole("heading", { name: "Effort levels", exact: true }),
+  });
+}
+
+function effortLevel(page: Page, level: number) {
+  const name = new RegExp(`^Level ${level} `);
+  const row = effortLevels(page)
+    .locator(".row.effort")
+    .filter({ has: page.getByRole("button", { name }) });
+  return {
+    row,
+    model: row.getByRole("button", { name }),
+    reasoning: row.getByRole("slider", {
+      name: `Reasoning for level ${level}`,
+      exact: true,
+    }),
+  };
 }
 
 const LEVEL_ONE_HELP =
   "Used for conversation names and, by default, safety review; choose an inexpensive model such as Luna or Haiku.";
 
 async function openDetail(page: Page, name: RegExp): Promise<void> {
-  if (page.viewportSize()!.width <= 700)
-    await page.getByRole("button", { name }).click();
+  await page.getByRole("button", { name }).click();
 }
 
 async function closeDetails(page: Page): Promise<void> {
   const sheets = page.locator("dialog.settings-sheet[open]");
+  const name =
+    page.viewportSize()!.width <= 700 ? /^Close / : /^(Close|Back to) /;
   while (await sheets.count())
-    await sheets
-      .last()
-      .getByRole("button", { name: /^Close / })
-      .click();
+    await sheets.last().getByRole("button", { name }).click();
 }
 
-async function closeLevel(page: Page): Promise<void> {
-  const current = page.locator(
-    'dialog.settings-sheet[open][aria-label^="Level "]',
-  );
-  if (await current.count())
-    await current.getByRole("button", { name: /^Close / }).click();
-}
+const expectModalSheet = (page: Page, name: string) =>
+  browserExpect(page.locator("dialog:modal")).toHaveAccessibleName(name);
 
 async function openLevel(page: Page, level: number): Promise<void> {
-  await closeLevel(page);
-  await openDetail(page, new RegExp(`^Level ${level} `));
-  if (page.viewportSize()!.width > 700)
-    await page
-      .getByRole("combobox", { name: `Model for level ${level}`, exact: true })
-      .focus();
+  await closeDetails(page);
+  await effortLevel(page, level).model.click();
+  await expectModalSheet(page, `Level ${level}`);
+  await browserExpect(
+    page.getByRole("combobox", { name: `Model for level ${level}` }),
+  ).toBeFocused();
 }
 
 async function expectLevelOneHelp(page: Page): Promise<void> {
-  await openLevel(page, 1);
-  const sheet = page.getByRole("region", { name: "Level 1", exact: true });
   await browserExpect(
-    sheet.getByText(LEVEL_ONE_HELP, { exact: true }),
+    effortLevels(page).getByText(LEVEL_ONE_HELP, { exact: true }),
   ).toBeVisible();
-  await closeLevel(page);
 }
 
 async function showCategory(page: Page, cat: string): Promise<void> {
@@ -200,15 +217,29 @@ async function showCategory(page: Page, cat: string): Promise<void> {
   await page.locator(`#settings-nav button[data-cat="${cat}"]`).click();
 }
 
-async function saveLadder(page: Page, tap = false): Promise<void> {
-  await closeLevel(page);
-  const save = page
-    .getByRole("region", { name: "Effort ladder", exact: true })
-    .getByRole("button", { name: "Save", exact: true });
-  if (tap) await save.tap();
-  else await save.click();
-  await page.getByText("Saved. Applies to new turns.").waitFor();
+async function expectLadderSaves(
+  page: Page,
+  saved: unknown[],
+  count: number,
+): Promise<void> {
+  await browserExpect.poll(() => saved.length).toBe(count);
+  await browserExpect(
+    effortLevels(page).getByText(
+      "Saved. Applies to new agents and agents whose level is chosen again.",
+      { exact: true },
+    ),
+  ).toBeVisible();
 }
+
+const subscriptionToken = () => ({
+  access_token: `h.${Buffer.from(
+    JSON.stringify({
+      "https://api.openai.com/auth": { chatgpt_account_id: "acct" },
+    }),
+  ).toString("base64url")}.s`,
+  refresh_token: "sk-test-cref",
+  expires_in: 7200,
+});
 
 export const tests: BrowserTest[] = [
   // Feature: #3396 the safety model choice persists through Settings reloads.
@@ -216,10 +247,90 @@ export const tests: BrowserTest[] = [
     const server = await startServer();
     const page = await browser.newPage({
       viewport: { width: 1280, height: 915 },
+      hasTouch: true,
     });
     const errors = captureErrors(page);
+    const endpoint = `${server.base}api/settings/safety-review-model`;
+    const luna = getBuiltinModels("openai-codex").find(
+      (model) => model.name === "GPT-6 Luna",
+    )!;
+    const decisions = getBuiltinClassifierModels("openai").find(
+      (model) => model.id === luna.id,
+    )!;
+    const jev = getBuiltinClassifierModels("openrouter").find(
+      (model) => model.name === "TypeSafe: Jev 1.14",
+    )!;
+    const jevId = `${jev.provider}/${jev.id}`;
+    const jevLabel = `${jev.name} · classifier`;
+    const decisionsId = `${decisions.provider}/${decisions.id}`;
+    const decisionsLabel = `${decisions.name} · classifier`;
+    const lunaId = `${luna.provider}/${luna.id}`;
+    const readChoice = async () => {
+      const response = await page.request.get(endpoint);
+      expect(response.ok()).toBe(true);
+      return response.json();
+    };
+    const ladder = effortLevels(page);
+    const row = (label: string, route = "") =>
+      ladder.getByRole("button", {
+        name: `Safety review ${label}${route && ` ${route}`}`,
+        exact: true,
+      });
+    const finder = page.getByRole("dialog", {
+      name: "Safety review",
+      exact: true,
+    });
+    const search = finder.getByRole("combobox", {
+      name: "Safety review model",
+    });
+    const defaultOption = finder.getByRole("option", {
+      name: "Same as level 1",
+      exact: true,
+    });
+    const savedStatus = ladder
+      .getByRole("status")
+      .and(page.getByText("Saved. Applies to the next run.", { exact: true }));
+    const posts: unknown[] = [];
+    page.on("request", (request) => {
+      if (request.url() === endpoint && request.method() === "POST")
+        posts.push(request.postDataJSON());
+    });
+    const saveChoice = async (
+      pick: () => Promise<void>,
+      model: string | null,
+    ) => {
+      const saved = page.waitForResponse(
+        (response) =>
+          response.url() === endpoint && response.request().method() === "POST",
+      );
+      await pick();
+      const response = await saved;
+      expect(response.ok()).toBe(true);
+      expect(response.request().postDataJSON()).toEqual({ model });
+      await browserExpect(savedStatus).toBeVisible();
+    };
+    const savePlatformKey = async () => {
+      const response = await page.request.post(
+        `${server.base}api/pi/codex-auth/api-key`,
+        { data: { key: "browser-test-decisions-key" } },
+      );
+      expect(response.ok()).toBeTrue();
+    };
     try {
       await gotoRoot(page, server.base);
+      await writeFile(
+        join(server.data, "settings", "pi-agent", "auth.json"),
+        JSON.stringify({
+          "openai-codex": {
+            type: "oauth",
+            access: "test-access",
+            refresh: "test-refresh",
+            expires: Date.now() + 3600_000,
+            accountId: "test-subscription",
+          },
+        }),
+        { mode: 0o600 },
+      );
       expect(
         (
           await page.request.post(
@@ -230,172 +341,170 @@ export const tests: BrowserTest[] = [
           )
         ).ok(),
       ).toBe(true);
-      const state = (await (
-        await page.request.get(`${server.base}api/settings/safety-review-model`)
-      ).json()) as {
-        models: { id: string; label: string }[];
-        results: Record<
-          string,
-          (typeof safetyResults)[keyof typeof safetyResults]
-        >;
-      };
-      expect(state.results).toEqual(safetyResults);
-      const warned = state.models.find(
-        (model) => (state.results[model.id]?.falseAllows ?? 0) > 0,
-      )!;
-      const safe = state.models.find(
-        (model) => state.results[model.id]?.falseAllows === 0,
-      )!;
-      const untested = state.models.find((model) => !state.results[model.id])!;
-      expect(warned).toBeDefined();
-      expect(safe).toBeDefined();
-      expect(untested).toBeDefined();
-      const result = state.results[warned.id]!;
-      const summary = `${result.passed}/${result.total} correct · ${(result.medianMs / 1000).toFixed(1)} s`;
-      await openSettingsPanel(page);
+      await savePlatformKey();
+      const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+      await openLadderSettings(page);
+      const settings = page.locator("#settings-modal");
       await browserExpect(
-        page.locator('#settings-nav button[data-cat="safety"]'),
-      ).toHaveCount(1);
-      await page.locator('#settings-nav button[data-cat="safety"]').click();
-      const control = page.getByLabel("Safety review model", { exact: true });
-      await browserExpect(control).toBeEnabled();
-      await browserExpect(
-        page.getByText("Safety review model", { exact: true }),
-      ).toHaveCount(1);
-      await browserExpect(control).toHaveValue("");
-      await browserExpect(control.locator("option").first()).toContainText(
-        "Same as level 1",
-      );
-      await browserExpect(
-        control.locator(`option[value="${warned.id}"]`),
-      ).toContainText(summary);
-      await control.scrollIntoViewIfNeeded();
-      expect(
-        await control.evaluate((element) => {
-          const box = element.getBoundingClientRect();
-          return [box.left + 5, box.right - 5].every((x) =>
-            [box.top + 5, box.bottom - 5].every((y) =>
-              element.contains(element.ownerDocument.elementFromPoint(x, y)),
-            ),
-          );
-        }),
-      ).toBe(true);
-      await control.selectOption(warned.id);
-      await page
-        .getByText("Saved. Applies to the next run.", { exact: true })
-        .waitFor();
-      await page
-        .getByText(
-          "This model has allowed risky actions in testing and may let risky actions through.",
-          { exact: true },
-        )
-        .waitFor();
+        settings.getByRole("button", { name: "Safety", exact: true }),
+      ).toHaveCount(0);
+      await row("Same as level 1").click();
+      await expectModalSheet(page, "Safety review");
+      await browserExpect(search).toHaveAttribute("aria-expanded", "true");
+      await browserExpect(defaultOption).toBeVisible();
+      const benchmarkText =
+        /\d+\s*\/\s*\d+ correct|Not tested|has allowed risky actions in testing/i;
+      await browserExpect(settings).not.toContainText(benchmarkText);
+      await search.press("Enter");
+      await browserExpect(finder).toBeHidden();
+      expect(posts).toEqual([]);
+      await row("Same as level 1").click();
+      await search.fill("jv114");
+      await browserExpect(defaultOption).toHaveCount(0);
+      const classifier = finder
+        .getByRole("group", { name: "OpenRouter", exact: true })
+        .getByRole("option", { name: jevLabel, exact: true });
+      await browserExpect(classifier).toBeVisible();
+      await browserExpect(classifier).not.toContainText(benchmarkText);
+      await saveChoice(() => classifier.click(), jevId);
+      await browserExpect(row(jevLabel, "OpenRouter")).toBeVisible();
+      await browserExpect(settings).not.toContainText(benchmarkText);
       await page.reload();
-      await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="safety"]').click();
-      await browserExpect(control).toHaveValue(warned.id);
-      await browserExpect(control.locator("option:checked")).toHaveText(
-        `${warned.label} — ${summary}`,
+      await openLadderSettings(page);
+      expect((await readChoice()).model).toBe(jevId);
+      await openLevel(page, 1);
+      const effort = page.getByRole("dialog", { name: "Level 1", exact: true });
+      await effort.getByRole("combobox").fill("gpt-6 luna");
+      for (const route of ["ChatGPT subscription", "OpenAI API key"]) {
+        const group = effort.getByRole("group", { name: route, exact: true });
+        await browserExpect(
+          group.getByText(route, { exact: true }),
+        ).toBeVisible();
+        await browserExpect(
+          group.getByRole("option", { name: luna.name, exact: true }),
+        ).toBeVisible();
+      }
+      await closeDetails(page);
+      await row(jevLabel, "OpenRouter").click();
+      await browserExpect(settings).not.toContainText(benchmarkText);
+      await search.fill("gpt-6 luna");
+      const subscription = finder
+        .getByRole("group", { name: "ChatGPT subscription", exact: true })
+        .getByRole("option", { name: luna.name, exact: true });
+      const apiGroup = finder.getByRole("group", {
+        name: "OpenAI API key",
+        exact: true,
+      });
+      const sharedId = finder
+        .getByRole("option")
+        .and(finder.locator(`[data-id="${decisionsId}"]`));
+      const apiKey = sharedId.and(
+        apiGroup.getByRole("option", {
+          name: decisionsLabel,
+          exact: true,
+        }),
       );
-      await browserExpect(page.getByText(summary, { exact: true })).toHaveCount(
-        0,
-      );
+      const expectBothRoutes = async () => {
+        for (const route of ["ChatGPT subscription", "OpenAI API key"])
+          await browserExpect(
+            finder.getByText(route, { exact: true }),
+          ).toBeVisible();
+        await browserExpect(subscription).toBeVisible();
+        await browserExpect(sharedId).toHaveCount(1);
+        await browserExpect(apiKey).toBeVisible();
+      };
+      await expectBothRoutes();
+      if (shots)
+        await page.screenshot({ path: `${shots}/openai-finder-1280.png` });
+      await saveChoice(() => apiKey.click(), decisionsId);
+      await browserExpect(
+        row(decisionsLabel, "OpenAI API key").getByText("OpenAI API key", {
+          exact: true,
+        }),
+      ).toBeVisible();
       expect(
         (
-          await (
-            await page.request.get(
-              `${server.base}api/settings/safety-review-model`,
-            )
-          ).json()
-        ).model,
-      ).toBe(warned.id);
-      await control.selectOption(safe.id);
-      await page
-        .getByText("Saved. Applies to the next run.", { exact: true })
-        .waitFor();
+          await page.request.post(
+            `${server.base}api/pi/codex-auth/api-key/remove`,
+          )
+        ).ok(),
+      ).toBeTrue();
+      await page.reload();
+      await openLadderSettings(page);
+      const unavailable = row(`${decisionsId} (unavailable)`, "OpenAI API key");
       await browserExpect(
-        page.getByText(
-          "This model has allowed risky actions in testing and may let risky actions through.",
-          { exact: true },
-        ),
-      ).toHaveCount(0);
-      const untestedSaved = page.waitForResponse(
-        (response) =>
-          response.url() === `${server.base}api/settings/safety-review-model` &&
-          response.request().method() === "POST" &&
-          response.request().postDataJSON().model === untested.id,
+        unavailable.getByText("OpenAI API key", { exact: true }),
+      ).toBeVisible();
+      await unavailable.click();
+      await search.fill("gpt-6 luna");
+      await browserExpect(
+        finder.getByText("ChatGPT subscription", { exact: true }),
+      ).toBeVisible();
+      await browserExpect(subscription).toBeVisible();
+      await browserExpect(apiGroup).toHaveCount(0);
+      await saveChoice(() => subscription.click(), lunaId);
+      await savePlatformKey();
+      const lunaRow = row(luna.name, "ChatGPT subscription");
+      await browserExpect(lunaRow).toBeVisible();
+      await browserExpect(settings).not.toContainText(benchmarkText);
+      await page.setViewportSize({ width: 412, height: 915 });
+      await page.goto("about:blank");
+      await gotoRoot(page, server.base);
+      await openLadderSettings(page);
+      expect((await readChoice()).model).toBe(lunaId);
+      for (const chosen of [lunaRow, effortLevel(page, 1).model])
+        await browserExpect(
+          chosen.getByText("ChatGPT subscription", { exact: true }),
+        ).toBeVisible();
+      await browserExpect(effortLevel(page, 1).model).toHaveAccessibleName(
+        `Level 1 ${luna.name} ChatGPT subscription`,
       );
-      await control.selectOption(untested.id);
-      expect((await untestedSaved).ok()).toBe(true);
-      await browserExpect(control.locator("option:checked")).toContainText(
-        "Not tested",
-      );
+      await openLevel(page, 1);
+      await closeDetails(page);
+      await expectHitCorners(lunaRow);
+      await lunaRow.tap();
+      await expectModalSheet(page, "Safety review");
+      await browserExpect(settings).not.toContainText(benchmarkText);
+      await expectHitCorners(search);
+      await expectHitCorners(defaultOption);
+      await search.fill("gpt-6 luna");
+      await expectBothRoutes();
+      if (shots)
+        await page.screenshot({ path: `${shots}/openai-finder-412.png` });
+      await search.fill("jv114");
+      await page.setViewportSize({ width: 1280, height: 915 });
+      await browserExpect(search).toHaveValue("jv114");
+      await browserExpect(search).toBeFocused();
+      await expectModalSheet(page, "Safety review");
+      await finder
+        .getByRole("button", { name: "Close Safety review", exact: true })
+        .click();
+      await browserExpect(finder).toBeHidden();
+      await lunaRow.click();
+      await browserExpect(search).toHaveAttribute("aria-expanded", "true");
+      await page.setViewportSize({ width: 412, height: 915 });
       await writeFile(
         join(server.data, "data", "config", "safety-review-model.json"),
         JSON.stringify({ model: "" }),
       );
       await browserExpect
-        .poll(
-          async () =>
-            (
-              await (
-                await page.request.get(
-                  `${server.base}api/settings/safety-review-model`,
-                )
-              ).json()
-            ).invalid,
-        )
+        .poll(async () => (await readChoice()).invalid)
         .toBe(true);
       await page.reload();
-      await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="safety"]').click();
-      await page
-        .getByText(
-          "The saved safety review model is invalid. Choose a model to restore review.",
-          { exact: true },
-        )
-        .waitFor();
-      await control.selectOption("");
-      await page
-        .getByText("Saved. Applies to the next run.", { exact: true })
-        .waitFor();
-      expect(
-        (
-          await (
-            await page.request.get(
-              `${server.base}api/settings/safety-review-model`,
-            )
-          ).json()
-        ).invalid,
-      ).toBe(false);
+      await openLadderSettings(page);
+      await row("Invalid saved choice").tap();
+      await browserExpect(
+        finder.getByText("Choose a model to restore safety review.", {
+          exact: true,
+        }),
+      ).toBeVisible();
+      await saveChoice(() => defaultOption.tap(), null);
+      await browserExpect(row("Same as level 1")).toBeVisible();
+      expect(await readChoice()).toMatchObject({ model: null, invalid: false });
       expect(errors).toEqual([]);
     } finally {
       await page.close();
       await stopServer(server);
-    }
-  },
-  // Regression: #2904 skipped updates do not offer an update button.
-  async function test_skipped_updates_hide_button(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
-    const page = await context.newPage();
-    try {
-      const status = await (
-        await page.request.get(base + "api/settings/update")
-      ).json();
-      expect(status.skipped).toBeTruthy();
-      await gotoRoot(page, base);
-      await page.locator(".agent").first().waitFor();
-      await page.locator("#settings-btn").click();
-      await openDetail(page, /^Software update/);
-      await page
-        .locator(".update-status")
-        .getByText(status.skipped, { exact: true })
-        .waitFor();
-      expect(await page.locator(".update-now").isVisible()).toBeFalse();
-    } finally {
-      await context.close();
     }
   },
   async function test_settings_category_list_back_and_deep_links(
@@ -414,22 +523,24 @@ export const tests: BrowserTest[] = [
     await openSettingsPanel(page);
     await page.locator("#settings-overlay.on").waitFor();
     const nav = page.locator("#settings-nav button");
-    await browserExpect(nav).toHaveText([
-      "Account",
-      "Appearance",
-      "Authentication",
+    const labels = [
+      "Providers",
       "Models",
-      "Safety",
-      "MCPs",
-    ]);
+      "Agents",
+      "Appearance",
+      "Remotes",
+      "Account",
+    ];
+    await browserExpect(nav).toHaveText(labels);
     for (const button of await nav.all())
       expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
     await browserExpect(page.locator("#settings-sections")).toBeHidden();
-    await page.locator("#settings-release").waitFor();
-    await visibleAndUncovered(page, "#settings-release");
-    await nav.getByText("Authentication", { exact: true }).tap();
+    const version = page.locator("#settings-release .settings-version");
+    await browserExpect(version).toBeVisible();
+    await expectHitCorners(version, 2);
+    await nav.getByText("Providers", { exact: true }).tap();
     const title = page.getByRole("heading", {
-      name: "Authentication",
+      name: "Providers",
       exact: true,
     });
     await browserExpect(title).toBeVisible();
@@ -445,10 +556,10 @@ export const tests: BrowserTest[] = [
     await back.tap();
     await browserExpect(title).toBeHidden();
     await browserExpect(
-      nav.getByText("Authentication", { exact: true }),
+      nav.getByText("Providers", { exact: true }),
     ).toBeVisible();
     await browserExpect(
-      page.locator('#settings-nav [data-cat="auth"]'),
+      page.locator('#settings-nav [data-cat="providers"]'),
     ).toBeFocused();
     const url = page.url();
     await nav.getByText("Models", { exact: true }).tap();
@@ -483,23 +594,53 @@ export const tests: BrowserTest[] = [
     ).toBeFocused();
     await page.locator("#settings-close").tap();
     await page.setViewportSize({ width: 1280, height: 800 });
-    await page.evaluate(() =>
-      (globalThis as any).dispatchEvent(
-        new CustomEvent("recurse:open-settings", { detail: "models" }),
-      ),
-    );
+    await openSettingsPanel(page);
+    await browserExpect(nav).toHaveText(labels);
     const models = page.locator('#settings-nav button[data-cat="models"]');
     await browserExpect(models).toBeFocused();
     await browserExpect(
       page.getByRole("heading", { name: "Models", exact: true }),
     ).toBeVisible();
-    await showCategory(page, "account");
-    await openDetail(page, /^Add a remote$/);
+    await showCategory(page, "remotes");
+    await page.reload();
+    await openSettingsPanel(page);
+    await browserExpect(
+      page.locator('#settings-nav button[data-cat="remotes"]'),
+    ).toBeFocused();
+    await openDetail(page, /^Add a remote/);
     await browserExpect(
       page.locator(".remote-add input").first(),
     ).toBeVisible();
     for (const input of await page.locator(".remote-add input:visible").all())
       expect((await input.boundingBox())!.height).toBeLessThanOrEqual(44);
+    await page.addInitScript(() => {
+      const storage = (globalThis as any).Storage.prototype;
+      for (const name of ["getItem", "setItem"]) {
+        const original = storage[name];
+        storage[name] = function (key: string, ...rest: unknown[]) {
+          if (key === "recurse.settingsCategory")
+            throw new DOMException("Storage is denied", "SecurityError");
+          return original.call(this, key, ...rest);
+        };
+      }
+    });
+    await page.reload();
+    const providers = page.locator(
+      '#settings-nav button[data-cat="providers"]',
+    );
+    await openSettingsPanel(page);
+    await browserExpect(providers).toBeFocused();
+    await showCategory(page, "appearance");
+    await browserExpect(
+      page.getByRole("heading", {
+        name: "Appearance",
+        exact: true,
+        level: 2,
+      }),
+    ).toBeVisible();
+    await page.locator("#settings-close").click();
+    await openSettingsPanel(page);
+    await browserExpect(providers).toBeFocused();
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -671,38 +812,16 @@ export const tests: BrowserTest[] = [
     await routeArtifacts(page, base);
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
-    await page.route(`${base}api/settings/update`, (route) =>
-      route.fulfill({
-        json: {
-          release: { version: "0.1.0", commit: "abc1234" },
-          skipped: null,
-          checking: false,
-          channel: "release",
-          installed: "v0.1.0",
-          available: "v0.2.0",
-          checked_at: 1,
-          error: null,
-          update: null,
-        },
-      }),
-    );
     await openSettingsPanel(page);
     await page.locator("#settings-overlay.on").waitFor();
-    await page.locator("#settings-release").waitFor();
-    expect(await page.locator("#settings-release").innerText()).toBe(
+    const version = page.locator("#settings-release .settings-version");
+    await browserExpect(version).toHaveText(
       `Recurse ${releaseLabel(await readRelease())}`,
     );
-    await visibleAndUncovered(page, "#settings-release");
+    await browserExpect(version).toBeVisible();
+    await expectHitCorners(version, 2);
+    await browserExpect(page.locator("#settings-nav button")).toHaveCount(6);
     await page.locator('#settings-nav button[data-cat="account"]').tap();
-    await page.getByRole("button", { name: /^Software update/ }).tap();
-    const updateNow = page.getByRole("button", { name: "Update now" });
-    await updateNow.scrollIntoViewIfNeeded();
-    expect(await page.locator(".update-status").innerText()).toBe(
-      "Recurse v0.2.0 is available (installed: v0.1.0, newest release).",
-    );
-    await visibleAndUncovered(page, ".update-now");
-    await closeDetails(page);
-    expect(await page.locator("#settings-nav button").count()).toBe(6);
     expect(await page.locator("#settings-modal .signout").count()).toBe(0);
     expect(
       await page
@@ -713,12 +832,6 @@ export const tests: BrowserTest[] = [
         })
         .count(),
     ).toBe(0);
-    const [titleBox, groupBox] = await Promise.all([
-      page.getByRole("heading", { name: "Account", exact: true }).boundingBox(),
-      page.locator(".settings-section .group:visible").first().boundingBox(),
-    ]);
-    expect(Math.round(groupBox!.x)).toBe(Math.round(titleBox!.x));
-    expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(390);
     await page
       .getByRole("button", { name: "Change password", exact: true })
       .tap();
@@ -727,7 +840,7 @@ export const tests: BrowserTest[] = [
     );
     expect(await password.first().evaluate(fontSize)).toBe("16px");
     expect((await password.first().boundingBox())!.height).toBe(44);
-    await closeDetails(page);
+    await showCategory(page, "agents");
     const notify = page.getByRole("switch", {
       name: "Notify me when a top-level agent finishes",
     });
@@ -830,23 +943,38 @@ export const tests: BrowserTest[] = [
       });
       const page = await context.newPage();
       const errors = captureErrors(page);
-      const open = async () => {
+      const open = async (category = "models") => {
         await page.locator(".agent").first().waitFor();
         await openSettingsPanel(page);
-        await page.locator('#settings-nav button[data-cat="models"]').click();
+        await showCategory(page, category);
       };
       await gotoRoot(page, base);
       await open();
       const warming = page.getByRole("switch", {
-        name: "Keep prompt cache warm while agents work",
+        name: "Keep context cached while agents work",
+        exact: true,
       });
       await browserExpect(warming).toBeEnabled();
       await browserExpect(warming).toBeChecked();
       const compacting = page.getByRole("switch", {
         name: "Compact long idle conversations before their cache expires",
+        exact: true,
       });
       await browserExpect(compacting).toBeEnabled();
       await browserExpect(compacting).not.toBeChecked();
+      for (const [control, hint] of [
+        [
+          warming,
+          "Before the provider's cache expires, Recurse may resend the last request so the next reply can be faster and cheaper. Resends use tokens.",
+        ],
+        [
+          compacting,
+          "Older messages are summarized for the model; the thread keeps them.",
+        ],
+      ] as const) {
+        await browserExpect(control).toHaveAccessibleDescription(hint);
+        await browserExpect(control.locator("xpath=..")).toContainText(hint);
+      }
       const minimum = page.getByRole("spinbutton", {
         name: "Minimum conversation length for idle compaction (tokens)",
       });
@@ -883,9 +1011,7 @@ export const tests: BrowserTest[] = [
         name: "Maximum context window slider (tokens)",
       });
       expect(await slider.count()).toBe(1);
-      await page.waitForFunction(
-        "document.querySelector('#maximum-context-window').value !== ''",
-      );
+      await browserExpect(maximum).toHaveValue(/./);
       const original = await maximum.inputValue();
       expect(await slider.inputValue()).toBe(original);
       for (const control of [slider, maximum]) {
@@ -893,56 +1019,132 @@ export const tests: BrowserTest[] = [
         await expectHitCorners(control, width === 412 ? 44 : 36);
         expect(bounds.x + bounds.width).toBeLessThanOrEqual(width);
       }
-      await slider.fill("500000");
-      expect(await maximum.inputValue()).toBe("500000");
-      await maximum.fill("500123");
-      expect(await slider.inputValue()).toBe("500123");
-      await slider.focus();
-      await slider.press("ArrowRight");
-      expect(await maximum.inputValue()).toBe("500124");
-      expect(await slider.inputValue()).toBe("500124");
-      expect(
-        await maximum.evaluate(
-          (el) =>
-            (el as unknown as { validity: { valid: boolean } }).validity.valid,
-        ),
-      ).toBeTrue();
       const card = maximum.locator("xpath=ancestor::form");
-      await maximum.fill("63999");
-      await card.getByRole("button", { name: "Save", exact: true }).click();
-      expect(
-        await maximum.evaluate(
-          (el) =>
-            (el as unknown as { validity: { rangeUnderflow: boolean } })
-              .validity.rangeUnderflow,
-        ),
-      ).toBeTrue();
-      expect(await card.locator(".msg").innerText()).toBe("");
+      expect(await card.getByRole("button").count()).toBe(0);
+      const endpoint = "api/settings/maximum-context-window";
+      const stored = async () => {
+        const response = await page.request.get(base + endpoint);
+        return (await response.json()).maximum_context_window;
+      };
+      const savedNote = card.getByText(
+        "Saved. Applies when an agent process next starts.",
+      );
+      await page.evaluate((endpoint) => {
+        const browser = globalThis as any;
+        const trace: string[] = (browser.contextTrace = []);
+        browser.addEventListener("pointerup", () => trace.push("release"), {
+          once: true,
+        });
+        const send = browser.fetch;
+        browser.fetch = async (input: unknown, init?: any) => {
+          if (!String(input).endsWith(endpoint)) return send(input, init);
+          const name =
+            init?.method === "POST"
+              ? `POST ${JSON.parse(init.body).maximum_context_window}`
+              : "GET";
+          trace.push(name);
+          const response = await send(input, init);
+          trace.push(`${name} done`);
+          return response;
+        };
+      }, `/${endpoint}`);
+      const trace = (): Promise<string[]> =>
+        page.evaluate(() => (globalThis as any).contextTrace);
+      const sent = (name: string) => [name, `${name} done`];
+      const status = card.locator(".msg");
+      const remount = async () => {
+        await showCategory(page, "agents");
+        await showCategory(page, "models");
+        await openDetail(page, /^Maximum context window /);
+      };
+      const track = (await slider.boundingBox())!;
+      const y = track.y + track.height / 2;
+      await page.mouse.move(track.x + track.width / 2, y);
+      await page.mouse.down();
+      await page.mouse.move(track.x + track.width * 0.75, y, { steps: 5 });
+      const dragged = Number(await maximum.inputValue());
+      expect(dragged).toBe(Number(await slider.inputValue()));
+      await page.mouse.up();
+      await savedNote.waitFor();
+      expect(await trace()).toEqual(["release", ...sent(`POST ${dragged}`)]);
+      expect(await stored()).toBe(dragged);
+      const held: Array<() => void> = [];
+      let holding = true;
+      await page.route(`**/${endpoint}`, async (request) => {
+        if (holding && request.request().method() === "POST")
+          await new Promise<void>((resolve) => held.push(resolve));
+        await request.continue();
+      });
+      const release = () => {
+        holding = false;
+        for (const resolve of held.splice(0)) resolve();
+      };
+      try {
+        await maximum.fill("500123");
+        expect(await slider.inputValue()).toBe("500123");
+        await slider.focus();
+        await browserExpect.poll(() => held.length).toBe(1);
+        await slider.press("ArrowRight");
+        expect(await maximum.inputValue()).toBe("500124");
+        await browserExpect(slider).toBeFocused();
+        await browserExpect(status).toHaveText("Saving…");
+        held.shift()!();
+        await browserExpect.poll(() => held.length).toBe(1);
+        await browserExpect(status).toHaveText("Saving…");
+        await remount();
+        await browserExpect(slider).toBeDisabled();
+        held.shift()!();
+        await browserExpect(maximum).toHaveValue("500124");
+        await browserExpect(slider).toBeEnabled();
+        await slider.focus();
+        await slider.press("ArrowRight");
+        await browserExpect.poll(() => held.length).toBe(1);
+        await maximum.fill("777777");
+        release();
+        await browserExpect.poll(stored).toBe(500125);
+        await browserExpect(status).toHaveText("");
+        expect(await maximum.inputValue()).toBe("777777");
+      } finally {
+        release();
+        await page.unroute(`**/${endpoint}`);
+      }
       await maximum.fill("500123");
-      await card.getByRole("button", { name: "Save", exact: true }).click();
-      await page
-        .getByText("Saved. Applies when an agent process next starts.")
-        .waitFor();
+      await maximum.press("Enter");
+      await savedNote.waitFor();
+      await browserExpect(maximum).toBeFocused();
+      await maximum.fill("63999");
+      await maximum.press("Enter");
+      await browserExpect(maximum).toBeFocused();
+      await browserExpect(maximum).toHaveJSProperty(
+        "validationMessage",
+        "Value must be greater than or equal to 64000.",
+      );
+      await browserExpect(status).toHaveText("");
+      await remount();
+      await browserExpect(maximum).toHaveValue("500123");
+      await browserExpect(slider).toBeEnabled();
+      expect(await trace()).toEqual([
+        "release",
+        ...[`POST ${dragged}`, "POST 500123", "POST 500124", "GET"].flatMap(
+          sent,
+        ),
+        ...["POST 500125", "POST 500123", "GET"].flatMap(sent),
+      ]);
       await page.reload({ waitUntil: "domcontentloaded" });
       await open();
       await openDetail(page, /^Maximum context window /);
-      await page.waitForFunction(
-        "document.querySelector('#maximum-context-window').value === '500123'",
-      );
+      await browserExpect(maximum).toHaveValue("500123");
       expect(await slider.inputValue()).toBe("500123");
       await maximum.fill(original);
-      await card.getByRole("button", { name: "Save", exact: true }).click();
-      await page
-        .getByText("Saved. Applies when an agent process next starts.")
-        .waitFor();
-      await showCategory(page, "account");
+      await maximum.press("Tab");
+      await browserExpect.poll(stored).toBe(Number(original));
+      await savedNote.waitFor();
+      await showCategory(page, "agents");
       await openDetail(page, /^Deleted agents' history /);
       const retention = page.getByRole("spinbutton", {
         name: "Keep deleted agents' history (days)",
       });
-      await page.waitForFunction(
-        "document.querySelector('#deleted-agent-history')?.value !== ''",
-      );
+      await browserExpect(retention).toHaveValue(/./);
       const kept = await retention.inputValue();
       expect(Number(kept)).toBe(90);
       const history = retention.locator("xpath=ancestor::form");
@@ -957,12 +1159,9 @@ export const tests: BrowserTest[] = [
         ).json(),
       ).toEqual({ days: 120 });
       await page.reload({ waitUntil: "domcontentloaded" });
-      await open();
-      await showCategory(page, "account");
+      await open("agents");
       await openDetail(page, /^Deleted agents' history /);
-      await page.waitForFunction(
-        "document.querySelector('#deleted-agent-history')?.value === '120'",
-      );
+      await browserExpect(retention).toHaveValue("120");
       await retention.fill(kept);
       await history.getByRole("button", { name: "Save", exact: true }).click();
       await history
@@ -973,7 +1172,7 @@ export const tests: BrowserTest[] = [
     }
   },
   // Regression: #3344 Keep ladder metadata aligned with changed levels.
-  async function test_settings_model_list_update_keeps_unsaved_ladder_picks(
+  async function test_settings_model_list_update_keeps_saved_ladder_picks(
     browser,
     base,
   ) {
@@ -982,81 +1181,230 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
-    const entry = { model: "anthropic/claude-opus-5-5", reasoning: "high" };
+    const entry = { model: LIST_OPUS.id, reasoning: "high" };
+    const fresh = { model: LIST_FRESH.id, reasoning: "high" };
+    const fillers = Array.from({ length: 60 }, (_, i) => ({
+      ...LIST_FRESH,
+      id: `openrouter/vendor/filler-${i + 1}`,
+      label: `Filler ${i + 1}`,
+    }));
     const routes = await routeLadder(page, base, {
       levels: [entry, entry, entry, entry, entry],
-      list: [LIST_OPUS, { ...LIST_FRESH, reasoning_levels: null }],
+      list: [LIST_OPUS, { ...LIST_FRESH, reasoning_levels: null }, ...fillers],
     });
-    const idle = { updating: false, updated_at: null, count: 449, error: null };
-    let status: object = idle;
+    const unread = {
+      updating: false,
+      updated_at: null,
+      count: null,
+      error: null,
+    };
+    const updating = { ...unread, updating: true };
+    const failed = {
+      ...unread,
+      count: 449,
+      error:
+        "openrouter: Unable to connect. Is the computer able to access the url?",
+    };
+    let status: object = unread;
     let posts = 0;
     await page.route(`${base}api/settings/model-list-update`, (route) => {
       if (route.request().method() === "POST") {
         posts++;
-        status = {
-          updating: false,
-          updated_at: null,
-          count: 449,
-          error:
-            "openrouter: Unable to connect. Is the computer able to access the url?",
-        };
-        return route.fulfill({
-          status: 202,
-          json: { ...idle, updating: true },
-        });
+        status = updating;
+        return route.fulfill({ status: 202, json: updating });
       }
       return route.fulfill({ json: status });
     });
-    await openLadder(page, base);
+    const ladderUrl = `${base}api/settings/effort-levels`;
+    const composerRead = Promise.withResolvers<void>();
+    let holdComposer = false;
+    await page.route(ladderUrl, async (route) => {
+      if (route.request().method() === "GET" && holdComposer) {
+        holdComposer = false;
+        await composerRead.promise;
+      }
+      return route.fallback();
+    });
+    await gotoRoot(page, base);
+    await page.locator(".agent").first().waitFor();
+    await startNewAgent(page);
+    await openLadderSettings(page);
     const line = page.locator(".model-list-status");
-    await page.getByText("449 models in Pi's list.").waitFor();
+    const level = (n: number) => effortLevel(page, n).model;
+    const reasoning = (n: number) => effortLevel(page, n).reasoning;
+    await browserExpect(line).toHaveText(
+      "The model list has not been read yet.",
+    );
+    await browserExpect(line).toBeVisible();
+    await browserExpect(level(2)).toHaveAccessibleName(
+      `Level 2 ${LIST_OPUS.label} ${LIST_OPUS.route}`,
+    );
+    await browserExpect(
+      effortLevels(page).getByRole("button", { name: "Save", exact: true }),
+    ).toHaveCount(0);
     const readsBefore = routes.ladderReads();
     await openLevel(page, 2);
     const box = page.getByRole("combobox", { name: "Model for level 2" });
-    await box.click();
     await box.fill("fresh");
+    holdComposer = true;
+    const composerAsked = page.waitForRequest(
+      (request) => request.url() === ladderUrl && request.method() === "GET",
+    );
     await box.press("Enter");
-    expect(await box.inputValue()).toBe("Fresh");
-    const sonnet = { model: "anthropic/claude-sonnet-5", reasoning: "low" };
+    const composerRequest = await composerAsked;
+    await expectLadderSaves(page, routes.saved, 1);
+    const freshName = `Level 2 ${LIST_FRESH.label} ${LIST_FRESH.route}`;
+    await browserExpect(level(2)).toHaveAccessibleName(freshName);
+    await openLevel(page, 2);
+    const listbox = page.getByRole("listbox", { name: "Model for level 2" });
+    await browserExpect(listbox.getByRole("option")).toHaveCount(50);
+    await browserExpect(listbox.locator(".model-box-group-head")).toHaveText([
+      /^Claude\s*1$/,
+      /^OpenRouter\s*49 of 61$/,
+    ]);
+    const chosen = `.model-box-option[data-id="${LIST_FRESH.id}"]`;
+    await browserExpect(listbox.locator(chosen)).toHaveAccessibleDescription(
+      "Current model",
+    );
+    await browserExpect(listbox.locator(chosen)).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await visibleAndUncovered(page, `${chosen}:visible`);
+    await closeDetails(page);
+    const sonnet = { model: LIST_SONNET.id, reasoning: "low" };
     routes.levels["3"] = sonnet;
+    composerRead.resolve();
+    await (await composerRequest.response())!.finished();
+    await browserExpect(page.locator("#model-trigger")).toContainText(
+      LIST_SONNET.id,
+    );
     const refreshedList = page.waitForResponse(
       `${base}api/settings/model-list`,
     );
-    await closeLevel(page);
-    await page.getByRole("button", { name: /^Update model list/ }).click();
-    await page
-      .getByText(
-        "Could not update: openrouter: Unable to connect. Is the computer able to access the url? Using Pi's current list.",
-      )
-      .waitFor();
-    expect(await line.getAttribute("class")).toContain("err");
+    const update = page.getByRole("button", { name: /^Update model list/ });
+    await update.click();
+    await browserExpect(line).toHaveText("Updating the model list…");
+    await browserExpect(line).toBeVisible();
+    status = failed;
+    await browserExpect(line).toHaveText(
+      "Could not update: openrouter: Unable to connect. Is the computer able to access the url? Using the current list.",
+    );
+    await browserExpect(line).toBeVisible();
+    await browserExpect(line).toHaveClass(/\berr\b/);
     expect(posts).toBe(1);
     await (await refreshedList).finished();
-    await page.waitForFunction(
-      () =>
-        (
-          (globalThis as any).document.querySelector(
-            'input[aria-label="Model for level 3"]',
-          ) as { value: string }
-        ).value === "anthropic/claude-sonnet-5",
+    await browserExpect(level(3)).toHaveAccessibleName(
+      `Level 3 ${LIST_SONNET.id}`,
     );
+    await browserExpect(reasoning(3)).toHaveAttribute("aria-valuetext", "low");
     expect(routes.listReads()).toBe(2);
     expect(routes.ladderReads()).toBeGreaterThan(readsBefore);
-    await browserExpect(
-      page.locator('input[aria-label="Model for level 2"]'),
-    ).toHaveValue("Fresh");
-    await browserExpect(
-      page.getByRole("button", { name: /^Update model list/ }),
-    ).toBeEnabled();
-    await saveLadder(page);
-    expect(routes.saved).toHaveLength(1);
-    const levels = routes.saved[0]!.levels;
-    expect(levels["2"]).toEqual({
-      model: "openrouter/vendor/fresh",
-      reasoning: "high",
+    await browserExpect(level(2)).toHaveAccessibleName(freshName);
+    await browserExpect(update).toBeEnabled();
+    expect(routes.saved).toEqual([
+      {
+        default_level: 3,
+        levels: { "1": entry, "2": fresh, "3": entry, "4": entry, "5": entry },
+      },
+    ]);
+    routes.failSaves("Disk is full.");
+    const failure = effortLevels(page).getByText("Disk is full.", {
+      exact: true,
     });
-    expect(levels["1"]).toEqual(entry);
-    expect(levels["3"]).toEqual(sonnet);
+    await reasoning(4).press("ArrowRight");
+    await browserExpect(failure).toBeVisible();
+    await browserExpect(reasoning(4)).toHaveAttribute(
+      "aria-valuetext",
+      "xhigh",
+    );
+    expect(routes.levels["4"]).toEqual(entry);
+    const elsewhere = { model: LIST_SONNET.id, reasoning: "max" };
+    routes.levels["5"] = elsewhere;
+    const reloaded = page.waitForResponse(`${base}api/settings/model-list`);
+    await update.click();
+    await browserExpect(line).toHaveText("Updating the model list…");
+    status = failed;
+    await (await reloaded).finished();
+    await browserExpect(level(5)).toHaveAccessibleName(
+      `Level 5 ${LIST_SONNET.id}`,
+    );
+    await browserExpect(reasoning(4)).toHaveAttribute(
+      "aria-valuetext",
+      "xhigh",
+    );
+    await browserExpect(failure).toBeVisible();
+    routes.failSaves(null);
+    const retry = effortLevels(page).getByRole("button", {
+      name: "Retry",
+      exact: true,
+    });
+    const discard = effortLevels(page).getByRole("button", {
+      name: "Discard changes",
+      exact: true,
+    });
+    await retry.click();
+    await expectLadderSaves(page, routes.saved, 2);
+    await browserExpect(retry).toBeHidden();
+    const retried = {
+      "1": entry,
+      "2": fresh,
+      "3": sonnet,
+      "4": { ...entry, reasoning: "xhigh" },
+      "5": elsewhere,
+    };
+    expect(routes.saved[1]).toEqual({ default_level: 3, levels: retried });
+    routes.failSaves("Disk is full.");
+    await reasoning(4).press("ArrowRight");
+    await browserExpect(failure).toBeVisible();
+    await browserExpect(reasoning(4)).toHaveAttribute("aria-valuetext", "max");
+    routes.failSaves(null);
+    const releaseReads = routes.hold("GET");
+    await discard.click();
+    for (const cleared of [failure, retry, discard])
+      await browserExpect(cleared).toBeHidden();
+    await browserExpect(reasoning(4)).toHaveAttribute(
+      "aria-valuetext",
+      "xhigh",
+    );
+    await reasoning(1).evaluate((el) => el.setAttribute("data-stale", ""));
+    releaseReads();
+    await browserExpect(
+      effortLevel(page, 1).row.locator("[data-stale]"),
+    ).toHaveCount(0);
+    await reasoning(1).press("ArrowLeft");
+    await expectLadderSaves(page, routes.saved, 3);
+    expect(routes.saved[2]!.levels).toEqual({
+      ...retried,
+      "1": { ...entry, reasoning: "medium" },
+    });
+    const release = routes.hold("POST");
+    await reasoning(1).press("ArrowLeft");
+    await browserExpect.poll(() => routes.saved.length).toBe(4);
+    await reasoning(4).press("ArrowLeft");
+    status = { ...failed, error: null };
+    const remounted = Promise.all([
+      page.waitForRequest(`${base}api/settings/model-list-update`),
+      page.waitForRequest(`${base}api/settings/safety-review-model`),
+    ]);
+    await page.locator('#settings-nav button[data-cat="providers"]').click();
+    await page.locator('#settings-nav button[data-cat="models"]').click();
+    await remounted;
+    await browserExpect(line).toHaveText("449 models in the current list.");
+    await browserExpect(line).toBeVisible();
+    await browserExpect(line).not.toHaveClass(/\berr\b/);
+    release();
+    await browserExpect(reasoning(1)).toHaveAttribute("aria-valuetext", "low");
+    await browserExpect(reasoning(4)).toHaveAttribute("aria-valuetext", "high");
+    const low = { ...retried, "1": { ...entry, reasoning: "low" } };
+    expect(routes.saved.slice(3)).toEqual([
+      { default_level: 3, levels: low },
+      { default_level: 3, levels: { ...low, "4": entry } },
+    ]);
+    const afterRelease = routes.events
+      .slice(routes.events.indexOf("released"))
+      .filter((event) => event !== "GET");
+    expect(afterRelease.slice(0, 3)).toEqual(["released", "POST", "LIST"]);
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -1069,9 +1417,9 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
-    const opus = { model: "anthropic/claude-opus-5-5", reasoning: "high" };
-    const gone = { model: "anthropic/claude-gone", reasoning: "minimal" };
-    const offOpus = { model: "anthropic/claude-opus-5-5", reasoning: "off" };
+    const opus = { model: LIST_OPUS.id, reasoning: "high" };
+    const gone = { model: "anthropic/test-gone", reasoning: "minimal" };
+    const offOpus = { model: LIST_OPUS.id, reasoning: "off" };
     const listRequests: string[] = [];
     page.on("request", (request) => {
       if (request.url().endsWith("/api/settings/model-list"))
@@ -1080,63 +1428,87 @@ export const tests: BrowserTest[] = [
     const routes = await routeLadder(page, base, {
       levels: [gone, offOpus, opus, opus, opus],
       list: [LIST_OPUS, LIST_SONNET, LIST_SOL, LIST_FRESH],
+      defaultLevel: 4,
     });
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
     expect(listRequests).toEqual([]);
     await page.locator("#settings-btn").click();
     await page.locator('#settings-nav button[data-cat="models"]').click();
-    await openDetail(page, /^Effort ladder /);
     const box = (level: number) =>
       page.locator(`input[aria-label="Model for level ${level}"]`);
-    const reasoning = (level: number) =>
-      page.getByLabel(`Reasoning for level ${level}`);
+    const reasoning = (level: number) => effortLevel(page, level).reasoning;
     await expectLevelOneHelp(page);
+    await browserExpect(
+      effortLevels(page).getByText("New agents start at level 4."),
+    ).toBeVisible();
     await openLevel(page, 1);
     expect(routes.listReads()).toBe(1);
-    expect(await box(1).getAttribute("placeholder")).toBe(
-      "anthropic/claude-gone",
-    );
+    expect(await box(1).getAttribute("placeholder")).toBe(gone.model);
     await browserExpect(box(1)).toHaveAttribute("aria-expanded", "true");
     await page
-      .getByText(
-        "level 1 model anthropic/claude-gone is not in Pi's model list",
-      )
+      .getByText(`level 1 model ${gone.model} is not in Pi's model list`)
       .waitFor();
-    const levelTexts = (level: number) =>
-      reasoning(level)
-        .locator("option")
-        .evaluateAll((options) => options.map((o) => o.textContent));
-    expect(await levelTexts(2)).toEqual([
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-      "off (not offered for this model)",
-    ]);
-    expect(await reasoning(2).inputValue()).toBe("off");
+    await closeDetails(page);
+    await browserExpect(reasoning(2)).toHaveAttribute(
+      "aria-valuetext",
+      "off, not offered for this model",
+    );
+    await browserExpect(
+      effortLevels(page).getByText("off is not offered for this model.", {
+        exact: true,
+      }),
+    ).toBeVisible();
     await openLevel(page, 3);
-    await box(3).click();
-    expect(await box(3).getAttribute("aria-expanded")).toBe("true");
     const listbox = page.getByRole("listbox", { name: "Model for level 3" });
     expect(await listbox.getByRole("option").count()).toBe(4);
     expect(await listCapacity(listbox)).toBeGreaterThanOrEqual(6);
     const activeId = await box(3).getAttribute("aria-activedescendant");
     expect(
       await page.locator(`[id="${activeId}"]`).getAttribute("data-id"),
-    ).toBe("anthropic/claude-opus-5-5");
-    const first = listbox.getByRole("option").first();
-    expect(await first.innerText()).toContain("Claude Opus 5.5");
-    expect(await first.innerText()).toContain("anthropic/claude-opus-5-5");
-    expect(await first.innerText()).toContain("Claude");
-    expect(await first.innerText()).toContain("1M");
+    ).toBe(LIST_OPUS.id);
+    await browserExpect(listbox.locator(".model-box-group-head")).toHaveText([
+      /^Claude\s*2$/,
+      /^ChatGPT subscription\s*1$/,
+      /^OpenRouter\s*1$/,
+    ]);
+    const current = listbox
+      .getByRole("group", { name: LIST_OPUS.route, exact: true })
+      .getByRole("option", { name: LIST_OPUS.label, exact: true });
+    const sol = listbox
+      .getByRole("group", { name: LIST_SOL.route, exact: true })
+      .getByRole("option", { name: LIST_SOL.label, exact: true });
+    const expectOneCurrent = async () => {
+      await browserExpect(listbox.getByRole("option")).toHaveText(
+        [
+          `${LIST_OPUS.label}\n✓`,
+          LIST_SONNET.label,
+          LIST_SOL.label,
+          LIST_FRESH.label,
+        ],
+        { useInnerText: true },
+      );
+      await browserExpect(listbox.locator(".model-box-current")).toHaveCount(1);
+      await browserExpect(current.locator(".model-box-current")).toBeVisible();
+      await browserExpect(current).toHaveAccessibleDescription("Current model");
+    };
+    await expectOneCurrent();
+    await box(3).press("ArrowDown");
+    await box(3).press("ArrowDown");
+    const crossed = await box(3).getAttribute("aria-activedescendant");
+    await browserExpect(sol).toHaveAttribute("id", crossed!);
+    await visibleAndUncovered(
+      page,
+      `.model-box-option[data-id="${LIST_SOL.id}"]:visible`,
+    );
+    await expectOneCurrent();
+    await browserExpect(sol).toHaveAccessibleDescription(LIST_SOL.id);
     await box(3).fill("gpt");
     expect(
       await listbox
         .getByRole("option")
         .evaluateAll((rows) => rows.map((row) => row.getAttribute("data-id"))),
-    ).toEqual(["openai-codex/gpt-6-sol"]);
+    ).toEqual([LIST_SOL.id]);
     await box(3).press("ArrowDown");
     await box(3).press("Escape");
     expect(await box(3).inputValue()).toBe("Claude Opus 5.5");
@@ -1150,41 +1522,70 @@ export const tests: BrowserTest[] = [
     await box(3).fill("frsh");
     await box(3).press("Enter");
     expect(await box(3).inputValue()).toBe("Fresh");
-    expect(await levelTexts(3)).toEqual(["off"]);
-    expect(await reasoning(3).inputValue()).toBe("off");
+    await browserExpect(reasoning(3)).toHaveAttribute("aria-valuetext", "off");
+    await browserExpect(reasoning(3)).toBeDisabled();
+    await expectLadderSaves(page, routes.saved, 1);
     await openLevel(page, 4);
-    await box(4).click();
     await box(4).fill("claude");
     await box(4).press("ArrowDown");
     await box(4).press("Enter");
     expect(await box(4).inputValue()).toBe("Claude Sonnet 5");
-    expect(await levelTexts(4)).toHaveLength(7);
-    expect(await reasoning(4).inputValue()).toBe("high");
+    await browserExpect(reasoning(4)).toHaveAttribute("max", "6");
+    await browserExpect(reasoning(4)).toHaveAttribute("aria-valuetext", "high");
+    await expectLadderSaves(page, routes.saved, 2);
     await openLevel(page, 5);
-    await box(5).click();
     await box(5).fill("gpt");
     await box(5).press("Enter");
-    expect(await reasoning(5).inputValue()).toBe("high");
-    await saveLadder(page);
-    expect(routes.saved).toEqual([
-      {
-        default_level: 3,
-        levels: {
-          "1": gone,
-          "2": offOpus,
-          "3": { model: "openrouter/vendor/fresh", reasoning: "off" },
-          "4": { model: "anthropic/claude-sonnet-5", reasoning: "high" },
-          "5": { model: "openai-codex/gpt-6-sol", reasoning: "high" },
-        },
-      },
+    await browserExpect(reasoning(5)).toHaveAttribute("aria-valuetext", "high");
+    await expectLadderSaves(page, routes.saved, 3);
+    await reasoning(5).press("ArrowRight");
+    await browserExpect(reasoning(5)).toHaveAttribute(
+      "aria-valuetext",
+      "xhigh",
+    );
+    await expectLadderSaves(page, routes.saved, 4);
+    let levels = { "1": gone, "2": offOpus, "3": opus, "4": opus, "5": opus };
+    const payloads = [
+      { "3": { model: LIST_FRESH.id, reasoning: "off" } },
+      { "4": { model: LIST_SONNET.id, reasoning: "high" } },
+      { "5": { model: LIST_SOL.id, reasoning: "high" } },
+      { "5": { model: LIST_SOL.id, reasoning: "xhigh" } },
+    ].map((change) => ({
+      default_level: 4,
+      levels: (levels = { ...levels, ...change }),
+    }));
+    expect(routes.saved).toEqual(payloads);
+    const announced = [await reasoning(2).getAttribute("aria-valuetext")];
+    for (let step = 0; step < 5; step++) {
+      await reasoning(2).press("ArrowRight");
+      announced.push(await reasoning(2).getAttribute("aria-valuetext"));
+    }
+    expect(announced).toEqual([
+      "off, not offered for this model",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
     ]);
+    await reasoning(2).press("Home");
+    await browserExpect(reasoning(2)).toHaveAttribute(
+      "aria-valuetext",
+      "off, not offered for this model",
+    );
+    await expectLadderSaves(page, routes.saved, 10);
+    expect(routes.saved.at(-1)).toEqual(payloads[3]);
     await openLevel(page, 1);
-    await box(1).click();
     await box(1).press("Escape");
-    expect(await page.locator("#settings-overlay.on").count()).toBe(1);
+    await browserExpect(box(1)).toHaveAttribute("aria-expanded", "false");
     await browserExpect(
       page.getByRole("region", { name: "Level 1", exact: true }),
     ).toBeVisible();
+    await page.keyboard.press("Escape");
+    await browserExpect(
+      page.getByRole("region", { name: "Level 1", exact: true }),
+    ).toBeHidden();
+    expect(await page.locator("#settings-overlay.on").count()).toBe(1);
     await page.keyboard.press("Escape");
     await page.waitForFunction(
       "!document.querySelector('#settings-overlay')?.classList.contains('on')",
@@ -1203,7 +1604,7 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
-    const opus = { model: "anthropic/claude-opus-5-5", reasoning: "high" };
+    const opus = { model: LIST_OPUS.id, reasoning: "high" };
     const routes = await routeLadder(page, base, {
       levels: [opus, opus, opus, opus, opus],
       list: [LIST_OPUS, LIST_SONNET, LIST_SOL, LIST_FRESH],
@@ -1214,25 +1615,32 @@ export const tests: BrowserTest[] = [
     await openSettingsPanel(page);
     await page.locator("#settings-overlay.on").waitFor();
     await page.locator('#settings-nav button[data-cat="models"]').tap();
-    await page.getByRole("button", { name: /^Effort ladder / }).tap();
     await expectLevelOneHelp(page);
-    await openLevel(page, 2);
+    const two = effortLevel(page, 2);
+    await browserExpect(two.model).toHaveAccessibleName(
+      `Level 2 ${LIST_OPUS.label} ${LIST_OPUS.route}`,
+    );
+    await browserExpect(
+      two.row.getByText("Reasoning", { exact: true }),
+    ).toBeVisible();
+    await expectHitCorners(two.reasoning);
+    await browserExpect(two.reasoning).toBeInViewport({ ratio: 1 });
+    await expectHitCorners(two.model);
+    await two.model.tap();
     const sheet = page.getByRole("region", { name: "Level 2", exact: true });
     const box = sheet.getByRole("combobox", { name: "Model for level 2" });
     await box.waitFor();
-    const select = page.getByLabel("Reasoning for level 2");
-    for (const control of [box, select]) {
-      const bounds = (await control.boundingBox())!;
-      expect(bounds.height).toBeGreaterThanOrEqual(44);
-      expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
-    }
+    const bounds = (await box.boundingBox())!;
+    expect(bounds.height).toBeGreaterThanOrEqual(44);
+    expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
     expect(await box.evaluate(fontSize)).toBe("16px");
     expect(await box.getAttribute("autocapitalize")).toBe("off");
     expect(await box.getAttribute("autocorrect")).toBe("off");
     await box.tap();
     await page.keyboard.type("fre");
     const listbox = page.getByRole("listbox", { name: "Model for level 2" });
-    const option = listbox.locator('[data-id="openrouter/vendor/fresh"]');
+    const freshRow = `.model-box-option[data-id="${LIST_FRESH.id}"]`;
+    const option = listbox.locator(freshRow);
     await option.waitFor();
     const [listBox, optionBox] = await Promise.all([
       listbox.boundingBox(),
@@ -1249,16 +1657,18 @@ export const tests: BrowserTest[] = [
     );
     expect(optionBox!.height).toBeGreaterThanOrEqual(44);
     expect(await listCapacity(listbox)).toBeGreaterThanOrEqual(4);
-    await visibleAndUncovered(
-      page,
-      '.model-box-option[data-id="openrouter/vendor/fresh"]:visible',
-    );
+    await visibleAndUncovered(page, `${freshRow}:visible`);
     await option.tap();
-    expect(await box.inputValue()).toBe("Fresh");
-    expect(await select.inputValue()).toBe("off");
-    await saveLadder(page, true);
+    await browserExpect(two.model).toHaveAccessibleName(
+      `Level 2 ${LIST_FRESH.label} ${LIST_FRESH.route}`,
+    );
+    await browserExpect(
+      two.model.getByText(LIST_FRESH.route, { exact: true }),
+    ).toBeVisible();
+    await browserExpect(two.reasoning).toHaveAttribute("aria-valuetext", "off");
+    await expectLadderSaves(page, routes.saved, 1);
     expect(routes.saved[0]!.levels["2"]).toEqual({
-      model: "openrouter/vendor/fresh",
+      model: LIST_FRESH.id,
       reasoning: "off",
     });
     expect(routes.saved[0]!.levels["1"]).toEqual(opus);
@@ -1272,44 +1682,59 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
-    const entry = { model: "anthropic/claude-opus-5-5", reasoning: "high" };
-    await routeLadder(page, base, {
-      levels: [entry, entry, entry, entry, entry],
-      list: [{ ...LIST_OPUS, label: "Opus from the list" }],
-    });
     await page.route(`${base}api/settings/effort-levels`, async (route) => {
       const response = await route.fetch();
       return route.fulfill({
         json: { ...(await response.json()), models: [] },
       });
     });
-    let release!: () => void;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
+    const outside = {
+      id: "fauxordinary/outside-ladder",
+      label: "Model from the list",
+      route: "Test",
+      context_window: null,
+      reasoning_levels: null,
+    };
+    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
     const started = page.waitForRequest(`${base}api/settings/model-list`);
     await page.route(`${base}api/settings/model-list`, async (route) => {
       await gate;
-      await route.fallback();
+      return route.fulfill({
+        json: { models: [outside], reasoning: ALL_LEVELS },
+      });
     });
-    await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
-    await started;
-    const model = page.locator("#model-trigger .model-name");
-    const width = await model.evaluate(
-      (node) => node.getBoundingClientRect().width,
-    );
-    const before = await model.innerText();
-    release();
-    expect(before).toBe("Effort");
-    await page.waitForFunction(
-      "document.querySelector('#model-trigger .model-name').textContent === 'Opus from the list'",
-    );
     expect(
-      await model.evaluate((node) => node.getBoundingClientRect().width),
-    ).toBe(width);
-    expect(errors).toEqual([]);
-    await closeWithRoutes(context);
+      (
+        await page.request.post(
+          `${base}__browser-test/seed-model-selection-error`,
+          {
+            data: { agent: "model-name-outside", model: outside.id },
+          },
+        )
+      ).ok(),
+    ).toBeTrue();
+    try {
+      await page.goto(`${base}#agent=model-name-outside`);
+      await page
+        .locator('.agent.selected[data-id="model-name-outside"]')
+        .waitFor({ state: "attached" });
+      await started;
+      const model = page.locator("#model-trigger .model-name");
+      await browserExpect(model).toBeVisible();
+      await browserExpect(model).toHaveText("Effort");
+      const width = await model.evaluate(
+        (node) => node.getBoundingClientRect().width,
+      );
+      release();
+      await browserExpect(model).toHaveText(outside.label);
+      expect(
+        await model.evaluate((node) => node.getBoundingClientRect().width),
+      ).toBe(width);
+      expect(errors).toEqual([]);
+    } finally {
+      release();
+      await closeWithRoutes(context);
+    }
   },
   async function test_shortcut_pane_default_closed_persists_and_keymap_active(
     browser,
@@ -1349,8 +1774,20 @@ export const tests: BrowserTest[] = [
     await page.reload({ waitUntil: "domcontentloaded" });
     await page.locator(".agent").first().waitFor();
     await page.waitForFunction("document.getElementById('shortcut-pane').open");
+    const titles = page.locator("#shortcut-groups .shortcut-title");
     await shortcutGroup.waitFor();
-    expect(await page.locator("#key-mode").isVisible()).toBeTrue();
+    await titles.last().waitFor();
+    await browserExpect(titles).toHaveText(
+      [
+        "When not typing",
+        "While typing",
+        "Agent actions",
+        "Open pane",
+        "Windows",
+        "Resize",
+      ],
+      { useInnerText: true },
+    );
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -1425,9 +1862,52 @@ export const tests: BrowserTest[] = [
       expect(await page.locator("#messages").isVisible()).toBeTrue();
       expect(await page.locator("#input").isVisible()).toBeTrue();
       await openSettingsPanel(page);
-      await showCategory(page, "account");
+      const customKeys = page.getByRole("heading", {
+        name: "Custom model keys",
+        exact: true,
+      });
+      await showCategory(page, "providers");
+      await page
+        .locator('.customkeys[aria-busy="false"]')
+        .waitFor({ state: "attached" });
+      await browserExpect(
+        page.getByRole("button", { name: /^Claude / }),
+      ).toBeVisible();
+      await browserExpect(customKeys).toBeHidden();
+      await writeFile(
+        join(server.data, "data/config/model-providers.json"),
+        JSON.stringify({
+          providers: {
+            "local-llm": {
+              base_url: "http://127.0.0.1:9/v1",
+              env_key: "LOCAL_LLM_KEY",
+              wire_api: "completions",
+              models: [{ id: "small" }],
+            },
+          },
+        }),
+      );
+      await browserExpect
+        .poll(async () =>
+          Object.keys(
+            await (
+              await context.request.get(
+                `${server.base}api/pi/custom-provider-auth`,
+              )
+            ).json(),
+          ),
+        )
+        .toEqual(["local-llm"]);
+      await showCategory(page, "providers");
+      await browserExpect(customKeys).toBeVisible();
+      await browserExpect(
+        page.getByRole("button", { name: /^local-llm No key saved/ }),
+      ).toBeVisible();
       const homes = page.locator(".remotes-settings .remote-incoming");
-      await homes.getByText("No homes have access.", { exact: true }).waitFor();
+      const homesRead = homes.locator('.group[aria-busy="false"]');
+      await showCategory(page, "remotes");
+      await homesRead.waitFor({ state: "attached" });
+      await browserExpect(homes).toBeHidden();
       const ids: string[] = [];
       for (let i = 0; i < 2; i++) {
         const minted = await context.request.post(
@@ -1439,9 +1919,16 @@ export const tests: BrowserTest[] = [
         expect(minted.status()).toBe(200);
         ids.push(((await minted.json()) as { id: string }).id);
       }
-      await page.locator("#settings-close").tap();
-      await openSettingsPanel(page);
-      await showCategory(page, "account");
+      await showCategory(page, "remotes");
+      await browserExpect(homes.getByRole("button")).toHaveCount(2);
+      const [titleBox, groupBox] = await Promise.all([
+        page
+          .getByRole("heading", { name: "Remotes", exact: true })
+          .boundingBox(),
+        homes.locator(".group").boundingBox(),
+      ]);
+      expect(Math.round(groupBox!.x)).toBe(Math.round(titleBox!.x));
+      expect(groupBox!.x + groupBox!.width).toBeLessThanOrEqual(390);
       for (const id of ids) {
         const address = `@browser-home\\.${id.slice(0, 6)}`;
         await homes
@@ -1460,12 +1947,22 @@ export const tests: BrowserTest[] = [
             ),
           ),
         ).toBeVisible();
+        const reread = page.waitForResponse(
+          (response) =>
+            response.request().method() === "GET" &&
+            response.url().endsWith("/api/backend-keys"),
+        );
         await details
           .getByRole("button", { name: "Revoke access", exact: true })
           .tap();
         await browserExpect(details).toHaveCount(0);
+        await reread;
+        await homesRead.waitFor({ state: "attached" });
       }
-      await homes.getByText("No homes have access.", { exact: true }).waitFor();
+      await browserExpect(homes).toBeHidden();
+      await browserExpect(
+        page.getByRole("button", { name: "Add a remote", exact: true }),
+      ).toBeVisible();
       expect(errors).toEqual([]);
     } finally {
       await context.close();
@@ -1532,16 +2029,7 @@ export const tests: BrowserTest[] = [
         return new Response(body, { status });
       },
     });
-    const account = Buffer.from(
-      JSON.stringify({
-        "https://api.openai.com/auth": { chatgpt_account_id: "acct" },
-      }),
-    ).toString("base64url");
-    const chatgptToken = JSON.stringify({
-      access_token: `h.${account}.s`,
-      refresh_token: "sk-test-cref",
-      expires_in: 7200,
-    });
+
     try {
       await gotoRoot(page, base);
       await page.locator(".agent").first().waitFor();
@@ -1552,7 +2040,7 @@ export const tests: BrowserTest[] = [
         },
       });
       await openSettingsPanel(page);
-      await page.locator('#settings-nav button[data-cat="auth"]').tap();
+      await page.locator('#settings-nav button[data-cat="providers"]').tap();
       const signIn = async (title: string, name: string) => {
         await closeDetails(page);
         await page
@@ -1561,27 +2049,49 @@ export const tests: BrowserTest[] = [
           )
           .tap();
         const section = page.getByRole("region", { name: title, exact: true });
-        const subscription = section.getByRole("button", {
-          name: "Subscription",
+        const isClaude = title === "Claude";
+        const card = (heading: string) =>
+          section.locator("section").filter({
+            has: page.getByRole("heading", { name: heading, exact: true }),
+          });
+        const keyCard = isClaude ? section : card("API key");
+        const subCard = isClaude ? section : card("ChatGPT subscription");
+        const edit = keyCard.getByRole("button", {
+          name: isClaude ? "API key" : "Add API key",
+          exact: true,
         });
-        await section.getByRole("button", { name: "API key" }).tap();
-        await browserExpect(section.locator("button.primary")).toHaveText(
-          "Save key",
-        );
-        await subscription.tap();
-        await browserExpect(section.locator(".keypanel")).toBeHidden();
-        const open = section.getByRole("link", {
+        await edit.tap();
+        const save = keyCard.getByRole("button", {
+          name: "Save key",
+          exact: true,
+        });
+        await browserExpect(save).toBeVisible();
+        const saveKey = async () => {
+          await keyCard
+            .getByLabel("OpenAI API key")
+            .fill("browser-test-openai-key");
+          await save.tap();
+          await browserExpect(
+            keyCard.getByText("Saved", { exact: true }),
+          ).toBeVisible();
+        };
+        if (!isClaude) await saveKey();
+        await subCard
+          .getByRole("button", {
+            name: isClaude ? "Subscription" : "Sign in",
+            exact: true,
+          })
+          .tap();
+        await browserExpect(keyCard.locator(".keypanel")).toBeHidden();
+        const open = subCard.getByRole("link", {
           name: `Open ${name} sign-in`,
         });
-        const answer = section.getByRole("textbox", {
+        const answer = subCard.getByRole("textbox", {
           name: `Address after signing in to ${name}`,
         });
-        const finish = section.getByRole("button", { name: "Finish sign-in" });
+        const finish = subCard.getByRole("button", { name: "Finish sign-in" });
         for (const control of [open, answer, finish]) {
-          await control.waitFor();
-          expect((await control.boundingBox())!.height).toBeGreaterThanOrEqual(
-            44,
-          );
+          await expectHitCorners(control);
         }
         await browserExpect(open).toBeFocused();
         const [provider] = await Promise.all([
@@ -1593,7 +2103,7 @@ export const tests: BrowserTest[] = [
         await answer.fill(provider.url());
         await provider.close();
         await finish.tap();
-        return { section, state };
+        return { section, state, subCard, keyCard, edit, saveKey };
       };
 
       const claude = await signIn("Claude", "Claude");
@@ -1610,22 +2120,61 @@ export const tests: BrowserTest[] = [
       );
 
       const chatgpt = await signIn("OpenAI", "ChatGPT");
-      const command = chatgpt.section.locator(".localfb pre");
+      const { subCard, keyCard } = chatgpt;
+      const command = subCard.locator(".localfb pre");
       await browserExpect(command).toContainText("code=chatgpt-code");
-      await browserExpect(
-        chatgpt.section.locator(".paste-sign-in"),
-      ).toHaveCount(0);
-      await chatgpt.section
+      await browserExpect(subCard.locator(".paste-sign-in")).toHaveCount(0);
+      await subCard
         .getByRole("textbox", { name: "Command output" })
-        .fill(chatgptToken);
-      await chatgpt.section
+        .fill(JSON.stringify(subscriptionToken()));
+      await subCard
         .locator(".localfb")
         .getByRole("button", { name: "Finish sign-in" })
         .tap();
       await browserExpect(
-        chatgpt.section.getByText("Logged in with your ChatGPT subscription."),
+        subCard.getByText("Logged in with your ChatGPT subscription."),
       ).toBeVisible();
-      await browserExpect(chatgpt.section.locator(".localfb")).toBeHidden();
+      await browserExpect(subCard.locator(".localfb")).toBeHidden();
+      const removeSub = subCard.getByRole("button", {
+        name: "Remove subscription",
+        exact: true,
+      });
+      const removeKey = keyCard.getByRole("button", {
+        name: "Remove API key",
+        exact: true,
+      });
+      const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+      for (const width of [412, 1280]) {
+        await page.setViewportSize({ width, height: 915 });
+        await browserExpect(
+          subCard.getByText("Signed in", { exact: true }),
+        ).toBeVisible();
+        await browserExpect(
+          keyCard.getByText("Saved", { exact: true }),
+        ).toBeVisible();
+        for (const button of [removeSub, removeKey])
+          await expectHitCorners(button);
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/openai-provider-${width}.png`,
+          });
+      }
+      await removeKey.click();
+      await browserExpect(
+        keyCard.getByText("Not saved", { exact: true }),
+      ).toBeVisible();
+      await browserExpect(
+        subCard.getByText("Signed in", { exact: true }),
+      ).toBeVisible();
+      await chatgpt.edit.click();
+      await chatgpt.saveKey();
+      await removeSub.click();
+      await browserExpect(
+        subCard.getByText("Not signed in", { exact: true }),
+      ).toBeVisible();
+      await browserExpect(
+        keyCard.getByText("Saved", { exact: true }),
+      ).toBeVisible();
 
       expect(requests.map((request) => [request.path, request.code])).toEqual([
         ["/claude/token", "claude-code"],
@@ -1636,6 +2185,7 @@ export const tests: BrowserTest[] = [
     } finally {
       for (const path of ["auth", "codex-auth"])
         await page.request.post(`${base}api/pi/${path}/logout`);
+      await page.request.post(`${base}api/pi/codex-auth/api-key/remove`);
       await context.close();
       await tokens.stop(true);
     }
@@ -1658,6 +2208,15 @@ export const tests: BrowserTest[] = [
             })
           ).ok(),
         ).toBeTrue();
+      const codex = `${base}api/pi/codex-auth`;
+      expect((await page.request.post(`${codex}/login-url`)).ok()).toBeTrue();
+      expect(
+        (
+          await page.request.post(`${codex}/token-json`, {
+            data: { token: JSON.stringify(subscriptionToken()) },
+          })
+        ).ok(),
+      ).toBeTrue();
       for (const [name, headers] of [
         [
           "anthropic-sse",
@@ -1708,11 +2267,32 @@ export const tests: BrowserTest[] = [
       await gotoRoot(page, base);
       await page.locator(".agent").first().waitFor();
       await page.locator("#settings-btn").click();
-      await page.locator('#settings-nav button[data-cat="auth"]').click();
+      await page.locator('#settings-nav button[data-cat="providers"]').click();
+      await browserExpect(
+        page.getByRole("button", { name: /^Claude / }),
+      ).toBeVisible();
+      await browserExpect(page.locator("dialog[open]")).toHaveCount(0);
       const time = String.raw`(?:\w{3} )?\d\d:\d\d`;
       for (const title of ["Claude", "OpenAI", "OpenRouter"]) {
+        await closeDetails(page);
+        await openDetail(page, new RegExp(`^${title} `));
         const section = page.getByRole("region", { name: title, exact: true });
         await browserExpect(section).toBeVisible();
+        if (title === "OpenAI") {
+          await browserExpect(
+            section.getByRole("button", {
+              name: "Replace API key",
+              exact: true,
+            }),
+          ).toBeVisible();
+          await browserExpect(
+            section.getByRole("button", {
+              name: "Remove API key",
+              exact: true,
+            }),
+          ).toBeVisible();
+          continue;
+        }
         await browserExpect(
           section.getByRole("button", { name: "API key", exact: true }),
         ).toBeVisible();
@@ -1725,7 +2305,7 @@ export const tests: BrowserTest[] = [
           ).toBeVisible();
         }
       }
-      await browserExpect(page.locator("dialog[open]")).toHaveCount(0);
+      await closeDetails(page);
       for (const width of [1280, 412]) {
         await page.setViewportSize({ width, height: 915 });
         for (const [title, left] of [
@@ -1733,22 +2313,16 @@ export const tests: BrowserTest[] = [
           ["OpenAI", ["59", "93"]],
         ] as const) {
           await closeDetails(page);
-          const provider = page.locator(
-            `.provider[data-provider="${title.toLowerCase()}"]`,
-          );
           const section = page.getByRole("region", {
             name: title,
             exact: true,
           });
-          if (width === 412) {
-            await browserExpect(section).toBeHidden();
-            await provider
-              .locator(":scope > .settings-detail > button.settings-row")
-              .click();
-            await browserExpect(
-              page.getByRole("dialog", { name: title, exact: true }),
-            ).toBeVisible();
-          }
+          await browserExpect(section).toBeHidden();
+          await openDetail(page, new RegExp(`^${title} `));
+          await browserExpect(
+            page.getByRole("dialog", { name: title, exact: true }),
+          ).toBeVisible();
+          if (width === 412) await expectModalSheet(page, title);
           await browserExpect(section.locator(".usage-name")).toHaveText([
             "5-hour",
             "Weekly",
@@ -1770,14 +2344,36 @@ export const tests: BrowserTest[] = [
           ).toHaveText(new RegExp(`^As of ${time}$`));
         }
       }
+      await expectModalSheet(page, "OpenAI");
+      const openai = page.getByRole("region", { name: "OpenAI", exact: true });
+      const counters = openai.locator(".usage-text");
+      const beforeRemoval = await counters.allTextContents();
+      await openai
+        .getByRole("button", { name: "Remove API key", exact: true })
+        .click();
+      await browserExpect(
+        openai.getByText("Not saved", { exact: true }),
+      ).toBeVisible();
+      await browserExpect(counters).toHaveText(beforeRemoval);
+      await openai
+        .getByRole("button", { name: "Add API key", exact: true })
+        .click();
+      await openai
+        .getByLabel("OpenAI API key")
+        .fill("browser-test-platform-key");
+      await openai
+        .getByRole("button", { name: "Save key", exact: true })
+        .click();
+      await browserExpect(
+        openai.getByText("Saved", { exact: true }),
+      ).toBeVisible();
+      await browserExpect(counters).toHaveText(beforeRemoval);
+      for (const counter of await counters.all())
+        await browserExpect(counter).toBeVisible();
       await page
         .getByRole("button", { name: "Close OpenAI", exact: true })
         .click();
-      await page
-        .locator(
-          '.provider[data-provider="claude"] > .settings-detail > button.settings-row',
-        )
-        .click();
+      await openDetail(page, /^Claude /);
       const claude = page.getByRole("region", { name: "Claude", exact: true });
       await claude
         .getByRole("button", { name: "API key", exact: true })
@@ -1785,13 +2381,17 @@ export const tests: BrowserTest[] = [
       const key = claude.getByLabel("Anthropic API key");
       await key.fill("unsaved-test-key");
       await page.setViewportSize({ width: 1280, height: 915 });
-      await browserExpect(page.locator("dialog[open]")).toHaveCount(0);
+      await browserExpect(
+        page.getByRole("button", { name: "Back to Providers", exact: true }),
+      ).toBeVisible();
+      await browserExpect(page.locator("dialog:modal")).toHaveCount(0);
       await browserExpect(key).toBeVisible();
       await browserExpect(key).toHaveValue("unsaved-test-key");
       expect(errors).toEqual([]);
     } finally {
       for (const path of ["auth", "codex-auth"])
         await page.request.post(`${base}api/pi/${path}/logout`);
+      await page.request.post(`${base}api/pi/codex-auth/api-key/remove`);
       await context.close();
     }
   },

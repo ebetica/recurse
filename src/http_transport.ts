@@ -7,14 +7,14 @@ import zlib from "node:zlib";
 import {
   requestTiming,
   withRequestTiming,
-} from "./observability/request_timing";
-
-import {
+  templateRoute,
   logEvent,
   INFO,
   type RuntimeLogger,
-} from "./observability/runtime_logging";
+} from "./observability";
 import { HttpError, type Exchange, type Handler } from "./web/router";
+
+export { UNKNOWN_ROUTE, templateRoute } from "./observability";
 
 export const DEFAULT_MAX_ENCODED_BYTES = 32 * 1024 * 1024;
 export const DEFAULT_MAX_DECODED_BYTES = 32 * 1024 * 1024;
@@ -848,13 +848,6 @@ export const HEARTBEAT_INTERVAL_SECONDS = 60.0;
 export const SUMMARY_TOP_ROUTES = 10;
 export const SUMMARY_MAX_SAMPLES = 1024;
 export const SUMMARY_MAX_ROUTES = 64;
-export const UNKNOWN_ROUTE = ":unknown";
-
-/** `/api/x/{cid}` and `/static/{path:path}` → log-safe `:param` segments. */
-export function templateRoute(template: string | null): string {
-  if (template === null || !template.startsWith("/")) return UNKNOWN_ROUTE;
-  return template.replace(/\{([\p{L}\p{N}_]+)(:[^}]*)?\}/gu, ":$1");
-}
 
 function percentile(sorted: readonly number[], ratio: number): number {
   if (!sorted.length) return 0;

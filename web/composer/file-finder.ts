@@ -4,7 +4,8 @@
 import { html, render } from "lit";
 import { inputEl } from "../dom.js";
 import { DRAFT, state } from "../state.js";
-import { backendFor, parseConversationId } from "../backends/backend.js";
+import { backendFor } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { LazyResults } from "../lazy-results.js";
 import {
   composerAutocompleteIs,

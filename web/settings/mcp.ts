@@ -206,7 +206,7 @@ export function buildMcpStatus(body: HTMLElement): () => void {
         timer = setTimeout(() => void refresh(), 1000);
     } catch {
       if (current === revision && active())
-        say("Couldn't load MCP server status. Reopen MCPs to try again.");
+        say("Couldn't load MCP server status. Reopen Settings to try again.");
     }
   };
   const observer = new MutationObserver(() => {

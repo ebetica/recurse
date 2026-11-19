@@ -15,17 +15,14 @@ export function responseRow(
     !!response.model &&
     !!response.responseModel &&
     response.model !== response.responseModel;
-  const effortChanged =
+  const reasoningChanged =
     !!response.thinkingLevel &&
     !!response.providerThinkingLevel &&
     response.thinkingLevel !== response.providerThinkingLevel;
   return {
     model: modelChanged ? `requested ${requested} → served ${served}` : served,
     modelChanged,
-    effort: effortChanged
-      ? `requested ${response.thinkingLevel} → served ${response.providerThinkingLevel}`
-      : (response.providerThinkingLevel ?? response.thinkingLevel),
-    effortChanged,
+    reasoningChanged,
     time:
       response.timestamp === undefined
         ? undefined

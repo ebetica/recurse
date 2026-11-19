@@ -215,7 +215,7 @@ The bulk stage runs:
 ## Viewport correspondence
 
 [Thread](../../web/conversation/thread.ts): `paint` → `Repaint`, `anchoredPaint`
-→ `Press`, `releaseBottomFollow` → `Release`. [Controls](../../web/conversation/controls.ts):
+→ `Press`, `releaseBottomFollow` → `Release`. [Scroller](../../web/conversation/scroll-ledger.ts):
 `ToBottom`/`OnFrame`. `Repaint` latches natural bottom. `NaturalFollow` checks
 settled bottom; `PendingBottom` excludes viewport holds during a batch.
 `Press` paints/relatches, then releases before anchoring.

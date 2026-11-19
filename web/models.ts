@@ -1,14 +1,14 @@
 // Draft effort applies on creation; existing choices wait for the next turn.
-// Running turns keep launched models; each backend owns its effort ladder.
+// The picker shows the recorded choice until the slider previews a ladder stop.
 // Unreachable choices explain why, without duplicate controls.
 // Context reuses tree usage for loaded history; pending Clear stays blank.
+import { backendFor } from "./backends/backend.js";
 import {
-  backendFor,
   conversationId,
   parseConversationId,
-} from "./backends/backend.js";
+} from "./backends/conversation-id/index.js";
 import { embeddedFrameHidden, state } from "./state.js";
-import { $ } from "./dom.js";
+import { $, el } from "./dom.js";
 import { api } from "./api.js";
 import {
   conversationContextLabel,
@@ -24,7 +24,7 @@ import {
   rowThreads,
   rowThreadContextKey,
   rowThreadClearPending,
-} from "./row-thread-state.js";
+} from "./row-thread-state/index.js";
 import type { Conversation, PendingModel } from "./types.js";
 
 export const EFFORT_LEVELS = [1, 2, 3, 4, 5] as const;
@@ -57,9 +57,6 @@ interface Ladder {
   models: LadderModel[];
 }
 
-// Fixed stop labels low through max, independent of configured reasoning.
-const EFFORT_STOP_WORDS = ["low", "medium", "high", "xhigh", "max"] as const;
-
 // Progressive picker host preserves controls across mixed shell generations.
 const controls = $("#model-controls");
 const row = $("#model-row")!;
@@ -69,18 +66,24 @@ const triggerName = $<HTMLElement>("#model-trigger .model-name")!;
 const menu = $("#model-menu")!;
 const sliderBox = $("#effort-slider")!;
 const range = $<HTMLInputElement>("#effort-range")!;
-const value = $("#effort-value")!;
 const modelLine = $("#effort-model")!;
-const currentLine = $("#effort-current");
+const modelStatus = el("span", "sr-only");
+modelStatus.setAttribute("role", "status");
+modelLine.setAttribute("aria-hidden", "true");
+modelLine.removeAttribute("role");
+modelLine.removeAttribute("aria-live");
+modelLine.after(modelStatus);
 
 let mode: "draft" | "conv" = "draft";
 let conv: Conversation | null = null;
+let previewLevel: EffortLevel | null = null;
+let touchStart: { pointerId: number; value: string } | null = null;
 let ladder: Ladder | null = null;
 // Owns `ladder`; switching backends drops it to avoid stale draft defaults.
 let ladderLabel = "";
 let loadFailed = false;
 let retryTimer = 0;
-const saving = new Set<string>();
+const saving = new Map<string, PendingModel>();
 let contextFallbackKey: string | null = null;
 const contextFallbackGate = new ContextFallbackGate();
 /** Latest fallback reading per session; Durable keys carry the row revision. */
@@ -213,17 +216,13 @@ function modelLabel(id: string): string | null {
   return ladder && listed ? id : null;
 }
 
-function describeLevel(level: EffortLevel): string {
-  const entry = entryFor(level);
-  if (!entry) return `Level ${level}`;
-  const name = modelLabel(entry.model);
-  return name
-    ? `Level ${level}: ${name}, reasoning ${entry.reasoning}`
-    : `Level ${level}, reasoning ${entry.reasoning}`;
+function pendingChoice(c: Conversation): PendingModel | null | undefined {
+  return saving.get(c.id) ?? c.pending_model;
 }
 
-function pendingLevel(c: Conversation): EffortLevel | null {
-  const pending = c.pending_model;
+function pendingLevel(
+  pending: PendingModel | null | undefined,
+): EffortLevel | null {
   if (!pending) return null;
   const direct = Number(pending.level);
   if (
@@ -246,10 +245,6 @@ function pendingLevel(c: Conversation): EffortLevel | null {
   return null;
 }
 
-function selectedLevel(c: Conversation): EffortLevel {
-  return pendingLevel(c) ?? levelOf(c.level, defaultLevel());
-}
-
 function pendingForLevel(level: EffortLevel): PendingModel {
   const entry = entryFor(level);
   return {
@@ -268,124 +263,80 @@ function committedLevel(): EffortLevel | null {
     return levelOf(stored, defaultLevel());
   }
   if (!conv) return null;
-  return (
-    pendingLevel(conv) ??
-    (isLegacyLevel(conv.level) ? null : (Number(conv.level) as EffortLevel))
-  );
+  const pending = pendingChoice(conv);
+  return pending
+    ? pendingLevel(pending)
+    : isLegacyLevel(conv.level)
+      ? null
+      : (Number(conv.level) as EffortLevel);
 }
 
 // The trigger names the pending model when a switch is waiting for a message.
 function paintTrigger(): void {
-  let name: string;
-  if (mode === "draft" || !conv) {
-    const level = committedLevel() ?? defaultLevel();
-    const entry = entryFor(level);
-    name = `${(entry && modelLabel(entry.model)) || "Effort"} · ${EFFORT_STOP_WORDS[level - EFFORT_LEVELS[0]]}`;
-  } else if (conv.pending_model) {
-    const pending = conv.pending_model;
-    const level = pendingLevel(conv);
-    const model = pending.model || (level && entryFor(level)?.model);
-    name = (model && modelLabel(model)) || "Effort";
-  } else if (isLegacyLevel(conv.level)) {
-    const raw = typeof conv.model === "string" ? conv.model : "";
-    name = raw ? (modelLabel(raw) ?? "Effort") : "Unknown model";
-  } else {
-    const entry = entryFor(Number(conv.level) as EffortLevel);
-    name = (entry && modelLabel(entry.model)) || "Effort";
-  }
-  const pending = mode === "conv" && !!conv?.pending_model;
-  trigger.classList.toggle("pending", pending);
+  const pending = mode === "conv" && conv && pendingChoice(conv);
+  const level = committedLevel();
+  const model =
+    mode === "draft" || !conv
+      ? entryFor(level ?? defaultLevel())?.model
+      : pending
+        ? pending.model || (level && entryFor(level)?.model)
+        : conv.model;
+  const name =
+    (model && modelLabel(model)) ||
+    (!model && level === null ? "Unknown model" : "Effort");
+  const accessibleName = level === null ? name : `Level ${level}: ${name}`;
+  trigger.classList.toggle("pending", !!pending);
   trigger.title = pending
     ? "Switches on your next message"
     : "Choose effort level (e or Shift+M)";
   triggerName.textContent = name;
   trigger.setAttribute(
     "aria-label",
-    `${name}: ${pending ? "switches on your next message; " : ""}choose effort level`,
+    `${accessibleName}: ${pending ? "switches on your next message; " : ""}choose effort level`,
   );
 }
 
-// Preview the slider's current stop: the fixed word for the stop beside the
-// slider, the stop's "model reasoning" on the bottom line, and the orange
-// fill behind the thumb. A null committed level (legacy, nothing picked yet)
-// renders a neutral track with an empty word until the first drag.
-function syncPreview(): void {
-  const stop = levelOf(range.value, NaN as unknown as number);
-  const at = EFFORT_LEVELS.includes(stop as EffortLevel)
-    ? (stop as EffortLevel)
-    : defaultLevel();
-  const entry = entryFor(at);
-  const legacyUnpicked =
-    mode === "conv" &&
-    conv &&
-    isLegacyLevel(conv.level) &&
-    sliderBox.classList.contains("legacy");
-  const legacyReasoning =
-    legacyUnpicked && typeof conv?.effort === "string" && conv.effort
-      ? conv.effort
+function syncPreview(at: EffortLevel, legacyUnpicked: boolean): void {
+  const recorded =
+    mode === "conv" && conv && previewLevel === null
+      ? (pendingChoice(conv) ?? conv).model
       : null;
-  value.textContent = legacyUnpicked
-    ? ""
-    : EFFORT_STOP_WORDS[at - EFFORT_LEVELS[0]];
-  range.setAttribute(
-    "aria-valuetext",
-    legacyReasoning
-      ? `${modelLabel(typeof conv?.model === "string" ? conv.model : "") ?? "Model loading"}, reasoning ${legacyReasoning}`
-      : describeLevel(at),
-  );
+  const model = recorded || (legacyUnpicked ? null : entryFor(at)?.model);
+  const name = model
+    ? modelLabel(model)
+    : legacyUnpicked
+      ? "Unknown model"
+      : null;
+  const valueText = legacyUnpicked
+    ? (name ?? "Model loading")
+    : `Level ${at}${name ? `: ${name}` : ""}`;
+  range.setAttribute("aria-valuetext", valueText);
   range.style.setProperty(
     "--fill",
-    `${((at - EFFORT_LEVELS[0]) / (EFFORT_LEVELS[EFFORT_LEVELS.length - 1] - EFFORT_LEVELS[0])) * 100}%`,
+    legacyUnpicked
+      ? "0%"
+      : `${((at - EFFORT_LEVELS[0]) / (EFFORT_LEVELS[EFFORT_LEVELS.length - 1] - EFFORT_LEVELS[0])) * 100}%`,
   );
   const info = reachabilityFor(at);
   range.title = info && !info.reachable ? info.reason : "";
-  if (!ladder) {
-    modelLine.textContent = loadFailed
-      ? "Effort ladder unavailable. New agents start at level 3; retrying…"
-      : "Loading effort ladder…";
-    return;
-  }
-  // Invariant: Legacy choices stay on their stored model until the first drag.
-  // That drag previews ladder stops, never silently remaps an untouched choice.
-  if (legacyUnpicked) {
-    const rawModel =
-      typeof conv?.model === "string" ? (conv.model as string) : "";
-    const model = rawModel ? modelLabel(rawModel) : "Unknown model";
-    modelLine.textContent = !model
-      ? "Loading model name…"
-      : legacyReasoning
-        ? `${model} ${legacyReasoning}`
-        : model;
-    return;
-  }
-  const name = entry && modelLabel(entry.model);
-  modelLine.textContent = !entry
-    ? ""
-    : name
-      ? `${name} ${entry.reasoning}`
-      : "Loading model name…";
+  const text = !ladder
+    ? loadFailed
+      ? "Couldn't load effort levels. New agents start at level 3; retrying…"
+      : "Loading effort levels…"
+    : (name ?? (model ? "Loading model name…" : ""));
+  modelLine.textContent = text;
+  const status = name && ladder ? valueText : text;
+  if (modelStatus.textContent !== status) modelStatus.textContent = status;
 }
 
-// Paint the slider at the committed level (or the default with a neutral
-// track for a legacy conversation), disabled while a switch is in flight or
-// a turn owns the model.
+// A legacy conversation has a neutral track until the operator chooses a stop.
 function paintSlider(disabled: boolean): void {
-  const current = committedLevel();
+  const current = previewLevel ?? committedLevel();
   const at = current ?? defaultLevel();
   range.value = String(at);
   range.disabled = disabled;
   sliderBox.classList.toggle("legacy", current === null);
-  if (currentLine) {
-    currentLine.hidden = mode !== "conv" || !conv?.pending_model;
-    if (!currentLine.hidden && conv) {
-      const model =
-        typeof conv.model === "string" && conv.model
-          ? (modelLabel(conv.model) ?? "…")
-          : "Unknown model";
-      currentLine.textContent = `Current: ${model}${conv.effort ? ` · ${conv.effort}` : ""}`;
-    }
-  }
-  syncPreview();
+  syncPreview(at, current === null);
 }
 
 function showContextTokens(c: Conversation | null): void {
@@ -519,6 +470,7 @@ export function showDraftModel(initial?: number | null): void {
   const alreadyInline = draftInline();
   menu.hidePopover();
   if (!alreadyInline) {
+    previewLevel = null;
     menu.classList.remove("draft-open");
     trigger.setAttribute("aria-expanded", "false");
   }
@@ -551,6 +503,7 @@ export function showDraftModel(initial?: number | null): void {
 // No conversation is loaded (a draft, or an agent still being read): show no
 // effort or context metadata rather than the last agent's values.
 export function hideModel(): void {
+  previewLevel = null;
   menu.hidePopover();
   menu.classList.remove("draft-open");
   trigger.setAttribute("aria-expanded", "false");
@@ -563,7 +516,11 @@ export function hideModel(): void {
 }
 
 export function showConversationModel(c: Conversation | null): void {
-  if (conv?.id !== c?.id) menu.hidePopover();
+  if (conv?.id !== c?.id) {
+    previewLevel = null;
+    touchStart = null;
+    menu.hidePopover();
+  }
   menu.classList.remove("draft-open");
   trigger.setAttribute("aria-expanded", String(menu.matches(":popover-open")));
   const show = !!c;
@@ -592,6 +549,7 @@ function pickerOpen(): boolean {
 }
 
 function closeDraftMenu(): void {
+  previewLevel = null;
   menu.classList.remove("draft-open");
   trigger.setAttribute("aria-expanded", "false");
   render();
@@ -625,6 +583,13 @@ trigger.addEventListener("click", (event) => {
   } else {
     openEffortMenu();
   }
+});
+
+menu.addEventListener("beforetoggle", (event) => {
+  previewLevel = null;
+  touchStart = null;
+  if (event instanceof ToggleEvent && event.newState === "open")
+    paintSlider(!!conv && saving.has(conv.id));
 });
 
 menu.addEventListener("toggle", () => {
@@ -679,8 +644,37 @@ menu.addEventListener("keydown", (event) => {
 
 range.addEventListener("input", () => {
   if (range.disabled) return;
-  sliderBox.classList.remove("legacy");
-  syncPreview();
+  previewLevel = levelOf(range.value, defaultLevel());
+  paintSlider(false);
+});
+
+function reselectLevel(): void {
+  if (mode === "conv" && pickerOpen() && !range.disabled)
+    range.dispatchEvent(new Event("change", { bubbles: true }));
+}
+range.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === "touch" && event.isPrimary)
+    touchStart = { pointerId: event.pointerId, value: range.value };
+});
+range.addEventListener("pointercancel", (event) => {
+  if (event.pointerId === touchStart?.pointerId) touchStart = null;
+});
+range.addEventListener("pointerup", (event) => {
+  if (event.pointerId !== touchStart?.pointerId) return;
+  const unchanged = range.value === touchStart.value;
+  touchStart = null;
+  // Invariant: Native touch emits change for a changed stop, but may emit
+  // neither change nor click for an unchanged stop.
+  if (unchanged) reselectLevel();
+});
+range.addEventListener("click", (event) => {
+  if (!(event instanceof PointerEvent) || event.pointerType !== "touch")
+    reselectLevel();
+});
+range.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") return;
+  event.preventDefault();
+  range.dispatchEvent(new Event("change", { bubbles: true }));
 });
 
 range.addEventListener("change", async () => {
@@ -693,6 +687,7 @@ range.addEventListener("change", async () => {
     render();
     return;
   }
+  previewLevel = null;
   if (mode === "draft") {
     if (state.draft && !state.draft.creator)
       state.draft.level = level as EffortLevel;
@@ -704,24 +699,10 @@ range.addEventListener("change", async () => {
     return;
   }
   const target = conv;
-  const previousPending = target.pending_model
-    ? { ...target.pending_model }
-    : null;
-  const previousRaw = target.level;
-  const previous = selectedLevel(target);
-  if (level === previous && !isLegacyLevel(previousRaw)) {
-    render();
-    return;
-  }
-  // Invariant: Paint the choice immediately. The stored level remains untouched
-  // until a composer message is admitted; the pending value also survives a
-  // refresh.
+  // Invariant: In-flight choices are keyed by agent so a refreshed snapshot
+  // cannot erase the preview. Only the accepted choice updates the snapshot.
   const optimistic = pendingForLevel(level as EffortLevel);
-  target.pending_model = optimistic;
-  if (state.currentConv?.id === target.id) {
-    state.currentConv.pending_model = optimistic;
-  }
-  saving.add(target.id);
+  saving.set(target.id, optimistic);
   render();
   try {
     const r = await backendFor(target.id).jpost(
@@ -743,19 +724,16 @@ range.addEventListener("change", async () => {
       level: data.level ?? level,
     };
     target.pending_model = accepted;
+    if (conv?.id === target.id) conv.pending_model = accepted;
     if (state.currentConv?.id === target.id) {
       state.currentConv.pending_model = accepted;
     }
   } catch {
-    target.pending_model = previousPending;
-    if (state.currentConv?.id === target.id) {
-      state.currentConv.pending_model = previousPending;
-    }
   } finally {
     saving.delete(target.id);
-    // Invariant: The global control may now belong to another agent. Repaint
-    // only when it still shows the switch target.
-    if (mode === "conv" && conv === target) render();
+    // Invariant: Refresh may replace the object, but only the same agent
+    // still owns the visible switch.
+    if (mode === "conv" && conv?.id === target.id) render();
   }
 });
 

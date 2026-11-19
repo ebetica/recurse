@@ -8,6 +8,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline";
+import { OPENAI_CHOICE_MARKER } from "./auth/index.ts";
 
 const EXPECTED_PI_VERSION = "1.5.1";
 const ANTHROPIC_OAUTH_MODULE = new URL(
@@ -106,21 +107,26 @@ function parseCredentials(current) {
 	return data;
 }
 
+const isOpenAI = (id) => id === "openai" || id === "openai-codex";
+
 function mutate(FileAuthStorageBackend, authPath, remove, selected, onlyIfMissing = false) {
 	const backend = new FileAuthStorageBackend(authPath);
 	return backend.withLock((current) => {
 		const data = parseCredentials(current);
-		// Invariant: ChatGPT subscription and OpenAI API-key credentials are one
-		// mutually exclusive Settings route; never let ambient Codex import win a
-		// race with selecting the direct OpenAI route.
+		// Invariant: Check for an OpenAI choice under the auth-file lock.
 		if (selected && onlyIfMissing && (
 			selected.provider in data
-			|| (selected.provider === "openai-codex" && "openai" in data)
+			|| (selected.provider === "openai-codex"
+				&& ("openai" in data || OPENAI_CHOICE_MARKER in data))
 		)) {
 			return { result: false };
 		}
 		for (const id of remove) delete data[id];
 		if (selected) data[selected.provider] = selected.credential;
+		// Invariant: No key and no valid provider ID; Pi can preserve the marker.
+		if (isOpenAI(selected?.provider) || remove.some(isOpenAI)) {
+			data[OPENAI_CHOICE_MARKER] = { type: "api_key", env: { RECORDED: "1" } };
+		}
 		return { result: true, next: `${JSON.stringify(data, null, 2)}\n` };
 	});
 }

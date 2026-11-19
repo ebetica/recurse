@@ -7,11 +7,8 @@ import { sharedTrees } from "../shared-trees.js";
 import { DRAFT, state } from "../state.js";
 import { requestKeyboardMode } from "../modal-mode.js";
 import type { TreeNode } from "../types.js";
-import {
-  findBackend,
-  parseConversationId,
-  type Backend,
-} from "../backends/backend.js";
+import { findBackend, type Backend } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import { treeOf } from "../backends/tree.js";
 import {
   AGENT_MENTION_LIMIT,

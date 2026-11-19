@@ -109,15 +109,62 @@ export function indexModels(models: readonly FinderModel[]): IndexedModel[] {
   });
 }
 
-/** Matches for `query`: text tier first, then version order; at most `limit`.
- * Fuzzy (subsequence) matches count only when nothing matches directly:
- * ids are long enough that "opus" would otherwise match most models.
- * `total` counts every match so the box can say how many were left out. */
-export function searchModels(
+export interface RouteMatches {
+  route: string;
+  models: FinderModel[];
+  /** Every match on this route, shown or not. */
+  total: number;
+}
+
+/** Matches grouped by route in route order, best first. Routes split `limit`
+ * rows evenly and short routes pass spare rows on, so a big route cannot hide
+ * the others; a matching `chosen` model takes its route's last row if
+ * needed. */
+export function searchModelsByRoute(
   index: readonly IndexedModel[],
   query: string,
   limit = MODEL_FINDER_LIMIT,
-): { models: FinderModel[]; total: number } {
+  chosen = "",
+): RouteMatches[] {
+  const byRoute = new Map<number, IndexedModel[]>();
+  for (const entry of rankModels(index, query)) {
+    const group = byRoute.get(entry.routeOrder) ?? [];
+    group.push(entry);
+    byRoute.set(entry.routeOrder, group);
+  }
+  const groups = [...byRoute.entries()].sort(([a], [b]) => a - b);
+  const shares = new Map<number, number>();
+  let left = limit;
+  [...groups]
+    .sort(([, a], [, b]) => a.length - b.length)
+    .forEach(([route, entries], i) => {
+      const share = Math.min(
+        entries.length,
+        Math.floor(left / (groups.length - i)),
+      );
+      shares.set(route, share);
+      left -= share;
+    });
+  return groups.map(([route, entries]) => {
+    const share = shares.get(route)!;
+    const shown = entries.slice(0, share);
+    const kept = entries.slice(share).find((e) => e.model.id === chosen);
+    if (kept && share) shown[share - 1] = kept;
+    return {
+      route: entries[0].model.route,
+      models: shown.map((entry) => entry.model),
+      total: entries.length,
+    };
+  });
+}
+
+/** Matches for `query`: text tier first, then version order.
+ * Fuzzy (subsequence) matches count only when nothing matches directly:
+ * ids are long enough that "opus" would otherwise match most models. */
+function rankModels(
+  index: readonly IndexedModel[],
+  query: string,
+): IndexedModel[] {
   const needle = normalizeSearchText(query.slice(0, MAX_QUERY));
   const ranked: {
     tier: number;
@@ -140,20 +187,7 @@ export function searchModels(
     const firstFuzzy = ranked.findIndex((entry) => entry.tier === FUZZY);
     if (firstFuzzy >= 0) ranked.length = firstFuzzy;
   }
-  return {
-    models: ranked.slice(0, limit).map((entry) => entry.entry.model),
-    total: ranked.length,
-  };
-}
-
-/** "1M", "272k", "32k": the context size a row shows. */
-export function contextLabel(tokens: number | null): string {
-  if (!tokens || tokens <= 0) return "";
-  if (tokens >= 1_000_000) {
-    const millions = tokens / 1_000_000;
-    return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
-  }
-  return `${Math.round(tokens / 1_000)}k`;
+  return ranked.map((entry) => entry.entry);
 }
 
 /** The levels a model's reasoning select offers: Pi's, else every level. */

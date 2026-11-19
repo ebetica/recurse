@@ -63,6 +63,7 @@ import {
   type FilesRoutesDeps,
 } from "./files";
 import { registerLoginRoutes } from "./login";
+import { registerTwoFactorRoutes } from "./two_factor";
 import { registerUiTiming } from "./ui_timing";
 import { registerMessageSearch } from "./message_search";
 import { backfillMessageSearch } from "../search/backfill";
@@ -332,6 +333,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     logger: web,
     backendKeys,
   };
+  registerTwoFactorRoutes(router, loginDeps);
   registerLoginRoutes(router, loginDeps);
   const credentialRoots = resolveRoots(config.env);
   const credentialDir = await piAgentDir(credentialRoots, preparePiAgentDir);

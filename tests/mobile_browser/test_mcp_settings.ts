@@ -1,5 +1,6 @@
 import { expect } from "bun:test";
 import { join } from "node:path";
+import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   gotoRoot,
@@ -47,11 +48,13 @@ export const tests: BrowserTest[] = [
       const agents = await page.locator(".agent").count();
       await page.locator("#settings-btn").click();
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page.getByRole("button", { name: /^MCP servers / }).click();
       await page
         .getByRole("region", { name: "MCP servers", exact: true })
         .waitFor();
-      const section = page.locator(".settings-section").filter({
-        has: page.getByRole("heading", { name: "MCP servers", exact: true }),
+      const section = page.getByRole("region", {
+        name: "MCP servers",
+        exact: true,
       });
       const callback = page.getByRole("textbox", {
         name: "OAuth callback URL",
@@ -123,6 +126,7 @@ export const tests: BrowserTest[] = [
       await page.locator(".agent").first().waitFor();
       await page.locator("#settings-btn").click();
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page.getByRole("button", { name: /^MCP servers / }).click();
       await page
         .getByRole("region", { name: "MCP servers", exact: true })
         .waitFor();
@@ -145,7 +149,9 @@ export const tests: BrowserTest[] = [
       expect(await status.innerText()).not.toContain("private-url-token");
       expect(await status.innerText()).not.toContain(process.execPath);
       await page.setViewportSize({ width: 412, height: 915 });
-      await page.getByRole("button", { name: /^MCP servers/ }).click();
+      await browserExpect(
+        page.getByRole("button", { name: "Close MCP servers", exact: true }),
+      ).toBeVisible();
       await row("healthy").scrollIntoViewIfNeeded();
       const box = await row("healthy").boundingBox();
       expect(box!.x).toBeGreaterThanOrEqual(0);
@@ -173,7 +179,7 @@ export const tests: BrowserTest[] = [
       await oauth.stop();
     }
   },
-  // Feature: #2839 plain-http tailnet pages sign in by pasting the loopback address.
+  // Regression: #3440 #2839 sign-in waits for check admission.
   async function test_mcp_sign_in_by_pasting_the_loopback_address(
     browser,
     base,
@@ -263,8 +269,27 @@ export const tests: BrowserTest[] = [
       await page
         .getByText("Paste the full address", { exact: false })
         .waitFor();
-      await answer.fill(provider.url());
-      await finish.tap();
+      const admission = async (action: string) => {
+        const response = await fetch(
+          `${base}__browser-test/mcp-check-admission`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ action }),
+          },
+        );
+        expect(response.status).toBe(200);
+        return (await response.json()) as { returnedBeforeAdmission: boolean };
+      };
+      await admission("hold");
+      try {
+        await answer.fill(provider.url());
+        await finish.tap();
+        await admission("entered");
+        expect((await admission("status")).returnedBeforeAdmission).toBe(false);
+      } finally {
+        await admission("release");
+      }
       await row.getByText("Connected", { exact: true }).waitFor();
       expect(oauth.grants).toEqual(["authorization_code"]);
       expect(await answer.count()).toBe(0);

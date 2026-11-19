@@ -13,6 +13,14 @@ import { registerFileTabSource } from "./panes/file-tabs.js";
 import { paneItem } from "./panes/navigation.js";
 import { copyText } from "./tool_details.js";
 import { highlightSource } from "./source-preview.js";
+import {
+  htmlFileModes,
+  HTML_OFFLINE_NOTE,
+  HTML_PREVIEW_FAILED,
+  HTML_TOO_LARGE,
+  isHtmlFile,
+  MAX_HTML_PREVIEW_BYTES,
+} from "./html-file-view.js";
 import { requestUiStatus } from "./ui-events.js";
 import { sendOperatorMessage } from "./conversation/operator-send.js";
 import type { PaneCacheDef, PaneContext, PaneNavigation } from "./types.js";
@@ -24,8 +32,13 @@ import {
   FILE_DOWNLOAD_ICON,
   REFRESH_ICON,
 } from "./icons.js";
-import { commentMount, type CommentPane } from "./artifacts/artifact-state.js";
-import { discardCurrent, renderComments } from "./artifacts/comment-bar.js";
+import type { CommentPane } from "./artifacts/artifact-state.js";
+import { commentMount } from "./comments/selection-draft/index.js";
+import {
+  commentRendering,
+  discardCurrent,
+  renderComments,
+} from "./artifacts/comment-bar.js";
 import {
   claimComments,
   comments,
@@ -74,6 +87,9 @@ interface View {
   preview?: ExplorerPreview;
   previewText: string;
   htmlPreview: boolean;
+  htmlLoading?: boolean;
+  htmlFrameFailed?: boolean;
+  tabSeed?: ExplorerPreview;
   previewError: string;
   previewLoading: boolean;
   previewRequest?: AbortController;
@@ -294,9 +310,6 @@ async function loadFile(view: View, path: string, more = false): Promise<void> {
   if (!more && !closeEditor(view)) return;
   if (!more && view.element._rs && !discardCurrent(view.element as CommentPane))
     return;
-  view.previewRequest?.abort();
-  const controller = new AbortController();
-  view.previewRequest = controller;
   if (!more) {
     if (!view.file)
       view.filePaths = [
@@ -307,26 +320,27 @@ async function loadFile(view: View, path: string, more = false): Promise<void> {
     view.preview = undefined;
     view.previewText = "";
     view.htmlPreview = false;
+    view.htmlFrameFailed = false;
   }
+  await loadPreview(view, path, more ? "source" : "initial");
+}
+
+async function loadPreview(
+  view: View,
+  path: string,
+  stage: "source" | "initial" | "remaining",
+): Promise<void> {
+  view.previewRequest?.abort();
+  const controller = new AbortController();
+  view.previewRequest = controller;
   view.previewError = "";
+  view.htmlLoading = stage !== "source" && isHtmlFile(path);
   view.previewLoading = true;
   paint(view);
   try {
-    const query: Record<string, string> = { path: filePath(view, path) };
-    if (more && view.preview?.next !== null && view.preview) {
-      query.offset = String(view.preview.next);
-      query.version = view.preview.version;
-    }
-    const preview = await read<ExplorerPreview>(
-      view.cid,
-      endpoint(view, "/file", query),
-      controller.signal,
-    );
-    if (controller.signal.aborted || view.disposed) return;
-    if (view.tabId && preview.root !== view.root)
-      throw new Error("Working folder changed. Reopen the file from Explorer.");
-    view.preview = preview;
-    view.previewText += preview.text ?? "";
+    if (stage !== "remaining")
+      await readFileChunk(view, path, controller.signal);
+    if (view.htmlLoading) await completeHtml(view, path, controller.signal);
   } catch (error) {
     if (!controller.signal.aborted)
       view.previewError =
@@ -334,9 +348,59 @@ async function loadFile(view: View, path: string, more = false): Promise<void> {
   } finally {
     if (!controller.signal.aborted) {
       view.previewLoading = false;
+      view.htmlLoading = false;
       paint(view);
     }
   }
+}
+
+async function readFileChunk(view: View, path: string, signal: AbortSignal) {
+  const query: Record<string, string> = { path: filePath(view, path) };
+  const previous = view.preview;
+  if (previous && previous.next !== null) {
+    query.offset = String(previous.next);
+    query.version = previous.version;
+  }
+  const preview = await read<ExplorerPreview>(
+    view.cid,
+    endpoint(view, "/file", query),
+    signal,
+  );
+  if (signal.aborted || view.disposed) return;
+  if (view.tabId && preview.root !== view.root)
+    throw new Error("Working folder changed. Reopen the file from Explorer.");
+  if (
+    preview.next !== null &&
+    (preview.next <= Number(query.offset ?? 0) || preview.next >= preview.size)
+  )
+    throw new Error("Couldn’t load the complete file for preview.");
+  view.preview = preview;
+  view.previewText += preview.text ?? "";
+}
+
+async function completeHtml(view: View, path: string, signal: AbortSignal) {
+  while (!signal.aborted && !view.disposed) {
+    const item = view.preview;
+    if (item?.kind !== "text" || item.size > MAX_HTML_PREVIEW_BYTES) return;
+    if (item.next === null) {
+      view.htmlPreview = true;
+      return;
+    }
+    await readFileChunk(view, path, signal);
+  }
+}
+
+function continueHtmlPreview(view: View, path: string) {
+  view.htmlLoading = false;
+  const item = view.preview;
+  if (
+    !isHtmlFile(path) ||
+    item?.kind !== "text" ||
+    item.size > MAX_HTML_PREVIEW_BYTES
+  )
+    return;
+  if (item.next === null) view.htmlPreview = true;
+  else void loadPreview(view, path, "remaining");
 }
 
 function setQuery(view: View, query: string): void {
@@ -705,30 +769,11 @@ function preview(view: View): TemplateResult {
       item?.kind === "text" &&
       item.canonicalPath &&
       item.size <= MAX_PREVIEW &&
+      !view.htmlLoading &&
       !view.htmlPreview
         ? html`<button class="btn sm" @click=${() => startEditing(view)}>
             Edit
           </button>`
-        : nothing}
-      ${!view.editing && item?.kind === "text" && /\.html?$/i.test(view.file!)
-        ? html`<div class="explorer-modes" role="group" aria-label="HTML view">
-            ${["Source", "Preview"].map(
-              (label) =>
-                html`<button
-                  class="btn sm"
-                  type="button"
-                  aria-pressed=${String(
-                    view.htmlPreview === (label === "Preview"),
-                  )}
-                  @click=${() => {
-                    view.htmlPreview = label === "Preview";
-                    paint(view);
-                  }}
-                >
-                  ${label}
-                </button>`,
-            )}
-          </div>`
         : nothing}
       ${item?.kind === "missing" || view.editing
         ? nothing
@@ -756,6 +801,32 @@ function preview(view: View): TemplateResult {
         >
           This file’s contents are sent to the model. Don’t save secrets here.
         </p>`
+      : nothing}
+    ${view.htmlLoading
+      ? html`<p class="explorer-status" role="status">Loading preview…</p>`
+      : nothing}
+    ${!view.htmlLoading &&
+    !view.editing &&
+    item?.kind === "text" &&
+    isHtmlFile(view.file!)
+      ? html`${htmlFileModes(
+          view.htmlPreview,
+          item.next !== null ||
+            item.size > MAX_HTML_PREVIEW_BYTES ||
+            !!view.htmlFrameFailed,
+          (preview) => {
+            if (preview === view.htmlPreview) return;
+            view.htmlPreview = preview;
+            paint(view);
+          },
+        )}
+        ${item.size > MAX_HTML_PREVIEW_BYTES || view.htmlFrameFailed
+          ? html`<p class="html-file-note" role="status">
+              ${item.size > MAX_HTML_PREVIEW_BYTES
+                ? HTML_TOO_LARGE
+                : HTML_PREVIEW_FAILED}
+            </p>`
+          : nothing}`
       : nothing}
     ${view.editing ? editor(view) : nothing}
     ${item && !item.canonicalPath
@@ -789,18 +860,21 @@ function preview(view: View): TemplateResult {
           This file cannot be shown as text. Download it to open it.
         </p>`
       : nothing}
-    ${item?.kind === "text" && !view.editing
+    ${item?.kind === "text" && !view.editing && !view.htmlLoading
       ? html`<pre
           class="explorer-source report-doc explorer-source-only"
           tabindex="0"
         ><code></code></pre>`
       : nothing}
-    ${view.previewLoading
+    ${view.previewLoading && !view.htmlLoading
       ? html`<p class="explorer-status explorer-source-only" role="status">
           Loading file…
         </p>`
       : nothing}
-    ${item?.kind === "text" && item.next !== null && !view.editing
+    ${item?.kind === "text" &&
+    item.next !== null &&
+    !view.editing &&
+    !view.htmlLoading
       ? html`<p class="explorer-status explorer-source-only">
             Showing ${view.previewText.length.toLocaleString()} characters of
             ${(item.size / 1024).toFixed(0)} KB.
@@ -817,16 +891,13 @@ function preview(view: View): TemplateResult {
                 Download the file to read the rest.
               </p>`}`
       : nothing}
-    ${item?.kind === "text" && !view.editing
+    ${item?.kind === "text" && !view.editing && !view.htmlLoading
       ? html`<div class="report-comments explorer-source-only"></div>
           <div class="report-bar explorer-source-only"></div>`
       : nothing}
     ${view.htmlPreview
-      ? html`<p class="explorer-status">
-            Preview shows loaded text without scripts, styles or external
-            resources.
-          </p>
-          <div class="explorer-html-preview files-document"></div>`
+      ? html`<p class="html-file-note">${HTML_OFFLINE_NOTE}</p>
+          <div class="explorer-html-preview"></div>`
       : nothing}`;
 }
 
@@ -868,7 +939,7 @@ function syncComments(view: View): void {
   else if (shown.length < view.previewText.length)
     code.append(view.previewText.slice(shown.length));
   highlightSource(code, item!.path);
-  claimComments(pane);
+  claimComments(pane, commentRendering);
   reanchor(pane, id);
   renderComments(pane);
 }
@@ -877,30 +948,30 @@ function syncHtmlPreview(view: View): void {
   const container = view.element.querySelector<HTMLElement>(
     ".explorer-html-preview",
   );
+  if (!container || container.dataset.loading) return;
   const text = view.previewText;
-  const name = view.file;
-  const length = String(text.length);
-  if (!container || container.dataset.shownLength === length) return;
+  const name = view.file!;
+  container.dataset.loading = "true";
   container.setAttribute("role", "status");
   container.textContent = "Loading preview…";
   const ownsView = () =>
     !view.disposed &&
-    container.isConnected &&
+    view.element.contains(container) &&
     view.file === name &&
     view.previewText === text;
   void import("./document-preview.js")
-    .then(({ mountHtmlPreview }) => {
-      if (!ownsView() || container.dataset.shownLength === length) return;
-      mountHtmlPreview(container, text, name!);
-      container.dataset.shownLength = length;
+    .then(async ({ htmlFileFrame }) => {
+      if (!ownsView()) return;
+      const frame = await htmlFileFrame(text, name);
+      if (!ownsView()) return;
+      container.replaceChildren(frame);
       container.removeAttribute("role");
     })
     .catch(() => {
-      if (!ownsView() || container.dataset.shownLength === length) return;
-      container.dataset.shownLength = length;
-      container.setAttribute("role", "alert");
-      container.textContent =
-        "Could not show the preview. Choose Source to read the file.";
+      if (!ownsView()) return;
+      view.htmlPreview = false;
+      view.htmlFrameFailed = true;
+      paint(view);
     });
 }
 
@@ -1144,6 +1215,14 @@ const cache: PaneCacheDef = {
     const view = views.get(element);
     if (view) {
       view.disposed = false;
+      if (
+        view.htmlLoading &&
+        view.file &&
+        view.previewRequest?.signal.aborted
+      ) {
+        if (view.preview) continueHtmlPreview(view, view.file);
+        else void loadFile(view, view.file);
+      }
       paint(view);
     }
   },
@@ -1339,8 +1418,15 @@ registerFileTabSource("explorer", (key, id) => {
       view.root = root;
       view.file = path;
       view.filePaths = paths;
-      view.preview = preview;
-      view.previewText = preview.text ?? "";
+      if (view.tabSeed !== preview) {
+        view.tabSeed = preview;
+        view.preview = preview;
+        view.previewText = preview.text ?? "";
+        view.previewError = "";
+        view.htmlPreview = false;
+        view.htmlFrameFailed = false;
+        continueHtmlPreview(view, path);
+      }
       paint(view);
     },
   };

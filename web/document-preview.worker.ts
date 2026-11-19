@@ -241,9 +241,17 @@ async function syntax(text: string, name: string): Promise<SourceToken[]> {
 }
 
 self.onmessage = async (
-  event: MessageEvent<{ bytes: ArrayBuffer; name: string; text?: string }>,
+  event: MessageEvent<
+    { bytes: ArrayBuffer; name: string; text?: string } | { markup: string }
+  >,
 ) => {
   try {
+    if ("markup" in event.data) {
+      const { htmlAppPreviewUrl } = await import("./html-preview-document.js");
+      self.postMessage({ started: true });
+      self.postMessage({ result: htmlAppPreviewUrl(event.data.markup) });
+      return;
+    }
     if (typeof event.data.text === "string") {
       self.postMessage({
         tokens: await syntax(event.data.text, event.data.name),

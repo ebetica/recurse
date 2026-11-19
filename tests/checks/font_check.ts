@@ -1,18 +1,18 @@
 /**
- * Type policy: sizes on the 10.5-20px scale, weights 400/600/700, families
- * as var(--font-sans|mono). tests/checks/static.ts runs it.
+ * Type policy: px and rem sizes on the 11-20px scale, weights 400/600/700,
+ * families as var(--font-sans|mono). tests/checks/static.ts runs it.
  */
 import { cssView } from "./radius_check.ts";
 
 export type Finding = { line: number; value: string; problem: string };
 
-const SCALE = new Set([10.5, 11.5, 12.5, 13.5, 15, 16, 17, 20]);
+const SCALE = new Set([11, 11.5, 12.5, 13.5, 15, 16, 17, 20]);
 const WEIGHTS = new Set([400, 600, 700]);
 const ALLOW = "font-check: allow";
 const FONT =
   /(?<![\w-])(font-size|font-family|font-weight|font)\s*:\s*((?:(?![\w-]+\s*:)[^;}"'`]|"[^"\n]*"|'[^'\n]*'|`[^`\n]*`)+)|\b(fontSize|fontFamily|fontWeight|font)\s*[:=]\s*(?:["'`]([^"'`]+)|(\d*\.?\d+))/gi;
 const WEIGHT = /^(\d*\.?\d+|bolder|lighter)$/i;
-const PX = /(?<![\w.$-])(\d*\.?\d+)px\b/;
+const SIZE = /^(\d*\.?\d+)(px|rem)$/i;
 
 /** Drop a font shorthand's /line-height, including calc() values. */
 function dropLineHeight(value: string): string {
@@ -45,6 +45,31 @@ function stripVars(value: string): string {
   return out;
 }
 
+/** The literal px or rem size word in a value: calc() and other function
+ * calls, quoted family names and an outer JS string quote are skipped. */
+function sizeOf(value: string): RegExpExecArray | null {
+  let rest = value
+    .replace(/^(["'`])(.*)\1$/, "$2")
+    .replace(/!\s*important/gi, " ");
+  for (
+    let at = rest.search(/[\w-]+\(/);
+    at >= 0;
+    at = rest.search(/[\w-]+\(/)
+  ) {
+    let end = rest.indexOf("(", at);
+    for (let depth = 0; end < rest.length; end++) {
+      if (rest[end] === "(") depth++;
+      else if (rest[end] === ")" && --depth === 0) break;
+    }
+    rest = `${rest.slice(0, at)} ${rest.slice(end + 1)}`;
+  }
+  for (const word of rest.replace(/"[^"]*"|'[^']*'/g, " ").split(/[\s,]+/)) {
+    const size = SIZE.exec(word);
+    if (size) return size;
+  }
+  return null;
+}
+
 /** The weight in a font-weight value or before a font shorthand's size. */
 function weightOf(property: string, value: string): string | null {
   const tokens = value
@@ -74,14 +99,19 @@ export function findFonts(text: string): Finding[] {
       .replace(/\s+/g, " ")
       .trim();
     const rest = stripVars(value);
-    const sized = property === "font" ? dropLineHeight(rest) : rest;
-    const size = /family|weight/.test(property) ? null : PX.exec(sized);
+    const sized = stripVars(
+      property === "font" ? dropLineHeight(value) : value,
+    );
+    const size = /family|weight/.test(property) ? null : sizeOf(sized);
     const weight = /weight|^font$/.test(property)
       ? weightOf(property, sized)
       : null;
     if (weight && !WEIGHTS.has(Number(weight)))
       findings.push({ line, value, problem: "weight" });
-    if (size && !SCALE.has(parseFloat(size[1]!)))
+    if (
+      size &&
+      !SCALE.has(parseFloat(size[1]!) * (/rem/i.test(size[2]!) ? 16 : 1))
+    )
       findings.push({ line, value, problem: "size" });
     else if (property.includes("weight")) continue;
     else if (!property.includes("size") && /\bmonospace\b/.test(rest))
@@ -102,7 +132,7 @@ export function checkFiles(
   return files.flatMap(({ file, text }) =>
     findFonts(text).map(({ line, value, problem }) =>
       problem === "size"
-        ? `${file}:${line}: font size ${value} is off the 10.5/11.5/12.5/13.5/15/16/17/20px scale`
+        ? `${file}:${line}: font size ${value} is off the 11/11.5/12.5/13.5/15/16/17/20px scale`
         : problem === "weight"
           ? `${file}:${line}: font weight ${value} is off the 400/600/700 scale`
           : `${file}:${line}: ${problem === "mono" ? "monospace" : "sans-serif"} font ${value} should use var(--font-${problem})`,

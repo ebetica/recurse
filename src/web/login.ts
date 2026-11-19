@@ -15,7 +15,6 @@ import {
   type RuntimeLogger,
 } from "../observability/runtime_logging";
 import { jsonObjectBody } from "./request_body";
-import { registerTwoFactorRoutes } from "./two_factor";
 import {
   clientIp,
   htmlResponse,
@@ -190,7 +189,6 @@ function redirectHome(extra: Record<string, string> = {}): Response {
 export function registerLoginRoutes(router: Router, deps: LoginDeps): void {
   const sleep = deps.sleep ?? ((seconds: number) => Bun.sleep(seconds * 1000));
   const { operator, throttle } = deps;
-  registerTwoFactorRoutes(router, deps);
 
   router.post("/login", async (ex) => {
     const { password, code } = await formFields(ex);

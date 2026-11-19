@@ -1,10 +1,12 @@
 import { expect } from "bun:test";
 import type { Browser, Page } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   gotoRoot,
   mockConversation,
   runBrowserTests,
+  startNewAgent,
   type BrowserTest,
 } from "./common";
 import { idleConv, tree } from "./fixtures";
@@ -158,8 +160,106 @@ export const tests: BrowserTest[] = [
     expect(await page.locator(".hold-tip.on").count()).toBe(0);
     await hold(page, "#trash-btn.armed");
     expect(await page.locator("#trash-btn.armed").count()).toBe(0);
-    expect(await trash.innerText()).toBe("Delete");
+    expect(await trash.innerText()).toBe("Delete agent");
     expect(await page.locator(".hold-tip.on").count()).toBe(0);
+    expect(errors).toEqual([]);
+    await context.close();
+  },
+  // Regression: #3472 a slide released on Delete's clipped part never arms or confirms it.
+  async function test_menu_slide_skips_deletes_clipped_part(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 915 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    const errors = captureErrors(page);
+    const deletes: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "DELETE") deletes.push(request.url());
+    });
+    await open(page, base, idle);
+    await page.locator("#trash-btn.on").waitFor({ state: "attached" });
+    const cdp = await context.newCDPSession(page);
+    const touch = (
+      type: "touchStart" | "touchMove" | "touchEnd" | "touchCancel",
+      x = 0,
+      y = 0,
+    ) =>
+      cdp.send("Input.dispatchTouchEvent", {
+        type,
+        touchPoints:
+          type === "touchMove" || type === "touchStart" ? [{ x, y }] : [],
+      });
+    const press = async () => {
+      const fab = (await page.locator("#pane-fab").boundingBox())!;
+      await touch("touchStart", fab.x + fab.width / 2, fab.y + fab.height / 2);
+      await page.locator("#pane-menu.on").waitFor();
+    };
+    await press();
+    const trash = page.locator("#trash-btn");
+    await browserExpect(trash).toHaveAccessibleName("Delete agent");
+    const box = (await trash.boundingBox())!;
+    await touch("touchMove", box.x + box.width / 2, box.y + box.height / 2);
+    await page.locator("#trash-btn.hot").waitFor();
+    await touch("touchCancel");
+    const height = Math.round(box.y);
+    await page.setViewportSize({ width: 412, height });
+    const slide = async (armed: number) => {
+      await press();
+      const row = await page.locator("#pane-menu").evaluate((menu) => {
+        menu.scrollTop = 32;
+        const frame = menu.getBoundingClientRect();
+        const item = menu.querySelector("#trash-btn")!.getBoundingClientRect();
+        return {
+          scrolled: menu.scrollTop,
+          menuBottom: frame.bottom,
+          top: item.top,
+          bottom: item.bottom,
+          x: item.left + item.width / 2,
+        };
+      });
+      const y = (row.menuBottom + height) / 2;
+      expect({
+        scrolled: row.scrolled,
+        cutByMenu: row.top < row.menuBottom && row.menuBottom < row.bottom,
+        belowMenuOnScreen: row.menuBottom < y && y < height,
+        insideRow: y < row.bottom,
+      }).toEqual({
+        scrolled: 32,
+        cutByMenu: true,
+        belowMenuOnScreen: true,
+        insideRow: true,
+      });
+      await touch("touchMove", row.x, y);
+      await page.evaluate(
+        () =>
+          new Promise((done) =>
+            (globalThis as any).requestAnimationFrame(() => done(null)),
+          ),
+      );
+      expect({
+        hot: await page.locator("#pane-menu .hot").count(),
+        armed: await page.locator("#trash-btn.armed").count(),
+      }).toEqual({ hot: 0, armed });
+      await touch("touchEnd");
+      await page.locator("#pane-menu.on").waitFor({ state: "detached" });
+    };
+    await slide(0);
+    expect(await page.locator("#trash-btn.armed").count()).toBe(0);
+    await page.locator("#pane-fab").tap();
+    await page.locator("#pane-menu.on").waitFor();
+    await trash.scrollIntoViewIfNeeded();
+    await trash.tap();
+    await page.locator("#trash-btn.armed").waitFor();
+    await slide(1);
+    expect(deletes).toEqual([]);
+    await page.setViewportSize({ width: 412, height: 915 });
+    await startNewAgent(page);
+    await page.locator("#pane-fab").tap();
+    await page.locator("#pane-menu.on").waitFor();
+    await browserExpect(trash).toBeHidden();
+    await browserExpect(page.locator("#pane-menu-divider")).toBeHidden();
     expect(errors).toEqual([]);
     await context.close();
   },

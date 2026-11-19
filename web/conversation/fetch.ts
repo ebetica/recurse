@@ -1,21 +1,21 @@
 // Focused conversation reads: fetching one agent's view into the cache,
 // painting it from cache or network, and warming neighbours. Settled reads
-// catch up committed input before painting idle. thread.ts owns rendering;
-// chrome.ts settles freshness. This module never paints chrome itself.
-import { backendFor, conversationId } from "../backends/backend.js";
+// catch up committed input before painting idle. Reads update chrome before
+// reconciling and rendering the thread.
+import { backendFor } from "../backends/backend.js";
+import { conversationId } from "../backends/conversation-id/index.js";
 import { backgroundWork, focusedPathReady } from "../background-work.js";
-import {
-  applyFreshness,
-  freshness,
-  noteRefreshApplied,
-  noteRefreshFailed,
-  setStopReadAuthoritative,
-} from "./chrome.js";
+import { applyFreshness, updateChrome } from "./chrome.js";
 import {
   type ConversationFetchPurpose,
   shouldCacheConversationResponse,
-} from "./cache.js";
-import { phaseFor } from "./freshness.js";
+} from "./cache/index.js";
+import {
+  focusedRead,
+  noteRefreshApplied,
+  noteRefreshFailed,
+  phaseFor,
+} from "./freshness.js";
 import { inputEl } from "../dom.js";
 import { notePaneConversationRendered, syncPanes } from "../panes.js";
 import {
@@ -35,7 +35,7 @@ import {
 } from "../show-timing.js";
 import { DRAFT, embeddedFrameHidden, state } from "../state.js";
 import { pollGeneration } from "./poll.js";
-import { convHash, renderConv } from "./thread.js";
+import { convHash, renderThread } from "./thread.js";
 import { type Conversation } from "../types.js";
 import { type ViewPage } from "../row-thread-state/view-blocks.js";
 
@@ -139,6 +139,11 @@ async function fetchConvView(
   } catch {
     return { status: 0, conv: null };
   }
+}
+
+function renderConv(conv: Conversation): void {
+  updateChrome(conv);
+  renderThread(conv);
 }
 
 // Paints a cached thread immediately and seeds its reconciliation hash. Panels
@@ -259,7 +264,7 @@ export async function refreshConv(
   if (!olderRead) latestRead = { id, started: requestedAt };
   state.currentConv = conv;
   convReadAt.set(id, performance.now());
-  setStopReadAuthoritative(id);
+  focusedRead.stopReadAuthoritativeId = id;
   // Invariant: A successful read proves the conversation exists: lift any
   // terminal park and make sure the focused subscription is live (a no-op while
   // it is).
@@ -272,7 +277,7 @@ export async function refreshConv(
   if (
     hash !== state.openConvHash ||
     blocksChanged ||
-    phaseFor(freshness, id) === "loading"
+    phaseFor(focusedRead.freshness, id) === "loading"
   ) {
     state.openConvHash = hash;
     renderConv(conv);

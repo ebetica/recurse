@@ -26,11 +26,12 @@ import { DurableHost } from "../../src/agents/durable/host.ts";
 import {
   customProviderSync,
   durableModels,
+  trustedModelCatalog,
 } from "../../src/agents/durable/models.ts";
 import { DurableViews } from "../../src/agents/durable/durable_rows.ts";
 import { ReportDoc } from "../../src/agents/durable/report.ts";
 import { deliverStop, withDurableStop } from "../../src/web/tree.ts";
-import { HttpError } from "../../src/web/router.ts";
+import { HttpError } from "../../src/web/router/index.ts";
 import {
   INFO,
   RuntimeLogger,
@@ -139,6 +140,9 @@ describe("durableModels", () => {
     );
     process.env.OPENAI_API_KEY = "sk-stray";
     const models = durableModels(dir);
+    const trusted = trustedModelCatalog(models);
+    const [builtIn] = trusted.getModels("openai");
+    expect(builtIn).toBeDefined();
     const spec = (models: string[]) => ({
       base_url: "http://127.0.0.1:9/v1",
       env_key: "CUSTOM_KEY",
@@ -152,11 +156,13 @@ describe("durableModels", () => {
     expect((await models.getAuth("stored"))?.auth.apiKey).toBe("stored-key");
     expect((await models.getAuth("fromenv"))?.auth.apiKey).toBe("env-fromenv");
     expect(models.getModel("fromenv", "b")?.api).toBe("openai-responses");
-    expect(models.getModel("openai", "gpt-5")).toBeUndefined();
+    expect(models.getModel("openai", builtIn!.id)).toBeUndefined();
+    expect(trusted.getModel("openai", builtIn!.id)).toBe(builtIn!);
+    expect(trusted.getModel("openai", "c")).toBeUndefined();
     sync({ stored: spec(["a"]) });
     expect(models.getModel("fromenv", "b")).toBeUndefined();
     expect(models.getModel("openai", "c")).toBeUndefined();
-    expect(models.getModel("openai", "gpt-5")).toBeDefined();
+    expect(models.getModel("openai", builtIn!.id)).toBeDefined();
     expect(await models.getAuth("openai")).toBeUndefined();
   });
 });
@@ -429,7 +435,7 @@ describe("DurableHost", () => {
     );
     try {
       await expect(host.send("c1", "hi", "r1")).rejects.toThrow(
-        "Model meta/muse-spark-1.3-contributor is unavailable. Pick another effort level in the model picker, or fix its model in Settings > Effort ladder.",
+        "Model meta/muse-spark-1.3-contributor is unavailable. Pick an effort level again in the model picker. If needed, update the ladder in Settings first.",
       );
     } finally {
       await host.close();

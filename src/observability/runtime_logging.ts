@@ -21,6 +21,13 @@ export const DEBUG = 10;
 export const INFO = 20;
 export const WARNING = 30;
 export const ERROR = 40;
+export const UNKNOWN_ROUTE = ":unknown";
+
+/** `/api/x/{cid}` and `/static/{path:path}` → log-safe `:param` segments. */
+export function templateRoute(template: string | null): string {
+  if (template === null || !template.startsWith("/")) return UNKNOWN_ROUTE;
+  return template.replace(/\{([\p{L}\p{N}_]+)(:[^}]*)?\}/gu, ":$1");
+}
 
 const EVENT_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const FIELD_RE = /^[a-z][a-z0-9_]{0,63}$/;

@@ -1,7 +1,8 @@
 // Authored image references stay inert until classified. Local paths use the
 // operator-only, byte-sniffed route; web images require a click per image and
 // send no referrer. Small raster data URLs need no network permission.
-import { backendFor, parseConversationId } from "../backends/backend.js";
+import { backendFor } from "../backends/backend.js";
+import { parseConversationId } from "../backends/conversation-id/index.js";
 import type { SessionFile } from "../files/model.js";
 
 const PATH_IMAGE_ROUTE =

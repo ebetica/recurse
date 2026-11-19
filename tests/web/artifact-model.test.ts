@@ -7,10 +7,10 @@ import {
   artifactRestoreUrl,
   artifactVersionsUrl,
   externalHttpHostname,
-  htmlPreviewSrcdoc,
   isSafeRasterFilename,
   pageErrorText,
 } from "../../web/artifacts/model.js";
+import { htmlPreviewSrcdoc } from "../../web/document-media/index.js";
 
 const SHA = "a".repeat(40);
 const OLD = "b".repeat(40);

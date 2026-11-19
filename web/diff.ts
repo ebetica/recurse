@@ -1843,9 +1843,12 @@ function shellTemplate(
     s.files || [],
     s.untracked || [],
   );
-  const more = s.moreFiles || 0;
   const e = entry(agentId);
   const local = e.selectedPr && e.local?.available ? e.local : null;
+  // Spec: Totals sum listed files, not localized --stat; complete diffs only.
+  const files = s.stat && !s.truncated ? changed.length : 0;
+  const total = (key: "additions" | "deletions") =>
+    changed.reduce((sum, file) => sum + (file[key] ?? 0), 0);
   return html` <div class="diff-list" tabindex="-1">
       ${changesFilter()} ${prSummaryTemplate(agentId)}
       ${error
@@ -1857,17 +1860,14 @@ function shellTemplate(
             ${error}
           </div>`
         : nothing}
-      ${s.stat
-        ? html`<details class="diff-stat" open>
-            <summary>
-              Diff
-              stat${changed.length
-                ? html` · ${changed.length}
-                  file${changed.length === 1 ? "" : "s"}${more ? "+" : ""}`
-                : nothing}
-            </summary>
-            <pre>${s.stat}</pre>
-          </details>`
+      ${files
+        ? html`<p class="diff-stat">
+            ${files} file${files === 1 ? "" : "s"} changed
+            <span class="diff-counts"
+              ><span class="add">+${total("additions")}</span>
+              <span class="del">−${total("deletions")}</span></span
+            >
+          </p>`
         : nothing}
       ${s.truncated
         ? html`<div class="diff-trunc" role="status">

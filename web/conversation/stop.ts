@@ -1,33 +1,22 @@
-// Stop control and dispatch. The browser owns only the POST-in-flight paint;
-// authoritative running, interrupting, and idle state always comes from /view.
+// Stop dispatch. The browser paints POST-in-flight feedback; authoritative
+// running, interrupting, and idle state always comes from /view.
 import { deliverStop } from "./operator-send.js";
-import { setComposerStopAvailability } from "../composer/action.js";
-import { phaseFor } from "./freshness.js";
 import { inputEl } from "../dom.js";
-import { DRAFT, state } from "../state.js";
-import {
-  type StopActivation,
-  type StopMode,
-  canStopProcesses,
-  processesStopTargetId,
-} from "../stop-control.js";
+import { state } from "../state.js";
+import { canStopProcesses, type StopActivation } from "../stop-control.js";
 import { createStopId, reportStopIdFallback } from "../stop-control/id.js";
 import { reportStopDiagnostic } from "../stop-control/telemetry.js";
-import { type Conversation } from "../types.js";
 import { requestUiStatus } from "../ui-events.js";
-import { freshness, stopReadAuthoritativeId } from "./chrome.js";
 import { refreshConv } from "./fetch.js";
+import { paintStopControl } from "./stop-view.js";
 import { paint } from "./thread.js";
 
-// POST-flight Stop feedback; only the next /view is durable status authority.
-export let stoppingId: string | null = null;
-
 export function stopPublicationPending(): boolean {
-  return stoppingId !== null;
+  return state.stopPostInFlightId !== null;
 }
 
 export function clearStopForNewTurn(cid: string): void {
-  if (stoppingId === cid) stoppingId = null;
+  if (state.stopPostInFlightId === cid) state.stopPostInFlightId = null;
   if (state.pendingStops[cid]) setStopPending(cid, false);
 }
 
@@ -35,46 +24,6 @@ function setStopPending(cid: string, pending: boolean): void {
   if (pending) state.pendingStops[cid] = true;
   else delete state.pendingStops[cid];
   window.dispatchEvent(new Event("recurse:stop-pending"));
-}
-
-export function selectedCanStop(conv?: Conversation | null): boolean {
-  if (conv?.id === state.selectedId)
-    return Boolean(conv.active_run) || conv.status === "running";
-  return ["running", "interrupting"].includes(
-    state.nodes[state.selectedId]?.status || "",
-  );
-}
-
-export function paintStopControl(
-  conv?: Conversation | null,
-  eligible = true,
-): void {
-  const posting = stoppingId === state.selectedId;
-  const authoritative =
-    stopReadAuthoritativeId === state.selectedId &&
-    phaseFor(freshness, state.selectedId) === "fresh";
-  const processes =
-    canStopProcesses(conv) && !selectedCanStop(conv) && !posting;
-  const visible =
-    eligible &&
-    authoritative &&
-    state.selectedId !== DRAFT &&
-    (selectedCanStop(conv) || posting || processes);
-  const mode: StopMode = processes ? "processes" : "turn";
-  const run = conv?.id === state.selectedId ? conv.active_run : null;
-  const target = !visible
-    ? null
-    : mode === "processes"
-      ? processesStopTargetId(state.selectedId)
-      : run
-        ? `${state.selectedId}:${run}`
-        : null;
-  setComposerStopAvailability(
-    visible,
-    target,
-    posting || conv?.status === "interrupting" ? "stopping" : "ready",
-    mode,
-  );
 }
 
 // Confirmation re-reads the authoritative Stop snapshot so a tokenless
@@ -106,7 +55,7 @@ export async function requestStop(
     requestUiStatus("Already finished");
     return;
   }
-  if (stoppingId === cid) return;
+  if (state.stopPostInFlightId === cid) return;
   const run = await currentRun(cid);
   if (!run || state.selectedId !== cid) {
     requestUiStatus("Already finished");
@@ -124,7 +73,7 @@ export async function requestStop(
     });
   }
   const stopId = generated.id;
-  stoppingId = cid;
+  state.stopPostInFlightId = cid;
   setStopPending(cid, true);
   paintStopControl(conv);
   if (conv?.id === cid) paint(conv);
@@ -167,7 +116,7 @@ export async function requestStop(
     setStopPending(cid, false);
     requestUiStatus("Stop failed — press Stop to retry");
   } finally {
-    if (stoppingId === cid) stoppingId = null;
+    if (state.stopPostInFlightId === cid) state.stopPostInFlightId = null;
     inputEl.disabled = false;
     if (state.selectedId === cid) {
       await refreshConv();

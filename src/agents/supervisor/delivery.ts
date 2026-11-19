@@ -113,8 +113,12 @@ export interface DeliveryDeps {
     recordedFile: string,
     recordedCwd: string,
   ): Promise<string | null>;
-  noteLevelTurnFailure(level: number, kind: string): Promise<void>;
-  noteLevelTurnSuccess(level: number): Promise<void>;
+  noteLevelTurnFailure(
+    level: number,
+    kind: string,
+    model?: string,
+  ): Promise<void>;
+  noteLevelTurnSuccess(level: number, model?: string): Promise<void>;
   // Reports ignore mid-run abort; pre-start abort reaches onError.
   tasks: TaskSet;
   /** Instance shutdown: aborts detached report tasks. */
@@ -786,13 +790,15 @@ export class SupervisorDelivery {
     try {
       const level = validLevel(conv.level);
       if (level === null) return;
+      const stored = conv.model;
+      const model = typeof stored === "string" ? stored : undefined;
       if (typeof error === "string" && error.trim()) {
-        const stored = conv.model;
         const kind = providerOutageKind(error, {
           model: typeof stored === "string" ? stored : null,
         });
-        if (kind !== null) await this.deps.noteLevelTurnFailure(level, kind);
-      } else if (!aborted) await this.deps.noteLevelTurnSuccess(level);
+        if (kind !== null)
+          await this.deps.noteLevelTurnFailure(level, kind, model);
+      } else if (!aborted) await this.deps.noteLevelTurnSuccess(level, model);
     } catch (exc) {
       logException(this.deps.log, "level_reachability_update_failed", exc, {
         conversation_id: String(conv.id || ""),

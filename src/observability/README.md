@@ -1,5 +1,19 @@
 # Wall-time diagnostics
 
+## Source files
+
+- `index.ts` exposes the HTTP transport's diagnostics through named reexports.
+- `runtime_logging.ts` redacts and persists bounded logs, and formats route templates.
+- `request_timing.ts` tracks bounded request-local phases and background work.
+- `slow_span.ts` collects wall spans, open phases and Worker reply observations.
+- `loop_lag.ts` and `loop_lag.worker.ts` sample main and observer timer delays.
+- `startup_metrics.ts` measures startup operations and mechanism counters.
+
+Route labels use templates, never raw request paths. Formatting stays below the
+HTTP transport so collecting diagnostics does not import routing or server work.
+
+## Sampling and attribution
+
 [loop_lag.ts](loop_lag.ts) measures delayed timer samples without native CPU or
 memory reads. Stall details are assembled only when a warning is emitted.
 [loop_lag.worker.ts](loop_lag.worker.ts) samples an independent timer through
@@ -74,3 +88,10 @@ decoding before the handler cannot be measured as a synchronous JavaScript span.
 Counters and spans are consumed each sample, with no per-row logs or payload
 retention. A stall with no named synchronous span remains unattributed, not proof
 that an overlapping await or worker caused it.
+
+## Rules for changes
+
+Keep collectors independent of HTTP and agent orchestration. Preserve bounded,
+redacted fields, unref'd timers and Worker termination; diagnostics never wait
+for a snapshot or retain request payloads. Extend the named-export entry when
+migrating existing private-path consumers.

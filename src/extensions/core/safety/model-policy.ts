@@ -3,7 +3,7 @@ import type {
   ClassifierModel,
   Model,
 } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { shippedReviewModels } from "../../../safety_review_models";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const MODEL_POLICY_ENV = "RECURSE_MODEL_POLICY";
@@ -45,12 +45,11 @@ export type TrustedModelPolicyState =
   | { status: "invalid" }
   | { status: "valid"; policy: TrustedModelPolicy };
 
-const BUILTIN_DECISIONS = new Set(
-  builtinProviders().flatMap((provider) =>
-    (provider.getAllModels?.() ?? [])
-      .filter((model) => model.type === "classifier")
-      .map((model) => `${model.provider}\u0000${model.id}`),
-  ),
+const BUILTIN_REVIEWERS = new Map(
+  shippedReviewModels().map(({ provider, id, type }) => [
+    `${provider}\u0000${id}`,
+    type,
+  ]),
 );
 
 const EFFORTS = new Set<ReviewEffort>([
@@ -209,6 +208,22 @@ export type ReviewSelection = {
   effort: ReviewEffort;
 };
 
+function findReviewModel(
+  ctx: ExtensionContext,
+  target: PolicyModel,
+  explicit: boolean,
+): ReviewModel | undefined {
+  if (!explicit) return ctx.modelRegistry.find(target.provider, target.model);
+  const type = BUILTIN_REVIEWERS.get(`${target.provider}\u0000${target.model}`);
+  if (!type) return undefined;
+  const model = ctx.modelRegistry.findOfType(
+    type,
+    target.provider,
+    target.model,
+  );
+  return model?.type === type ? model : undefined;
+}
+
 /** Bounded diagnostics when no trusted candidate resolves. */
 export function reviewerConfigurationCategory(
   ctx: ExtensionContext,
@@ -219,7 +234,13 @@ export function reviewerConfigurationCategory(
   if (state.status === "valid") {
     const { policy } = state;
     const pin = policy.reviewer_pin;
-    if (pin && !sameModel(ctx.modelRegistry.find(pin.provider, pin.model), pin))
+    if (
+      pin &&
+      !sameModel(
+        findReviewModel(ctx, pin, Boolean(policy.reviewer_explicit)),
+        pin,
+      )
+    )
       return "unsupported_reviewer_pin";
     if (!sameModel(activeModel, policy.active))
       return "acting_identity_mismatch";
@@ -246,24 +267,25 @@ export function pickReviewerCandidates(
     : purpose === "reviewer"
       ? [target, ...(target.candidates ?? [])]
       : [target, policy.reviewer, ...(policy.reviewer.candidates ?? [])];
+  const isOpenAI = (provider: string) =>
+    provider === "openai" || provider === "openai-codex";
+  // Invariant: Fix the first OpenAI billing route before checking availability.
+  const billing = candidates.find(({ provider }) =>
+    isOpenAI(provider),
+  )?.provider;
   const selected: ReviewSelection[] = [];
   const seen = new Set<string>();
   for (const candidate of candidates) {
-    const key = `${candidate.provider}\u0000${candidate.model}`;
-    if (
-      !candidate.provider ||
-      seen.has(key) ||
-      (policy.reviewer_explicit && !BUILTIN_DECISIONS.has(key))
-    )
+    if (isOpenAI(candidate.provider) && candidate.provider !== billing)
       continue;
+    const key = `${candidate.provider}\u0000${candidate.model}`;
+    if (!candidate.provider || seen.has(key)) continue;
     seen.add(key);
-    const model = policy.reviewer_explicit
-      ? ctx.modelRegistry.findOfType(
-          "classifier",
-          candidate.provider,
-          candidate.model,
-        )
-      : ctx.modelRegistry.find(candidate.provider, candidate.model);
+    const model = findReviewModel(
+      ctx,
+      candidate,
+      Boolean(policy.reviewer_explicit),
+    );
     if (model && sameModel(model, candidate)) {
       selected.push({ model, effort: candidate.effort });
     }

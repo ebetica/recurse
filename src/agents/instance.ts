@@ -38,7 +38,7 @@ import {
 } from "./runtime/memory_snapshot";
 import { collectionSnapshot } from "./runtime/node_files";
 import { SidebarScript, type TreeSource } from "../sidebar_script";
-import { agent } from "../web/api_v1/agent";
+import { agent } from "../agent_metadata/index";
 import { agentContext } from "../web/api_v1/context";
 import { piBinding } from "./runtime/pi/session";
 import {
@@ -859,9 +859,10 @@ export async function buildInstance(options: InstanceOptions) {
     drainActions: (cid, signal) => tree.drainParkedPlatformActions(cid, signal),
     boundSessionFile: (sessionId, file, cwd) =>
       backend.boundSessionFile(sessionId, file, cwd),
-    noteLevelTurnFailure: (level, kind) =>
-      config.noteLevelTurnFailure(level, kind),
-    noteLevelTurnSuccess: (level) => config.noteLevelTurnSuccess(level),
+    noteLevelTurnFailure: (level, kind, model) =>
+      config.noteLevelTurnFailure(level, kind, model),
+    noteLevelTurnSuccess: (level, model) =>
+      config.noteLevelTurnSuccess(level, model),
     tasks,
     signal: shutdownController.signal,
     log: log.agents,

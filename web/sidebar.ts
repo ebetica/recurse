@@ -2,16 +2,12 @@
 // Keyed forest rows preserve DOM/scroll; tree_projection owns reveal policy.
 // Rename/swipe freeze repaint until done; accepted deletes fence older reads.
 // Rows keep title, badges and time on one line; models stay in the composer.
-import { startNewAgent } from "./composer.js";
 import { sharedTrees, reloadChangedTreeLink } from "./shared-trees.js";
 import { copyText } from "./tool_details.js";
 import { remoteSectionHeader } from "./backends/discovery.js";
 import { treeFor, treeOf } from "./backends/tree.js";
-import {
-  backendFor,
-  backends,
-  parseConversationId,
-} from "./backends/backend.js";
+import { backendFor, backends } from "./backends/backend.js";
+import { parseConversationId } from "./backends/conversation-id/index.js";
 import { html, render, nothing, type TemplateResult } from "lit";
 import { html as staticHtml, unsafeStatic } from "lit/static-html.js";
 import { repeat } from "lit/directives/repeat.js";
@@ -26,6 +22,8 @@ import {
   embedded,
 } from "./state.js";
 import { $, listEl, titleEl, inputEl } from "./dom.js";
+import { focusAgentTree } from "./sidebar/focus.js";
+export { focusAgentTree, restoreAgentFocus } from "./sidebar/focus.js";
 import {
   MESSAGE_ICON,
   NEW_ICON,
@@ -96,8 +94,8 @@ import {
 import { canDrop } from "./reparent.js";
 import { initAgentDrag, isDraggingAgent } from "./sidebar/drag.js";
 import type { TreeNode } from "./types.js";
-import type { Action, Section } from "./sidebar/arrangement.js";
-import { SIDEBAR_CHANGE, shownTags } from "./sidebar/actions.js";
+import type { Action, Section } from "../src/sidebar_script/index.js";
+import { SIDEBAR_CHANGE, shownTags, startDraft } from "./sidebar/index.js";
 import * as folds from "./sidebar/agent-folds.js";
 import { holdOpen, moveHold, openHold, releaseHold } from "./sidebar/hold.js";
 import {
@@ -208,7 +206,14 @@ function visibleTree(): TreeEntry[] {
           hasChildren: e.hasChildren,
           collapsed: e.collapsed,
         }));
-  if (state.draft) {
+  // Invariant: Once the draft's agent is listed, the draft row takes its place
+  // until promotion, so the agent shows once and keeps its place throughout.
+  const created = state.draft?.creator?.convId;
+  const listed = created ? out.findIndex((e) => e.n?.id === created) : -1;
+  if (listed >= 0) {
+    const { depth, sectionDepth } = out[listed];
+    out[listed] = { draftRow: true, depth, sectionDepth };
+  } else if (state.draft) {
     const current = out.findIndex((e) => e.n?.id === state.selectedId);
     out.splice(current >= 0 ? current + 1 : 0, 0, {
       draftRow: true,
@@ -589,7 +594,7 @@ export function renderSidebar(): void {
                 : `${label} is offline`}
               ?disabled=${!connected}
               ?hidden=${sharedTrees !== null}
-              @click=${(e: Event) => startNewAgent(e, label)}
+              @click=${() => startDraft(label)}
             >
               ${unsafeHTML(NEW_ICON)}
             </button>
@@ -825,7 +830,7 @@ function openHistoryEntry(traversed: boolean, listed = false): void {
   // view. Popstate/hashchange describe one traversal; later same-URL navigation
   // still counts, while refusals and unavailable notices happen only once.
   const handled = [
-    location.href,
+    [location.href, history.state?.artifactView?.visit].join("\u0001"),
     entry.agent,
     entry.draft,
     current.agent,
@@ -899,23 +904,6 @@ export function treeExpandIfCollapsed(): boolean {
   return true;
 }
 
-export function focusAgentTree(): boolean {
-  renderSidebar();
-  const row = listEl.querySelector<HTMLElement>(
-    `.agent[data-id="${CSS.escape(state.cursorId)}"]`,
-  );
-  row?.focus();
-  return !!row && document.activeElement === row;
-}
-
-export function restoreAgentFocus(): boolean {
-  if (focusAgentTree()) return true;
-  if (!matchMedia("(max-width: 700px)").matches) return false;
-  const menu = document.getElementById("menu-btn");
-  menu?.focus();
-  return document.activeElement === menu;
-}
-
 export function moveCursor(id: string): void {
   if (id !== state.cursorId)
     window.dispatchEvent(new Event("recurse:selection-change"));
@@ -968,7 +956,7 @@ export function armDelete(timeoutMs = 3000): void {
   trashBtn.classList.toggle("armed", onOpen);
   trashBtn.querySelector(".action-label")!.textContent = onOpen
     ? "Confirm delete agent and descendants"
-    : "Delete";
+    : "Delete agent";
   if (onOpen) trashHold.pin();
   renderSidebar();
   clearTimeout(disarmTimer);
@@ -981,7 +969,7 @@ export function disarmDelete(): void {
   clearTimeout(disarmTimer);
   titleEl.classList.remove("armed");
   trashBtn.classList.remove("armed");
-  trashBtn.querySelector(".action-label")!.textContent = "Delete";
+  trashBtn.querySelector(".action-label")!.textContent = "Delete agent";
   trashHold.hide();
   renderSidebar();
 }
@@ -1350,17 +1338,13 @@ export function refreshUpBtn(authoritativeTree = false): void {
   const hasParent = currentParent() !== null;
   upTop.classList.toggle("on", hasParent);
   const selectedSaved = !!state.selectedId && state.selectedId !== DRAFT;
-  const cachedSelection = selectedSaved
-    ? state.convCache.peek(state.selectedId)
-    : undefined;
   const savedAgent =
     selectedSaved &&
     (visibleAgent(state.selectedId) ||
       // Invariant: Before the first tree response, a selected deep link or
       // cached conversation is enough to show the affordance. Once a response
       // lands, only its own rows keep it visible.
-      (!treeSnapshotKnown &&
-        (cachedSelection !== undefined || state.selectedId !== "")));
+      !treeSnapshotKnown);
 
   shareBtn.hidden = !savedAgent;
   trashBtn.classList.toggle("on", savedAgent);

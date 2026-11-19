@@ -19,7 +19,6 @@ import {
   buildMaximumContextSection,
   buildLadderSection,
 } from "./settings/models.js";
-import { buildSafetySection } from "./settings/safety.js";
 import { clearSkillsCache } from "./skills.js";
 import { installFocusTrap, restoreFocus } from "./focus_trap.js";
 import { buildThemeSection, cancelThemeCssPreview } from "./settings/theme.js";
@@ -29,11 +28,13 @@ import { buildTwoFactorSection } from "./settings/two-factor.js";
 import { buildMcpStatus } from "./settings/mcp.js";
 import { buildConnectedBackends } from "./settings/backends.js";
 import { buildNotificationsSection } from "./settings/notifications.js";
-import { buildUpdatesSection, showRelease } from "./settings/updates.js";
+import { hideVersion, showVersion } from "./settings/updates.js";
 import {
+  CATEGORY_LABELS,
   categoryButton,
   categoryPage,
   closeSettingsDetails,
+  relayoutSettingsDetails,
   settingsDetail,
   settingsSectionShell,
   type Category,
@@ -51,9 +52,40 @@ async function errDetail(r: Response, fallback: string): Promise<string> {
 }
 
 type BuildFn = (body: HTMLElement, close: () => void) => void;
-const settingsSections: { title: string; cat: Category; build: BuildFn }[] = [];
-const settingsSection = (title: string, cat: Category, build: BuildFn) =>
-  settingsSections.push({ title, cat, build });
+type Section = { title: string; cat: Category; build: BuildFn };
+const section = (title: string, cat: Category, build: BuildFn): Section => ({
+  title,
+  cat,
+  build,
+});
+/** Sections for the Recurse chosen in Settings, in page order. */
+const remoteSections = [
+  section("Claude", "providers", buildClaudeSection),
+  section("OpenAI", "providers", buildOpenAISection),
+  ...(SHOW_MUSE_SUBSCRIPTION
+    ? [section("Muse", "providers", buildMuseSubscriptionSection)]
+    : []),
+  section("OpenRouter", "providers", buildOpenRouterSection),
+  section("Custom model keys", "providers", buildCustomKeysSection),
+  section("Effort levels", "models", buildLadderSection),
+  section("Context", "models", buildPromptCacheSection),
+  section("Maximum context window", "models", buildMaximumContextSection),
+  section("MCP servers", "agents", buildMcpSection),
+];
+/** This Recurse's own sections, before the chosen Recurse's in a category. */
+const homeSections = [
+  section("Notifications", "agents", buildNotificationsSection),
+  section("Deleted agents' history", "agents", buildDeletedHistorySection),
+  section("Theme", "appearance", buildThemeSection),
+  section("Name and icon", "appearance", buildBrandingSection),
+  section("Sidebar", "appearance", buildSidebarSection),
+  section("Connected remotes", "remotes", buildConnectedBackends),
+  section("Change password", "account", buildPasswordSection),
+  section("Two-factor sign-in", "account", buildTwoFactorSection),
+  section("Session", "account", buildSessionSection),
+];
+/** The category last chosen in this browser; Settings reopens on it. */
+const LAST_CATEGORY_KEY = "recurse.settingsCategory";
 // Login sections show the provider's tile and login state.
 const PROVIDERS = new Set(["Claude", "OpenAI", "Muse", "OpenRouter"]);
 
@@ -62,7 +94,7 @@ const settingsModal = $("#settings-modal")!;
 let settingsReturnFocus: HTMLElement | null = null;
 installFocusTrap(
   settingsModal,
-  () => !settingsModal.querySelector("dialog[open]"),
+  () => !settingsModal.querySelector("dialog:modal"),
 );
 const settingsBackend = $<HTMLSelectElement>("#settings-backend")!;
 settingsBackend.onchange = () => renderSettings(settingsBackend.value);
@@ -107,22 +139,22 @@ function renderSettings(label: string) {
   closeSettingsDetails();
   setSettingsLabel(label);
   settingsBackend.value = label;
-  void showRelease(settingsRelease, label);
+  showVersion(settingsRelease, label);
   const pane = $("#settings-sections")!;
   const nav = $("#settings-nav")!;
   pane.replaceChildren();
   nav.replaceChildren();
-  const cats = label
-    ? (["auth", "models", "safety", "agents"] as const)
-    : ([
-        "account",
-        "appearance",
-        "auth",
-        "models",
-        "safety",
-        "agents",
-      ] as const);
-  let current: Category = cats[0];
+  const sections = label
+    ? remoteSections
+    : [...homeSections, ...remoteSections];
+  const cats = (Object.keys(CATEGORY_LABELS) as Category[]).filter((cat) =>
+    sections.some((s) => s.cat === cat),
+  );
+  let last: string | null = null;
+  try {
+    last = localStorage.getItem(LAST_CATEGORY_KEY);
+  } catch {}
+  let current = cats.find((cat) => cat === last) ?? cats[0]!;
   let mounted: Category | null = null;
   const back = () => {
     if (settingsDepth() === 2) return history.back();
@@ -143,7 +175,7 @@ function renderSettings(label: string) {
     const page = categoryPage(cat, back);
     page.hidden = false;
     pane.appendChild(page);
-    for (const s of settingsSections.filter((x) => x.cat === cat)) {
+    for (const s of sections.filter((x) => x.cat === cat)) {
       const { section, body } = settingsSectionShell(
         s.title,
         PROVIDERS.has(s.title),
@@ -157,6 +189,9 @@ function renderSettings(label: string) {
   for (const cat of cats) {
     const btn = categoryButton(cat);
     btn.onclick = () => {
+      try {
+        localStorage.setItem(LAST_CATEGORY_KEY, cat);
+      } catch {}
       show(cat, true);
       const link = pane.querySelector<HTMLElement>(".settings-back");
       if (link?.offsetParent) {
@@ -166,7 +201,7 @@ function renderSettings(label: string) {
     };
     nav.appendChild(btn);
   }
-  show(cats[0], false);
+  show(current, false);
 }
 const phoneSettings = matchMedia("(max-width: 700px)");
 const settingsDepth = (): number => Number(history.state?.settings) || 0;
@@ -180,6 +215,7 @@ phoneSettings.addEventListener("change", () => {
     settingsModal.classList.add("drilled");
     if (settingsDepth() === 1) pushSettingsEntry(2);
   } else if (!phoneSettings.matches) showCategory(category, false);
+  relayoutSettingsDetails();
 });
 let unwinding = false;
 function unwind(): void {
@@ -234,6 +270,7 @@ export function closeSettings(): boolean {
   closeSettingsDetails();
   $("#settings-sections")!.replaceChildren();
   $("#settings-nav")!.replaceChildren();
+  hideVersion(settingsRelease);
   showCategory = () => {};
   if (settingsDepth() && !unwinding) unwind();
   else seen();
@@ -254,11 +291,7 @@ $("#settings-close")!.onclick = closeSettings;
 settingsOverlay.addEventListener("click", (e) => {
   if (e.target === settingsOverlay) closeSettings();
 });
-settingsSection("Theme", "appearance", buildThemeSection);
-settingsSection("Name and icon", "appearance", buildBrandingSection);
-settingsSection("Sidebar", "appearance", buildSidebarSection);
-settingsSection("Remotes", "account", buildConnectedBackends);
-settingsSection("Change password", "account", (body) => {
+function buildPasswordSection(body: HTMLElement): void {
   body.dataset.themeProtected = "change-password";
   body.innerHTML = `
     <form autocomplete="off">
@@ -320,18 +353,9 @@ settingsSection("Change password", "account", (body) => {
       btn.disabled = false;
     }
   });
-});
+}
 
-settingsSection("Two-factor sign-in", "account", buildTwoFactorSection);
-
-settingsSection("Claude", "auth", buildClaudeSection);
-settingsSection("OpenAI", "auth", buildOpenAISection);
-if (SHOW_MUSE_SUBSCRIPTION)
-  settingsSection("Muse", "auth", buildMuseSubscriptionSection);
-settingsSection("OpenRouter", "auth", buildOpenRouterSection);
-settingsSection("Custom model keys", "auth", buildCustomKeysSection);
-
-settingsSection("Deleted agents' history", "account", (body) => {
+function buildDeletedHistorySection(body: HTMLElement): void {
   const { api, jpost } = settingsClient();
   body.innerHTML = `<form>
     <div class="group"><label class="item">Keep deleted agents' history
@@ -376,12 +400,7 @@ settingsSection("Deleted agents' history", "account", (body) => {
       button.disabled = false;
     }
   });
-});
-
-settingsSection("Safety review model", "safety", buildSafetySection);
-settingsSection("Prompt cache", "models", buildPromptCacheSection);
-settingsSection("Maximum context window", "models", buildMaximumContextSection);
-settingsSection("Effort ladder", "models", buildLadderSection);
+}
 
 // ---- section: MCP servers ----
 // Checked before Save so a paste slip shows under the box; the server still
@@ -395,7 +414,7 @@ function mcpJsonError(text: string): string | null {
   }
 }
 
-settingsSection("MCP servers", "agents", (body) => {
+function buildMcpSection(body: HTMLElement): void {
   const { api } = settingsClient();
   body.innerHTML = `
     <form>
@@ -468,11 +487,9 @@ settingsSection("MCP servers", "agents", (body) => {
       button.disabled = !loaded;
     }
   });
-});
+}
 
-settingsSection("Notifications", "account", buildNotificationsSection);
-settingsSection("Updates", "account", buildUpdatesSection);
-settingsSection("Session", "account", (body) => {
+function buildSessionSection(body: HTMLElement): void {
   body.innerHTML = `
     <div class="group"><button type="button" class="item danger">Log out</button></div>`;
   body.querySelector("button")!.onclick = async () => {
@@ -482,4 +499,4 @@ settingsSection("Session", "account", (body) => {
     } catch {}
     location.reload();
   };
-});
+}

@@ -86,10 +86,12 @@ export async function renderPromptBudget(
       boundSessionFile: async () => null,
       now: () => 0,
     });
+    const [model, effort] = config.resolveEffortLevel(3);
     const row = {
       id: "budget",
       backend: "durable",
-      model: "faux/faux-1",
+      model,
+      effort,
       level: 3,
       workdir: repo,
     };

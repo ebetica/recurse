@@ -1,8 +1,18 @@
-// Document HTML is sanitized in an inert template, then shown in the Artifact
-// sandbox without scripts, network access or same-origin privileges.
+// Converted documents are sanitized and inert. Ordinary HTML runs with the
+// opaque-origin Artifact app policy: no fetch or external subresources.
 // Downloads are bounded; conversion runs in a time-limited worker.
 import DOMPurify from "dompurify";
-import { htmlPreviewSrcdoc } from "./artifacts/model.js";
+import { html, nothing, render } from "lit";
+import { htmlPreviewSrcdoc } from "./document-media/index.js";
+import {
+  htmlFileModes,
+  HTML_OFFLINE_NOTE,
+  HTML_PREVIEW_FAILED,
+  HTML_TOO_LARGE,
+  isHtmlFile,
+  MAX_HTML_PREVIEW_BYTES,
+} from "./html-file-view.js";
+import { highlightSource } from "./source-preview.js";
 
 export interface DocumentSection {
   title: string;
@@ -24,28 +34,39 @@ function note(text: string): HTMLElement {
   return element;
 }
 
-async function bytes(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
+async function bytes(
+  url: string,
+  signal: AbortSignal,
+  htmlFile: boolean,
+): Promise<{ data: ArrayBuffer; truncated: boolean }> {
   const response = await fetch(url, { signal, credentials: "same-origin" });
   if (response.status === 404)
     throw Error("File not found. Check the link or choose another file.");
   if (!response.ok || !response.body)
     throw Error("Couldn’t download this file.");
-  if (Number(response.headers.get("content-length")) > MAX_BYTES) {
+  if (!htmlFile && Number(response.headers.get("content-length")) > MAX_BYTES) {
     await response.body.cancel();
     throw Error("This file is too large to preview (limit: 8 MB).");
   }
   const reader = response.body.getReader();
   const parts: Uint8Array[] = [];
   let size = 0;
+  let truncated = false;
+  const limit = htmlFile ? MAX_HTML_PREVIEW_BYTES : MAX_BYTES;
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
-    size += value.length;
-    if (size > MAX_BYTES) {
+    if (size + value.length > limit) {
       await reader.cancel();
-      throw Error("This file is too large to preview (limit: 8 MB).");
+      if (!htmlFile)
+        throw Error("This file is too large to preview (limit: 8 MB).");
+      parts.push(value.subarray(0, limit - size));
+      size = limit;
+      truncated = true;
+      break;
     }
     parts.push(value);
+    size += value.length;
   }
   signal.throwIfAborted();
   const result = new Uint8Array(size);
@@ -54,45 +75,50 @@ async function bytes(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
     result.set(part, offset);
     offset += part.length;
   }
-  return result.buffer;
+  return { data: result.buffer, truncated };
 }
 
-function parse(
-  data: ArrayBuffer,
-  name: string,
-  signal: AbortSignal,
-): Promise<DocumentPreview> {
+function documentWork<T>(
+  input: { bytes: ArrayBuffer; name: string } | { markup: string },
+  signal?: AbortSignal,
+): Promise<T> {
   return new Promise((resolve, reject) => {
-    signal.throwIfAborted();
+    signal?.throwIfAborted();
     const worker = new Worker("/static/document-preview.worker.js", {
       type: "module",
     });
     const stop = () => {
       clearTimeout(timer);
       worker.terminate();
-      signal.removeEventListener("abort", abort);
+      signal?.removeEventListener("abort", abort);
     };
     const abort = () => {
       stop();
-      reject(signal.reason);
+      reject(signal?.reason);
     };
-    const timer = setTimeout(() => {
+    const expire = () => {
       stop();
       reject(Error("This document took too long to preview."));
-    }, 15_000);
-    signal.addEventListener("abort", abort, { once: true });
+    };
+    let timer = setTimeout(expire, 15_000);
+    signal?.addEventListener("abort", abort, { once: true });
     worker.onerror = () => {
       stop();
       reject(Error("Couldn’t read this document."));
     };
     worker.onmessage = (
-      event: MessageEvent<{ result?: DocumentPreview; error?: string }>,
+      event: MessageEvent<{ started?: true; result?: T; error?: string }>,
     ) => {
+      if (event.data.started) {
+        clearTimeout(timer);
+        timer = setTimeout(expire, 1_000);
+        return;
+      }
       stop();
       if (event.data.result) resolve(event.data.result);
       else reject(Error(event.data.error || "Couldn’t read this document."));
     };
-    worker.postMessage({ bytes: data, name }, [data]);
+    worker.postMessage(input, "bytes" in input ? [input.bytes] : []);
   });
 }
 
@@ -125,44 +151,18 @@ function markdownCodeStyles(): string {
   return `<style>:root{font-size:${theme.fontSize};${tokens}}${rules.join("")}.content pre{color:var(--text)}</style>`;
 }
 
-function source(html: string): string {
-  const fragment = DOMPurify.sanitize(html, {
+const documentTags = (
+  "p br h1 h2 h3 h4 h5 h6 strong em b i u s ul ol li table thead tbody th tr td " +
+  "pre code blockquote hr img div span section a"
+).split(" ");
+const documentAttrs = ["src", "alt", "class", "scope", "colspan", "rowspan"];
+
+function sanitizedMarkup(markup: string): string {
+  const template = document.createElement("template");
+  const fragment = DOMPurify.sanitize(markup, {
     RETURN_DOM_FRAGMENT: true,
-    ALLOWED_TAGS: [
-      "p",
-      "br",
-      "h1",
-      "h2",
-      "h3",
-      "h4",
-      "h5",
-      "h6",
-      "strong",
-      "em",
-      "b",
-      "i",
-      "u",
-      "s",
-      "ul",
-      "ol",
-      "li",
-      "table",
-      "thead",
-      "tbody",
-      "tr",
-      "th",
-      "td",
-      "pre",
-      "code",
-      "blockquote",
-      "hr",
-      "img",
-      "div",
-      "span",
-      "section",
-      "a",
-    ],
-    ALLOWED_ATTR: ["src", "alt", "class", "scope", "colspan", "rowspan"],
+    ALLOWED_TAGS: documentTags,
+    ALLOWED_ATTR: documentAttrs,
     ALLOW_DATA_ATTR: false,
   });
   for (const image of fragment.querySelectorAll("img")) {
@@ -175,12 +175,24 @@ function source(html: string): string {
         document.createTextNode("[Remote or unsupported image omitted]"),
       );
   }
-  const template = document.createElement("template");
-  template.content.append(fragment);
+  template.content.replaceChildren(fragment);
+  return template.innerHTML;
+}
+
+function source(markup: string): string {
   return htmlPreviewSrcdoc(
-    `${markdownCodeStyles()}<style>img{max-width:100%;height:auto}table{border-collapse:collapse}td,th{border:1px solid GrayText;padding:var(--space-2,6px);white-space:pre-wrap;min-width:64px}th{position:sticky;top:0;background:Canvas}pre{white-space:pre-wrap}</style><div class="content">${template.innerHTML}</div>`,
+    `${markdownCodeStyles()}<style>img{max-width:100%;height:auto}table{border-collapse:collapse}td,th{border:1px solid GrayText;padding:var(--space-2,6px);white-space:pre-wrap;min-width:64px}th{position:sticky;top:0;background:Canvas}pre{white-space:pre-wrap}</style><div class="content">${sanitizedMarkup(markup)}</div>`,
     { scripts: false, embeddedImages: true },
   );
+}
+
+function documentFrame(title: string): HTMLIFrameElement {
+  const frame = document.createElement("iframe");
+  frame.className = "files-document-frame";
+  frame.title = title;
+  frame.setAttribute("sandbox", "");
+  frame.referrerPolicy = "no-referrer";
+  return frame;
 }
 
 function display(
@@ -188,11 +200,7 @@ function display(
   result: DocumentPreview,
   title: string,
 ): void {
-  const frame = document.createElement("iframe");
-  frame.className = "files-document-frame";
-  frame.title = title;
-  frame.setAttribute("sandbox", "");
-  frame.referrerPolicy = "no-referrer";
+  const frame = documentFrame(title);
   const sections = result.sections;
   container.replaceChildren();
   const limitNote = note("");
@@ -224,13 +232,61 @@ function display(
   select(0);
 }
 
-/** Show already-loaded HTML through the same sanitized document viewer. */
-export function mountHtmlPreview(
-  container: HTMLElement,
-  html: string,
+/** Run an HTML file with the same isolation as an Artifact app. */
+export async function htmlFileFrame(
+  markup: string,
   title: string,
-): void {
-  display(container, { sections: [{ title, html }] }, title);
+  signal?: AbortSignal,
+): Promise<HTMLIFrameElement> {
+  const frame = documentFrame(`Preview of ${title}`);
+  if (!("sandbox" in frame)) throw Error(HTML_PREVIEW_FAILED);
+  frame.classList.add("html-file-frame");
+  frame.setAttribute("sandbox", "allow-scripts");
+  frame.src = await documentWork<string>({ markup }, signal);
+  return frame;
+}
+
+async function displayHtml(
+  container: HTMLElement,
+  markup: string,
+  title: string,
+  truncated: boolean,
+  signal: AbortSignal,
+): Promise<void> {
+  let frame: HTMLIFrameElement | undefined;
+  let reason = truncated ? HTML_TOO_LARGE : "";
+  if (!reason) {
+    try {
+      frame = await htmlFileFrame(markup, title, signal);
+    } catch {
+      reason = HTML_PREVIEW_FAILED;
+    }
+  }
+  if (signal.aborted) return;
+  const root = document.createElement("div");
+  container.replaceChildren(root);
+  const select = (preview: boolean) => {
+    render(
+      html`${htmlFileModes(preview, !!reason, select)}
+      ${preview || reason
+        ? html`<p class="html-file-note">
+            ${preview
+              ? HTML_OFFLINE_NOTE
+              : reason +
+                (truncated ? " Download the file to read the rest." : "")}
+          </p>`
+        : nothing}
+      ${preview
+        ? frame
+        : html`<pre
+            class="report-doc files-source"
+            tabindex="0"
+          ><code>${markup}</code></pre>`}`,
+      root,
+    );
+    if (!preview) highlightSource(root.querySelector("code")!, title);
+  };
+  select(!!frame);
 }
 
 /** Mount from a download URL; the caller keeps its Download action. */
@@ -245,7 +301,8 @@ export function mountDocument(
   const controller = new AbortController();
   views.set(container, controller);
   container.dataset.documentShown = url;
-  if (size !== undefined && size > MAX_BYTES) {
+  const htmlFile = isHtmlFile(name);
+  if (!htmlFile && size !== undefined && size > MAX_BYTES) {
     container.replaceChildren(
       note(
         "This file is too large to preview (limit: 8 MB). Download it to open it.",
@@ -254,9 +311,22 @@ export function mountDocument(
     return;
   }
   container.replaceChildren(note("Loading document…"));
-  void bytes(url, controller.signal)
-    .then((data) => parse(data, name, controller.signal))
-    .then((result) => {
+  void bytes(url, controller.signal, htmlFile)
+    .then(async ({ data, truncated }) => {
+      if (controller.signal.aborted) return;
+      if (htmlFile) {
+        return displayHtml(
+          container,
+          new TextDecoder().decode(data),
+          name,
+          truncated,
+          controller.signal,
+        );
+      }
+      const result = await documentWork<DocumentPreview>(
+        { bytes: data, name },
+        controller.signal,
+      );
       if (!controller.signal.aborted) display(container, result, name);
     })
     .catch((error: unknown) => {

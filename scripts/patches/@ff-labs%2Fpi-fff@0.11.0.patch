@@ -1,5 +1,5 @@
 diff --git a/src/aux-finders.ts b/src/aux-finders.ts
-index 12e1ecbf072a2212e74f90ecd59da283006188ca..f326dd13ee5f18cadb539502c5aed4f9766670ee 100644
+index 12e1ecbf072a2212e74f90ecd59da283006188ca..07ee24761a211f5347caf9925149b6843e8ff9a7 100644
 --- a/src/aux-finders.ts
 +++ b/src/aux-finders.ts
 @@ -1,11 +1,11 @@
@@ -84,7 +84,7 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..f326dd13ee5f18cadb539502c5aed4f9
      }
  
      // Coalesce concurrent creations for the same root so we scan once. A slow
-@@ -87,6 +92,15 @@ export class AuxFinderPool {
+@@ -87,6 +92,25 @@ export class AuxFinderPool {
    }
  
    private async create(root: string): Promise<AuxPicker> {
@@ -97,10 +97,20 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..f326dd13ee5f18cadb539502c5aed4f9
 +      );
 +    }
 +
++    const dataDir = process.env.CHAT_DATA_DIR;
++    if (dataDir) {
++      const data = await fs.promises.realpath(dataDir);
++      if (rootCovers(root, data)) {
++        throw new Error(
++          `(fff): ${root} contains the Recurse data directory, so it is not indexed. Search a narrower directory such as ${path.join(data, "worktrees")}, or use rg in bash.`,
++        );
++      }
++    }
++
      if (this.entries.length >= MAX_AUX) {
        let oldest = this.entries[0];
        for (const e of this.entries) if (e.lastUsed < oldest.lastUsed) oldest = e;
-@@ -94,22 +108,20 @@ export class AuxFinderPool {
+@@ -94,22 +118,20 @@ export class AuxFinderPool {
        this.entries = this.entries.filter((e) => e !== oldest);
      }
  
@@ -129,7 +139,7 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..f326dd13ee5f18cadb539502c5aed4f9
      return entry;
    }
  
-@@ -120,9 +132,9 @@ export class AuxFinderPool {
+@@ -120,9 +142,9 @@ export class AuxFinderPool {
  }
  
  // Split an absolute path into an existing directory (the aux root) and a
@@ -142,7 +152,7 @@ index 12e1ecbf072a2212e74f90ecd59da283006188ca..f326dd13ee5f18cadb539502c5aed4f9
  export function resolveAuxRoot(absPath: string): { root: string; suffix: string } | null {
    const trimmed = path.normalize(absPath.trim()).replace(/\/+$/, "") || "/";
    if (!path.isAbsolute(trimmed)) return null;
-@@ -139,13 +151,13 @@ export function resolveAuxRoot(absPath: string): { root: string; suffix: string
+@@ -139,13 +161,13 @@ export function resolveAuxRoot(absPath: string): { root: string; suffix: string
      try {
        stat = fs.statSync(candidate);
      } catch {

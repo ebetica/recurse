@@ -1,6 +1,7 @@
 import { expect } from "bun:test";
 import { EventEmitter, once } from "node:events";
 import type { Locator, Page, Route } from "playwright";
+import type { TreeUpdate } from "../../src/web/tree_protocol";
 import {
   captureErrors,
   closeWithRoutes,
@@ -636,14 +637,21 @@ export const tests: BrowserTest[] = [
     const beforeUpdate = beforeTree.find(
       (row) => row.id === fixture.demo,
     )!.updated;
-    const changedTree = page.waitForResponse(
-      async (response) =>
-        new URL(response.url()).pathname === "/api/tree" &&
-        (await response.json()).some(
-          (row: TreeStamp) =>
-            row.id === fixture.demo && row.updated !== beforeUpdate,
-        ),
-    );
+    const changedTree = page.waitForResponse(async (response) => {
+      if (!response.ok() || new URL(response.url()).pathname !== "/api/tree")
+        return false;
+      const tree = (await response.json()) as
+        | TreeStamp[]
+        | TreeUpdate<TreeStamp>;
+      const rows = Array.isArray(tree)
+        ? tree
+        : "changed" in tree
+          ? tree.changed
+          : [];
+      return rows.some(
+        (row) => row.id === fixture.demo && row.updated !== beforeUpdate,
+      );
+    });
     let refreshed = false;
     const previewRefresh = nextListRequest(page, fixture.demo).then(
       (request) => {

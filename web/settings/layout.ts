@@ -1,7 +1,7 @@
 // Settings layout: a category sidebar on wide screens and, on phones, a
 // category list that opens one category's page with a back link. Sections
-// are a small label above rounded rows. Details stay inline on desktop;
-// phones open the same controls in keyboard-contained sheets.
+// are a small label above rounded rows. A row opens its controls in a
+// sub-page over the category on desktop and in a sheet on phones.
 import {
   CHEVRON_RIGHT_ICON,
   SETTINGS_CATEGORY_ICONS,
@@ -28,12 +28,43 @@ export function settingsRow(
 }
 
 const openSheets: HTMLDialogElement[] = [];
+const reopen = new WeakMap<HTMLDialogElement, (force: boolean) => boolean>();
 const phoneDetails = matchMedia("(max-width: 700px)");
-const detailLayouts = new WeakMap<HTMLElement, () => void>();
-phoneDetails.addEventListener("change", () => {
-  for (const body of document.querySelectorAll<HTMLElement>(".settings-detail"))
-    detailLayouts.get(body)?.();
-});
+
+/** Switch open details between sub-page and sheet, keeping inputs and focus. */
+export function relayoutSettingsDetails(): void {
+  const moved: HTMLDialogElement[] = [];
+  for (const sheet of openSheets.slice()) {
+    if (!sheet.isConnected || !sheet.open) continue;
+    const inside = moved.some((outer) => outer.contains(sheet));
+    if (reopen.get(sheet)?.(inside)) moved.push(sheet);
+  }
+}
+
+/**
+ * Whether focus is in `entry`, or in its open detail before a control there
+ * was disabled mid-request (the browser then moves focus to the page).
+ */
+export function holdsFocus(entry: HTMLElement): boolean {
+  const active = document.activeElement;
+  if (entry.contains(active)) return true;
+  return (
+    (!active || active === document.body) &&
+    !!entry.querySelector(":scope > dialog[open]")
+  );
+}
+
+/** Order rows without moving the one holding focus or an open detail. */
+export function arrangeRows(list: HTMLElement, rows: HTMLElement[]): void {
+  const held = rows.findIndex(
+    (row) =>
+      row.contains(document.activeElement) ||
+      row.querySelector(":scope > dialog[open]"),
+  );
+  if (held < 0) return list.append(...rows);
+  rows[held]!.before(...rows.slice(0, held));
+  rows[held]!.after(...rows.slice(held + 1));
+}
 
 /** Dismiss editors before closing or rebuilding Settings. */
 export function closeSettingsDetails(): void {
@@ -62,11 +93,15 @@ document.addEventListener(
   true,
 );
 
-/** Show controls inline on desktop and in a labelled sheet on phones. */
+/**
+ * A row opening its controls: a sub-page with a back link on desktop, or a
+ * labelled sheet on phones and when `alwaysSheet` is set.
+ */
 export function settingsDetail(
   body: HTMLElement,
   label: string,
   value: () => string = () => "",
+  { alwaysSheet = false } = {},
 ): { refresh(): void; open(): void; close(): void } {
   const sheet = document.createElement("dialog");
   sheet.className = "settings-sheet";
@@ -74,6 +109,10 @@ export function settingsDetail(
   sheet.setAttribute("aria-label", label);
   const head = document.createElement("header");
   head.className = "settings-sheet-head";
+  const back = document.createElement("button");
+  back.type = "button";
+  back.className = "settings-sub-back";
+  back.onclick = () => sheet.close();
   const heading = document.createElement("h2");
   heading.textContent = label;
   const close = document.createElement("button");
@@ -82,38 +121,60 @@ export function settingsDetail(
   close.textContent = "Done";
   close.setAttribute("aria-label", `Close ${label}`);
   close.onclick = () => sheet.close();
-  head.append(heading, close);
+  head.append(back, heading, close);
   const content = document.createElement("div");
   content.className = "settings-detail-content";
   content.setAttribute("role", "region");
   content.setAttribute("aria-label", label);
   content.append(...body.childNodes);
-  sheet.append(head);
-  const summary = document.createElement("div");
-  summary.className = "settings-detail-summary";
-  const title = span("settings-row-label", "", label);
-  title.setAttribute("role", "heading");
-  title.setAttribute("aria-level", "3");
-  summary.append(title, span("settings-row-value", "", value()));
+  sheet.append(head, content);
   const refresh = () => {
-    for (const header of [row, summary])
-      header.querySelector(".settings-row-value")!.textContent = value();
+    row.querySelector(".settings-row-value")!.textContent = value();
   };
   const open = () => {
-    if (!phoneDetails.matches || sheet.open || !sheet.isConnected) return;
-    sheet.showModal();
+    if (sheet.open || !sheet.isConnected) return;
+    const page = !alwaysSheet && !phoneDetails.matches;
+    sheet.classList.toggle("settings-subpage", page);
+    back.hidden = !page;
+    close.hidden = page;
+    if (page) {
+      const under =
+        body.parentElement?.closest<HTMLElement>(".settings-sheet[open]") ??
+        body.closest<HTMLElement>(".settings-cat");
+      const name =
+        under?.querySelector(":scope > header h2")?.textContent ?? "Settings";
+      back.innerHTML = UP_ICON;
+      back.append(name);
+      back.setAttribute("aria-label", `Back to ${name}`);
+      sheet.show();
+      back.focus();
+    } else sheet.showModal();
+    if (openSheets.includes(sheet))
+      openSheets.splice(openSheets.indexOf(sheet), 1);
     openSheets.push(sheet);
   };
   const row = settingsRow(label, value(), open);
   row.setAttribute("aria-haspopup", "dialog");
+  reopen.set(sheet, (force) => {
+    const page = !alwaysSheet && !phoneDetails.matches;
+    if (!force && page === sheet.classList.contains("settings-subpage"))
+      return false;
+    const focused = document.activeElement;
+    sheet.close();
+    open();
+    if (focused instanceof HTMLElement && sheet.contains(focused))
+      focused.focus();
+    return true;
+  });
   sheet.addEventListener("close", () => {
+    if (sheet.open) return;
     const index = openSheets.indexOf(sheet);
     if (index >= 0) openSheets.splice(index, 1);
     refresh();
-    if (row.isConnected && phoneDetails.matches) row.focus();
+    if (row.isConnected) row.focus();
   });
   sheet.addEventListener("click", (event) => {
-    if (event.target !== sheet) return;
+    if (event.target !== sheet || !sheet.matches(":modal")) return;
     const box = sheet.getBoundingClientRect();
     if (
       event.clientX < box.left ||
@@ -124,24 +185,19 @@ export function settingsDetail(
       sheet.close();
   });
   body.classList.add("settings-detail");
-  body.append(row, summary, sheet);
-  const layout = () => {
-    if (!phoneDetails.matches && sheet.open) sheet.close();
-    (phoneDetails.matches ? sheet : body).append(content);
-  };
-  detailLayouts.set(body, layout);
-  layout();
+  body.append(row, sheet);
   return { refresh, open, close: () => sheet.close() };
 }
 
 export type Category = keyof typeof SETTINGS_CATEGORY_ICONS;
+/** Category names in navigation order. */
 export const CATEGORY_LABELS: Record<Category, string> = {
-  account: "Account",
-  appearance: "Appearance",
-  auth: "Authentication",
+  providers: "Providers",
   models: "Models",
-  agents: "MCPs",
-  safety: "Safety",
+  agents: "Agents",
+  appearance: "Appearance",
+  remotes: "Remotes",
+  account: "Account",
 };
 
 const span = (className: string, html = "", text = "") => {

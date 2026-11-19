@@ -22,7 +22,7 @@ type Review = {
   prompt_cache_key?: string;
 };
 
-// Regression: #2982 #3390 preserve the cached reviewer prefix in the inspector.
+// Regression: #2982 #3390 #3466 keep the cached reviewer prefix, also after a reset.
 test("consecutive Durable reviews preserve the actual Codex cache identity and wire prefix", async () => {
   const root = mkdtempSync(join(tmpdir(), "durable-review-cache-"));
   const work = join(root, "work");
@@ -179,6 +179,8 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
       review.input.flatMap((item: any) => (item.role ? [item.role] : []));
     expect(roles(reviews[2]!)).toEqual([
       "user",
+      "user",
+      "user",
       "assistant",
       "user",
       "assistant",
@@ -208,6 +210,8 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     });
     expect(capture.context.systemPrompt).toBe(reviews[2]!.instructions);
     expect(capture.context.messages.map((message) => message.role)).toEqual([
+      "user",
+      "user",
       "user",
       "assistant",
       "user",
@@ -264,7 +268,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     expect(reviews[3]!.instructions).toBe(reviews[0]!.instructions);
     expect(JSON.stringify(reviews[3]!.input)).toContain("create one more file");
     expect(JSON.stringify(reviews[3]!.input)).toContain("touch three");
-    expect(roles(reviews[3]!)).toEqual(["user"]);
+    expect(roles(reviews[3]!)).toEqual(Array(5).fill("user"));
     const live = await host.open("c1");
     await config.setEffortLevel(
       1,
@@ -289,11 +293,11 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     await until(idle(host));
     expect(reviews).toHaveLength(29);
     expect(await host.open("c1")).toBe(live);
-    expect(roles(reviews[4]!)).toEqual(["user"]);
+    expect(roles(reviews[4]!)).toEqual(Array(5).fill("user"));
     expect(
       roles(reviews[27]!).filter((role) => role === "assistant"),
     ).toHaveLength(23);
-    expect(roles(reviews[28]!)).toEqual(["user"]);
+    expect(roles(reviews[28]!)).toEqual(Array(5).fill("user"));
     expect(JSON.stringify(reviews[28]!.input)).toContain("cap-23");
     expect(reviews[4]!.prompt_cache_key).not.toBe(reviews[0]!.prompt_cache_key);
     expect(new Set(reviews.slice(4).map((r) => r.prompt_cache_key)).size).toBe(
@@ -321,7 +325,17 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     );
     await until(idle(host));
     expect(reviews).toHaveLength(charsStart + 2);
-    expect(reviews.slice(charsStart).map(roles)).toEqual([["user"], ["user"]]);
+    const [first, second] = reviews.slice(charsStart);
+    expect([first, second].map((review) => roles(review!))).toEqual([
+      Array(5).fill("user"),
+      Array(6).fill("user"),
+    ]);
+    expect(JSON.stringify(first!.input.at(-1))).toContain("touch chars-one");
+    expect(JSON.stringify(second!.input.at(-1))).toContain("touch chars-two");
+    expect(first!.input.slice(0, -1)).toHaveLength(4);
+    expect(second!.input.slice(0, first!.input.length - 1)).toEqual(
+      first!.input.slice(0, -1),
+    );
     await host.clear("c1");
     faux.setResponses([
       bash("seed-one", "touch seed-one"),
@@ -337,7 +351,12 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
       "review-cache-seed",
     );
     await until(idle(host));
-    expect(roles(reviews.at(-1)!)).toEqual(["user", "assistant", "user"]);
+    expect(roles(reviews.at(-1)!)).toEqual([
+      "user",
+      "user",
+      "assistant",
+      "user",
+    ]);
     const retained = await host.open("c1");
     const abortStart = reviews.length;
     let reached!: () => void;
@@ -363,6 +382,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     await reviewing;
     const beforeAbort = reviews[abortStart]!.input.slice(0, -1);
     expect(roles(reviews[abortStart]!)).toEqual([
+      "user",
       "user",
       "assistant",
       "user",
@@ -417,6 +437,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     expect(existsSync(join(work, "recovery"))).toBe(true);
     expect(roles(reviews[failureStart]!)).toEqual([
       "user",
+      "user",
       "assistant",
       "user",
       "assistant",
@@ -441,7 +462,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
       "review-cache-clear",
     );
     await until(idle(host));
-    expect(roles(reviews.at(-1)!)).toEqual(["user"]);
+    expect(roles(reviews.at(-1)!)).toEqual(["user", "user"]);
     expect(JSON.stringify(reviews.at(-1)!.input)).not.toContain(
       "public cache fixture",
     );

@@ -63,8 +63,8 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
   overflow-wrap: anywhere; }
 .diff-base-item { gap: var(--space-3); min-width: 0; }
 .diff-base-kind:empty { display: none; }
-.diff-base-kind { flex: none; font-size: 0.65625rem; text-transform: uppercase;
-  letter-spacing: .04em; color: var(--muted); width: 44px; }
+.diff-base-kind { flex: none; font-size: 0.6875rem; text-transform: capitalize;
+  color: var(--muted); width: 44px; }
 .diff-base-label-text { flex: 1 1 auto; min-width: 0; overflow: hidden;
   text-overflow: ellipsis; white-space: nowrap;
   font-family: var(--font-mono); }
@@ -76,7 +76,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-pr-title a:hover { color: var(--accent); }
 .diff-pr-title svg { flex: none; width: 16px; height: 16px; margin-top: var(--space-1); }
 .diff-pr-meta { margin: calc(-1 * var(--space-3)) 0 var(--space-2); color: var(--muted);
-  font-size: 0.8125rem; }
+  font-size: 0.84375rem; }
 .diff-pr-body { font-size: 0.84375rem; line-height: 1.5; overflow-wrap: anywhere; }
 .diff-pr-body.clamped { position: relative; display: -webkit-box;
   -webkit-box-orient: vertical; -webkit-line-clamp: 6; overflow: hidden; }
@@ -107,13 +107,8 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-expand-all[aria-pressed="true"] { background: var(--panel-2);
   color: var(--text); font-weight: 600; }
 
-.diff-stat { margin-bottom: var(--space-3); font-size: 0.78125rem; color: var(--muted); }
-.diff-stat summary { cursor: pointer; }
-.diff-stat summary:hover { color: var(--text); }
-.diff-stat pre { margin: var(--space-2) 0 0; padding: var(--space-3) var(--space-4); overflow-x: auto;
-  font-size: 0.71875rem; line-height: 1.5;
-  font-family: var(--font-mono);
-  background: var(--code-bg); border-radius: 8px; white-space: pre; }
+.diff-stat { display: flex; align-items: center; gap: var(--space-3); margin: 0 0 var(--space-3);
+  font-size: 0.78125rem; color: var(--muted); }
 
 .diff-more { color: var(--muted); font-size: 0.78125rem; padding: var(--space-3) var(--space-1); }
 
@@ -124,8 +119,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-untracked > summary::-webkit-details-marker { display: none; }
 .diff-untracked > summary svg { flex: none; width: 16px; height: 16px; }
 .diff-untracked[open] > summary svg { transform: rotate(90deg); }
-.diff-group-label { font-size: 0.78125rem; font-weight: 600; letter-spacing: .02em;
-  text-transform: uppercase; color: var(--muted); }
+.diff-group-label { font-size: 0.78125rem; font-weight: 600; color: var(--muted); }
 
 .diff-file { border-bottom: 1px solid var(--border); }
 .diff-file-head { display: flex; align-items: center; gap: var(--space-2); width: 100%; }

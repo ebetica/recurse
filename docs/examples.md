@@ -95,7 +95,7 @@ If a theme hides the controls, add `?customCss=off` before the URL's `#` fragmen
 page, including previews. Select a built-in theme to undo it on every page.
 
 For an MCP server with many or rarely used tools, add `"loadToolsOnDemand": true`
-to that server's JSON entry in Settings > MCPs. Its tool schemas then stay out of
+to that server's JSON entry in Settings > Agents > MCP servers. Its tool schemas then stay out of
 the agent's inline tool list; the agent finds and inspects them from code when
 needed. Omitting it or setting it to `false` keeps the default inline tool list.
 

@@ -1,4 +1,4 @@
-// The status line beside Settings > Effort ladder > Update model list.
+// The status line beside Settings > Effort levels > Update model list.
 // Pure: the Settings section fetches /api/settings/model-list-update and
 // renders this text.
 
@@ -17,10 +17,10 @@ export function modelListStatusText(
   formatTime: (epochSeconds: number) => string = (seconds) =>
     new Date(seconds * 1000).toLocaleString(),
 ): string {
-  if (status.updating) return "Updating the model list from pi.dev…";
+  if (status.updating) return "Updating the model list…";
   const since =
     status.updated_at === null
-      ? "Pi's current list"
+      ? "the current list"
       : `the list from ${formatTime(status.updated_at)}`;
   if (status.error) {
     const reason = /[.!?]$/u.test(status.error)
@@ -28,9 +28,9 @@ export function modelListStatusText(
       : `${status.error}.`;
     return `Could not update: ${reason} Using ${since}.`;
   }
-  if (status.count === null) return "Pi's model list has not been read yet.";
+  if (status.count === null) return "The model list has not been read yet.";
   const models = `${status.count} model${status.count === 1 ? "" : "s"}`;
   return status.updated_at === null
-    ? `${models} in Pi's list.`
+    ? `${models} in the current list.`
     : `${models}, updated ${formatTime(status.updated_at)}.`;
 }

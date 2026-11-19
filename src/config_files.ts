@@ -27,6 +27,7 @@ function parsed(text: string | undefined): unknown {
 export class ConfigFiles {
   private readonly files = new Map<string, Snapshot>();
   private readonly pending = new Map<string, Promise<void>>();
+  private readonly queued = new Map<string, Promise<void>>();
   private readonly writes = new Map<string, Promise<unknown>>();
   private readonly controller = new AbortController();
 
@@ -48,7 +49,10 @@ export class ConfigFiles {
       return { text, value: parsed(text), checkedAt: this.now() };
     }
     const cached = this.files.get(path);
-    if (!cached || this.now() - cached.checkedAt >= this.recheckMs)
+    if (
+      (!cached || this.now() - cached.checkedAt >= this.recheckMs) &&
+      !this.pending.has(path)
+    )
       void this.refresh(path);
     return (
       this.files.get(path) ?? {
@@ -114,8 +118,22 @@ export class ConfigFiles {
   }
 
   refresh(path: string): Promise<void> {
+    // Invariant: A refresh reads after it is called, so it sees an edit made
+    // while an older read was in flight; callers meanwhile share one queued
+    // read, which keeps its turn until it starts.
+    const queued = this.queued.get(path);
+    if (queued) return queued;
     const pending = this.pending.get(path);
-    if (pending) return pending;
+    if (!pending) return this.read(path);
+    const next = pending.then(() => {
+      this.queued.delete(path);
+      return this.read(path);
+    });
+    this.queued.set(path, next);
+    return next;
+  }
+
+  private read(path: string): Promise<void> {
     if (this.controller.signal.aborted) return Promise.resolve();
     const entry: Snapshot = this.files.get(path) ?? {
       text: undefined,

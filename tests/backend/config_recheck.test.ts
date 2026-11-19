@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -248,6 +249,59 @@ test("Settings provider writes keep cached reads responsive during a disk wait",
         await writer.close();
         await abortable(seeded, AbortSignal.timeout(5_000));
       }
+    } finally {
+      worker.terminate();
+      retire(root, join(tmpdir(), "config-fixture-trash"));
+    }
+  }
+});
+
+// Regression: #3514 an explicit refresh reads after a read already in flight.
+test("an explicit Settings refresh sees an edit made during an older read", async () => {
+  const root = mkdtempSync(join(tmpdir(), "recurse-config-refresh-fifo-"));
+  const dir = join(root, "data", "config");
+  const path = join(dir, "maximum-context-window.json");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(path, JSON.stringify({ maximum_context_window: 200_000 }));
+  const worker = new Worker(
+    new URL("./fixtures/config_recheck_worker.ts", import.meta.url).href,
+  );
+  const waiting = new Map<string, (value: number) => void>();
+  const next = (name: string) =>
+    new Promise<number>((resolve) => waiting.set(name, resolve));
+  worker.onmessage = (event: MessageEvent<{ type: string; value: number }>) => {
+    waiting.get(event.data.type)?.(event.data.value);
+    waiting.delete(event.data.type);
+  };
+  let older: Awaited<ReturnType<typeof open>> | undefined;
+  let requested = false;
+  try {
+    const ready = next("ready");
+    worker.postMessage({ type: "init", root });
+    expect(await abortable(ready, AbortSignal.timeout(5_000))).toBe(200_000);
+    rmSync(path);
+    expect(
+      await Bun.spawn(["mkfifo", path], { stdout: "ignore", stderr: "inherit" })
+        .exited,
+    ).toBe(0);
+    const read = next("read");
+    const refreshed = next("refreshed");
+    requested = true;
+    worker.postMessage({ type: "read" });
+    expect(await abortable(read, AbortSignal.timeout(5_000))).toBe(200_000);
+    older = await open(path, "w");
+    const edit = join(dir, "edit.json");
+    writeFileSync(edit, JSON.stringify({ maximum_context_window: 500_000 }));
+    renameSync(edit, path);
+    await older.writeFile(JSON.stringify({ maximum_context_window: 300_000 }));
+    await older.close();
+    older = undefined;
+    expect(await abortable(refreshed, AbortSignal.timeout(5_000))).toBe(
+      500_000,
+    );
+  } finally {
+    try {
+      if (requested && older) await older.close();
     } finally {
       worker.terminate();
       retire(root, join(tmpdir(), "config-fixture-trash"));

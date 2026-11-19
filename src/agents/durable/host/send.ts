@@ -8,7 +8,6 @@ import type {
   AgentState,
   Conversation,
   Harness,
-  SubmissionDraft,
 } from "@earendil-works/pi-durable";
 import type { DurableHost } from "../host.ts";
 import { splitPiUserText } from "../../view/session_entries";
@@ -17,47 +16,13 @@ import { WARNING } from "../../../observability/runtime_logging";
 import { writeClear } from "./clear.ts";
 import { startTitle } from "./title.ts";
 import { runtime } from "./load.ts";
-
-export interface Held {
-  requestId: string;
-  content: string;
-  images?: readonly ImageContent[];
-  note: boolean;
-}
+import { draft, type Held } from "./submission.ts";
 
 export interface SendOptions {
   note?: boolean;
   attachmentIds?: readonly string[];
   interrupt?: boolean;
   onInterrupt?: (interrupted: boolean) => void;
-}
-
-/** One send as a submission: an input, or a note written as a user message. */
-export function draft(held: Held): SubmissionDraft {
-  const content = held.images?.length
-    ? [{ type: "text" as const, text: held.content }, ...held.images]
-    : held.content;
-  return held.note
-    ? {
-        type: "write",
-        requestId: held.requestId,
-        entry: {
-          kind: "recurse.note",
-          model: [{ role: "user", content, timestamp: Date.now() }],
-        },
-      }
-    : {
-        type: "input",
-        content,
-        requestId: held.requestId,
-        // Invariant: Only explicit operator input cuts model output; all other
-        // origins retain boundary steering. Pi treats interrupt as steer while
-        // tools run.
-        whenBusy:
-          splitPiUserText(held.content)[0] === "operator"
-            ? "interrupt"
-            : "steer",
-      };
 }
 
 /**
@@ -202,12 +167,16 @@ export async function syncAgent(
     agent?.model?.provider === model.provider &&
     agent.model.modelId === model.modelId &&
     agent.thinkingLevel === thinkingLevel;
-  if (same(await harness.snapshot(AgentDoc, conversation.id, context))) return;
   const models = await host.models();
+  if (
+    models.getModel(model.provider, model.modelId) &&
+    same(await harness.snapshot(AgentDoc, conversation.id, context))
+  )
+    return;
   const unknown = await conversation.commit(async (tx) => {
     if ((await tx.doc(LiveDoc, conversation.id)).run !== undefined) return;
-    if (same(await tx.doc(AgentDoc, conversation.id))) return;
     if (!models.getModel(model.provider, model.modelId)) return true;
+    if (same(await tx.doc(AgentDoc, conversation.id))) return;
     await configure(tx, conversation.id, { model, thinkingLevel });
     return false;
   }, context);

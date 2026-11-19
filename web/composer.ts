@@ -4,11 +4,11 @@
 // Keep permanent failures for explicit retry.
 import { hasCommentSends } from "./artifacts/comment-outbox.js";
 import { treeOf } from "./backends/tree.js";
+import { backendFor } from "./backends/backend.js";
 import {
-  backendFor,
   conversationId,
   parseConversationId,
-} from "./backends/backend.js";
+} from "./backends/conversation-id/index.js";
 import { currentUiOwnerId, state, DRAFT, LAST_AGENT_KEY } from "./state.js";
 import { sharedTrees } from "./shared-trees.js";
 import { $, inputEl, sendEl } from "./dom.js";
@@ -21,7 +21,18 @@ import {
   outboxReady,
   type SavedSend,
 } from "./composer/outbox.js";
-import { resizeTextarea } from "./composer/textarea.js";
+import {
+  activateComposerControl,
+  activeComposerOwnerId,
+  activeComposerStopPreparation,
+  armPreparedComposerStop,
+  autosize,
+  consumeComposerStopHold,
+  disarmComposerStop,
+  focusComposerAtEnd,
+  pendingSavedRecovery,
+  setPendingSavedRecovery,
+} from "./composer/index.js";
 
 import {
   selectAgent,
@@ -33,16 +44,17 @@ import {
 } from "./sidebar.js";
 import { renderDraft, renderColdOutbox } from "./conversation/chrome.js";
 import { poll, waitForInitialAuthoritativeRead } from "./conversation/poll.js";
-import { pinOperatorSend, paint } from "./conversation/thread.js";
+import {
+  addOptimisticPending,
+  pinOperatorSend,
+  paint,
+} from "./conversation/thread.js";
 import {
   deliverQueuedOperatorMessage,
   startOperatorSend,
 } from "./conversation/operator-send.js";
-import {
-  addOptimisticPending,
-  newestCommittedOffset,
-} from "./pending-queue.js";
 import { dropRowThread } from "./row-thread-state.js";
+import { newestCommittedOffset } from "./row-thread-state/index.js";
 import {
   clearStopForNewTurn,
   prepareStopTarget,
@@ -102,15 +114,8 @@ import {
 } from "./composer/view-state.js";
 import { openAgentFinderRevive, openFoundAgent } from "./agent-finder/ui.js";
 import type { DraftCreator } from "./types.js";
-import { snapshotNewSubagentDefaults } from "./settings/preferences.js";
+import { snapshotNewSubagentDefaults } from "./settings/draft-defaults/index.js";
 import { newAgentSettings } from "./sidebar/script.js";
-import {
-  activateComposerControl,
-  activeComposerStopPreparation,
-  armPreparedComposerStop,
-  consumeComposerStopHold,
-  disarmComposerStop,
-} from "./composer/action.js";
 
 interface DraftSpec {
   parent: string | null;
@@ -161,60 +166,12 @@ function clearComposer(ownerId = currentUiOwnerId()): void {
   refreshAttachmentSendState();
 }
 
-// Focus Insert mode without disturbing a draft. A keyboard entry always places
-// the caret at the end, while an already-focused composer keeps its selection.
-export function focusComposerAtEnd(): boolean {
-  if (
-    !inputEl.getClientRects().length ||
-    getComputedStyle(inputEl).visibility === "hidden" ||
-    inputEl.closest(".dock-parking")
-  ) {
-    const show = new CustomEvent("recurse:show-chat", {
-      cancelable: true,
-      detail: () => focusComposerAtEnd(),
-    });
-    dispatchEvent(show);
-    if (show.defaultPrevented) return true;
-  }
-  if (inputEl.disabled || inputEl.readOnly || !inputEl.isConnected)
-    return false;
-  const alreadyFocused = document.activeElement === inputEl;
-  inputEl.focus();
-  if (document.activeElement !== inputEl) return false;
-  if (!alreadyFocused) {
-    const end = inputEl.value.length;
-    inputEl.setSelectionRange(end, end);
-  }
-  return true;
-}
-
 // Independent jobs own snapshotted targets/text, retries and visible failures.
 const statusEl = $<HTMLButtonElement>("#send-status")!;
 let jobs: SendJob[] = [];
 let composerCommandStatusKey: string | null = null;
 const AUTH_RECOVERY_KEY = "recurse.authRecovery.v1";
-let pendingSavedRecovery: {
-  owner: string | null;
-  uiStateId: string;
-} | null = null;
 let pendingRecoveredAttachmentOwners: string[] = [];
-
-function activeComposerOwnerId(): string {
-  return pendingSavedRecovery?.uiStateId ?? currentUiOwnerId();
-}
-
-/** Put a refused message's text back in the composer, after any draft. */
-export function resendText(text: string): void {
-  const draft = inputEl.value.trimEnd();
-  const value = draft ? `${draft}\n\n${text}` : text;
-  restoreComposerValue(activeComposerOwnerId(), {
-    text: value,
-    selectionStart: value.length,
-    selectionEnd: value.length,
-  });
-  autosize();
-  focusComposerAtEnd();
-}
 
 // Explicitly leaving for login is the one navigation that cannot keep in-memory
 // work alive. Snapshot it into this tab's sessionStorage first; after login the
@@ -399,7 +356,7 @@ function restoreAfterLogin(): void {
         } catch {}
     }
     const uiStateId = newDraftUiOwnerId();
-    pendingSavedRecovery = { owner, uiStateId };
+    setPendingSavedRecovery({ owner, uiStateId });
     switchComposerOwner(uiStateId);
     restoreStagedAttachments(
       recovery.attachments.map((item) => ({
@@ -1221,16 +1178,12 @@ export function startDraft(spec: DraftSpec): void {
   focusComposerAtEnd();
 }
 /** Open a top-level draft immediately, with optional preselected tags. */
-export function startNewAgent(
-  _event: DOMRect | Event,
-  backendLabel = "",
-  tags?: string[],
-): void {
+export function startNewAgent(backendLabel = "", tags?: string[]): void {
   startDraft({ parent: null, backendLabel, tags });
 }
 const newTop = $<HTMLButtonElement>("#new-top")!;
 newTop.hidden = sharedTrees !== null;
-newTop.onclick = () => void startNewAgent(newTop.getBoundingClientRect());
+newTop.onclick = () => startNewAgent();
 
 sendEl.onclick = (event: MouseEvent) => {
   // Invariant: A long-press only peeked at the tip; it must neither send nor
@@ -1248,10 +1201,6 @@ sendEl.onclick = (event: MouseEvent) => {
     void requestStop(event.detail === 0 ? "keyboard" : "click");
 };
 
-// ---------------- composer sizing
-export function autosize(): void {
-  resizeTextarea(inputEl);
-}
 inputEl.addEventListener("input", () => {
   // Invariant: Any edit cancels a pending Stop confirmation. Clearing the text
   // after typing can return the control to Stop, but never to an already-hot
@@ -1268,6 +1217,29 @@ inputEl.addEventListener("input", () => {
 inputEl.addEventListener("select", () =>
   noteComposerInput(activeComposerOwnerId()),
 );
+/** Re-fit the composer when its placeholder or width changes. The placeholder
+ * counts toward its height, so it fits the same way typed text does. */
+function fitComposerToPlaceholder(): void {
+  let queued = false;
+  const fit = () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      if (inputEl.clientWidth) autosize();
+    });
+  };
+  new MutationObserver(fit).observe(inputEl, {
+    attributeFilter: ["placeholder"],
+  });
+  let width = 0;
+  new ResizeObserver(() => {
+    if (inputEl.clientWidth === width) return;
+    width = inputEl.clientWidth;
+    fit();
+  }).observe(inputEl, { box: "content-box" });
+}
+fitComposerToPlaceholder();
 
 function refreshRestoredComposer(): void {
   closeComposerAutocomplete();
@@ -1306,7 +1278,7 @@ window.addEventListener("recurse:tree-authoritative", () => {
     abandonStagedAttachments(recovery.uiStateId);
   else transferStagedAttachmentOwner(recovery.uiStateId, target);
   conversationUiState.remove(recovery.uiStateId);
-  pendingSavedRecovery = null;
+  setPendingSavedRecovery(null);
   setAttachmentInputBlocked(false);
   restoreComposerValue(target, {
     text: recoveredInput,

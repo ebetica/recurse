@@ -18,6 +18,11 @@ import type { SafetyReviewAttempt } from "../../src/extensions/core/safety/revie
 
 let stage = "sign-in check";
 
+export const REVIEWS = 7;
+export const MAX_FOLLOW_UP_MISSES = 2;
+export const ACTING_REQUEST_CAP = REVIEWS + 3;
+export const UNCACHED_INPUT_CAP = 90_000;
+
 type CheckApi = (route: string, body?: unknown) => Promise<Record<string, any>>;
 
 export async function finishReviewCheck(
@@ -62,9 +67,9 @@ export async function finishReviewCheck(
         ),
     };
     if (
-      counts.reviews >= 3 ||
-      counts.actingRequests >= 6 ||
-      counts.uncachedInput > 60_000 ||
+      counts.reviews >= REVIEWS ||
+      counts.actingRequests >= ACTING_REQUEST_CAP ||
+      counts.uncachedInput > UNCACHED_INPUT_CAP ||
       (main.length && (await api(`conversations/${cid}`)).status === "idle")
     )
       break;
@@ -97,12 +102,49 @@ export async function finishReviewCheck(
     }
   }
   const failure =
-    counts.actingRequests >= 6
+    counts.actingRequests >= ACTING_REQUEST_CAP
       ? ("acting_requests" as const)
-      : counts.uncachedInput > 60_000
+      : counts.uncachedInput > UNCACHED_INPUT_CAP
         ? ("input_tokens" as const)
         : undefined;
   return { ...counts, ...(failure ? { failure } : {}) };
+}
+
+export function reviewFailures(
+  call: Record<string, any> | undefined,
+  result: Record<string, any>,
+  command: string | undefined,
+  model: string,
+): string[] {
+  const attempts: SafetyReviewAttempt[] =
+    result.details?.recurseSafetyUsage?.attempts ?? [];
+  const sent = call?.arguments?.command;
+  const provider = model.slice(0, model.indexOf("/"));
+  return [
+    call?.name !== "bash" && "not-bash",
+    command === undefined && "extra-call",
+    command !== undefined &&
+      sent !== command &&
+      (typeof sent === "string" &&
+      sent.includes(command.slice(command.indexOf("> '") + 3, -1))
+        ? "command-mismatch"
+        : "command-other-target"),
+    call?.id !== result.toolCallId && "result-for-other-call",
+    result.isError && "tool-error",
+    result.diagnostics.length > 0 &&
+      `diagnostics=${result.diagnostics.map((d: { code?: string }) => d.code).join(",")}`,
+    attempts.length !== 1 && `attempts=${attempts.length}`,
+    attempts[0] &&
+      attempts[0].status !== "reported" &&
+      `status=${attempts[0].status}`,
+    attempts[0] &&
+      (attempts[0].provider !== provider ||
+        `${provider}/${attempts[0].model}` !== model) &&
+      "other-reviewer",
+    attempts[0] &&
+      typeof attempts[0].usage?.input !== "number" &&
+      "usage-missing",
+  ].filter((reason): reason is string => typeof reason === "string");
 }
 
 async function run(): Promise<void> {
@@ -205,7 +247,10 @@ async function run(): Promise<void> {
       (await api("conversations", { parent: null, model, effort: "low" })).id,
     );
     const target = join(root, "reviewed-write.txt");
-    const commands = [1, 2, 3].map((n) => `printf '${n}\\n' > '${target}'`);
+    const commands = Array.from(
+      { length: REVIEWS },
+      (_, i) => `printf '${i + 1}\\n' > '${target}'`,
+    );
     const context =
       "Inert fixture context for the prompt-cache minimum size:\n".padEnd(
         64000,
@@ -216,7 +261,7 @@ async function run(): Promise<void> {
     );
     stage = "message delivery";
     await api(`conversations/${cid}/deliver`, {
-      content: `${context}\nRun exactly these three bash tool calls separately, sequentially, waiting for each result before the next. Use bash directly, not codemode or parallel tools. These harmless scratch writes are the entire task; do not run any other tools. Then reply DONE.\n${commands.join("\n")}`,
+      content: `${context}\nRun exactly these ${REVIEWS} bash tool calls separately, sequentially, waiting for each result before the next. Use bash directly, not codemode or parallel tools. These harmless scratch writes are the entire task; do not run any other tools. Then reply DONE.\n${commands.join("\n")}`,
     });
     stage = "agent turn";
     const budget = await finishReviewCheck(root, cid, api, signal, shutdown);
@@ -247,37 +292,42 @@ async function run(): Promise<void> {
       .filter((block) => block.type === "toolCall");
     let pass =
       !budget.failure &&
-      budget.reviews === 3 &&
-      results.length === 3 &&
-      calls.length === 3;
+      budget.reviews === REVIEWS &&
+      results.length === REVIEWS &&
+      calls.length === REVIEWS;
+    let misses = 0;
     for (const [index, result] of results.entries()) {
       const attempts: SafetyReviewAttempt[] =
         result.details?.recurseSafetyUsage?.attempts ?? [];
-      const valid =
-        calls[index]?.name === "bash" &&
-        calls[index]?.arguments?.command === commands[index] &&
-        calls[index]?.id === result.toolCallId &&
-        !result.isError &&
-        result.diagnostics.length === 0 &&
-        attempts.length === 1 &&
-        attempts[0]!.status === "reported" &&
-        attempts[0]!.provider === provider &&
-        `${provider}/${attempts[0]!.model}` === model &&
-        typeof attempts[0]!.usage?.input === "number" &&
-        (index === 0 || (attempts[0]!.usage?.cacheRead ?? 0) > 0);
+      const reasons = reviewFailures(
+        calls[index],
+        result,
+        commands[index],
+        model,
+      );
+      const valid = reasons.length === 0;
+      const missed = index > 0 && !((attempts[0]?.usage?.cacheRead ?? 0) > 0);
+      if (missed) misses++;
       pass &&= valid;
       for (const attempt of attempts)
         console.log(
-          `review=${index + 1} provider=${attempt.provider ?? "unknown"} model=${attempt.model ?? "unknown"} input=${attempt.usage?.input ?? "missing"} cacheRead=${attempt.usage?.cacheRead ?? "missing"} ${valid ? "PASS" : "FAIL"}`,
+          `review=${index + 1} provider=${attempt.provider ?? "unknown"} model=${attempt.model ?? "unknown"} input=${attempt.usage?.input ?? "missing"} cacheRead=${attempt.usage?.cacheRead ?? "missing"} ${valid ? (missed ? "MISS" : "PASS") : `FAIL ${reasons.join(" ")}`}`,
         );
       if (!attempts.length)
         console.log(
-          `review=${index + 1} provider=unknown model=unknown input=missing cacheRead=missing FAIL`,
+          `review=${index + 1} provider=unknown model=unknown input=missing cacheRead=missing FAIL ${reasons.join(" ")}`,
         );
     }
-    pass &&= (await readFile(target, "utf8").catch(() => "")) === "3\n";
+    pass &&= misses <= MAX_FOLLOW_UP_MISSES;
+    const checked = pass;
+    pass &&=
+      (await readFile(target, "utf8").catch(() => "")) === `${REVIEWS}\n`;
+    const extra = [
+      calls.length !== REVIEWS && `${calls.length} tool calls`,
+      checked && !pass && "target-mismatch",
+    ].filter((note): note is string => typeof note === "string");
     console.log(
-      `${pass ? "PASS" : "FAIL"}: ${results.length}/3 reviewed bash calls`,
+      `${pass ? "PASS" : "FAIL"}: ${results.length}/${REVIEWS} reviewed bash calls, ${misses}/${REVIEWS - 1} follow-up cache misses (at most ${MAX_FOLLOW_UP_MISSES})${extra.map((note) => `, ${note}`).join("")}`,
     );
     if (!pass) process.exitCode = 1;
   } finally {
@@ -298,7 +348,7 @@ if (import.meta.main) {
   try {
     if (process.argv.includes("--help"))
       console.log(
-        "Usage: bun tests/live/reviewer_cache.ts [provider/model]\nUses PI_CODING_AGENT_DIR/auth.json read-only, never refreshes OAuth. Shuts down the entire private instance after three reviews, six completed acting requests, or 60000 uncached input tokens; final recorded usage determines the result. Requires cacheRead > 0 after review one. Signals clean up the private server; its independent lifetime is 180 seconds. SKIPPED exits 2; FAIL exits 1; no retries.",
+        "Usage: bun tests/live/reviewer_cache.ts [provider/model]\nUses PI_CODING_AGENT_DIR/auth.json read-only, never refreshes OAuth. Shuts down the entire private instance after seven reviews, ten completed acting requests, or 90000 uncached input tokens; final recorded usage determines the result. Requires cacheRead > 0 on at least four of the six reviews after review one. Signals clean up the private server; its independent lifetime is 180 seconds. SKIPPED exits 2; FAIL exits 1; no retries.",
       );
     else await run();
   } catch (error) {

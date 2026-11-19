@@ -800,7 +800,7 @@ describe("model changes apply when no run is going (D2)", () => {
       await until(() => logs.some((e) => e.endsWith("sync_failed")));
       const refused = await host.send("c1", "sixth", "r6").catch((e) => e);
       expect(String(refused)).toContain(
-        "Model meta/muse-1 is unavailable. Pick another effort level in the model picker, or fix its model in Settings > Effort ladder.",
+        "Model meta/muse-1 is unavailable. Pick an effort level again in the model picker. If needed, update the ladder in Settings first.",
       );
       expect(seen).toHaveLength(5);
       settings.value = ["faux/faux-1", "medium"];
@@ -822,7 +822,7 @@ describe("model changes apply when no run is going (D2)", () => {
       const { id, error } = host.metadata("c1").pending[0]!;
       expect(id).toBe("r8");
       expect(error).toBe(
-        "Model meta/muse-1 is unavailable. Pick another effort level in the model picker, or fix its model in Settings > Effort ladder.",
+        "Model meta/muse-1 is unavailable. Pick an effort level again in the model picker. If needed, update the ladder in Settings first.",
       );
       expect(await host.cancel("c1", "r8b")).toBe(true);
       await until(() => host.metadata("c1").pending.length === 1);

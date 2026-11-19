@@ -25,6 +25,8 @@ import { tests as twoFactor } from "./test_two_factor";
 import { tests as notifications } from "./test_notification_clicks";
 import { tests as remotes } from "./test_remotes";
 import { tests as settingsSync } from "./test_settings_sync";
+import { tests as settingsUpdates } from "./test_settings_updates";
+import { tests as settingsSubpages } from "./test_settings_subpages";
 import { tests as mcpSettings } from "./test_mcp_settings";
 import { tests as composer } from "./test_composer";
 import { tests as safety } from "./test_safety";
@@ -89,6 +91,8 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["notifications", notifications],
   ["remotes", remotes],
   ["settings-sync", settingsSync],
+  ["settings-updates", settingsUpdates],
+  ["settings-subpages", settingsSubpages],
   ["mcp-settings", mcpSettings],
   ["composer", composer],
   ["safety", safety],

@@ -1,6 +1,6 @@
 # MCP sign-in
 
-Settings → MCPs → MCP servers takes Pi's `mcp.json` format and Pi's validation,
+Settings → Agents → MCP servers takes Pi's `mcp.json` format and Pi's validation,
 except that every server uses code mode: `exposure` other than `"codemode"`,
 `toolExposure` and `autoEnableCodemode: false` are refused, because the safety
 review blocks MCP calls that do not come from a code-mode script.
@@ -8,7 +8,7 @@ review blocks MCP calls that do not come from a code-mode script.
 HTTP servers authenticate in one of three ways:
 
 - OAuth (the default, or `"auth": "oauth"` as Slack and Codex write it): sign
-  in under Settings → MCPs. Servers may register a client automatically.
+  in under Settings → Agents → MCP servers. Servers may register a client automatically.
 - `"auth": { "provider": "<provider>" }`: send the token of that provider's
   Settings login, as Pi does. The URL must be https, except on loopback.
 - An `Authorization` header.

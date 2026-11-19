@@ -33,6 +33,7 @@ afterAll(async () => {
 });
 
 class World {
+  tree: unknown = structuredClone(seed.tree);
   convs: Record<string, Rec> = structuredClone(seed.conversations);
   live = new Map<string, [string, string]>(
     Object.entries(seed.live) as [string, [string, string]][],
@@ -60,7 +61,7 @@ async function buildTreeApp(world: World) {
           "retry-after": "2",
         });
     },
-    tree: async () => structuredClone(seed.tree),
+    tree: async () => world.tree,
     loopbackAuthenticated: (ex) => loopbackAuthenticated(ex, token),
     projectionReady: () => state.ready && state.projection,
     nodeCids: () => [...seed.node_cids],
@@ -138,6 +139,69 @@ describe("corpus", () => {
       await app.running.close();
     }
   }, 60_000);
+});
+
+// Regression: #3507 a small tree update must not download every row again.
+test("tree deltas revalidate and replay an exact retained snapshot", async () => {
+  const world = new World();
+  const rows = Object.values(world.convs);
+  const [parent, child, ...others] = rows;
+  world.tree = rows;
+  const app = await buildTreeApp(world);
+  const read = (base: string | null = "snapshot", etag?: string) =>
+    fetch(`${app.running.url}/api/tree`, {
+      headers: {
+        ...(base !== null ? { "x-recurse-tree-base": base } : {}),
+        ...(etag ? { "if-none-match": etag } : {}),
+      },
+    });
+  try {
+    const first = await read();
+    const base = first.headers.get("etag")!;
+    expect(first.headers.get("cache-control")).toBe("private, no-cache");
+    expect(await first.json()).toEqual(rows);
+    const revalidated = await read("snapshot", base);
+    expect(revalidated.status).toBe(304);
+    expect(revalidated.headers.get("etag")).toBe(base);
+    expect(await revalidated.text()).toBe("");
+    const unchanged = await read(base);
+    expect(unchanged.headers.get("etag")).toBe(base);
+    expect(await unchanged.json()).toEqual({ unchanged: true });
+    app.state.ready = false;
+    expect((await read(base)).status).toBe(503);
+    app.state.ready = true;
+
+    const updated = { ...parent, unread: true };
+    world.tree = [...others, updated];
+    const delta = {
+      base,
+      changed: [updated],
+      deleted: [child!.id],
+      order: [...others.map((row) => row.id), parent!.id],
+    };
+    const legacy = await read(null, base);
+    const latest = legacy.headers.get("etag")!;
+    expect(await legacy.json()).toEqual(world.tree);
+    for (const response of await Promise.all([read(base), read(base)])) {
+      expect(response.headers.get("etag")).toBe(latest);
+      expect(response.headers.get("cache-control")).toBe("private, no-store");
+      expect(await response.json()).toEqual(delta);
+    }
+    expect(await (await read(`W/"unknown", ${base}`)).json()).toEqual(
+      world.tree,
+    );
+    expect(await (await read(latest)).json()).toEqual({ unchanged: true });
+
+    world.tree = [updated];
+    expect(await (await read(latest)).json()).toEqual(world.tree);
+    for (let i = 0; i < 8; i++) {
+      world.tree = [{ ...updated, updated: i }, ...others];
+      await (await read()).text();
+    }
+    expect(await (await read(base)).json()).toEqual(world.tree);
+  } finally {
+    await app.running.close();
+  }
 });
 
 describe("stop diagnostics budget", () => {

@@ -308,7 +308,7 @@ export interface ShortcutGroup {
 export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
   {
     id: "normal",
-    title: "Normal",
+    title: "When not typing",
     items: [
       ...NORMAL_BINDINGS.map(({ keys, command, description }) => ({
         keys,
@@ -332,20 +332,20 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
   },
   {
     id: "insert",
-    title: "Insert",
+    title: "While typing",
     items: [
       { keys: ["Enter"], description: "send (desktop)" },
       { keys: ["Shift+Enter"], description: "new line" },
       {
         keys: ["Escape"],
         command: "cancel-local",
-        description: "return to Normal",
+        description: "stop typing",
       },
     ],
   },
   {
     id: "prefix",
-    title: "t prefix",
+    title: "Agent actions",
     items: PREFIX_BINDINGS.map(({ keys, command, description }) => ({
       keys: ["t", keys[0]],
       command,

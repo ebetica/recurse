@@ -14,6 +14,7 @@ import {
 import {
   builtinProviders,
   getBuiltinModelDataGeneratedAt,
+  getBuiltinProviders,
 } from "@earendil-works/pi-ai/providers/all";
 import { personalizeOpenRouterCatalog } from "@earendil-works/pi-ai/providers/openrouter";
 import { createModels } from "@earendil-works/pi-ai";
@@ -23,6 +24,7 @@ import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.l
 
 import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { ReadOnlySignIns } from "../../auth/read_only_sign_ins.ts";
+import { providerOutageKind, PICK_EFFORT_LEVEL_AGAIN } from "../view";
 import { FileModelsStore } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/models-store.js";
 import {
   withPersonalizedCatalog,
@@ -55,6 +57,19 @@ const anthropicModels = new WeakMap<
   object,
   ReturnType<Provider["getModels"]>[number]
 >();
+
+/** Pi also supports OpenAI OAuth on the platform route; Recurse doesn't. */
+function withPlatformKeyOnly(provider: Provider): Provider {
+  if (provider.id !== "openai") return provider;
+  const auth = { apiKey: provider.auth.apiKey };
+  return new Proxy(provider, {
+    get(target, key) {
+      if (key === "auth") return auth;
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
 
 /** Recurse token refresh and independently inspectable Anthropic requests. */
 function withRecurseAnthropicRefresh(provider: Provider): Provider {
@@ -122,11 +137,30 @@ export function withRequestedEffort(models: Models): Models {
         return (...args: Parameters<Models["streamSimple"]>) => {
           const stream = target.streamSimple(...args);
           const thinkingLevel = args[2]?.reasoning ?? "off";
+          const stamp = (
+            message: Awaited<ReturnType<typeof stream.result>>,
+          ) => {
+            message.thinkingLevel = thinkingLevel;
+            const action = PICK_EFFORT_LEVEL_AGAIN;
+            if (
+              message.stopReason === "error" &&
+              !message.errorMessage?.endsWith(action)
+            ) {
+              const kind = providerOutageKind(message.errorMessage, {
+                model: `${args[0].provider}/${args[0].id}`,
+              });
+              if (
+                kind === "provider authentication failed" ||
+                kind === "model was not available"
+              )
+                message.errorMessage = `${message.errorMessage || "Model request failed."} ${action}`;
+            }
+            return message;
+          };
           return new Proxy(stream, {
             get(response, property) {
               if (property === "result")
-                return async () =>
-                  Object.assign(await response.result(), { thinkingLevel });
+                return async () => stamp(await response.result());
               if (property === Symbol.asyncIterator)
                 return async function* () {
                   for await (const event of response) {
@@ -136,7 +170,7 @@ export function withRequestedEffort(models: Models): Models {
                         : event.type === "error"
                           ? event.error
                           : event.partial;
-                    message.thinkingLevel = thinkingLevel;
+                    stamp(message);
                     yield event;
                   }
                 };
@@ -258,7 +292,8 @@ export function durableModels(
   const builtins = new Map<string, Provider>();
   const builtinIds = new Map<string, string[]>();
   let openRouterCatalogIds: string[] = [];
-  for (const provider of builtinProviders()) {
+  for (const builtin of builtinProviders()) {
+    const provider = withPlatformKeyOnly(builtin);
     builtinIds.set(
       provider.id,
       (provider.getAllModels?.() ?? provider.getModels()).map(
@@ -611,14 +646,18 @@ function customProvider(
 
 // Keeps `models`' custom providers equal to the latest Settings value. A call
 // with the same object does nothing unless a Pi config reload replaced it;
-// removed providers restore the latest underlying Pi provider.
+// removed providers restore the latest underlying Pi provider. The trusted
+// catalog reserves built-in provider names for the shipped providers.
 export function customProviderSync(
   models: MutableModels,
   envValue: (provider: string) => string | undefined,
+  reserved?: ReadonlySet<string>,
 ): (providers: Record<string, CustomProviderSpec>) => void {
   const trusted = trustedModelCatalog(models);
   const syncTrusted =
-    trusted === models ? undefined : customProviderSync(trusted, envValue);
+    trusted === models
+      ? undefined
+      : customProviderSync(trusted, envValue, new Set(getBuiltinProviders()));
   let applied: Record<string, CustomProviderSpec> = {};
   const builtins = new Map(models.getProviders().map((p) => [p.id, p]));
   const installed = new Map<string, Provider>();
@@ -642,6 +681,7 @@ export function customProviderSync(
       else models.setProvider(withRecurseAnthropicRefresh(builtin));
     }
     for (const [id, spec] of Object.entries(providers)) {
+      if (reserved?.has(id)) continue;
       const current = models.getProvider(id);
       if (current !== installed.get(id)) {
         if (current) builtins.set(id, current);

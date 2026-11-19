@@ -13,14 +13,14 @@ export type AgentStatus =
 export type AgentTreeStatus = AgentStatus | "working" | "waiting" | "unknown";
 
 export interface TreeNode {
-  agent?: import("../src/web/api_v1/schema.js").Agent & {
-    context?: import("../src/web/api_v1/schema.js").AgentStatus["context"];
+  agent?: import("../src/web/api_v1/schema/index.js").Agent & {
+    context?: import("../src/web/api_v1/schema/index.js").AgentStatus["context"];
   };
   status_reason?: string | null;
   workdir?: string | null;
   effort?: number | null;
   error?: boolean;
-  prs?: import("./sidebar/rows.js").SidebarRow["prs"];
+  prs?: import("../src/sidebar_script/index.js").SidebarRow["prs"];
   branch?: string;
   cwd?: string;
   id: string;

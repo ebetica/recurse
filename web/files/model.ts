@@ -194,6 +194,15 @@ export function rendersAsMarkdown(file: SessionFile): boolean {
   return file.preview === "text" && /\.(?:md|markdown)$/i.test(file.name);
 }
 
+/** A file's type in users' words, from its extension and media kind ("PNG
+ * image", "MD file"); never a MIME type. Empty without an extension. */
+export function fileTypeLabel(name: string, mediaType: string): string {
+  const extension = /.\.([a-z0-9]{1,8})$/i.exec(name)?.[1];
+  if (!extension) return "";
+  const kind = /^(image|video|audio)\//.exec(mediaType)?.[1] ?? "file";
+  return `${extension.toUpperCase()} ${kind}`;
+}
+
 export function fileKindLabel(storage: SessionFile["storage"]): string {
   return storage === "upload" ? "Uploaded" : "Published by agent";
 }
