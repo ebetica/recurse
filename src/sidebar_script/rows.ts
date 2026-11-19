@@ -2,7 +2,7 @@
 // fields. The browser and server dry run use the same projection.
 import { agent, type Agent } from "../agent_metadata/index.js";
 
-export interface Tag {
+interface Tag {
   at: number;
   by: string;
   until?: number;
@@ -72,7 +72,7 @@ export function liveTags(tags: unknown, now: number): Tags {
 }
 
 /** A tree row as the script sees it; `rank` is its place in activity order. */
-export function sidebarRow(
+function sidebarRow(
   node: RowSource,
   rank: number,
   now: number,

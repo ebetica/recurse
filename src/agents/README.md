@@ -6,13 +6,14 @@ turns ([durable/README.md](durable/README.md)); the browser reads bounded
 conversation views through [view/README.md](view/README.md).
 
 **Source files:** [instance.ts](instance.ts) wires the parts together;
-[supervisor/](supervisor/) owns collection lifecycle and delivery;
+[supervisor/](supervisor/) owns collection lifecycle, delivery and
+[bounded reads](supervisor/reads.ts);
+[lifecycle/](lifecycle/README.md) owns admission leases and retry state;
 [agent_tree.ts](agent_tree.ts) owns tree operations;
 [runtime/agent_node.ts](runtime/agent_node.ts) owns one agent's admission and
-controls; [agent_store.ts](agent_store.ts) and
-[conversation_store.ts](conversation_store.ts) store agent state;
-[conversation_model_choices.ts](conversation_model_choices.ts) freezes existing
-model choices during startup;
+controls; [runtime/context_usage.ts](runtime/context_usage.ts) projects retained
+usage for the tree and API; [storage/](storage/README.md) owns agent and
+conversation records;
 [reconciler.ts](reconciler.ts) retries deferred work;
 [reap_history.ts](reap_history.ts) retains deleted history; and
 [worktree_holders.ts](worktree_holders.ts) tracks worktree holders.
@@ -56,7 +57,7 @@ Each retry replaces the previous deferral note without dropping its earlier
 status context. Startup gates actions
 until the collection is ready; maintenance is separate from request handling.
 Shutdown closes admission and waits for owned tasks and process cleanup.
-[Admission](mutation_guard.ts) tries the in-process reservation before deadline
+[Admission](lifecycle/mutation_guard.ts) tries the in-process reservation before deadline
 refusal and attempts the kernel lock even after slow file preparation. An expired
 budget permits an uncontended lease, not waiting on another holder. The bounded
 [admission model](../../specs/tla/LifecycleAdmission.tla) checks both boundaries,

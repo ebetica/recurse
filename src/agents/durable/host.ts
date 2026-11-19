@@ -2,7 +2,7 @@
 // One Harness per conversation; runs outlive HTTP. Keep handles, live rows and
 // per-conversation order; host/ holds lifecycles. Settings owns auth.
 // Reap, clear and recovery verify group cleanup before retiring.
-import { runStateClock } from "../run_state_clock";
+import { runStateClock } from "./run_state_clock";
 import { ServerStoppingError } from "./stopping_error";
 import { IdleHarnesses } from "./idle_harnesses";
 import { needsRecovery } from "./host/recovery";
@@ -869,8 +869,12 @@ export class DurableHost {
   }
 
   /** Full payloads, addressed by their existing tool task identity. */
-  toolDetails(cid: string, artifactId: string): Promise<Rec | null> {
-    return toolDetails(this, cid, artifactId);
+  toolDetails(
+    cid: string,
+    artifactId: string,
+    includeOperatorFailure = false,
+  ): Promise<Rec | null> {
+    return toolDetails(this, cid, artifactId, includeOperatorFailure);
   }
 
   /** Operator-only control, called by AgentNode.setSafety before its notice. */
@@ -1088,6 +1092,7 @@ export class DurableHost {
         },
         options,
         files,
+        () => this.viewChanged(cid),
       );
     }
     const state = this.metadata(cid);
@@ -1095,6 +1100,7 @@ export class DurableHost {
       ...page,
       turn_status: state.status,
       active_run: state.active_run,
+      active_run_start: state.active_run_start,
       run_state_clock: state.run_state_clock,
     };
   }
@@ -1104,6 +1110,7 @@ export class DurableHost {
   metadata(cid: string): {
     status: string;
     active_run: string | null;
+    active_run_start: number | null;
     run_state_clock: [string, number];
     pending: Rec[];
     pending_actions: string[];
@@ -1117,6 +1124,7 @@ export class DurableHost {
     return {
       status: run === null ? "idle" : "running",
       active_run: run,
+      active_run_start: row?.runFirstEntry ?? null,
       run_state_clock: runStateClock(),
       pending: this.pendingRows(cid),
       pending_actions: this.pendingActions(cid),
@@ -1169,8 +1177,8 @@ export class DurableHost {
   }
 
   // Full thinking of the reply at entry `offset`, or of the live answer at -1.
-  thinking(cid: string, offset: number): Promise<Rec | null> {
-    return thinking(this, cid, offset);
+  thinking(cid: string, offset: number, liveRow?: string): Promise<Rec | null> {
+    return thinking(this, cid, offset, liveRow);
   }
 
   /** The stored model input or reply, addressed by Durable entry id. */

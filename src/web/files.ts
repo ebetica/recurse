@@ -24,7 +24,7 @@ import {
 } from "../agents/runtime/attachments/crop";
 import type { OpenedDownload } from "../agents/runtime/attachments/preview";
 import { contentDisposition } from "../agents/runtime/attachments/published";
-import { parsePythonJson } from "../utils/py_compact_json";
+import { parsePythonJson } from "../utils/python-json";
 import { parseUrlencoded } from "./login";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse, type OpenedFile } from "./static";
@@ -34,7 +34,7 @@ import { agentMarked, isOperator } from "./request_auth";
 import { readPathImage } from "./path_image";
 
 /** Image extensions render inline; any other upload is a download. */
-export const ATTACH_TYPES: Readonly<Record<string, string>> = {
+const ATTACH_TYPES: Readonly<Record<string, string>> = {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
@@ -45,13 +45,13 @@ export const ATTACH_TYPES: Readonly<Record<string, string>> = {
 const PREVIEW_CSP = "default-src 'none'; sandbox";
 const SVG_PREVIEW_CSP =
   "default-src 'none'; style-src 'unsafe-inline'; img-src data:; font-src data:; sandbox";
-export const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
+const ATTACH_MAX_BYTES = 25 * 1024 * 1024;
 // Owner-bound, attacker-influenced bytes: never shared-cached or re-sniffed.
-export const ARTIFACT_SAFE_HEADERS: Readonly<Record<string, string>> = {
+const ARTIFACT_SAFE_HEADERS: Readonly<Record<string, string>> = {
   "cache-control": "private, no-store",
   "x-content-type-options": "nosniff",
 };
-export const ARTIFACT_INLINE_TYPES: ReadonlySet<string> = new Set([
+const ARTIFACT_INLINE_TYPES: ReadonlySet<string> = new Set([
   "text/html",
   "text/markdown",
   "text/plain",
@@ -63,11 +63,11 @@ export const ARTIFACT_INLINE_TYPES: ReadonlySet<string> = new Set([
   "application/pdf",
 ]);
 /** Opaque-origin sandbox: live scripts never reach the app session. */
-export const ARTIFACT_AGENT_RE = /^[A-Za-z0-9_-]{1,128}$/;
+const ARTIFACT_AGENT_RE = /^[A-Za-z0-9_-]{1,128}$/;
 /** Starlette's MultiPartParser max_part_size for non-file fields. */
-export const MULTIPART_FIELD_MAX_BYTES = 1024 * 1024;
+const MULTIPART_FIELD_MAX_BYTES = 1024 * 1024;
 /** Starlette's max_files and max_fields. */
-export const MULTIPART_MAX_ITEMS = 1000;
+const MULTIPART_MAX_ITEMS = 1000;
 /** Upload bodies past one maximal file plus 1 MiB of form are refused. */
 export const UPLOAD_BODY_MAX_BYTES = ATTACH_MAX_BYTES + 1024 * 1024;
 
@@ -129,7 +129,7 @@ const keyErrorText = (error: Error) =>
   /^'.*'$/s.test(error.message) ? error.message : `'${error.message}'`;
 
 /** Map a store AttachmentError to its honest HTTP status. */
-export function attachmentErrorResponse(error: Error): HttpError {
+function attachmentErrorResponse(error: Error): HttpError {
   const text = error.message;
   if (error instanceof CropConflict) return new HttpError(409, text);
   if (text.includes("unavailable"))
@@ -172,14 +172,14 @@ export function artifactFailure(error: unknown): never {
   throw error;
 }
 
-export function artifactOwner(agent: unknown): string {
+function artifactOwner(agent: unknown): string {
   if (typeof agent !== "string" || !ARTIFACT_AGENT_RE.test(agent))
     throw new HttpError(404, "artifact owner not found");
   return agent;
 }
 
 /** Conservative ASCII attachment filename; never an internal storage path. */
-export function artifactFilename(name: string): string {
+function artifactFilename(name: string): string {
   const base = basename(name || "artifact");
   const safe = base
     .replace(/[^A-Za-z0-9._-]+/g, "-")
@@ -188,7 +188,7 @@ export function artifactFilename(name: string): string {
   return safe || "artifact";
 }
 
-export function artifactDeletionMessage(result: Rec): string {
+function artifactDeletionMessage(result: Rec): string {
   return (
     `[Artifact deleted] “${String(result.title)}” ` +
     `(id: ${String(result.id)}, version: ${String(result.version)}) was deleted. ` +
@@ -241,7 +241,7 @@ function bytesResponse(
 }
 
 /** Files up to this size are answered from memory, keeping Content-Length. */
-export const BUFFERED_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024;
+const BUFFERED_DOWNLOAD_MAX_BYTES = 4 * 1024 * 1024;
 
 /**
  * A checked download's body: small files are read whole and closed; larger
@@ -288,11 +288,11 @@ function quoteAll(text: string): string {
   );
 }
 
-export interface FormFile {
+interface FormFile {
   readonly filename: string;
   readonly data: Uint8Array;
 }
-export type FormValue = string | FormFile;
+type FormValue = string | FormFile;
 
 /** python-multipart parse_options_header for one header value. */
 function headerOptions(value: string): [string, Map<string, string>] {
@@ -349,7 +349,7 @@ async function readCapped(request: Request, max: number): Promise<Uint8Array> {
 }
 
 /** Starlette's form for one request body, as FastAPI saw it. */
-export async function parseForm(
+async function parseForm(
   ex: Exchange,
   maxBytes = UPLOAD_BODY_MAX_BYTES,
 ): Promise<Map<string, FormValue[]>> {

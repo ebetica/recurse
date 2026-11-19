@@ -43,7 +43,7 @@ import {
   renameConversation,
 } from "./sidebar.js";
 import { renderDraft, renderColdOutbox } from "./conversation/chrome.js";
-import { poll, waitForInitialAuthoritativeRead } from "./conversation/poll.js";
+import { poll, waitForInitialAuthoritativeRead } from "./polling/index.js";
 import {
   addOptimisticPending,
   pinOperatorSend,
@@ -678,11 +678,11 @@ export function send(): void {
   for (const a of ready) {
     if (a.isImage) {
       const alt =
-        (a.filename || "image").replace(/[\[\]\n]/g, " ").trim() || "image";
+        (a.filename || "image").replace(/[[\]\n]/g, " ").trim() || "image";
       content += `\n\n![${alt}](${a.url})`;
     } else {
       const label =
-        (a.filename || "file").replace(/[\[\]]/g, " ").trim() || "file";
+        (a.filename || "file").replace(/[[\]]/g, " ").trim() || "file";
       content += `\n\n[${label}](${a.url})`;
     }
   }
@@ -1143,7 +1143,7 @@ window.addEventListener("offline", () => renderSendStatus());
 
 // Instant + client-side: show a blank thread and focus the box right away.
 // The agent is created on the server only when the first message is sent.
-export function startDraft(spec: DraftSpec): void {
+function startDraft(spec: DraftSpec): void {
   if (sharedTrees !== null && (!spec.parent || !state.nodes[spec.parent]))
     return;
   // Invariant: A draft has no panes of its own. Guard before changing selection

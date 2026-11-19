@@ -1,0 +1,70 @@
+{
+  "T3 hand-made deps cast": {
+    "tests/backend/durable_interrupt.test.ts": 1,
+    "tests/backend/durable_prompt.test.ts": 1,
+    "tests/backend/durable_turn_prompt.test.ts": 1,
+    "tests/backend/http_routes_app.ts": 1,
+    "tests/backend/http_tree.test.ts": 1
+  },
+  "T10 links the shared node_modules; use linkDependencies": {
+    "tests/backend/affected_tests.test.ts": 1,
+    "tests/backend/server_smoke.test.ts": 1
+  },
+  "T6 positive visibility snapshot; wait with locator.waitFor() or browserExpect(locator).toBeVisible()": {
+    "tests/mobile_browser/common.ts": 1,
+    "tests/mobile_browser/test_active_agents.ts": 1,
+    "tests/mobile_browser/test_artifact_visit.ts": 2,
+    "tests/mobile_browser/test_changes_expand.ts": 1,
+    "tests/mobile_browser/test_composer.ts": 2,
+    "tests/mobile_browser/test_durable.ts": 1,
+    "tests/mobile_browser/test_explorer.ts": 3,
+    "tests/mobile_browser/test_files.ts": 9,
+    "tests/mobile_browser/test_header.ts": 4,
+    "tests/mobile_browser/test_image_box_crops.ts": 2,
+    "tests/mobile_browser/test_image_drawing.ts": 3,
+    "tests/mobile_browser/test_image_swipe.ts": 4,
+    "tests/mobile_browser/test_mobile_layout.ts": 1,
+    "tests/mobile_browser/test_pane_chrome.ts": 2,
+    "tests/mobile_browser/test_pane_hotkeys.ts": 15,
+    "tests/mobile_browser/test_pane_powerbar.ts": 1,
+    "tests/mobile_browser/test_panes_artifacts.ts": 16,
+    "tests/mobile_browser/test_platform_commands.ts": 7,
+    "tests/mobile_browser/test_selection_comments.ts": 3,
+    "tests/mobile_browser/test_settings.ts": 4,
+    "tests/mobile_browser/test_side_history.ts": 1,
+    "tests/mobile_browser/test_sidebar.ts": 2,
+    "tests/mobile_browser/test_turn_groups.ts": 8,
+    "tests/mobile_browser/test_turns.ts": 1,
+    "tests/mobile_browser/test_visible_attachments.ts": 5,
+    "tests/mobile_browser/test_waiting_takeover.ts": 2,
+    "tests/mobile_browser/thread_disclosures.ts": 1,
+    "tests/mobile_browser/thread_tools.ts": 1
+  },
+  "T6 sleep of a second or more": {
+    "tests/mobile_browser/server/agents.ts": 1,
+    "tests/mobile_browser/test_durable.ts": 1
+  },
+  "T6 explicit browser timeout": {
+    "tests/mobile_browser/artifact_reopen.ts": 1,
+    "tests/mobile_browser/common.ts": 1,
+    "tests/mobile_browser/logging.test.ts": 1,
+    "tests/mobile_browser/parallel.test.ts": 3,
+    "tests/mobile_browser/test_changes_expand.ts": 5,
+    "tests/mobile_browser/test_composer.ts": 5,
+    "tests/mobile_browser/test_durable.ts": 17,
+    "tests/mobile_browser/test_failed_send_hold.ts": 6,
+    "tests/mobile_browser/test_line_comments.ts": 3,
+    "tests/mobile_browser/test_model_response.ts": 1,
+    "tests/mobile_browser/test_panes_artifacts.ts": 6,
+    "tests/mobile_browser/test_platform_commands.ts": 2,
+    "tests/mobile_browser/test_recovery.ts": 2,
+    "tests/mobile_browser/test_remote_sidebar.ts": 3,
+    "tests/mobile_browser/test_remotes.ts": 5,
+    "tests/mobile_browser/test_themes.ts": 1,
+    "tests/mobile_browser/test_turn_groups.ts": 1,
+    "tests/mobile_browser/test_turns.ts": 2,
+    "tests/mobile_browser/test_wake.ts": 1,
+    "tests/mobile_browser/thread_disclosures.ts": 1,
+    "tests/mobile_browser/thread_tools.ts": 1
+  }
+}

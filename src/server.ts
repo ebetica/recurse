@@ -37,14 +37,14 @@ import {
   type Router,
 } from "./web/router";
 
-export const IDLE_TIMEOUT_SECONDS = 255;
-export const MAX_REQUEST_BODY_BYTES = DEFAULT_MAX_ENCODED_BYTES + 1024 * 1024;
+const IDLE_TIMEOUT_SECONDS = 255;
+const MAX_REQUEST_BODY_BYTES = DEFAULT_MAX_ENCODED_BYTES + 1024 * 1024;
 
-export const GRACEFUL_SHUTDOWN_SECONDS = HTTP_DRAIN_SECONDS;
+const GRACEFUL_SHUTDOWN_SECONDS = HTTP_DRAIN_SECONDS;
 
 export type Middleware = (next: Handler) => Handler;
 
-export interface AppOptions {
+interface AppOptions {
   readonly router: Router;
   readonly logger: RuntimeLogger;
   /** CSRF/auth/throttling; runs outside decompression. Identity by default. */
@@ -202,7 +202,7 @@ export async function tailscaleSocket(dataDir: string): Promise<string> {
   return socket;
 }
 
-export interface ServerOptions {
+interface ServerOptions {
   readonly handler: Handler;
   readonly logger: RuntimeLogger;
   readonly host?: string;
@@ -350,7 +350,7 @@ export function startServer(options: ServerOptions): RunningServer {
 }
 
 /** `bun src/server.ts --host H --port P [--check]`, as src/local.ts runs it. */
-export function parseArgs(argv: readonly string[]): {
+function parseArgs(argv: readonly string[]): {
   host: string;
   port: number;
   check: boolean;

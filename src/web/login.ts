@@ -14,7 +14,7 @@ import {
   logEvent,
   type RuntimeLogger,
 } from "../observability/runtime_logging";
-import { jsonObjectBody } from "./request_body";
+import { jsonDictBody } from "./request";
 import {
   clientIp,
   htmlResponse,
@@ -31,8 +31,8 @@ import {
   type Router,
 } from "./router";
 
-export const FORM_MAX_FIELDS = 1000;
-export const PASSWORD_MIN_CHARS = 12;
+const FORM_MAX_FIELDS = 1000;
+const PASSWORD_MIN_CHARS = 12;
 
 export interface LoginDeps {
   readonly operator: OperatorAuth;
@@ -112,22 +112,6 @@ async function formFields(
   return { password: "", code: "" };
 }
 
-/** FastAPI `body: dict`: the parsed JSON object, or its 422/400 answer. */
-export async function jsonDictBody(
-  ex: Exchange,
-): Promise<Record<string, unknown>>;
-/** FastAPI `body: dict | None = None`: an absent or null body is null. */
-export async function jsonDictBody(
-  ex: Exchange,
-  required: false,
-): Promise<Record<string, unknown> | null>;
-export async function jsonDictBody(
-  ex: Exchange,
-  required = true,
-): Promise<Record<string, unknown> | null> {
-  return jsonObjectBody(ex, required);
-}
-
 /** Python truthiness of a parsed JSON value. */
 function truthy(value: unknown): boolean {
   if (value === undefined || value === null || value === false) return false;
@@ -172,10 +156,7 @@ export function sessionCookieHeader(token: string, secure = true): string {
 }
 
 /** Starlette's delete_cookie: `expires=0` renders as the current time. */
-export function clearCookieHeader(
-  now: Date = new Date(),
-  secure = true,
-): string {
+function clearCookieHeader(now: Date = new Date(), secure = true): string {
   return `${COOKIE_NAME}=""; expires=${now.toUTCString()}; HttpOnly; Max-Age=0; Path=/; SameSite=lax${secure ? "; Secure" : ""}`;
 }
 

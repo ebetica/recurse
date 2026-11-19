@@ -57,7 +57,7 @@ export interface ExplorerRequests {
   release: { owner: string; token: string };
   shutdown: Record<string, never>;
 }
-export interface ExplorerResults {
+interface ExplorerResults {
   list: ExplorerListing;
   preview: ExplorerPreview;
   admit: null;

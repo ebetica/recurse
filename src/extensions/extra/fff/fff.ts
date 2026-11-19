@@ -8,7 +8,7 @@ import type { FffFlags } from "./fff_tools.ts";
 import type { FffWorker } from "./fff_worker.ts";
 import { adaptPiTool } from "./pi_tool_adapter.ts";
 
-export interface FffOptions {
+interface FffOptions {
   worker: FffWorker;
   cwd: string;
   flags: FffFlags;

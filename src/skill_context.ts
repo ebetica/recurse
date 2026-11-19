@@ -10,13 +10,13 @@ import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import { resolveRoots } from "./local_roots";
 
-export const SKILL_CONTEXT_VERSION = 4;
-export const WORKDIR_CONTEXT_TTL_SECONDS = 5;
+const SKILL_CONTEXT_VERSION = 4;
+const WORKDIR_CONTEXT_TTL_SECONDS = 5;
 
 type MarkerValue = null | boolean | number | string | bigint | MarkerValue[];
-export type StatId = readonly [mtimeNs: bigint, size: bigint] | null;
-export type SkillGate = readonly [StatId, StatId, StatId];
-export type GlobalsPair = readonly [
+type StatId = readonly [mtimeNs: bigint, size: bigint] | null;
+type SkillGate = readonly [StatId, StatId, StatId];
+type GlobalsPair = readonly [
   beforeWorkdir: MarkerValue[],
   afterWorkdir: MarkerValue[],
 ];
@@ -53,7 +53,7 @@ const PYTHON_EDGE_SPACE = new RegExp(
   "gu",
 );
 
-export function pythonStrip(value: string): string {
+function pythonStrip(value: string): string {
   return value.replace(PYTHON_EDGE_SPACE, "");
 }
 
@@ -92,7 +92,7 @@ function expandUser(
 }
 
 /** Metadata-only marker for one registry location; stat follows symlinks. */
-export async function pathMarker(
+async function pathMarker(
   path: string,
   changes = true,
   home?: string,
@@ -225,7 +225,7 @@ function digest(values: readonly MarkerValue[]): string {
 }
 
 /** Context from already-computed registry globals and fresh workdir markers. */
-export async function contextWithGlobals(
+async function contextWithGlobals(
   beforeWorkdir: readonly MarkerValue[],
   afterWorkdir: readonly MarkerValue[],
   workdir: string,
@@ -295,7 +295,7 @@ export class SkillRenderCache {
   }
 }
 
-export interface SkillSnapshot {
+interface SkillSnapshot {
   readonly registry: SkillRegistry;
   readonly gate: SkillGate;
   readonly globalsPair: GlobalsPair;
@@ -312,7 +312,7 @@ async function skillStat(path: string | null): Promise<StatId> {
 }
 
 /** Stat-only identity rechecked before reusing the shared snapshot. */
-export async function skillGate(registry: SkillRegistry): Promise<SkillGate> {
+async function skillGate(registry: SkillRegistry): Promise<SkillGate> {
   return Promise.all([
     skillStat(registry.dataDir),
     skillStat(join(registry.agentDir, "settings.json")),
@@ -321,7 +321,7 @@ export async function skillGate(registry: SkillRegistry): Promise<SkillGate> {
 }
 
 /** Detached filesystem build; it mutates no SkillContext state. */
-export async function buildSkillSnapshot(
+async function buildSkillSnapshot(
   registry: SkillRegistry,
 ): Promise<SkillSnapshot> {
   const gate = await skillGate(registry);
@@ -329,9 +329,7 @@ export async function buildSkillSnapshot(
   return { registry, gate, globalsPair };
 }
 
-export type SnapshotBuilder = (
-  registry: SkillRegistry,
-) => Promise<SkillSnapshot>;
+type SnapshotBuilder = (registry: SkillRegistry) => Promise<SkillSnapshot>;
 
 export class SkillContext {
   private snapshotValue: SkillSnapshot | null = null;
@@ -492,11 +490,4 @@ function encodeBigInts(value: unknown): unknown {
   if (typeof value === "bigint") return value.toString();
   if (Array.isArray(value)) return value.map(encodeBigInts);
   return value;
-}
-
-/** Reuse the render-global calculation for a shared skill snapshot. */
-export function globalsForRegistry(
-  registry: SkillRegistry,
-): Promise<GlobalsPair> {
-  return new SkillRenderCache(registry).globalsForSnapshot();
 }

@@ -9,7 +9,7 @@ import {
   type SidebarScript,
 } from "../sidebar_script";
 import { conditionalJson } from "./caching";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Router } from "./router";
 
 export function registerSidebarScriptRoutes(

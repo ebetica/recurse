@@ -3,10 +3,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { expect } from "bun:test";
 import { waitForPaneScroll } from "./pane_layout";
-declare const document: any;
+import {
+  expect as browserExpect,
+  type Locator,
+  type Page,
+} from "playwright/test";
 
 import {
   captureErrors,
+  expectHitCorners,
   gotoRoot,
   mockConversation,
   postFixture,
@@ -266,7 +271,7 @@ async function runSelectionComment(
           .getRangeAt(0)
           .getBoundingClientRect();
         const button = document
-          .querySelector(".selection-comment-offer")
+          .querySelector(".selection-comment-offer")!
           .getBoundingClientRect();
         return {
           selectionTop: selection.top,
@@ -358,6 +363,72 @@ async function testSelectionCommentReplacement(
   }
 }
 
+async function editArtifactComment(
+  page: Page,
+  paragraph: Locator,
+  mobile: boolean,
+  original: string,
+  edited: string,
+): Promise<void> {
+  const activate = (control: Locator) =>
+    mobile ? control.tap() : control.click();
+  const popover = page.locator(".report-comment-popover");
+  const input = popover.getByRole("textbox");
+  const save = popover.getByRole("button", { name: "Save", exact: true });
+  const cancel = popover.getByRole("button", { name: "Cancel", exact: true });
+  const mark = paragraph.locator("mark.report-cmark").first();
+  const inline = paragraph.getByRole("button", {
+    name: "Edit highlighted comment",
+  });
+  const submit = page.getByRole("button", {
+    name: "Submit comments",
+    exact: true,
+  });
+  if (mobile) await expectHitCorners(inline);
+  await activate(mark);
+  await browserExpect(popover).toBeVisible();
+  await browserExpect(input).toHaveValue(original);
+  await browserExpect(input).toBeFocused();
+  await browserExpect(mark).toBeVisible();
+  if (mobile) {
+    await expectHitCorners(save);
+    await expectHitCorners(cancel);
+  }
+  await input.fill(edited);
+  await activate(save);
+  await browserExpect(popover).toBeHidden();
+  await browserExpect(mark).toBeFocused();
+  await inline.press("Enter");
+  await browserExpect(input).toHaveValue(edited);
+  await input.fill("");
+  await browserExpect(
+    page.getByRole("button", { name: "Finish editing" }),
+  ).toBeDisabled();
+  await browserExpect(save).toBeDisabled();
+  await input.press("Escape");
+  await browserExpect(inline).toBeFocused();
+  await browserExpect(submit).toBeEnabled();
+  const entry = page.getByRole("button", { name: `Edit comment: ${edited}` });
+  await browserExpect(entry).toContainText(edited);
+  if (mobile) await expectHitCorners(entry);
+  await activate(entry);
+  await browserExpect(input).toHaveValue(edited);
+  await input.fill("Discard this change");
+  await activate(cancel);
+  await browserExpect(popover).toBeHidden();
+  await browserExpect(entry).toBeFocused();
+  await entry.press("Enter");
+  await browserExpect(input).toHaveValue(edited);
+  await input.fill("Discard this too");
+  await input.press("Escape");
+  await browserExpect(popover).toBeHidden();
+  await browserExpect(entry).toBeFocused();
+  await browserExpect(page.locator(".report-comment")).toHaveCount(1);
+  await browserExpect(page.locator(".report-sendbar-label")).toHaveText(
+    "1 comment",
+  );
+}
+
 async function checkArtifactCommentSend(
   browser: any,
   base: string,
@@ -423,7 +494,9 @@ async function checkArtifactCommentSend(
           await popover.waitFor();
           const reply = `Preserved ${mobile} ${moves} ${submit}`;
           const note = `Reply only ${reply}`;
-          await popover.locator("textarea").fill(note);
+          const edit = moves && submit === "button";
+          const initial = edit ? "This note needs editing" : note;
+          await popover.locator("textarea").fill(initial);
           const secondNote = `Also preserve ${mobile} ${moves} ${submit}`;
           const beforeStage = await page
             .locator(scrollerSelector)
@@ -471,6 +544,11 @@ async function checkArtifactCommentSend(
                   : "artifact-staged-desktop.png",
               );
           }
+          if (edit) {
+            await editArtifactComment(page, paragraph, mobile, initial, note);
+            await paragraph.scrollIntoViewIfNeeded();
+            await waitForPaneScroll(page, scrollerSelector, paneSelector);
+          }
           const scroll = await page
             .locator(scrollerSelector)
             .evaluate((element: any) => element.scrollTop);
@@ -490,6 +568,13 @@ async function checkArtifactCommentSend(
           await page.locator(".msg.user", { hasText: note }).waitFor();
           expect(deliveries).toHaveLength(1);
           expect(deliveries[0]).toContain(note);
+          if (edit) {
+            expect(deliveries[0]).not.toContain(initial);
+            expect(deliveries[0]).not.toContain("Discard this");
+            expect(
+              deliveries[0]!.split("\n").filter((line) => line === note),
+            ).toHaveLength(1);
+          }
           if (submit !== "button") {
             expect(deliveries[0]).toContain(secondNote);
             expect(

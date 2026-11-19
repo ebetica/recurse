@@ -3,7 +3,7 @@
 // Pi references/commands stay intact; errors hide values, writes are 0600.
 // Saved servers apply next turn; loadToolsOnDemand hides inline schemas.
 
-import { open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { mcpServerConfig } from "./extensions/extra/mcp/status";
@@ -25,7 +25,7 @@ const isRecord = (value: unknown): value is Rec =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** Recurse's rules for one server entry, then Pi's; null when valid. */
-export function mcpServerError(name: string, value: unknown): string | null {
+function mcpServerError(name: string, value: unknown): string | null {
   const at = `server "${name}":`;
   if (isRecord(value)) {
     if (value.exposure !== undefined && value.exposure !== "codemode")
@@ -102,7 +102,7 @@ function mcpFileError(value: unknown): string | null {
 }
 
 /** `value` with every literal env and header value of every server masked. */
-export function maskMcpConfig(value: Rec): Rec {
+function maskMcpConfig(value: Rec): Rec {
   const copy = structuredClone(value);
   if (!isRecord(copy.mcpServers)) return copy;
   for (const server of Object.values(copy.mcpServers))
@@ -230,15 +230,4 @@ export async function saveMcpConfig(
     throw failure;
   }
   return pretty(maskMcpConfig(next as Rec));
-}
-
-/** Changes whenever the stored file is written, replaced or removed. */
-export async function mcpFileStamp(agentDir: string): Promise<string> {
-  try {
-    const info = await stat(join(agentDir, MCP_FILE_NAME), { bigint: true });
-    return `${info.ino}:${info.size}:${info.mtimeNs}:${info.ctimeNs}`;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return code === "ENOENT" ? "absent" : `unreadable:${code}`;
-  }
 }

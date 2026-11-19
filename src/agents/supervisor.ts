@@ -1,7 +1,12 @@
 // Supervisor collection coordination is split across supervisor/ modules.
 // instance.ts composes their explicit dependencies; nodes own per-agent work.
-export * from "./supervisor/delivery";
-export * from "./supervisor/reads";
-export * from "./supervisor/create";
-export * from "./supervisor/reap";
-export * from "./supervisor/lifecycle";
+export {
+  SpawnWorkdir,
+  SupervisorCreate,
+  type CreateDeps,
+} from "./supervisor/create";
+export {
+  SupervisorReap,
+  type DoomedScan,
+  type ReapDeps,
+} from "./supervisor/reap";

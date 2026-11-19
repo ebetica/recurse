@@ -3,19 +3,19 @@
 // Shared projection/reply policies are injected, not independently duplicated.
 
 import { performance } from "node:perf_hooks";
-import { claimChecked } from "../claim_checked";
+import { claimChecked } from "./claim_checked";
 import {
   providerStartingOverlay,
   readMuted,
   readSafetyEffectiveOff,
   readSafetyOff,
-} from "../conversation_status";
+} from "./conversation_status";
 import {
   activeRunId,
   dedupePendingRows,
   stripPendingKeys,
   type ConversationRecord,
-} from "../conversation_store";
+} from "../storage";
 import {
   claimHistory,
   historyAlive,
@@ -26,7 +26,7 @@ import {
   type HistoryNode,
   type JsonObject,
   type PiBinding,
-} from "../history_claim";
+} from "./history_claim";
 import {
   AttachmentError,
   AttachmentNotFound,
@@ -71,15 +71,15 @@ import {
   type SessionFilesContext,
   type TextSnippet,
 } from "../../session_files";
-import { pyCompactJson } from "../../utils/py_compact_json";
+import { pyCompactJson } from "../../utils/python-json";
 
 /** Same cap the resident view enforces on session bytes. */
-export const MAX_SESSION_BYTES = 128 * 1024 * 1024;
-export const VIEW_WEIGHT_QUIET_SECONDS = 300;
-export const VIEW_SESSION_BYTES_WARN = 16 * 1024 * 1024;
+const MAX_SESSION_BYTES = 128 * 1024 * 1024;
+const VIEW_WEIGHT_QUIET_SECONDS = 300;
+const VIEW_SESSION_BYTES_WARN = 16 * 1024 * 1024;
 
 /** Provider stop reasons that mean success, interruption or a tool call. */
-export const REPLY_REASONS: ReplyReasonPolicy = Object.freeze({
+const REPLY_REASONS: ReplyReasonPolicy = Object.freeze({
   success: new Set(["stop", "end_turn", "record"]),
   interrupted: new Set(["aborted", "abort"]),
   tool: new Set(["toolUse", "tool_use"]),
@@ -139,14 +139,14 @@ const METADATA_PRIVATE_LATE_KEYS = [
 ];
 
 /** The resident view cache: 200 projections, evicted after 600 s idle. */
-export function createViewCache(): ViewCache {
+function createViewCache(): ViewCache {
   return new ViewCache((cid) => new ConversationView(cid, ""), {
     maxViews: 200,
     idleTtl: 600,
   });
 }
 
-export interface ReadNode extends HistoryNode {
+interface ReadNode extends HistoryNode {
   inboxMessages(): readonly ConversationRecord[];
 }
 
@@ -165,7 +165,11 @@ export interface ReadsDeps {
         instance?: string | null;
       },
     ): Promise<JsonObject>;
-    thinking(cid: string, offset: number): Promise<JsonObject | null>;
+    thinking(
+      cid: string,
+      offset: number,
+      liveRow?: string,
+    ): Promise<JsonObject | null>;
     turnPrompt(cid: string, offset: number): Promise<JsonObject | null>;
     metadata(cid: string): JsonObject;
     contextUsage(cid: string): Promise<JsonObject>;
@@ -727,10 +731,11 @@ export class SupervisorReads {
   async readThinkingText(
     cid: string,
     offset: number,
+    liveRow?: string,
   ): Promise<JsonObject | null> {
     const claim = this.claim(cid);
     if (claim !== null && this.deps.durable?.owns(claim.conv))
-      return this.deps.durable.thinking(cid, offset);
+      return this.deps.durable.thinking(cid, offset, liveRow);
     if (claim === null || claim.binding === null) return null;
     const binding = claim.binding;
     // Invariant: Only Durable has a live answer.

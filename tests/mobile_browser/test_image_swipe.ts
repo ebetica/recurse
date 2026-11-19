@@ -420,7 +420,7 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
-  // Regression: #3103 keeps submitted comments in view; #3510 pans late holds; preserves #2966 downloads, #2862 drafts, #2858 gestures, #2859 standalone uploads and #2978 compact labels.
+  // Regression: #3103 keeps submitted comments in view; #3510 pans late holds; #3516 taps after held timers; preserves #2966 downloads, #2862 drafts, #2858 gestures, #2859 standalone uploads and #2978 compact labels.
   async function test_published_images_touch_gallery(browser, base) {
     const fixture = (await postFixture(
       base,
@@ -558,19 +558,22 @@ export const tests: BrowserTest[] = [
         ...at(0.05),
       });
     };
-    const doubleTap = async (at: { x: number; y: number }) => {
+    const doubleTap = async (at: { x: number; y: number }, held = false) => {
       const start = Date.now() / 1000;
       for (const [type, offset] of [
         ["touchStart", 0],
         ["touchEnd", 0.05],
         ["touchStart", 0.15],
         ["touchEnd", 0.2],
-      ] as const)
+      ] as const) {
+        if (held && type === "touchEnd")
+          await page.locator("mark.files-box-start").waitFor();
         await touch.send("Input.dispatchTouchEvent", {
           type,
           touchPoints: type === "touchStart" ? [at] : [],
           timestamp: start + offset,
         });
+      }
     };
     const swipe = async (dx: number, dy = 0) => {
       await page.waitForFunction(
@@ -929,6 +932,12 @@ export const tests: BrowserTest[] = [
     expect(await count.getAttribute("aria-expanded")).toBe("false");
     expect(await count.isDisabled()).toBeTrue();
     expect((await bar.boundingBox())!.height).toBeLessThanOrEqual(60);
+    expect(await geometry()).toEqual(fittedGeometry);
+    await doubleTap(sendFrom, true);
+    await browserExpect.poll(scale).toBe(2);
+    expect(await frame.locator("mark.report-cbox").count()).toBe(0);
+    await doubleTap(sendFrom);
+    await browserExpect.poll(scale).toBe(1);
     expect(await geometry()).toEqual(fittedGeometry);
     await touch.send("Emulation.setCPUThrottlingRate", { rate: 40 });
     await doubleTap(sendFrom);

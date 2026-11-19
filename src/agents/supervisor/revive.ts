@@ -11,7 +11,7 @@ import {
 } from "../durable/archive";
 import type { ReviveState } from "../durable/revive_doc";
 import type { TaskSet } from "../../utils/tasks";
-import type { ConversationRecord } from "../conversation_store";
+import type { ConversationRecord } from "../storage";
 import type { CreateOptions } from "./create";
 import type { SupervisorDelivery } from "./delivery";
 
@@ -26,7 +26,7 @@ export class ReviveRefused extends Error {
   }
 }
 
-export interface ReviveDeps {
+interface ReviveDeps {
   archive: Pick<
     AgentArchive,
     "root" | "get" | "search" | "markRevived" | "move"

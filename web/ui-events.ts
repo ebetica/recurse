@@ -13,7 +13,7 @@ const ACTIVE_TURN_STATUSES: ReadonlySet<AgentTreeStatus> = new Set([
 ]);
 
 // Detects only worktree-quiescent transitions.
-export function turnJustSettled(
+function turnJustSettled(
   previous: AgentTreeStatus | undefined,
   current: AgentTreeStatus | undefined,
 ): boolean {

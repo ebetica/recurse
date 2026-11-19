@@ -67,7 +67,7 @@ function reportedUsage(usage: Row["usage"]): boolean {
 
 class SignInError extends Error {}
 
-export async function literalSignIns(
+async function literalSignIns(
   stored: unknown,
   readOnly: Pick<CredentialStore, "modify" | "delete">,
 ): Promise<CredentialStore> {

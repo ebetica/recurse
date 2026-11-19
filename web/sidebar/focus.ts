@@ -4,7 +4,7 @@
 import { listEl } from "../dom.js";
 import { state } from "../state.js";
 
-let renderAgentList: () => void;
+export let renderAgentList: () => void;
 export function configureAgentFocus(render: () => void): void {
   renderAgentList = render;
 }

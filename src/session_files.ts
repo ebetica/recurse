@@ -18,15 +18,11 @@ import {
   entryIdentity,
   splitPiUserText,
   type JsonObject,
-  type PiTurnGroup,
 } from "./agents/view/session_entries";
 
-export type Entry = Record<string, unknown>;
-export type FileRecord = Record<string, string | number | boolean>;
-export type FileListEntry = Record<
-  string,
-  string | number | boolean | string[]
->;
+type Entry = Record<string, unknown>;
+type FileRecord = Record<string, string | number | boolean>;
+type FileListEntry = Record<string, string | number | boolean | string[]>;
 export interface FilePage {
   files: FileListEntry[];
   cursor: string | null;
@@ -48,7 +44,7 @@ export interface CollectionSnapshot {
   readonly owner: string;
   readonly temp_key: string;
 }
-export type Reference = [storage: string, id: string | null, fallback: Entry];
+type Reference = [storage: string, id: string | null, fallback: Entry];
 export type ReferenceProof = readonly [
   triple: readonly [
     sessionId: string,
@@ -67,12 +63,12 @@ export interface SessionFilesContext {
   ) => string | null | Promise<string | null>;
 }
 
-export const MAX_LIST_FILES = 1000;
-export const MAX_REFS_PER_MESSAGE = 50_000;
-export const MAX_REFERENCE_LINE_BYTES = 4 * 1024 * 1024;
-export const MAX_TEXT_FILE_BYTES = 256 * 1024;
-export const MAX_TEXT_PREVIEW_BYTES = 64 * 1024;
-export const MAX_IMAGE_PREVIEW_BYTES = 5 * 1024 * 1024;
+const MAX_LIST_FILES = 1000;
+const MAX_REFS_PER_MESSAGE = 50_000;
+const MAX_REFERENCE_LINE_BYTES = 4 * 1024 * 1024;
+const MAX_TEXT_FILE_BYTES = 256 * 1024;
+const MAX_TEXT_PREVIEW_BYTES = 64 * 1024;
+const MAX_IMAGE_PREVIEW_BYTES = 5 * 1024 * 1024;
 
 const UPLOAD_ID_RE = base.FILE_ID_REGEX;
 const PUBLISHED_ID_RE = base.ID_REGEX;
@@ -202,7 +198,7 @@ export function safeName(value: unknown): string {
 }
 
 /** Last suffix after lowercasing, with the accepted make/docker names. */
-export function extension(name: string): string {
+function extension(name: string): string {
   const lower = name.toLowerCase();
   if (lower === "dockerfile" || lower === "makefile") return lower;
   return extname(lower).replace(/^\./u, "");
@@ -222,7 +218,7 @@ function allUploadReferences(text: string): string[] {
 }
 
 /** Upload references from one user message: ids, then content URLs. */
-export function userRefs(message: Entry): Reference[] {
+function userRefs(message: Entry): Reference[] {
   const out: Reference[] = [];
   const values = message.attachment_ids;
   if (Array.isArray(values)) {
@@ -247,7 +243,7 @@ export function userRefs(message: Entry): Reference[] {
 }
 
 /** Publication references from one assistant message, optionally resolved. */
-export function assistantRefs(
+function assistantRefs(
   message: Entry,
   callIndex: Readonly<Record<string, Manifest>> | null = null,
 ): Reference[] {
@@ -286,7 +282,7 @@ export function assistantRefs(
 }
 
 /** References from one projected Pi entry. */
-export function refs(
+function refs(
   entry: Entry,
   callIndex: Readonly<Record<string, Manifest>> | null = null,
 ): Reference[] {
@@ -298,7 +294,7 @@ export function refs(
 }
 
 /** Scroll fence for one conversation: per-session, never a ledger era. */
-export function piThreadGeneration(sessionId: string | null): number {
+function piThreadGeneration(sessionId: string | null): number {
   if (typeof sessionId !== "string" || !sessionId) return 0;
   const digest = createHash("sha256").update(sessionId, "utf8").digest("hex");
   return (
@@ -307,7 +303,7 @@ export function piThreadGeneration(sessionId: string | null): number {
 }
 
 // One Pi timestamp as epoch seconds, from a standard Pi ISO date/time string.
-export function piTimestamp(value: unknown): number | null {
+function piTimestamp(value: unknown): number | null {
   if (typeof value === "boolean") return null;
   if (typeof value === "number") {
     if (!Number.isFinite(value) || value < 0) return null;
@@ -334,7 +330,7 @@ export function piTimestamp(value: unknown): number | null {
 }
 
 /** One Pi entry as a Files-pane message with structured references. */
-export function piEntryMessage(entry: Entry): Entry | null {
+function piEntryMessage(entry: Entry): Entry | null {
   const kind = boundaryKind(entry as JsonObject);
   const message = entry.message;
   if (!isObject(message)) return null;
@@ -375,34 +371,6 @@ export function piEntryMessage(entry: Entry): Entry | null {
     text,
     publish_calls: calls,
   };
-}
-
-/** Oldest-first per-entry rows with their turn, for bounded paging. */
-export function piFlattenEntries(groups: readonly PiTurnGroup[]): Entry[] {
-  const out: Entry[] = [];
-  for (const group of groups) {
-    const turn = group.start_entry_id
-      ? `pi:${group.start_entry_id}`
-      : `pi:offset:${group.start_offset}`;
-    for (const [offset, end, entry] of [...group.rows].sort(
-      (a, b) => a[0] - b[0],
-    )) {
-      const boundary = boundaryKind(entry);
-      const kind =
-        boundary === "user"
-          ? "user"
-          : assistantText(entry) !== null
-            ? "assistant"
-            : null;
-      if (kind === null) continue;
-      const message = piEntryMessage(entry);
-      if (message === null) continue;
-      const row: Entry = { kind, offset, turn, message };
-      if (end !== null) row.end_offset = end;
-      out.push(row);
-    }
-  }
-  return out;
 }
 
 function validateLimit(value: unknown): number {
@@ -1088,7 +1056,7 @@ async function referenceAt(
   );
 }
 
-export function textPreview(data: Bytes, name: string): TextSnippet | null {
+function textPreview(data: Bytes, name: string): TextSnippet | null {
   const ext = extension(name);
   if (ACTIVE_EXTENSIONS.has(ext) || !TEXT_EXTENSIONS.has(ext)) return null;
   const bytes = new Uint8Array(data);

@@ -2,9 +2,9 @@
 // New requests replace unapplied ones; crashes lose them and clients retry.
 // Consume only after success. Admit/select under the conversation guard;
 // native work runs outside it, parking never needs an instance storage lease.
-import type { ConversationRecord } from "./conversation_store";
+import type { ConversationRecord } from "./storage";
 
-export type ActionKind = "clear" | "compact";
+type ActionKind = "clear" | "compact";
 
 export interface ActionRequest {
   id: string;
@@ -13,13 +13,13 @@ export interface ActionRequest {
   requested_at: number | null;
 }
 
-export interface QueuedAction {
+interface QueuedAction {
   id: string;
   action: string;
   queued: boolean;
 }
 
-export interface CompactionDeps {
+interface CompactionDeps {
   load(
     cid: string,
   ): ConversationRecord | null | Promise<ConversationRecord | null>;

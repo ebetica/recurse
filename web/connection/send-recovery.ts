@@ -6,7 +6,7 @@
 import { validBackendLabel } from "../../src/backends/label/index.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 
-export interface StoredAttachment {
+interface StoredAttachment {
   url: string;
   isImage: boolean;
   filename: string;
@@ -15,7 +15,7 @@ export interface StoredAttachment {
   uiOwnerId?: string;
 }
 
-export interface StoredSendJob {
+interface StoredSendJob {
   draft: boolean;
   convId: string | null;
   content: string;
@@ -33,7 +33,7 @@ export interface StoredSendJob {
   waitForIndex: number;
 }
 
-export interface StoredDraft {
+interface StoredDraft {
   parent: string | null;
   tags?: string[];
   backendLabel?: string;

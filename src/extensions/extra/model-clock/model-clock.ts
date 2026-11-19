@@ -10,12 +10,9 @@ import {
 } from "@earendil-works/pi-durable";
 import { applyTimestamps, createTimestampState } from "./timestamps.ts";
 
-export type RequestTransform = (
-  messages: Message[],
-  provider: string,
-) => Message[];
+type RequestTransform = (messages: Message[], provider: string) => Message[];
 
-export interface ModelClockOptions {
+interface ModelClockOptions {
   after: readonly RequestTransform[];
   now?: () => number;
 }

@@ -1,6 +1,5 @@
 import { mkdir } from "node:fs/promises";
 type Element = any;
-declare const document: any;
 declare const Node: any;
 declare const getComputedStyle: any;
 declare const innerWidth: number;

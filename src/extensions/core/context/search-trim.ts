@@ -1,17 +1,17 @@
 // Search head/tail trimming shares its bounds with core/shells/trim.ts; keep
 // both algorithms in sync.
 
-export const DEFAULT_BYTE_BUDGET = 50 * 1024;
+const DEFAULT_BYTE_BUDGET = 50 * 1024;
 const DEFAULT_MAX_LINES = 2_000;
 const DEFAULT_MAX_LINE_LEN = 500;
 
-export interface TrimOptions {
+interface TrimOptions {
   byteBudget?: number;
   maxLines?: number;
   maxLineLen?: number;
 }
 
-export interface TrimResult {
+interface TrimResult {
   text: string;
   trimmed: boolean;
   omittedLines: number;

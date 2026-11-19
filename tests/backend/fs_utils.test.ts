@@ -5,7 +5,7 @@ import {
   openPinnedLockFile,
   openPinnedRegularFile,
   readJson,
-} from "../../src/agents/fs_utils";
+} from "../../src/utils/fs_utils";
 
 import {
   constants,

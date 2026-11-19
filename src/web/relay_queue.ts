@@ -17,7 +17,7 @@ interface Route {
   /** The label the home polls with; absent in older files (the address). */
   label?: string;
 }
-export interface QueueRoute {
+interface QueueRoute {
   address: string;
   name: string;
   key: string | null;

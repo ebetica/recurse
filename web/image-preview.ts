@@ -1,7 +1,7 @@
 // URL allowlist for composer image thumbnails: same-origin uploaded images
 // only. Image clicks use the shared Files image pop-out (files.ts).
 
-export interface PreviewTarget {
+interface PreviewTarget {
   url: string;
   alt: string;
 }
@@ -28,7 +28,7 @@ export function previewTargetFor(a: {
 // thumbnail. Never admit data:, blob:, cross-origin, asset, or content URLs.
 export function isServedAttachmentUrl(url: string): boolean {
   return (
-    /^\/api\/attachments\/[\w.\-]+$/.test(url) ||
+    /^\/api\/attachments\/[\w.-]+$/.test(url) ||
     /^\/api\/conversations\/[^/?#]+\/attachments\/[^/?#]+\/(?:preview|thumbnail)$/.test(
       url,
     ) ||

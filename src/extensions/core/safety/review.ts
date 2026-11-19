@@ -15,9 +15,14 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { ReviewEffort, ReviewModel } from "./model-policy.ts";
 import { SAFETY_CRITERIA, safetyDecisionContext } from "./decision.ts";
 import { buildReviewerSystemPrompt } from "./policy.ts";
-import { slowSpan } from "../../../observability/slow_span";
+import { slowSpan } from "../../../observability/slow-span";
+import {
+  oneLine,
+  redactSecrets,
+  truncateToolDetail,
+} from "../../../tool_projection/index";
 import type { ReviewHistory } from "./review-history.ts";
-export type ReviewInputs = {
+type ReviewInputs = {
   dataDir?: string;
   statsRoot?: string;
   history?: ReviewHistory;
@@ -28,7 +33,7 @@ export type ReviewInputs = {
 
 const REVIEW_TIMEOUT_MS = 60_000;
 
-export type SafetyDecision = "allow" | "deny";
+type SafetyDecision = "allow" | "deny";
 
 export type SafetyReviewAttempt = {
   status: "reported" | "unreported";
@@ -49,6 +54,8 @@ export type SafetyReviewAttempt = {
   };
 };
 
+export type ReviewFailureDetail = { status?: number; message: string };
+
 export type SafetyVerdict = {
   decision: SafetyDecision;
   reason: string;
@@ -56,6 +63,8 @@ export type SafetyVerdict = {
   reviewer?: { provider: string; model: string };
   /** Infrastructure failures fail open and do not count as policy denials. */
   procedural?: boolean;
+  /** Sanitized diagnostic for the operator log and tool view only. */
+  operatorFailure?: ReviewFailureDetail;
 };
 
 function responseText(content: readonly unknown[]): string {
@@ -365,14 +374,55 @@ async function emitReviewUsageStats(input: {
   }
 }
 
+// Spec: Pi flattens HTTP status into a leading errorMessage prefix.
+const HTTP_ERROR_PREFIX =
+  /^(?:Error: )?(?:HTTP(?: status)?\s+([45]\d\d)\b\s*[: -]*|([45]\d\d)(?=\s|:|$)\s*[: -]*|[\w .-]+ API error \(([45]\d\d)\):\s*)/i;
+
+function errorStatus(error: unknown): number | undefined {
+  for (
+    let depth = 0;
+    depth < 4 && error && typeof error === "object";
+    depth++
+  ) {
+    const { status, statusCode, cause } = error as {
+      status?: unknown;
+      statusCode?: unknown;
+      cause?: unknown;
+    };
+    for (const value of [status, statusCode]) {
+      if (
+        typeof value === "number" &&
+        Number.isInteger(value) &&
+        value >= 100 &&
+        value <= 599
+      )
+        return value;
+    }
+    error = cause;
+  }
+  return undefined;
+}
+
+function statusFromMessage(detail: string): number | undefined {
+  const prefix = HTTP_ERROR_PREFIX.exec(detail.trimStart());
+  return prefix ? Number(prefix[1] ?? prefix[2] ?? prefix[3]) : undefined;
+}
+
 function failedVerdict(
   reason: string,
   reviewAttempts?: SafetyReviewAttempt[],
+  detail = reason,
+  status?: number,
+  credentials?: readonly (string | undefined)[],
 ): SafetyVerdict {
+  const line = oneLine(redactSecrets(detail, credentials));
+  status ??= statusFromMessage(line);
+  const message = truncateToolDetail(line.replace(HTTP_ERROR_PREFIX, ""), 200);
   return {
     decision: "deny",
     reason,
     procedural: true,
+    operatorFailure: { ...(status === undefined ? {} : { status }), message },
     ...(reviewAttempts?.length ? { reviewAttempts } : {}),
   };
 }
@@ -551,27 +601,51 @@ export async function reviewAction(
       "Process snapshot: unavailable (no session-scoped shell registry).",
   },
 ): Promise<SafetyVerdict> {
-  let auth: Awaited<ReturnType<typeof ctx.modelRegistry.getApiKeyAndHeaders>>;
+  type Auth = ReturnType<typeof ctx.modelRegistry.getApiKeyAndHeaders>;
+  const getAuth = ctx.modelRegistry.getApiKeyAndHeaders as (
+    model: ReviewModel,
+  ) => Auth;
+  let auth: Awaited<Auth>;
+  const authFailure =
+    "Safety review could not authenticate the configured reviewer model.";
+  const authTimeout = timeoutSignal(ctx.signal);
   try {
-    auth =
-      model.type === "classifier"
-        ? { ok: true, apiKey: undefined }
-        : await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    auth = await settleBeforeAbort(
+      getAuth.call(ctx.modelRegistry, model),
+      authTimeout.signal,
+    );
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
     return failedVerdict(
-      `Safety review could not authenticate the configured reviewer model: ${detail}`,
+      `${authFailure} ${detail}`,
+      undefined,
+      authFailure,
+      errorStatus(error) ?? statusFromMessage(detail),
     );
+  } finally {
+    authTimeout.dispose();
   }
   if (!auth.ok)
     return failedVerdict(
-      `Safety review could not authenticate the configured reviewer model: ${auth.error}`,
+      `${authFailure} ${auth.error}`,
+      undefined,
+      authFailure,
+      statusFromMessage(auth.error),
     );
   if (model.type !== "classifier" && !auth.apiKey)
     return failedVerdict(
       "Safety review has no API key for the configured reviewer model.",
     );
 
+  const credentials = [
+    auth.apiKey,
+    ...Object.values(auth.headers ?? {}).flatMap((value) =>
+      value ? [value, /^(?:Bearer|Basic)\s+(\S+)/i.exec(value)?.[1]] : [],
+    ),
+    ...Object.entries(auth.env ?? {}).flatMap(([name, value]) =>
+      /key|token|secret|password/i.test(name) ? [value] : [],
+    ),
+  ];
   if (model.type === "classifier") {
     inputs.history?.clear();
     inputs = { ...inputs, history: undefined };
@@ -697,6 +771,9 @@ export async function reviewAction(
           return failedVerdict(
             `Safety reviewer did not finish cleanly (${response.stopReason})${response.errorMessage ? `: ${response.errorMessage}` : ""}.`,
             reviewAttempts,
+            response.errorMessage,
+            errorStatus(response),
+            credentials,
           );
         if (
           answer?.type !== "choice" ||
@@ -751,6 +828,9 @@ export async function reviewAction(
         return failedVerdict(
           `Safety reviewer did not finish cleanly (${response.stopReason})${detail}.`,
           reviewAttempts,
+          response.errorMessage,
+          errorStatus(response),
+          credentials,
         );
       }
       reviewAttempts.push(reportedAttempt(response));
@@ -778,7 +858,13 @@ export async function reviewAction(
   } catch (error) {
     if (requestInFlight) reviewAttempts.push({ status: "unreported" });
     const detail = error instanceof Error ? error.message : String(error);
-    return failedVerdict(`Safety review failed: ${detail}`, reviewAttempts);
+    return failedVerdict(
+      `Safety review failed: ${detail}`,
+      reviewAttempts,
+      detail,
+      errorStatus(error),
+      credentials,
+    );
   } finally {
     void emitReviewUsageStats({
       conversationId: conversationId ?? conversationSessionId,

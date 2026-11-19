@@ -1,7 +1,7 @@
 // Bound titles from untrusted text: Python whitespace, no control/format chars.
 // Caps count Unicode code points, not UTF-16 units.
 
-export const TITLE_MAX_LEN = 80;
+const TITLE_MAX_LEN = 80;
 
 const PYTHON_WHITESPACE =
   /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/gu;

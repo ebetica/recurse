@@ -9,7 +9,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { AgentStore } from "../../src/agents/agent_store";
+import { AgentStore } from "../../src/agents/storage/agent_store";
 import { Config } from "../../src/config";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -26,7 +26,7 @@ import {
   freshTakenOverOrder,
   validateExternalKey,
   LEGACY_BACKEND,
-} from "../../src/agents/conversation_store";
+} from "../../src/agents/storage/conversation_store";
 import {
   fixtureStore,
   fixtureHooks,

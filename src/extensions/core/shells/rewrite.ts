@@ -3,7 +3,7 @@
 // Heredocs, here-strings, substitutions, escaped newlines and unbalanced syntax
 // stay untouched; teaching fires only for actual removals.
 
-export interface RewriteResult {
+interface RewriteResult {
   command: string;
   rewritten: boolean;
   /** Whether the rewrite removed anything before spawn. */
@@ -203,7 +203,7 @@ function timeoutSpan(
       index += 2;
       continue;
     }
-    if (/^--signal=/.test(flag) || /^--kill-after=/.test(flag)) {
+    if (flag.startsWith("--signal=") || flag.startsWith("--kill-after=")) {
       index += 1;
       continue;
     }

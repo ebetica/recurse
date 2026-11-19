@@ -45,7 +45,7 @@ export interface ThreadRequest {
   nativeReadOnly?: boolean;
   target?: SearchTarget;
 }
-export interface RequestTiming {
+interface RequestTiming {
   received: number;
   finished: number;
 }

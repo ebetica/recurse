@@ -2,9 +2,9 @@
 // Failed reads end refreshing, but cold switches wait for a correct thread.
 // Owns focused read state; chrome.ts paints its indicator and dimming.
 
-export type FreshnessPhase = "fresh" | "refreshing" | "loading";
+type FreshnessPhase = "fresh" | "refreshing" | "loading";
 
-export interface FreshnessState {
+interface FreshnessState {
   /** The conversation the phase describes; null once nothing is pending. */
   readonly id: string | null;
   readonly phase: FreshnessPhase;
@@ -27,18 +27,12 @@ export function conversationSwitched(
 }
 
 /** The authoritative read for `id` was applied. */
-export function refreshApplied(
-  current: FreshnessState,
-  id: string,
-): FreshnessState {
+function refreshApplied(current: FreshnessState, id: string): FreshnessState {
   return current.id === id ? FRESH : current;
 }
 
 /** The authoritative read for `id` failed; the poll loop retries. */
-export function refreshFailed(
-  current: FreshnessState,
-  id: string,
-): FreshnessState {
+function refreshFailed(current: FreshnessState, id: string): FreshnessState {
   return current.id === id && current.phase === "refreshing" ? FRESH : current;
 }
 

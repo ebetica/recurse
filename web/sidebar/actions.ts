@@ -2,7 +2,7 @@
 // Dialogs collect input; tag-state keeps changes until a newer tree read.
 import { backendFor, treeOf } from "../backends/index.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
-import { refreshSidebarTags } from "./action-handlers.js";
+import { refreshSidebarTree } from "./action-handlers.js";
 import { SIDEBAR_CHANGE } from "./events.js";
 import { requestUiStatus } from "../ui-events.js";
 import { state } from "../state.js";
@@ -100,5 +100,5 @@ async function send(
         : `${action.label} failed for ${failed} of ${ids.length}; try again`,
     );
   changed();
-  void refreshSidebarTags();
+  void refreshSidebarTree();
 }

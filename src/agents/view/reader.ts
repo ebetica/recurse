@@ -27,8 +27,6 @@ import {
 } from "../../tool_projection/__init__";
 import { containsSecret } from "../../tool_projection/redaction";
 
-export type { JsonObject } from "./session_entries";
-
 const VIEW_READ_BYTES = 4 << 20;
 const VIEW_WINDOW_MAX = 100;
 const VIEW_RESULT_MAX = LIVE_TOOL_OUTPUT_MAX;
@@ -70,12 +68,13 @@ export interface ViewBatch {
   readonly older: boolean;
 }
 
-export interface ConversationBlock {
+interface ConversationBlock {
   readonly id: string;
   readonly kind: string;
   readonly role: string;
   readonly text: string;
   readonly thinking?: string | null;
+  readonly thinking_key?: string;
   readonly has_thinking?: true;
   readonly thinking_title?: string | null;
   readonly thinking_start_ms?: number;
@@ -110,7 +109,7 @@ export interface ConversationBlock {
   readonly text_hash?: number;
 }
 
-export interface ConversationSnapshot {
+interface ConversationSnapshot {
   readonly instance_id: string;
   readonly revision: number;
   readonly blocks: readonly ConversationBlock[];
@@ -120,7 +119,7 @@ export interface ConversationSnapshot {
   readonly reset: boolean;
 }
 
-export interface ConversationProjection {
+interface ConversationProjection {
   readonly cid: string;
   readonly instance_id: string;
   readonly revision: number;
@@ -1056,6 +1055,7 @@ function servedBlock(
       ? { text_from: block.text_from, text_hash: block.text_hash }
       : {}),
     ...(block.thinking ? { thinking_title: block.thinking } : {}),
+    ...(block.thinking_key ? { thinking_key: block.thinking_key } : {}),
     ...(block.has_thinking ? { has_thinking: true } : {}),
     ...(typeof block.thinking_start_ms === "number"
       ? {

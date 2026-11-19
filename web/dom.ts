@@ -30,7 +30,7 @@ export function el<K extends keyof HTMLElementTagNameMap>(
 
 export const listEl = req("#agent-list");
 export const msgsEl = req("#messages");
-// Read-only: only conversation/scroll-ledger.ts moves the thread.
+// Read-only: only thread-scroll/scroll-ledger.ts moves the thread.
 export const scrollEl: Omit<HTMLElement, "scrollTop"> & {
   readonly scrollTop: number;
   scroll: never;

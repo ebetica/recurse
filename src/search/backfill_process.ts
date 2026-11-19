@@ -1,7 +1,7 @@
 // Startup catch-up uses one owned process without pre-reading transcript data.
 // Replies contain counters only; closing verifies the process group is gone.
 import { fileURLToPath } from "node:url";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 import type { ProcessLifecycle } from "../process_lifecycle";
 import type { SearchTarget, SyncStats } from "./index";
 

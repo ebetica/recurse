@@ -12,7 +12,7 @@ import {
 } from "../observability/runtime_logging";
 import type { TranscriptQuery } from "../agents/durable/transcript";
 import { conditionalJson } from "./caching";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { TEMP_ID_RE } from "./conversations";
 import { ReviveRefused } from "../agents/supervisor/revive";
 import { clientIp, isOperator } from "./request_auth";
@@ -22,8 +22,8 @@ import { TreeDeltaHistory } from "./tree_delta";
 type Rec = Record<string, unknown>;
 
 /** Client-supplied idempotency token for a deliver stop. */
-export const STOP_ID_RE = /^[A-Za-z0-9._-]{1,160}$/;
-export const STOP_DIAGNOSTIC_EVENTS: ReadonlySet<string> = new Set([
+const STOP_ID_RE = /^[A-Za-z0-9._-]{1,160}$/;
+const STOP_DIAGNOSTIC_EVENTS: ReadonlySet<string> = new Set([
   "capture_installed",
   "capture_seen",
   "dispatch_started",
@@ -32,31 +32,31 @@ export const STOP_DIAGNOSTIC_EVENTS: ReadonlySet<string> = new Set([
   "request_result",
   "request_failure",
 ]);
-export const STOP_DIAGNOSTIC_GENERATORS: ReadonlySet<string> = new Set([
+const STOP_DIAGNOSTIC_GENERATORS: ReadonlySet<string> = new Set([
   "random_uuid",
   "get_random_values",
   "fallback",
 ]);
-export const STOP_DIAGNOSTIC_INPUTS: ReadonlySet<string> = new Set([
+const STOP_DIAGNOSTIC_INPUTS: ReadonlySet<string> = new Set([
   "pointerdown",
   "touchstart",
   "click",
   "keyboard",
 ]);
-export const STOP_DIAGNOSTIC_POINTERS: ReadonlySet<string> = new Set([
+const STOP_DIAGNOSTIC_POINTERS: ReadonlySet<string> = new Set([
   "mouse",
   "touch",
   "pen",
   "unknown",
 ]);
-export const STOP_DIAGNOSTIC_RESULTS: ReadonlySet<string> = new Set([
+const STOP_DIAGNOSTIC_RESULTS: ReadonlySet<string> = new Set([
   "accepted",
   "rejected",
   "finished",
   "lookup_failed",
   "exception",
 ]);
-export const STOP_DIAGNOSTIC_WINDOW = 60.0;
+const STOP_DIAGNOSTIC_WINDOW = 60.0;
 export const STOP_DIAGNOSTIC_MAX = 32;
 const STOP_DIAGNOSTIC_IPS = 1024;
 const STOP_DIAGNOSTIC_FIELDS = new Set([
@@ -195,7 +195,7 @@ async function acceptIdleProcessStop(
   return idle;
 }
 
-export interface DurableStop {
+interface DurableStop {
   owns(cid: string): boolean;
   stopStatus(cid: string): Promise<readonly [string | null, string | null]>;
   /** Abort exactly `expectedRun`; false when it is not the live run. */

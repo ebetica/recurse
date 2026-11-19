@@ -15,7 +15,7 @@ import {
 import type { ChildProcess } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import type { OwnedProcess } from "../../../process_lifecycle.ts";
-import { slowSpan } from "../../../observability/slow_span";
+import { slowSpan } from "../../../observability/slow-span";
 import {
   McpOAuthCredentialStore,
   McpServerConnection,
@@ -54,7 +54,7 @@ type Session = {
   connections: Map<string, Slot>;
   abort: AbortController;
 };
-export const MCP_AUTH_FILE_NAME = "mcp-auth.json";
+const MCP_AUTH_FILE_NAME = "mcp-auth.json";
 /** Pi OAuth credentials for servers in `configPath`'s mcp.json. */
 export const mcpCredentials = (configPath: string) =>
   new McpOAuthCredentialStore(
@@ -124,11 +124,14 @@ class OwnedStdio extends StdioTransport {
     try {
       await super.close();
     } finally {
-      if (this.proc) {
-        if (!(await this.host.release(this.proc)))
-          throw new Error("MCP server process groups survived");
-        this.procs.delete(this.proc);
-      }
+      await this.releaseProcess();
+    }
+  }
+  private async releaseProcess() {
+    if (this.proc) {
+      if (!(await this.host.release(this.proc)))
+        throw new Error("MCP server process groups survived");
+      this.procs.delete(this.proc);
     }
   }
 }

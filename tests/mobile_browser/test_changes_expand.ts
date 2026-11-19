@@ -278,7 +278,7 @@ export const tests: BrowserTest[] = [
   },
 ];
 
-export const highlightingTests: BrowserTest[] = [1280, 412].map(
+const highlightingTests: BrowserTest[] = [1280, 412].map(
   (width) =>
     // Regression: #2380 patch-only syntax state must not cross hidden file lines. (also #2457 a note in the code wraps inside the visible patch.)
     async function test_changes_hidden_python(browser, base) {

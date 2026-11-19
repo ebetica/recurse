@@ -16,7 +16,7 @@ import { agentMarked, isOperator } from "./request_auth";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse } from "./static";
 
-export interface ExplorerRoutesDeps {
+interface ExplorerRoutesDeps {
   cwd(cid: string): Promise<string | null>;
   search(
     cid: string,
@@ -37,10 +37,7 @@ const SAFE_HEADERS = {
  * A file path outside the working folder becomes its parent folder and name;
  * inside it, a path relative to the folder.
  */
-export function locate(
-  root: string,
-  path: string,
-): { root: string; path: string } {
+function locate(root: string, path: string): { root: string; path: string } {
   if (!path || path.includes("\0")) return { root, path };
   const target =
     path === "~" || path.startsWith("~/")

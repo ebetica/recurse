@@ -3,7 +3,7 @@
  * tests/checks/static.ts runs it.
  */
 
-export type Finding = { line: number; value: string };
+type Finding = { line: number; value: string };
 
 const SCALE = new Set(["0", "6px", "8px", "10px", "14px", "999px", "50%"]);
 const ALLOW = "radius-check: allow";

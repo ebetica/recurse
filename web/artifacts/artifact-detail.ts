@@ -30,7 +30,7 @@ import {
 export { setNotice };
 import { reviewedVersion, type DocumentChanges } from "../document-review.js";
 
-export async function loadVersions(
+async function loadVersions(
   pane: ArtifactEl,
   info: ArtifactInfo,
 ): Promise<void> {
@@ -134,7 +134,7 @@ async function changesFor(
   }
 }
 
-export function isCurrentArtifactRequest(
+function isCurrentArtifactRequest(
   pane: ArtifactEl,
   sequence: number,
   agentId: string,

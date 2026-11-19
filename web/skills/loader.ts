@@ -5,14 +5,14 @@
 import type { SkillChoice } from "../types.js";
 
 export const SKILL_CACHE_KEY = "recurse.skillCache.v2";
-export const SKILL_CACHE_VERSION = 2;
-export const SKILL_CACHE_TTL_MS = 15 * 60_000;
-export const SKILL_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
-export const SKILL_CACHE_MAX_ENTRIES = 24;
+const SKILL_CACHE_VERSION = 2;
+const SKILL_CACHE_TTL_MS = 15 * 60_000;
+const SKILL_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
+const SKILL_CACHE_MAX_ENTRIES = 24;
 const SKILL_CACHE_MAX_BYTES = 256 * 1024;
 const SKILL_CACHE_MAX_SKILLS = 256;
 
-export type SkillLoadState =
+type SkillLoadState =
   | {
       status: "ready";
       skills: SkillChoice[];
@@ -22,7 +22,7 @@ export type SkillLoadState =
     }
   | { status: "loading" | "error" | "missing" };
 
-export type SkillFetchResult =
+type SkillFetchResult =
   | { status: "ok"; skills: SkillChoice[]; context: string; etag?: string }
   | { status: "not-modified"; context: string; etag?: string };
 
@@ -39,7 +39,7 @@ export interface StorageLike {
   removeItem(key: string): void;
 }
 
-export interface SkillCacheEntry {
+interface SkillCacheEntry {
   agentId: string;
   context: string;
   skills: SkillChoice[];

@@ -7,18 +7,18 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { PI_PACKAGE_ROOT } from "../build_dir";
 import { ReadOnlyAuthStorage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 import type { ProcessHandle, ProcessLifecycle } from "../process_lifecycle";
-import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
+import { parsePythonJson, pyCompactJson } from "../utils/python-json";
 import type { ProviderCredentialStore } from "./provider_store";
 
-export const AUTH_FILE_NAME = "auth.json";
+const AUTH_FILE_NAME = "auth.json";
 export const HTTP_TIMEOUT_MS = 30_000;
 // Browser User-Agent avoids token endpoints' Cloudflare bot refusal.
 export const USER_AGENT =
   "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 " +
   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
-export const WORKER_PATH = join(import.meta.dir, "..", "pi_auth.worker.mjs");
+const WORKER_PATH = join(import.meta.dir, "..", "pi_auth.worker.mjs");
 const AUTH_REFRESH_SKEW_MS = 5 * 60 * 1000;
 const AUTH_RESOLVE_TIMEOUT_MS = 75_000;
 const WORKER_ENV_STRIP = [
@@ -50,7 +50,7 @@ export class HttpStatusError extends Error {
   }
 }
 
-export interface OAuthStoreOptions {
+interface OAuthStoreOptions {
   /** coding_backend pi_agent_dir(): prepared, not necessarily created. */
   piAgentDir: () => Promise<string>;
   /** The server's ambient environment. */
@@ -65,7 +65,7 @@ export interface OAuthStoreOptions {
   pid?: number;
 }
 
-export interface NativeRequestOptions {
+interface NativeRequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
   /** Largest accepted response line; the default suits credential replies. */
@@ -647,7 +647,7 @@ export function pyUrlencode(fields: Record<string, string>): string {
 const NON_PRINTABLE = /[\p{C}\p{Z}]/u;
 
 /** repr() of a Python str. */
-export function pyStrRepr(value: string): string {
+function pyStrRepr(value: string): string {
   const quote = value.includes("'") && !value.includes('"') ? '"' : "'";
   let out = quote;
   for (const ch of value) {
@@ -692,6 +692,6 @@ function pyNumber(value: number): string {
 }
 
 /** str() of a JSON value (strings unquoted, containers as repr). */
-export function pyStr(value: unknown): string {
+function pyStr(value: unknown): string {
   return typeof value === "string" ? value : pyRepr(value);
 }

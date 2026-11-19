@@ -20,7 +20,7 @@ export const TEST_PI_MODELS = [
   context_window,
 }));
 
-export function piModelListText(models = TEST_PI_MODELS): string {
+function piModelListText(models = TEST_PI_MODELS): string {
   return JSON.stringify({ version: PI_MODEL_LIST_VERSION, models });
 }
 

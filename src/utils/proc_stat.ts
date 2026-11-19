@@ -19,10 +19,10 @@ export interface ProcStat {
   session: number;
   startTime: string;
 }
-export type ProcResult =
+type ProcResult =
   | { state: "ok"; stat: ProcStat }
   | { state: "dead" | "permission" | "unavailable"; stat: null };
-export interface ProcessIdentity {
+interface ProcessIdentity {
   start_time: string | null;
   pgid: number | null;
   sid: number | null;
@@ -47,7 +47,7 @@ export function procFields(raw: string): {
 }
 
 /** Parse fields 3, 5, 6 and 22 without converting the start token to Number. */
-export function parseProcStat(pid: number, raw: string): ProcResult {
+function parseProcStat(pid: number, raw: string): ProcResult {
   const end = raw.lastIndexOf(")");
   if (end < 0) return { state: "unavailable", stat: null };
   const fields = raw

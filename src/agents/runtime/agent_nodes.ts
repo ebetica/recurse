@@ -1,9 +1,9 @@
 // Live AgentNode registry: one owner per conversation; Durable owns Harnesses.
 // Await-free check/insert prevents duplicate owners; expose desired
 // mute/safety.
-import type { ConversationRecord } from "../conversation_store";
+import type { ConversationRecord } from "../storage";
 
-export interface RegistryNode<S> {
+interface RegistryNode<S> {
   store: S | null;
   readonly reaping: boolean;
   muteDesired: boolean | null;
@@ -19,7 +19,7 @@ export interface RegistryNode<S> {
   dropStall(): void;
 }
 
-export interface AgentNodesDeps<N extends RegistryNode<S>, S> {
+interface AgentNodesDeps<N extends RegistryNode<S>, S> {
   createNode(cid: string, store: S | null): N;
   store: {
     convRowExists(cid: string): boolean;

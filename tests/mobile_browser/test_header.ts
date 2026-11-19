@@ -290,19 +290,19 @@ export const tests: BrowserTest[] = [
           (globalThis as any).document.querySelector("#agent-list").scrollTop,
       );
       expect(
-        await agentList.evaluate((list) => {
-          const box = list.getBoundingClientRect();
-          const track = (list.offsetWidth - list.clientWidth) / 2;
+        await agentList.evaluate((el) => {
+          const box = el.getBoundingClientRect();
+          const track = ((el as HTMLElement).offsetWidth - el.clientWidth) / 2;
           return {
-            overflows: list.scrollHeight > list.clientHeight,
+            overflows: el.scrollHeight > el.clientHeight,
             trackClear:
               track > 0 &&
               [...Array(track).keys()].every(
                 (i) =>
-                  list.ownerDocument.elementFromPoint(
+                  el.ownerDocument.elementFromPoint(
                     box.right - 1 - i,
                     box.top + box.height / 2,
-                  ) === list,
+                  ) === el,
               ),
           };
         }),

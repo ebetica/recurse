@@ -2,19 +2,22 @@
 // Ratchet file/module SCCs and entry debt; omit type/lazy edges by default.
 // Nearest folder owns each file; nested folders are separate modules. Root
 // src/web files stand alone. Folder index.ts files use only named re-exports.
-// --modules dumps debt; --dot/--cycles accept it; --height prints a chain.
-import { existsSync, readFileSync } from "node:fs";
+// Passing checks shrink the tracked baselines and ask you to commit them.
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import ts from "typescript";
 
-export async function checkImportGraph(args: string[] = []): Promise<boolean> {
+export async function checkImportGraph(
+  args: string[] = [],
+  sources?: Map<string, ts.SourceFile>,
+): Promise<boolean> {
   if (args.includes("--help")) {
     console.log(`bun tests/checks/import_graph.ts [--root DIR] [--baseline FILE] [--module-baseline FILE]
---modules prints module debt JSON; baselines must only shrink.
---dot [--modules | --dirs] prints DOT; --cycles [--modules] prints SCCs.
---height prints the condensed module height and one longest chain.
---dynamic includes literal import() edges; type-only imports stay omitted.`);
+Default: fail on regressions; after a passing check, shrink improved baselines and print which files to commit.
+--modules prints module debt JSON; --dot [--modules | --dirs] prints DOT.
+--cycles [--modules] prints SCCs; --height prints one longest module chain.
+--dynamic includes literal import() edges and never writes baselines; type-only imports stay omitted.`);
     return true;
   }
   const option = (name: string, fallback: string) => {
@@ -131,15 +134,11 @@ export async function checkImportGraph(args: string[] = []): Promise<boolean> {
   );
   for (const [index, file] of files.entries()) {
     const absolute = resolve(root, file);
-    const source = ts.createSourceFile(
-      file,
-      texts[index]!,
-      {
-        languageVersion: ts.ScriptTarget.Latest,
-        jsDocParsingMode: ts.JSDocParsingMode.ParseNone,
-      },
-      false,
-    );
+    const source = ts.createSourceFile(absolute, texts[index]!, {
+      languageVersion: ts.ScriptTarget.Latest,
+      jsDocParsingMode: ts.JSDocParsingMode.ParseNone,
+    });
+    sources?.set(absolute, source);
     const edges = new Set<string>();
     graph.set(file, edges);
     const options = compilerOptions(file);
@@ -371,55 +370,63 @@ export async function checkImportGraph(args: string[] = []): Promise<boolean> {
     console.log(JSON.stringify(debt, null, 2));
   } else {
     const baseline: string[][] = JSON.parse(readFileSync(baselinePath, "utf8"));
-    const key = (cycle: string[]) => JSON.stringify([...cycle].sort());
+    const covered = (cycle: string[], expected: string[][]) =>
+      expected.some((entry) => cycle.every((member) => entry.includes(member)));
+    const cyclesChanged = (actual: string[][], expected: string[][]) =>
+      actual.length !== expected.length ||
+      expected.some((entry) => !covered(entry, actual));
     for (const cycle of cycles)
-      if (!baseline.some((entry) => key(entry) === key(cycle))) {
+      if (!covered(cycle, baseline)) {
+        const path = cyclePath(cycle, graph);
         console.error(
-          `Unbaselined import cycle: ${cyclePath(cycle, graph).join(" → ")}`,
+          path.length === cycle.length + 1
+            ? `Unbaselined import cycle: ${path.join(" → ")}`
+            : `Unbaselined import cycle component: ${cycle.join(", ")}\nExample cycle: ${path.join(" → ")}`,
         );
         console.error(
           "move the shared code into a lower module or pass a callback",
         );
         failures++;
       }
-    for (const entry of baseline)
-      if (!cycles.some((cycle) => key(entry) === key(cycle))) {
-        console.error(
-          `Stale import cycle baseline; remove or shrink: ${entry.join(", ")}`,
-        );
-        failures++;
-      }
     const moduleBaseline: typeof debt = JSON.parse(
       readFileSync(moduleBaselinePath, "utf8"),
     );
-    const compare = (label: string, actual: string[], expected: string[]) => {
-      for (const item of actual)
-        if (!expected.includes(item)) {
-          console.error(`Unbaselined ${label}: ${item}`);
-          failures++;
-        }
-      for (const item of expected)
-        if (!actual.includes(item)) {
-          console.error(`Stale ${label} baseline; remove or shrink: ${item}`);
-          failures++;
-        }
+    const fail = (message: string) => {
+      console.error(`Unbaselined ${message}`);
+      failures++;
     };
-    compare(
-      "module cycle",
-      moduleCycles.map(key),
-      moduleBaseline.cycles.map(key),
-    );
-    compare("module entry bypass", debt.bypasses, moduleBaseline.bypasses);
-    const entryKeys = (items: Record<string, number>) =>
-      Object.entries(items).map(
-        ([name, count]) =>
-          `${name}: ${count < 0 ? "missing index.ts" : `${count} statements other than named re-exports`}`,
-      );
-    compare(
-      "module entry",
-      entryKeys(entries),
-      entryKeys(moduleBaseline.entries),
-    );
+    for (const cycle of moduleCycles)
+      if (!covered(cycle, moduleBaseline.cycles))
+        fail(`module cycle: ${cycle.join(", ")}`);
+    const priorBypasses = new Set(moduleBaseline.bypasses);
+    for (const bypass of bypasses)
+      if (!priorBypasses.has(bypass)) fail(`module entry bypass: ${bypass}`);
+    for (const [name, count] of Object.entries(entries)) {
+      const cap = moduleBaseline.entries[name];
+      if (cap === -1 || (count !== -1 && count <= (cap ?? 0))) continue;
+      const reason =
+        count === -1
+          ? "missing index.ts"
+          : `${count} statements other than named re-exports`;
+      fail(`module entry: ${name}: ${reason}`);
+    }
+    if (!failures && !dynamic) {
+      const shrink = (file: string, next: unknown) => {
+        writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
+        console.log(
+          `Shrank ${relative(root, file)}; commit the updated baseline.`,
+        );
+      };
+      if (cyclesChanged(cycles, baseline)) shrink(baselinePath, cycles);
+      if (
+        cyclesChanged(moduleCycles, moduleBaseline.cycles) ||
+        bypasses.length !== priorBypasses.size ||
+        Object.entries(moduleBaseline.entries).some(
+          ([name, cap]) => entries[name] !== cap,
+        )
+      )
+        shrink(moduleBaselinePath, debt);
+    }
     console.log(
       `module graph: ${modules.size} modules, ${moduleCycles.length} cycles (${moduleCycles.reduce((sum, cycle) => sum + cycle.length, 0)} modules), ${bypasses.length} entry bypasses, ${Object.keys(entries).length} missing/non-thin entries; height ${longest.length}`,
     );

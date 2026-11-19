@@ -48,7 +48,7 @@ const IMPORT_LINE =
 const LAUNCH_LINE = /Worker|new URL\(|spawn|execPath/;
 const BROWSER_INDEX = "tests/mobile_browser/index.ts";
 
-export type Plan = {
+type Plan = {
   /** Changed build inputs, or files no test names: every suite runs. */
   everything: string[];
   backend: string[];
@@ -68,7 +68,7 @@ export type Plan = {
 };
 
 /** Reverse dependency edges: path -> files whose text names that path. */
-export function dependents(
+function dependents(
   files: string[],
   read: (path: string) => string,
   deleted: string[] = [],
@@ -144,7 +144,7 @@ export function dependents(
 }
 
 /** Browser group labels and their test files, read from the runner's list. */
-export function browserGroups(index: string): Map<string, string[]> {
+function browserGroups(index: string): Map<string, string[]> {
   const files = new Map<string, string>();
   for (const match of index.matchAll(
     /import \{ tests as (\w+) \} from "\.\/(\w+)";/g,
@@ -173,7 +173,7 @@ const SERVER_ENTRIES = [
 ];
 
 /** Decide which tests can observe `changes`, with an optional coverage map. */
-export function plan(
+function plan(
   changes: FileChange[],
   files: string[],
   read: (path: string) => string,
@@ -349,7 +349,7 @@ export function plan(
 }
 
 /** The shell commands for a plan, one per line. */
-export function commands(result: Plan): string[] {
+function commands(result: Plan): string[] {
   if (result.everything.length)
     return [
       `# everything: ${result.browserReason}`,
@@ -381,7 +381,7 @@ export function commands(result: Plan): string[] {
  * Commits whose changes may reach a browser group, fewest groups first.
  * Ties keep the given order; commits the map cannot place come last.
  */
-export function blame(
+function blame(
   group: string,
   commits: Array<{ name: string; changes: FileChange[] }>,
   files: string[],

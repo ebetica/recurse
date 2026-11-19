@@ -1239,31 +1239,32 @@ test.each([
       expect(result.transcript).toContain(reason);
       expect(result.failureLogs).toEqual([]);
     } else {
+      const missingCredentials = mode === "file-pin-no-credentials";
+      const invalidPin = mode === "no-trusted-reviewer";
       expect(reviews).toHaveLength(0);
-      expect(result.selected).toEqual(
-        mode === "file-pin-no-credentials" ? [native.id] : [],
-      );
+      expect(result.selected).toEqual(missingCredentials ? [native.id] : []);
       expect(result.transcript).toContain("allowed without review");
-      if (mode === "no-trusted-reviewer")
+      expect(result.transcript).toContain("safety_review_failed");
+      if (invalidPin) {
         expect(result.transcript).toContain(
           "Your chosen safety reviewer is not a built-in model",
         );
-      expect(result.transcript).toContain("safety_review_failed");
-      if (mode === "no-trusted-reviewer")
         expect(result.transcript).toContain("effort level 1");
+      }
       expect(result.failureLogs).toEqual([
         {
           event: "safety_review_failed",
           fields: {
             cid: "c1",
-            stage:
-              mode === "no-trusted-reviewer" ? "configuration" : "provider",
-            category:
-              mode === "no-trusted-reviewer"
-                ? "unsupported_reviewer_pin"
-                : "auth",
-            ...(mode === "file-pin-no-credentials"
-              ? { provider: "anthropic", model: native.id }
+            stage: invalidPin ? "configuration" : "provider",
+            category: invalidPin ? "unsupported_reviewer_pin" : "auth",
+            ...(missingCredentials
+              ? {
+                  provider: "anthropic",
+                  model: native.id,
+                  error:
+                    "Safety_review_could_not_authenticate_the_configured_reviewer_model.",
+                }
               : {}),
             elapsed_ms: expect.any(Number),
             attempts: 0,

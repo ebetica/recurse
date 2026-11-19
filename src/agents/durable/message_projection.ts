@@ -1,5 +1,5 @@
 // Transcript rendering shared by the subagent CLI and API.
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 
 type JsonObject = Record<string, unknown>;
 
@@ -512,7 +512,6 @@ export {
   pyTruthy,
   pythonStrip,
   renderWindow,
-  summarizeArgs,
   textBlocks,
 };
 export type { JsonObject, Row };

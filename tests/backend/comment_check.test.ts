@@ -19,17 +19,28 @@ const fixture = (name: string) =>
   );
 
 describe("comment policy", () => {
-  test("correct docs, headers, body exceptions and non-comment tokens pass", () => {
+  test("correct docs, headers, ordinary body comments and wide lines pass", () => {
     expect(checkComments("src/example.ts", fixture("correct"))).toEqual([]);
-    expect(
-      checkComments(
-        "web/example.jsx",
-        "export const View = () => <p>// text</p>;",
-      ),
-    ).toEqual([]);
     expect(
       checkComments("src/local.ts", "#!/usr/bin/env bun\nexport {};\n"),
     ).toEqual([]);
+  });
+
+  test("comments in code are distinct from slashes in literal tokens", () => {
+    expect(
+      checkComments(
+        "tests/example.tsx",
+        readFileSync(
+          new URL("./fixtures/comments/literal-tokens.txt", import.meta.url),
+          "utf8",
+        ),
+      ).map((v) => `${v.line}:${v.rule}`),
+    ).toEqual([
+      "3:test-comment",
+      "4:test-comment",
+      "6:test-comment",
+      "10:test-comment",
+    ]);
   });
 
   test("only extracted tool help is exempt", () => {
@@ -38,8 +49,10 @@ describe("comment policy", () => {
       checkComments("tools/example.ts", source).map(
         (v) => `${v.line}:${v.rule}`,
       ),
-    ).toEqual(["13:comment-lines", "21:unexpected-comment"]);
-    expect(checkComments("src/example.ts", source).length).toBeGreaterThan(2);
+    ).toEqual(["13:comment-lines", "21:comment-lines"]);
+    expect(
+      checkComments("src/example.ts", source).map((v) => `${v.line}:${v.rule}`),
+    ).toEqual(["2:comment-lines", "13:comment-lines", "21:comment-lines"]);
     expect(
       checkComments(
         "tools/example.ts",
@@ -86,31 +99,23 @@ describe("comment policy", () => {
     );
   });
 
-  test("reports each forbidden attachment, line limit and width", () => {
+  test("reports each forbidden attachment and line limit", () => {
     const observed = checkComments("src/example.ts", fixture("violations"));
     expect(observed.map((v) => `${v.line}:${v.rule}`)).toEqual([
       "1:comment-lines",
       "8:comment-lines",
       "11:unexpected-comment",
       "21:comment-lines",
-      "28:unexpected-comment",
-      "29:unexpected-comment",
-      "30:unexpected-comment",
       "31:comment-lines",
       "38:unexpected-comment",
       "40:unexpected-comment",
-      "41:comment-width",
       "43:duplicate-doc",
       "46:duplicate-doc",
       "50:duplicate-doc",
       "54:duplicate-doc",
       "58:duplicate-doc",
-      "62:unexpected-comment",
-      "64:unexpected-comment",
-      "67:unexpected-comment",
-      "69:unexpected-comment",
       "70:unexpected-comment",
-      "71:comment-width",
+      "71:unexpected-comment",
     ]);
   });
 
@@ -130,7 +135,7 @@ describe("comment policy", () => {
       expect(checkComments(file, fixture("exempt"))).toEqual([]);
   });
 
-  test("consecutive line comments form docs, headers and body exceptions", () => {
+  test("consecutive line comments form docs, headers and body comments", () => {
     expect(checkComments("src/a.ts", fixture("line-groups"))).toEqual([]);
     expect(
       checkComments("src/a.ts", fixture("line-group-violations")).map(
@@ -195,9 +200,7 @@ describe("comment policy", () => {
       expect((await run("--strict")).exitCode).toBe(0);
       expect((await run()).stdout.toString()).toContain("Comment warnings: 0");
       put(".prettierrc", '{"printWidth": 10}');
-      expect((await run("--strict")).exitCode).toBe(1);
-      expect((await run()).stdout.toString()).toContain("comment-width");
-      put(".prettierrc", '{"printWidth": 80}');
+      expect((await run("--strict")).exitCode).toBe(0);
       for (const file of [
         "src/local.ts",
         "tools/a.mjs",

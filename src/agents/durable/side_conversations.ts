@@ -30,11 +30,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 
 /** The only tools that run in a side conversation, directly or nested. */
-export const SIDE_TOOLS: ReadonlySet<string> = new Set([
-  "read",
-  "grep",
-  "find",
-]);
+const SIDE_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find"]);
 
 export const RETURN_TO_MAIN = "return_to_main";
 

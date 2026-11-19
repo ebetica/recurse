@@ -3,21 +3,21 @@
 // Task slots and nested holds expire independently of network/body completion.
 // Rejections are contained, never retried here; callers own recurring retry.
 
-export type BackgroundTask = (signal: AbortSignal) => Promise<unknown>;
+type BackgroundTask = (signal: AbortSignal) => Promise<unknown>;
 
 interface RunningTask {
   controller: AbortController;
   timer: number;
 }
 
-export const BACKGROUND_CONCURRENCY = 2;
-export const BACKGROUND_QUEUE_LIMIT = 12;
+const BACKGROUND_CONCURRENCY = 2;
+const BACKGROUND_QUEUE_LIMIT = 12;
 // Slot deadline prevents frozen background requests starving later warming.
-export const BACKGROUND_TASK_TIMEOUT_MS = 15_000;
+const BACKGROUND_TASK_TIMEOUT_MS = 15_000;
 // Hold deadline outlives poll wedge escape but cannot suppress warming forever.
-export const HOLD_TIMEOUT_MS = 13_000;
+const HOLD_TIMEOUT_MS = 13_000;
 
-export class BackgroundQueue {
+class BackgroundQueue {
   private readonly waiting: { key: string; task: BackgroundTask }[] = [];
   private readonly running = new Map<string, RunningTask>();
   private paused = 0;

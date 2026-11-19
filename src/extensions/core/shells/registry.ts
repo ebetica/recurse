@@ -3,7 +3,7 @@
 // wedging turns.
 
 import { type ChildProcess, spawn } from "node:child_process";
-import { slowSpan } from "../../../observability/slow_span";
+import { slowSpan } from "../../../observability/slow-span";
 import fs from "node:fs";
 import fsPromises, { type FileHandle } from "node:fs/promises";
 import {
@@ -40,9 +40,9 @@ import {
 } from "./status.ts";
 import { clampLineLimit, trimOutput } from "./trim.ts";
 
-export type ShellMode = "foreground" | "background" | "monitor";
-export type ShellStatus = "running" | "exited" | "killed" | "error";
-export type ShellLaunchError = "live-cap" | "spawn";
+type ShellMode = "foreground" | "background" | "monitor";
+type ShellStatus = "running" | "exited" | "killed" | "error";
+type ShellLaunchError = "live-cap" | "spawn";
 
 // Notification command cap; logs and trimmed output retain details.
 const COMMAND_CHARS_IN_MESSAGES = 300;
@@ -91,7 +91,7 @@ export interface ShellConfig {
   agentTempDir: string | undefined;
 }
 
-export const DEFAULT_CONFIG: ShellConfig = {
+const DEFAULT_CONFIG: ShellConfig = {
   foregroundWaitMs: 10_000,
   byteBudget: 50 * 1024,
   lineLimit: 2000,
@@ -113,7 +113,7 @@ export const DEFAULT_CONFIG: ShellConfig = {
   agentTempDir: undefined,
 };
 
-export interface MonitorNotice {
+interface MonitorNotice {
   shellId: string;
   lines: string[];
 }
@@ -208,7 +208,7 @@ export function verifySignalIdentity(shell: {
   return true;
 }
 
-export interface ShellInfo {
+interface ShellInfo {
   id: string;
   pid: number | undefined;
   command: string;

@@ -2,7 +2,7 @@
 // unit-testable in isolation. `desired` drives the toggle position, its red
 // label, and track; `effective` is what review is doing right now; `pending`
 // marks a mid-turn change that is queued but not yet in force ("· next turn").
-export interface SafetyView {
+interface SafetyView {
   desired: boolean;
   effective: boolean;
   pending: boolean;

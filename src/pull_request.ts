@@ -11,3 +11,15 @@ export function prIdentity(
   const number = Number(match[2]);
   return { repo, number, url: `https://github.com/${repo}/pull/${number}` };
 }
+
+/**
+ * The PR a successful bash `command` created: a `gh pr create` command's last
+ * output line that is a PR URL, as `gh pr create` prints it.
+ */
+export function createdPrUrls(command: string, output: string): string[] {
+  if (!/(?:^|[;&|(\n])\s*gh\s+pr\s+create\b/u.test(command)) return [];
+  const urls = output
+    .split("\n")
+    .flatMap((line) => prIdentity(line.trim()) ?? []);
+  return urls.length ? [urls.at(-1)!.url] : [];
+}

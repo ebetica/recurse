@@ -1,5 +1,6 @@
 // Holds the draft and its viewer without importing pane rendering or actions.
 import type {
+  Comment,
   CommentBox,
   CommentPane,
 } from "../../artifacts/artifact-state.js";
@@ -7,7 +8,6 @@ import type { PreparedCrop } from "../../artifacts/comment-crops.js";
 
 export interface SelectionSource {
   doc: Document;
-  pane: CommentPane | null;
   agentId: string | null;
   artifactId: string | null;
   version: string | null;
@@ -23,6 +23,7 @@ export interface SelectionSource {
 }
 
 export interface SelectionDraft {
+  pane: CommentPane;
   key: string;
   version: string;
   root: Element;
@@ -32,6 +33,7 @@ export interface SelectionDraft {
   box?: CommentBox;
   crop?: PreparedCrop;
   mark?: HTMLElement;
+  edit?: { comment: Comment; anchor: HTMLElement };
 }
 export let selectionDraft: SelectionDraft | null = null;
 export function setSelectionDraft(draft: SelectionDraft | null): void {
@@ -44,11 +46,6 @@ export const commentMount: { current: CommentPane | null } = {
 };
 
 /** The viewer owning the floating selection-comment draft. */
-export function selectionCommentOwner(): HTMLElement | null {
-  if (!selectionDraft) return null;
-  return (
-    selectionDraft.source.pane ||
-    selectionDraft.root.closest<HTMLElement>(".pane-body") ||
-    commentMount.current
-  );
+export function selectionCommentOwner(): CommentPane | null {
+  return selectionDraft?.pane ?? null;
 }

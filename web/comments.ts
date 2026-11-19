@@ -1,7 +1,7 @@
 // Guards staged Changes/Artifact comments on navigation and tab close. They
 // exist only in-page until sent; confirm discards, cancel stays put.
 
-export interface CommentSource {
+interface CommentSource {
   count(): number;
   discard(): void;
 }

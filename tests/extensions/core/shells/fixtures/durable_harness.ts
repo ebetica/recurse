@@ -28,7 +28,7 @@ import {
 import type { ShellConfig } from "../../../../../src/extensions/core/shells/registry.ts";
 import { ProcessLifecycle } from "../../../../../src/process_lifecycle.ts";
 
-export const lifecycle = new ProcessLifecycle({
+const lifecycle = new ProcessLifecycle({
   registry: {} as never,
   shellStateDir: "/nonexistent",
   termGraceMs: 500,

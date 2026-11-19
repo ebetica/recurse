@@ -18,21 +18,21 @@ import { inheritedLockFd } from "./lock.cli";
 import { logError, monotonic, say, type RunResult } from "./system";
 import { runInstallScript, scriptOutput, type UpdateReport } from "./update";
 
-export const HEAD_POLL_DEFAULT = 60;
-export const LOOP_INTERVAL = 0.2;
-export const BACKOFF_START = 1;
-export const BACKOFF_MAX = 30;
-export const HEALTHY_UPTIME = 30;
-export const LOOP_ERROR_BACKOFF = 1;
-export const QUIESCENCE_NOTICE = 30;
-export const STATUS_TIMEOUT = 2;
-export const UPDATE_TIMEOUT = 600;
+const HEAD_POLL_DEFAULT = 60;
+const LOOP_INTERVAL = 0.2;
+const BACKOFF_START = 1;
+const BACKOFF_MAX = 30;
+const HEALTHY_UPTIME = 30;
+const LOOP_ERROR_BACKOFF = 1;
+const QUIESCENCE_NOTICE = 30;
+const STATUS_TIMEOUT = 2;
+const UPDATE_TIMEOUT = 600;
 
-export interface Stopping {
+interface Stopping {
   flag: boolean;
 }
 
-export type AppStatus = [ready: boolean | null, activeAgents: number | null];
+type AppStatus = [ready: boolean | null, activeAgents: number | null];
 
 const LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1";
 
@@ -101,7 +101,7 @@ export async function queryAppStatus(
 
 // Deferred restarts pass when idle or their wait cap expires.
 // Supervisor re-exec additionally requires known zero active turns.
-export async function reloadGate(
+async function reloadGate(
   dataDir: string,
   port: number,
   pendingSince: number,
@@ -113,7 +113,7 @@ export async function reloadGate(
   return [inflight === 0 || now - pendingSince >= cap, inflight];
 }
 
-export interface Clock {
+interface Clock {
   readonly monotonic: () => number;
   readonly sleep: (seconds: number) => Promise<void>;
 }
@@ -169,7 +169,7 @@ export interface SupervisorDeps {
   onStopSignals: (stop: () => void) => () => void;
 }
 
-export function supervisorDeps(): SupervisorDeps {
+function supervisorDeps(): SupervisorDeps {
   return {
     prepareCodeSource: (dataDir) => prepareCodeSource(dataDir),
     buildCurrentGeneration: (codeDir, options) =>

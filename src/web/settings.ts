@@ -51,7 +51,7 @@ import {
   saveMcpConfig,
 } from "../mcp_config";
 import { conditionalJson } from "./caching";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Router } from "./router";
 import type { PiModelUpdater } from "../pi_model_list";
 import type { RecurseUpdates } from "../recurse_update";
@@ -61,7 +61,7 @@ import { McpCheckBusy, type McpChecks } from "../mcp_checks";
 type Rec = Record<string, unknown>;
 
 /** Pi's model providers and their labels, in menu order. */
-export const PI_PROVIDER_LABELS: readonly (readonly [string, string])[] = [
+const PI_PROVIDER_LABELS: readonly (readonly [string, string])[] = [
   ["claude", "Claude"],
   ["openai", "OpenAI"],
   ["openrouter", "OpenRouter"],
@@ -111,7 +111,7 @@ function settingsModelList(config: Config): Rec[] {
   }));
 }
 
-export function logicalProviderAuthed(
+function logicalProviderAuthed(
   provider: string,
   authed: ReadonlySet<string>,
 ): boolean {
@@ -122,7 +122,7 @@ export function logicalProviderAuthed(
   return false;
 }
 
-export interface SettingsRoutesDeps {
+interface SettingsRoutesDeps {
   readonly config: Config;
   promptCacheWarmingChanged?(): void;
   readonly modelUpdates: Pick<PiModelUpdater, "start" | "status">;

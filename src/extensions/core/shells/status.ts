@@ -2,7 +2,7 @@
 // state. Equal timestamps retain live launch order or legacy snapshot order.
 import { escapeReminderMarkers } from "../../../reminder_text.ts";
 
-export type BackgroundReminderStatus = "running" | "stopping";
+type BackgroundReminderStatus = "running" | "stopping";
 
 export interface BackgroundReminderShell {
   id: string;
@@ -12,7 +12,7 @@ export interface BackgroundReminderShell {
   launchSequence?: number;
 }
 
-export interface BackgroundReminderOptions {
+interface BackgroundReminderOptions {
   maxEntries?: number;
   maxBytes?: number;
   maxCommandChars?: number;
@@ -118,7 +118,7 @@ export function formatBackgroundShellReminder(
   return output;
 }
 
-export interface StillRunningShell {
+interface StillRunningShell {
   id: string;
   command: string;
   pid: number | undefined;

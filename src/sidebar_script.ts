@@ -24,7 +24,7 @@ const KEEP = 10;
 /** The dry run's bound, including the worker's engine start. */
 const DRY_RUN_MS = 5000;
 
-export interface ScriptVersion {
+interface ScriptVersion {
   at: number;
   by: string;
   script: string | null;

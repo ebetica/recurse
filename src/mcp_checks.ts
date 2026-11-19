@@ -12,7 +12,7 @@ import {
 import { McpConfigError } from "./mcp_config";
 import type { ProcessLifecycle } from "./process_lifecycle";
 import { AbortScope, type TaskSet } from "./utils/tasks";
-import { retirePath } from "./utils/trash_sweep";
+import { retirePath } from "./utils/trash-sweep";
 
 interface CheckOptions {
   configPath: string;

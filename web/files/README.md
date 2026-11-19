@@ -12,6 +12,8 @@
 - [`style.css`](style.css): collection and viewer layout.
 
 The server's owner-scoped accepted-file routes supply metadata and bytes.
+App startup connects row reads, turn observations, and published-file changes to
+the Files pane. Row commits notify it synchronously before the next thread paint.
 
 ## Views
 

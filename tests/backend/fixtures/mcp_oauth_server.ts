@@ -8,7 +8,7 @@ import { createHash, randomBytes } from "node:crypto";
 type Client = { redirect_uris: string[] };
 type Grant = { client_id: string; expiresAt: number };
 
-export interface OAuthMcpServer {
+interface OAuthMcpServer {
   origin: string;
   url: string;
   /** Every grant_type the token endpoint accepted, in order. */

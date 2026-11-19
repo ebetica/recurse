@@ -85,7 +85,7 @@ const add = (sum: TurnUsage, usage: Partial<Usage> | undefined): TurnUsage => ({
   cost: sum.cost + (usage?.cost?.total ?? 0),
 });
 
-export async function recurseSections(
+async function recurseSections(
   root: string,
   repo: string,
   dataDir: string,

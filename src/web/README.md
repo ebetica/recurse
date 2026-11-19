@@ -1,7 +1,7 @@
 # HTTP boundary
 
-Shared matching, query coercion and response primitives live in
-[router/](router/), without application dependencies.
+[Router](router/) matches routes and handles query and response primitives.
+[Request helpers](request/) decode JSON and read the middleware's auth method.
 
 `app.ts` composes Config, instance services, routes and authentication without
 listening or starting work. Before listening, startup prepares storage/logging,

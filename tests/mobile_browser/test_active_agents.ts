@@ -1,4 +1,3 @@
-declare const document: any;
 declare const getComputedStyle: any;
 import { expect } from "bun:test";
 import { tree as fixtureTree } from "./fixtures";

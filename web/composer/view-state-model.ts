@@ -2,7 +2,7 @@
 import type { ComposerViewState } from "../conversation-ui-state/schema.js";
 import type { ConversationUiStateStore } from "../conversation-ui-state/store.js";
 
-export interface ComposerField {
+interface ComposerField {
   value: string;
   selectionStart: number | null;
   selectionEnd: number | null;

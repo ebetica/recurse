@@ -319,7 +319,7 @@ export function activityUsage(
 
 // Sums reply usage when no recorded aggregate exists: always a lower bound.
 // Missing calls contribute nothing; cumulative scope prices never sum.
-export function replyUsageTotal(
+function replyUsageTotal(
   reported: readonly (TurnUsage | null | undefined)[],
   counts: Pick<
     ActivityUsage,

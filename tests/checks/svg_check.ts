@@ -3,9 +3,9 @@
  * tests/checks/static.ts runs it.
  */
 import ts from "typescript";
-import { tsCode } from "./color_check.ts";
+import { StyleFile, type StyleText } from "./style_file.ts";
 
-export type Finding = { line: number; markup: string };
+type Finding = { line: number; markup: string };
 
 const ALLOW = "svg-check: allow";
 const ICONS = "web/icons.ts";
@@ -33,18 +33,13 @@ function literalText(source: ts.SourceFile, text: string): string {
   return keep(text, (i) => inside[i] === 1);
 }
 
-/** Inline SVG markup in one file's text, empty icon slots excepted. */
-export function findSvg(text: string, file: string): Finding[] {
+function findSvgIn(input: StyleText): Finding[] {
+  const { file, text } = input;
   let code: string, markup: string;
   if (file.endsWith(".ts")) {
-    const source = ts.createSourceFile(
-      file,
-      text,
-      ts.ScriptTarget.Latest,
-      true,
-    );
-    code = tsCode(source, text);
-    markup = literalText(source, text);
+    const syntax = StyleFile.from(input);
+    code = syntax.code;
+    markup = literalText(syntax.source, text);
   } else {
     code = markup = text.replace(/\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->/g, (m) =>
       m.replace(/[^\n]/g, " "),
@@ -67,16 +62,19 @@ export function findSvg(text: string, file: string): Finding[] {
   return findings;
 }
 
+/** Inline SVG markup in one file's text, empty icon slots excepted. */
+export function findSvg(text: string, file: string): Finding[] {
+  return findSvgIn({ file, text });
+}
+
 /** Error lines for the given files; empty when the policy holds. */
-export function checkFiles(
-  files: readonly { file: string; text: string }[],
-): string[] {
+export function checkFiles(files: readonly StyleText[]): string[] {
   return files
     .filter(({ file }) => file !== ICONS)
-    .flatMap(({ file, text }) =>
-      findSvg(text, file).map(
+    .flatMap((input) =>
+      findSvgIn(input).map(
         ({ line, markup }) =>
-          `${file}:${line}: inline SVG ${markup} belongs in ${ICONS}`,
+          `${input.file}:${line}: inline SVG ${markup} belongs in ${ICONS}`,
       ),
     );
 }

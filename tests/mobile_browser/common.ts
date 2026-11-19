@@ -26,14 +26,13 @@ export const ROOT = join(import.meta.dir, "../..");
 export const LOGIN = "browser-test-password";
 export const ARTIFACT_VERSION = "a".repeat(40);
 export const OLDER_ARTIFACT_VERSION = "b".repeat(40);
-export const TOOL_ARTIFACT_ID = "c".repeat(24);
 export const PNG_1X1 = Uint8Array.from(
   Buffer.from(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
     "base64",
   ),
 );
-export const SVG_IMAGE = Buffer.from(
+const SVG_IMAGE = Buffer.from(
   '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"><rect width="10" height="10" fill="red"/></svg>',
 );
 export const ARTIFACT: any = {
@@ -159,7 +158,7 @@ export const rootAgentId = (): string => {
 };
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-export async function waitReady(
+async function waitReady(
   base: string,
   deadline = Date.now() + 30_000,
   headers: Record<string, string> = {},

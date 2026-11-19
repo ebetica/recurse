@@ -199,7 +199,7 @@ function evidenceHeader(generation: string): string {
   ].join("\n");
 }
 
-export type DurableReviewJournal = Readonly<{
+type DurableReviewJournal = Readonly<{
   journalEvidence: string;
   appendedRecords: number;
   reset: boolean;

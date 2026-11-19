@@ -19,7 +19,7 @@ import {
 } from "../utils/libc";
 
 /** An OSError-like failure carrying the libc errno name. */
-export class SystemError extends Error {
+class SystemError extends Error {
   override name = "OSError";
   constructor(
     readonly call: string,
@@ -126,7 +126,7 @@ export class TimeoutExpired extends Error {
   }
 }
 
-export interface RunOptions {
+interface RunOptions {
   readonly cwd?: string;
   readonly env: Readonly<Record<string, string>>;
   /** Omit to wait for the command however long it takes. */
@@ -204,7 +204,7 @@ const stderrSink: LogSink = {
 };
 
 /** The `recurse.supervisor` logger, written to stderr. */
-export const LOG = logger("supervisor", stderrSink);
+const LOG = logger("supervisor", stderrSink);
 
 /** A low-volume operator notice. */
 export function say(message: string): void {

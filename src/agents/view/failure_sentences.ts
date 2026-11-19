@@ -88,7 +88,7 @@ const MODEL_MARKERS = [
   "model is not supported",
 ];
 
-export type KnownModels = ReadonlySet<string>;
+type KnownModels = ReadonlySet<string>;
 
 export interface FailureContext {
   readonly provider?: string | null;
@@ -349,21 +349,6 @@ export function providerOutageKind(
     context,
   );
   return model !== null ? "model was not available" : null;
-}
-
-/** The live working-row text while Pi waits before a retry. */
-export function retryingStatus(attempt: unknown, maximum: unknown): string {
-  // Invariant: Python rejects the float 2.0 here; JavaScript numbers cannot
-  // tell 2.0 from 2, so integral floats count. Callers pass Pi's integer
-  // counters.
-  const valid =
-    Number.isInteger(attempt) &&
-    Number.isInteger(maximum) &&
-    (attempt as number) > 0 &&
-    (maximum as number) >= (attempt as number);
-  return valid
-    ? `Connection dropped; retrying (attempt ${attempt} of ${maximum})…`
-    : "Connection dropped; retrying…";
 }
 
 /** The transient transport failure a raw error names, if any. */

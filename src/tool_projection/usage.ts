@@ -11,10 +11,10 @@ export const USAGE_KEYS = [
   "cacheRead",
   "cacheWrite",
 ] as const;
-export const MAX_USAGE_GROUPS = 16;
-export const MAX_MODEL_SCOPE_KEYS = MAX_USAGE_GROUPS;
-export const MAX_MODEL_SCOPE_ENTRIES = 2048;
-export const MAX_MODEL_SCOPE_BYTES = 64 * 1024;
+const MAX_USAGE_GROUPS = 16;
+const MAX_MODEL_SCOPE_KEYS = MAX_USAGE_GROUPS;
+const MAX_MODEL_SCOPE_ENTRIES = 2048;
+const MAX_MODEL_SCOPE_BYTES = 64 * 1024;
 
 const MAX_SAFE_USAGE = Number.MAX_SAFE_INTEGER;
 const MAX_COST_SCOPES = 512;
@@ -57,7 +57,7 @@ export function validCostScope(value: unknown): value is string {
 }
 
 /** Accept only compact ASCII model selectors in durable scope metadata. */
-export function validModelScopeKey(value: unknown): value is string {
+function validModelScopeKey(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
@@ -89,7 +89,7 @@ export function validUsageCost(value: unknown): value is number {
 }
 
 /** One provider call's dollar cost, or null when the provider stated none. */
-export function reportedCost(
+function reportedCost(
   total: unknown,
   billedTokens: number,
   source: unknown = undefined,
@@ -232,21 +232,6 @@ function reportedSelector(usage: JsonObject): string | null {
   return null;
 }
 
-/** Fold Pi assistant-message usage fields into one turn summary. */
-export function summarizePiMessages(messages: unknown): Row | null {
-  const usage = new TurnUsage();
-  if (!Array.isArray(messages)) return null;
-  for (const message of messages) {
-    const normalized = providerUsage(message);
-    if (normalized === null) {
-      usage.partial = true;
-      continue;
-    }
-    usage.addCall(normalized, true);
-  }
-  return usage.summary();
-}
-
 // Fold finalized safety-review attempts without mixing them into model totals.
 export function summarizeSafetyResults(results: unknown): Row | null {
   const usage = new TurnUsage();
@@ -256,7 +241,7 @@ export function summarizeSafetyResults(results: unknown): Row | null {
 }
 
 /** Whole-turn provider and safety-review billing, durably accumulated. */
-export class TurnUsage {
+class TurnUsage {
   totals: Record<(typeof USAGE_KEYS)[number], number> = {
     input: 0,
     output: 0,
@@ -1290,205 +1275,5 @@ export class TurnUsage {
       calls: this.safetyCalls,
       partial: this.safetyPartial,
     };
-  }
-}
-
-/** Provider-reported billing for one assistant reply, across its calls. */
-export class SegmentUsage {
-  usage: Row | null = null;
-  latestUsage: Row | null = null;
-  usageSelectors: string[] = [];
-  private usageSelectorSet = new Set<string>();
-  private usageSelectorBytes = 0;
-  usageSelectorPartial = false;
-  usageCost = 0;
-  usageCostPartial = false;
-  usageCostKnown = false;
-  usageCostOverflow = false;
-  usageUnavailable = false;
-
-  private registerSegmentSelector(
-    usage: JsonObject,
-    selector: string | null,
-  ): void {
-    if (selector === null) {
-      if ("selectors" in usage || "selectorPartial" in usage)
-        this.usageSelectorPartial = true;
-    } else if (!this.usageSelectorSet.has(selector)) {
-      const selectorBytes = selector.length;
-      if (
-        this.usageSelectors.length >= MAX_USAGE_GROUPS ||
-        this.usageSelectorBytes + selectorBytes > MAX_MODEL_SCOPE_BYTES
-      )
-        this.usageSelectorPartial = true;
-      else {
-        this.usageSelectorSet.add(selector);
-        this.usageSelectors.push(selector);
-        this.usageSelectorBytes += selectorBytes;
-      }
-    }
-  }
-
-  private foldSegmentScopedCost(
-    segment: Row,
-    scope: unknown,
-    scopePartial: boolean,
-    cost: unknown,
-    source: unknown,
-  ): void {
-    if (source === "unknown") {
-      const priorCost = segment["cost"];
-      if (
-        typeof priorCost === "number" &&
-        Number.isFinite(priorCost) &&
-        priorCost >= 0
-      ) {
-        this.usageCostPartial = true;
-        segment["costScope"] = scope;
-        segment["costScopePartial"] = true;
-        segment["costPartial"] = true;
-      } else {
-        segment["costScope"] = scope;
-        segment["costSource"] = "unknown";
-        segment["costScopePartial"] = scopePartial;
-        delete segment["cost"];
-        delete segment["costPartial"];
-      }
-    } else if (typeof cost === "number" && Number.isFinite(cost) && cost >= 0) {
-      this.usageCost = cost;
-      this.usageCostKnown = true;
-      this.usageCostPartial = scopePartial;
-      segment["cost"] = this.usageCost;
-      segment["costSource"] = "authoritative";
-      segment["costScope"] = scope;
-      segment["costScopePartial"] = scopePartial;
-      segment["costPartial"] = scopePartial;
-    } else {
-      this.usageCostPartial = true;
-      delete segment["cost"];
-      delete segment["costPartial"];
-      segment["costSource"] = "unknown";
-      segment["costScope"] = scope;
-      segment["costScopePartial"] = true;
-    }
-  }
-
-  private foldSegmentUnscopedCost(
-    segment: Row,
-    cost: unknown,
-    source: unknown,
-  ): void {
-    if (
-      source === "unknown" ||
-      typeof cost !== "number" ||
-      !Number.isFinite(cost) ||
-      cost < 0
-    ) {
-      this.usageCostPartial = true;
-      if (source === "unknown") segment["costSource"] = "unknown";
-    } else {
-      this.usageCost += cost;
-      this.usageCostKnown = true;
-      if (!Number.isFinite(this.usageCost)) {
-        this.usageCost = 0;
-        this.usageCostPartial = true;
-        this.usageCostOverflow = true;
-      }
-    }
-  }
-
-  private projectSegmentCost(
-    scoped: boolean,
-    source: unknown,
-    cost: unknown,
-    scopePartial: boolean,
-  ): void {
-    if (this.usage === null) return;
-    if (
-      scoped &&
-      source === "authoritative" &&
-      typeof cost === "number" &&
-      Number.isFinite(cost) &&
-      cost >= 0
-    ) {
-      this.usage["cost"] = this.usageCost;
-      this.usage["costPartial"] = scopePartial;
-    } else if (!this.usageCostPartial && !(scoped && source === "unknown")) {
-      this.usage["cost"] = this.usageCost;
-      delete this.usage["costPartial"];
-    } else if (
-      !scoped &&
-      this.usageCostKnown &&
-      !this.usageCostOverflow &&
-      Number.isFinite(this.usageCost) &&
-      this.usageCost >= 0
-    ) {
-      this.usage["cost"] = this.usageCost;
-      this.usage["costPartial"] = true;
-    } else if (!(scoped && source === "unknown")) {
-      delete this.usage["cost"];
-      delete this.usage["costPartial"];
-    }
-  }
-
-  private recordLatestUsage(usage: JsonObject): void {
-    const latest: Row = {};
-    for (const key of USAGE_KEYS) latest[key] = usage[key];
-    if (this.usageSelectors.length > 0) {
-      latest["selectors"] = [...this.usageSelectors];
-      latest["selectorPartial"] = this.usageSelectorPartial;
-    } else if (this.usageSelectorPartial) latest["selectorPartial"] = true;
-    if (
-      this.usage !== null &&
-      ["authoritative", "unknown"].includes(this.usage["costSource"])
-    ) {
-      latest["costSource"] = this.usage["costSource"];
-    }
-    if (this.usage !== null && validCostScope(this.usage["costScope"]))
-      latest["costScope"] = this.usage["costScope"];
-    if (
-      this.usage !== null &&
-      typeof this.usage["costScopePartial"] === "boolean"
-    ) {
-      latest["costScopePartial"] = this.usage["costScopePartial"];
-    }
-    if (this.usage !== null && "cost" in this.usage)
-      latest["cost"] = this.usage["cost"];
-    if (this.usage?.["costPartial"] === true) latest["costPartial"] = true;
-    this.latestUsage = latest;
-  }
-
-  // Accumulate billed usage; unsuccessful calls do not replace latest usage.
-  addUsage(usage: Row, successful: boolean): void {
-    if (this.usage === null) {
-      this.usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-    }
-    const nextCounts: Row = {};
-    for (const key of USAGE_KEYS)
-      nextCounts[key] = this.usage[key] + Number(usage[key]);
-    if (USAGE_KEYS.every((key) => nextCounts[key] <= MAX_SAFE_USAGE))
-      Object.assign(this.usage, nextCounts);
-    else this.usageUnavailable = true;
-    const segment = this.usage;
-    this.registerSegmentSelector(usage, reportedSelector(usage));
-    let cost = usage["cost"];
-    let source = usage["costSource"];
-    const scope = usage["costScope"];
-    const scoped = validCostScope(scope);
-    if (scope !== undefined && scope !== null && !scoped) {
-      source = "unknown";
-      cost = undefined;
-    }
-    const scopePartial = usage["costScopePartial"] === true;
-    if (scoped && (source === "unknown" || source === "authoritative")) {
-      this.foldSegmentScopedCost(segment, scope, scopePartial, cost, source);
-    } else this.foldSegmentUnscopedCost(segment, cost, source);
-    if (this.usageUnavailable) this.usage = null;
-    else if (this.usageSelectors.length > 0) {
-      segment["selectors"] = [...this.usageSelectors];
-      segment["selectorPartial"] = this.usageSelectorPartial;
-    }
-    this.projectSegmentCost(scoped, source, cost, scopePartial);
-    if (successful) this.recordLatestUsage(usage);
   }
 }

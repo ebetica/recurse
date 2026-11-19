@@ -1,4 +1,5 @@
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { mkdtemp, open, writeFile, type FileHandle } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -8,6 +9,11 @@ import {
   fauxThinking,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
+import {
+  defineExtension,
+  GenerationTask,
+  hook,
+} from "@earendil-works/pi-durable";
 import { type Fixture, type Routes, hex } from "../fixture";
 
 export function routes(fx: Fixture): Routes {
@@ -24,6 +30,19 @@ export function routes(fx: Fixture): Routes {
   } = fx.agents;
   const { seedUpload } = fx.history;
   const { NAVIGATION_IMAGES } = fx.media;
+  const toolGates = new Map<
+    string,
+    Map<string, { reader: FileHandle; writer?: FileHandle }>
+  >();
+  const closeToolGates = async (agent: string) => {
+    const gates = toolGates.get(agent);
+    toolGates.delete(agent);
+    await Promise.all(
+      Array.from(gates?.values() ?? [], ({ reader, writer }) =>
+        Promise.all([reader.close(), writer?.close()]),
+      ),
+    );
+  };
   return {
     "seed-durable": async () => {
       await create("durable-demo", "Durable demo");
@@ -56,6 +75,18 @@ export function routes(fx: Fixture): Routes {
         fauxAssistantMessage("Second durable answer."),
       ]);
       return { agent: "durable-demo" };
+    },
+    "seed-focused-settle": async ({ recovery }) => {
+      const agent = recovery ? "focused-recovery" : "focused-settle";
+      await create(agent, "Focused reply");
+      const held = hold(agent);
+      script(agent).setResponses([
+        async () => {
+          await held;
+          return fauxAssistantMessage("The focused reply is complete.");
+        },
+      ]);
+      return { agent };
     },
     "seed-live-publication": async () => {
       const agent = "live-publication";
@@ -255,11 +286,19 @@ export function routes(fx: Fixture): Routes {
     },
     "durable-thinking-cleanup": async (body) => {
       const agent = body.agent ?? "durable-thinking";
-      await release(agent, "commit");
-      await release(agent);
-      await release(agent, "finish");
-      await instance.durable.stop(agent);
-      await instance.durable.stopProcesses(agent);
+      try {
+        await release(agent, "commit");
+        await release(agent);
+        await release(agent, "finish");
+        await release(agent, "after-unreadable");
+        await release(agent, "thinking-content");
+        await release(agent, "after-run");
+        await release(agent, "idle-finish");
+        await instance.durable.stop(agent);
+        await instance.durable.stopProcesses(agent);
+      } finally {
+        await closeToolGates(agent);
+      }
       return { ok: true };
     },
     "seed-durable-clear": async () => {
@@ -370,8 +409,56 @@ export function routes(fx: Fixture): Routes {
               "live-output-ready",
             )
           : undefined;
+      const backgroundGate = thinking ? `${outputGate}-background` : undefined;
+      const middleGate = thinking ? `${outputGate}-middle` : undefined;
+      const blockOn = (path: string) =>
+        `IFS= read -r release < '${path.replaceAll("'", "'\\''")}'`;
+      if (thinking) {
+        const descriptors = new Map<
+          string,
+          { reader: FileHandle; writer?: FileHandle }
+        >();
+        toolGates.set(agent, descriptors);
+        try {
+          for (const [name, path] of [
+            ["first-tool", outputGate!],
+            ["second-tool", middleGate!],
+            ["background", backgroundGate!],
+          ] as const) {
+            if (await Bun.spawn(["mkfifo", path]).exited)
+              throw new Error(`Could not create ${name} gate`);
+            const reader = await open(
+              path,
+              constants.O_RDONLY | constants.O_NONBLOCK,
+            );
+            descriptors.set(name, { reader });
+            const writer = await open(
+              path,
+              constants.O_WRONLY | constants.O_NONBLOCK,
+            );
+            descriptors.set(name, { reader, writer });
+          }
+          const afterRun = hold(agent, "after-run");
+          (await instance.durable.open(agent)).registry.install(
+            defineExtension({
+              name: "browser-hold-committed-reply",
+              hooks: [
+                hook(GenerationTask, {
+                  afterRun: async () => {
+                    await afterRun;
+                    return undefined;
+                  },
+                }),
+              ],
+            }),
+          );
+        } catch (error) {
+          await closeToolGates(agent);
+          throw error;
+        }
+      }
       const commands = thinking
-        ? ["sleep 30", `while [ ! -f '${outputGate}' ]; do sleep 0.05; done`]
+        ? [blockOn(backgroundGate!), blockOn(outputGate!)]
         : mode.includes("output")
           ? Array.from(
               {
@@ -388,33 +475,64 @@ export function routes(fx: Fixture): Routes {
           : ["sleep 30"];
       const held = hold(agent);
       const finished = hold(agent, "finish");
-      script(agent).setResponses([
+      const content = thinking ? hold(agent, "thinking-content") : undefined;
+      const chatgpt = thinking?.startsWith("chatgpt");
+      const claudeSignature = "test-claude-signature";
+      const chatgptSignature = JSON.stringify({
+        type: "reasoning",
+        id: "rs_last_thinking",
+        encrypted_content: "test-encrypted-reasoning",
+        summary: [],
+      });
+      const unreadable =
+        thinking === "claude-redacted"
+          ? {
+              ...fauxThinking(""),
+              thinkingSignature: claudeSignature,
+              redacted: true,
+            }
+          : thinking === "chatgpt-encrypted"
+            ? { ...fauxThinking(""), thinkingSignature: chatgptSignature }
+            : undefined;
+      const afterUnreadable = unreadable
+        ? hold(agent, "after-unreadable")
+        : undefined;
+      let reviewing = false;
+      const startReview = () => {
+        reviewing = true;
+        return fauxAssistantMessage(
+          [
+            fauxThinking(
+              "**Reviewing the command result**\nThe command finished; I am checking the result.",
+            ),
+            fauxToolCall("bash", { command: "printf 'Reviewed'" }),
+          ],
+          { stopReason: "toolUse" },
+        );
+      };
+      const fake = script(
+        agent,
+        undefined,
+        undefined,
+        thinking
+          ? (event) =>
+              reviewing && event.type === "thinking_delta" ? content : undefined
+          : undefined,
+      );
+      fake.setResponses([
         fauxAssistantMessage(
           [
             ...(thinking
               ? [
                   {
                     ...fauxThinking(
-                      thinking.includes("redacted") ||
-                        thinking.includes("encrypted")
-                        ? ""
+                      chatgpt
+                        ? "I am waiting for the command to finish before checking its result."
                         : "**Checking the background work**\nI am waiting for the command to finish before checking its result.",
                     ),
-                    ...(thinking.startsWith("chatgpt")
-                      ? {
-                          thinkingSignature: JSON.stringify({
-                            type: "reasoning",
-                            id: "rs_last_thinking",
-                            encrypted_content: "test-encrypted-reasoning",
-                            summary: [],
-                          }),
-                        }
-                      : {
-                          thinkingSignature: "test-claude-signature",
-                          ...(thinking === "claude-redacted"
-                            ? { redacted: true }
-                            : {}),
-                        }),
+                    thinkingSignature: chatgpt
+                      ? chatgptSignature
+                      : claudeSignature,
                   },
                 ]
               : []),
@@ -429,26 +547,71 @@ export function routes(fx: Fixture): Routes {
           ],
           { stopReason: "toolUse" },
         ),
-        () =>
-          held.then(() =>
-            thinking
-              ? fauxAssistantMessage(
-                  [
-                    fauxThinking(
-                      "**Reviewing the command result**\nThe command finished; I am checking the result.",
-                    ),
-                    fauxToolCall("bash", {
-                      command: "sleep 30",
-                      background: true,
-                    }),
-                  ],
-                  { stopReason: "toolUse" },
-                )
-              : fauxAssistantMessage("Live tools finished."),
-          ),
+        ...(thinking
+          ? [
+              fauxAssistantMessage(
+                [
+                  fauxText("The first command finished."),
+                  fauxToolCall("bash", {
+                    command: `printf '%s %s\\n' 'Second command' started; ${blockOn(middleGate!)}; printf '%s %s\\n' 'Second command' finished`,
+                  }),
+                ],
+                { stopReason: "toolUse" },
+              ),
+            ]
+          : []),
+        async () => {
+          await held;
+          if (!thinking) return fauxAssistantMessage("Live tools finished.");
+          if (!unreadable) return startReview();
+          return fauxAssistantMessage(
+            [
+              unreadable,
+              fauxText("The unreadable step finished."),
+              fauxToolCall("bash", { command: "printf 'Processed'" }),
+            ],
+            { stopReason: "toolUse" },
+          );
+        },
+        ...(afterUnreadable ? [() => afterUnreadable.then(startReview)] : []),
         () => finished.then(() => fauxAssistantMessage("Live tools finished.")),
+        ...(thinking
+          ? [fauxAssistantMessage("Background work finished.")]
+          : []),
       ]);
       return { agent, outputGate };
+    },
+    "seed-live-thinking-idle": async (body) => {
+      const agent = `live-thinking-idle-${hex(4)}`;
+      await create(agent, "Thinking before idle");
+      const finished = hold(agent, "idle-finish");
+      script(agent).setResponses([
+        fauxAssistantMessage(
+          [
+            ...(body?.redacted === true
+              ? [
+                  {
+                    ...fauxThinking(""),
+                    thinkingSignature: "test-claude-signature",
+                    redacted: true,
+                  },
+                  fauxText("The unreadable step finished."),
+                ]
+              : [
+                  fauxThinking(
+                    "**Checking before idle**\nI will finish without background work.",
+                  ),
+                ]),
+            fauxToolCall("bash", { command: "printf 'Checked'" }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        () =>
+          finished.then(() =>
+            fauxAssistantMessage("Finished without background work."),
+          ),
+      ]);
+      return { agent };
     },
     "seed-durable-stop": async (body) => {
       const agent = body.agent ?? "durable-stop";
@@ -477,7 +640,9 @@ export function routes(fx: Fixture): Routes {
         agent: string;
         gate?: string;
       };
-      await release(agent, gate);
+      const writer = gate ? toolGates.get(agent)?.get(gate)?.writer : undefined;
+      if (writer) await writer.write("release\n");
+      else await release(agent, gate);
       return { ok: true };
     },
     "seed-scroll-pin": async (body) => {

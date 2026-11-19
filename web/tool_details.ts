@@ -14,11 +14,8 @@ import type {
   ToolCall,
 } from "./types.js";
 
-export type JsonLoader = (url: string, cid: string) => Promise<unknown>;
-export type Scheduler = (
-  fn: () => void,
-  ms: number,
-) => ReturnType<typeof setTimeout>;
+type JsonLoader = (url: string, cid: string) => Promise<unknown>;
+type Scheduler = (fn: () => void, ms: number) => ReturnType<typeof setTimeout>;
 
 interface DetailEntry {
   open: boolean;
@@ -46,7 +43,7 @@ function artifactLive(artifact: ToolArtifact | null | undefined): boolean {
 // Per-artifact disclosure state. Stable owner+artifact keys prevent a late
 // fetch from one conversation painting into another after navigation or a modal
 // race.
-export class ToolDetailStore {
+class ToolDetailStore {
   private readonly entries = new Map<string, DetailEntry>();
   constructor(
     private readonly loadJson: JsonLoader = defaultLoader,
@@ -66,7 +63,7 @@ export class ToolDetailStore {
       if (!key.startsWith(prefix)) continue;
       this.close(entry);
     }
-    for (const key of [...this.inlineOpen]) {
+    for (const key of this.inlineOpen) {
       if (key.startsWith(prefix)) this.inlineOpen.delete(key);
     }
   }
@@ -189,7 +186,7 @@ function decodeBase64(value = ""): string {
 
 // JSON.stringify escapes terminal controls/ANSI as text. lit then inserts the
 // result through a text node, so neither terminal escapes nor HTML execute.
-export function payloadText(payload: CapturedPayload): string {
+function payloadText(payload: CapturedPayload): string {
   if (payload.format === "json") {
     try {
       return JSON.stringify(payload.value, null, 2);
@@ -203,7 +200,7 @@ export function payloadText(payload: CapturedPayload): string {
   return `${head}\n\n[… ${payload.omitted_bytes.toLocaleString()} bytes omitted by the storage limit …]\n\n${tail}`;
 }
 
-export interface ToolRowRef {
+interface ToolRowRef {
   artifact_id?: string;
   artifact_unavailable?: ToolCall["artifact_unavailable"];
 }
@@ -310,9 +307,7 @@ export function toolOpenTimingText(
   return parts.length ? parts.join(" · ") : null;
 }
 
-export function commandText(
-  event: ToolArtifactEvent | null | undefined,
-): string {
+function commandText(event: ToolArtifactEvent | null | undefined): string {
   if (event?.payload.format !== "json") return "";
   const value = event.payload.value;
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
@@ -320,7 +315,7 @@ export function commandText(
   return typeof command === "string" ? command : "";
 }
 
-export function eventText(event: ToolArtifactEvent | null | undefined): string {
+function eventText(event: ToolArtifactEvent | null | undefined): string {
   if (event?.payload.format !== "json") return "";
   const value = event.payload.value as { content?: unknown } | undefined;
   const content = value?.content;
@@ -339,7 +334,7 @@ export function eventText(event: ToolArtifactEvent | null | undefined): string {
     .join("\n");
 }
 
-export function plainDisplayText(text: string): string {
+function plainDisplayText(text: string): string {
   // Invariant: Browser text nodes do not execute terminal controls, but
   // stripping SGR/OSC makes output readable. Other C0 bytes become visible
   // escapes. Copy still uses the exact raw text, and the structured pane
@@ -374,7 +369,7 @@ function writtenText(event: ToolArtifactEvent): string {
   return "";
 }
 
-export function inputText(artifact: ToolArtifact): string {
+function inputText(artifact: ToolArtifact): string {
   const event = artifact.input;
   if (!event?.payload) return "";
   const command = commandText(event);
@@ -386,13 +381,13 @@ export function inputText(artifact: ToolArtifact): string {
   return payloadText(event.payload);
 }
 
-export function outputLabel(artifact: ToolArtifact): string {
+function outputLabel(artifact: ToolArtifact): string {
   if (artifact.result) return "Output";
   if (artifact.status === "stale") return "Last captured output";
   return "Live output";
 }
 
-export interface DetailSection {
+interface DetailSection {
   label: string;
   text: string;
   omitted: number;
@@ -402,7 +397,7 @@ export interface DetailSection {
 // running or background call's newest captured output stands in for a result it
 // does not have yet. An update that applied cleanly has no output worth
 // reading, so only a failure adds a section back.
-export function detailSections(artifact: ToolArtifact): DetailSection[] {
+function detailSections(artifact: ToolArtifact): DetailSection[] {
   const sections: DetailSection[] = [];
   const input = inputText(artifact);
   if (input) {
@@ -416,8 +411,13 @@ export function detailSections(artifact: ToolArtifact): DetailSection[] {
     artifact.background_latest || artifact.result || artifact.latest_update;
   const failed = artifact.status === "error" || output?.is_error === true;
   const isUpdate = UPDATE_TOOLS.has(artifact.tool_name.toLowerCase());
-  if (isUpdate && !failed && artifact.status !== "stale") return sections;
-  const text = eventDisplayText(output);
+  const review = artifact.safety_review_failure;
+  if (isUpdate && !failed && artifact.status !== "stale" && !review)
+    return sections;
+  const outputText = eventDisplayText(output);
+  const text = [outputText, toolReviewFailureText(artifact)]
+    .filter(Boolean)
+    .join("\n");
   if (failed && !text) {
     sections.push({
       label: "Error",
@@ -432,6 +432,18 @@ export function detailSections(artifact: ToolArtifact): DetailSection[] {
     });
   }
   return sections;
+}
+
+export function toolReviewFailureText(artifact?: ToolArtifact | null): string {
+  const review = artifact?.safety_review_failure;
+  return review
+    ? [
+        review.status === undefined ? undefined : `HTTP ${review.status}`,
+        review.message,
+      ]
+        .filter(Boolean)
+        .join(": ")
+    : "";
 }
 
 function sectionBlock(section: DetailSection): TemplateResult {

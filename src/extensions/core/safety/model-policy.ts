@@ -16,21 +16,21 @@ export type ReviewEffort =
   | "xhigh"
   | "max";
 
-export type PolicyModel = {
+type PolicyModel = {
   provider: string;
   model: string;
 };
 
-export type PolicyCandidate = PolicyModel & {
+type PolicyCandidate = PolicyModel & {
   effort: ReviewEffort;
 };
 
-export type PolicyRoute = PolicyCandidate & {
+type PolicyRoute = PolicyCandidate & {
   /** Ordered reviewer fallbacks; only the reviewer route may carry these. */
   candidates?: readonly PolicyCandidate[];
 };
 
-export type TrustedModelPolicy = {
+type TrustedModelPolicy = {
   version: 1;
   active: PolicyModel;
   reviewer_pin?: PolicyModel;

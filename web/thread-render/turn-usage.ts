@@ -10,7 +10,7 @@ import type {
   TurnUsageTotal,
 } from "../types.js";
 
-export interface TurnUsageModel extends TurnUsage {
+interface TurnUsageModel extends TurnUsage {
   promptTokens: number;
   inputPercent: number;
   cacheReadPercent: number;
@@ -61,19 +61,6 @@ export function turnTotalUsage(
   // Invariant: No reported call means no total, whatever the other numbers say.
   if (total.calls < 1) return null;
   return total;
-}
-
-// Labels whole-turn scope, answer count and completeness, never a single
-// answer's cost or an exact total when part is missing.
-export function turnUsageLabel(total: TurnUsageTotal | null): string {
-  if (!total) return "Token usage for this turn's last answer";
-  const answers =
-    total.replies > 1 ? `, across its ${total.replies} answers` : "";
-  const partial = total.partial || total.costPartial === true;
-  return (
-    `Token usage for this turn${answers}` +
-    (partial ? ", at least this much" : "")
-  );
 }
 
 // Names whole-turn request aggregation, including tool-loop calls. These summed
@@ -270,35 +257,6 @@ export function conversationModelUsage(
       groupedCalls !== value.calls ||
       coveragePartial;
   return { groups, partial };
-}
-
-// Token counts that the authoritative conversation total has but its known
-// selector rows do not. Cost is deliberately absent: this row is attribution,
-// not a guessed model or price.
-export function conversationUsageRemainder(
-  total: TurnUsage | null | undefined,
-  groups: readonly TurnUsage[],
-): TurnUsage | null {
-  const aggregate = turnUsageModel(total);
-  if (!aggregate) return null;
-  const fields = ["input", "output", "cacheRead", "cacheWrite"] as const;
-  const grouped = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
-  for (const group of groups) {
-    if (!turnUsageModel(group)) return null;
-    for (const field of fields) {
-      const next = grouped[field] + group[field];
-      if (!Number.isSafeInteger(next) || next > aggregate[field]) return null;
-      grouped[field] = next;
-    }
-  }
-  const remainder = {
-    input: aggregate.input - grouped.input,
-    output: aggregate.output - grouped.output,
-    cacheRead: aggregate.cacheRead - grouped.cacheRead,
-    cacheWrite: aggregate.cacheWrite - grouped.cacheWrite,
-  };
-  if (fields.some((field) => !validCount(remainder[field]))) return null;
-  return fields.some((field) => remainder[field] > 0) ? remainder : null;
 }
 
 export function safetyReviewUsage(

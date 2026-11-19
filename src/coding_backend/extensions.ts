@@ -32,7 +32,7 @@ function expandUser(path: string, home: string | undefined): string {
   return home + path.slice(1);
 }
 
-export interface SafetyRootInputs {
+interface SafetyRootInputs {
   repoUrl: string;
   repoDir: string;
   worktrees: string;

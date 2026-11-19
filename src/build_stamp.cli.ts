@@ -20,14 +20,14 @@ import { delimiter, join } from "node:path";
 import { randomBytes } from "node:crypto";
 
 export const PI_VERSION = "1.5.1";
-export const STAMP_NAME = ".build-stamp.json";
+const STAMP_NAME = ".build-stamp.json";
 /** Checkout-relative files each build publishes; sizes catch patched drift. */
 export const ARTIFACT_PATHS = [
   "node_modules/@earendil-works/pi-coding-agent/package.json",
   "node_modules/@ff-labs/pi-fff/package.json",
   "node_modules/@ff-labs/pi-fff/src/index.ts",
 ] as const;
-export const BUILD_INPUTS = [
+const BUILD_INPUTS = [
   "web",
   ":(exclude)web/dist",
   ":(exclude)web/.recurse-dist-*",
@@ -43,23 +43,23 @@ export const BUILD_INPUTS = [
 ] as const;
 
 export type SourceState = [head: string, dirty: boolean];
-export interface GitResult {
+interface GitResult {
   readonly stdout: string;
   readonly returncode: number;
 }
-export type GitRunner = (root: string, ...args: string[]) => GitResult;
-export interface ExpectedStamp {
+type GitRunner = (root: string, ...args: string[]) => GitResult;
+interface ExpectedStamp {
   head: string;
   dirty: boolean;
   pi_version: string;
   frontend: "built";
   artifacts: Record<string, number>;
 }
-export interface StampRuntime {
+interface StampRuntime {
   readonly git?: GitRunner;
   readonly sourceState?: (root: string) => SourceState | null;
 }
-export interface ExpectedOptions extends StampRuntime {
+interface ExpectedOptions extends StampRuntime {
   readonly state?: SourceState | null;
 }
 
@@ -175,7 +175,7 @@ export function sourceState(
 }
 
 /** Record cheap identity for each managed file that a build publishes. */
-export function artifactState(root: string): Record<string, number> {
+function artifactState(root: string): Record<string, number> {
   const found: Record<string, number> = {};
   for (const relative of ARTIFACT_PATHS) {
     const path = appendPath(root, relative);
@@ -196,7 +196,7 @@ function currentSourceState(root: string, runtime: StampRuntime) {
 }
 
 /** Compute the payload a clean build would publish, or null if unknown. */
-export function expected(
+function expected(
   root: string,
   options: ExpectedOptions = {},
 ): ExpectedStamp | null {
@@ -214,7 +214,7 @@ export function expected(
 }
 
 /** Return the on-disk build stamp path. */
-export function stampPath(root: string): string {
+function stampPath(root: string): string {
   return appendPath(appendPath(root, ".recurse"), STAMP_NAME);
 }
 

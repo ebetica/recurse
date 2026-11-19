@@ -7,7 +7,7 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { CLOSE_ICON } from "../icons.js";
 import { splitHiddenFrame } from "../thread-render/turn-view.js";
 
-export const REMOVE_QUEUED_MESSAGE_LABEL = "Remove queued message";
+const REMOVE_QUEUED_MESSAGE_LABEL = "Remove queued message";
 export const RETRY_QUEUED_MESSAGE_LABEL = "Retry sending queued message";
 
 // Compact failed-send wording; raw backend text remains in the tooltip.
@@ -74,7 +74,7 @@ export function removeOptimisticMessageById<T extends { id?: string }>(
   return messages.filter((message) => message.id !== id);
 }
 
-export function isPendingEcho(
+function isPendingEcho(
   optimistic: { id?: string; content: string },
   pending: { id?: string; content: string },
 ): boolean {
@@ -89,14 +89,14 @@ export function isPendingEcho(
 const DELIVERY_TRAILER_TAIL =
   /\n?\[recurse-delivery:[A-Za-z0-9_.:-]{1,128}\]\s*$/;
 
-export function stripDeliveryTrailer(content: string): string {
+function stripDeliveryTrailer(content: string): string {
   return content.replace(DELIVERY_TRAILER_TAIL, "");
 }
 
 // The committed row stores the whole prompt: platform context ahead of a
 // "## Message" frame line, then the operator's text. Identity compares the
 // text the operator sent, so the frame comes off first (then the receipt).
-export function committedMessageIdentity(content: string): string {
+function committedMessageIdentity(content: string): string {
   return stripDeliveryTrailer(splitHiddenFrame(content));
 }
 
@@ -112,7 +112,7 @@ export interface OptimisticEntry {
   confirmed?: boolean;
 }
 
-export interface CommittedCandidate {
+interface CommittedCandidate {
   content: unknown;
   offset: number;
   from?: string | null;

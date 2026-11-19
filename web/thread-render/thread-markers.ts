@@ -1,10 +1,3 @@
-// Projects compaction markers at their durable boundary and queued actions.
-// Clear replaces history, so only its queued state appears here; no
-// DOM/network.
-
-// Backend marker role; markers arrive as their own pseudo-turn.
-export const MARKER_ROLE = "marker";
-
 interface MarkerLike {
   role?: string;
   marker?: string;

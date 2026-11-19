@@ -19,7 +19,7 @@ const status = Type.Union([
   Type.Literal("deleting"),
   Type.Literal("unknown"),
 ]);
-export const AgentSchema = Type.Object({
+const AgentSchema = Type.Object({
   id: Type.String(),
   parent: Type.Union([Type.String(), Type.Null()]),
   title: Type.String(),
@@ -40,7 +40,7 @@ export const AgentSchema = Type.Object({
   replied_at: Type.Optional(Type.Union([Type.Number(), Type.Null()])),
 });
 export type Agent = Static<typeof AgentSchema>;
-export const AgentStatusSchema = Type.Object({
+const AgentStatusSchema = Type.Object({
   ...AgentSchema.properties,
   context: Type.Union(
     [
@@ -62,13 +62,13 @@ export const AgentStatusSchema = Type.Object({
   ),
 });
 export type AgentStatus = Static<typeof AgentStatusSchema>;
-export const ShellSchema = Type.Object({
+const ShellSchema = Type.Object({
   id: Type.String(),
   mode: Type.Union([Type.Literal("background"), Type.Literal("monitor")]),
   command: Type.String(),
   elapsed_seconds: Type.Number({ minimum: 0 }),
 });
-export const MessageSchema = Type.Object({
+const MessageSchema = Type.Object({
   cursor: Type.Integer({ minimum: 0 }),
   at: Type.Union([Type.Number(), Type.Null()]),
   kind: Type.Union([
@@ -82,7 +82,7 @@ export const MessageSchema = Type.Object({
   args: Type.Optional(Type.String()),
   truncated: Type.Optional(Type.Boolean()),
 });
-export const ErrorSchema = Type.Object({
+const ErrorSchema = Type.Object({
   detail: Type.String(),
   code: Type.Union([
     Type.Literal("not_found"),

@@ -10,7 +10,7 @@ const MAX_NAME = 128;
 export const MAX_FILE = 65_536;
 const NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const LINE = /^export ([A-Za-z_][A-Za-z0-9_]*)=('(?:[^'\r\n]|'"'"')*')$/;
-export type EnvironmentOverride = { name: string; value: string; line: string };
+type EnvironmentOverride = { name: string; value: string; line: string };
 
 function uid(): number {
   const value = process.getuid?.();
@@ -27,7 +27,7 @@ export function shellQuote(value: string): string {
   return "'" + value.replaceAll("'", "'\"'\"'") + "'";
 }
 
-export function parseEnvironmentOverrides(
+function parseEnvironmentOverrides(
   contents: string,
 ): Map<string, EnvironmentOverride> {
   if (Buffer.byteLength(contents) > MAX_FILE)
@@ -47,7 +47,7 @@ export function parseEnvironmentOverrides(
   return overrides;
 }
 
-export function fixedPath(env: NodeJS.ProcessEnv): string | undefined {
+function fixedPath(env: NodeJS.ProcessEnv): string | undefined {
   const path = env.RECURSE_AGENT_ENV_FILE;
   const scratch = env.RECURSE_AGENT_TMPDIR;
   if (!path || !scratch || !isAbsolute(path) || !isAbsolute(scratch))
@@ -71,7 +71,7 @@ async function validateDirectory(path: string): Promise<void> {
   }
 }
 
-export async function readOverrides(
+async function readOverrides(
   path: string,
 ): Promise<Map<string, EnvironmentOverride>> {
   await validateDirectory(path);

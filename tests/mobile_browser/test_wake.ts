@@ -1,7 +1,6 @@
 import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 declare const window: any;
-declare const document: any;
 declare const PageTransitionEvent: any;
 import {
   postFixture,

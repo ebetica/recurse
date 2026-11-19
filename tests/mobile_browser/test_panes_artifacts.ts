@@ -390,7 +390,9 @@ export const tests: BrowserTest[] = [
         expect(await pane.locator(".artifact-list").count()).toBe(0);
         expect(await pane.locator(".report-comment").count()).toBe(1);
         expect(
-          await pane.locator(".report-comment blockquote").textContent(),
+          await pane
+            .locator(".report-comment .report-comment-quote")
+            .textContent(),
         ).toBe("Second updated");
         page.once("dialog", (dialog) => void dialog.accept());
         await page.keyboard.press("h");
@@ -496,7 +498,9 @@ export const tests: BrowserTest[] = [
             await page.keyboard.press("h");
             expect(await pane.locator(".report-comment").count()).toBe(1);
             expect(
-              await pane.locator(".report-comment blockquote").textContent(),
+              await pane
+                .locator(".report-comment .report-comment-quote")
+                .textContent(),
             ).toBe("Second updated");
             page.once("dialog", (dialog) => void dialog.accept());
           } else {
@@ -523,7 +527,9 @@ export const tests: BrowserTest[] = [
         await headingDraft.locator("textarea").fill("Heading anchor");
         await headingDraft.locator(".report-comment-popover-submit").click();
         expect(
-          await pane.locator(".report-comment blockquote").textContent(),
+          await pane
+            .locator(".report-comment .report-comment-quote")
+            .textContent(),
         ).toBe("Second updated");
         const delivered = page.waitForRequest((request) =>
           request.url().endsWith(`/api/conversations/${owner}/deliver`),
@@ -1635,7 +1641,7 @@ export const tests: BrowserTest[] = [
     await popover.locator("textarea").fill("keep my place");
     await popover.locator(".report-comment-popover-submit").click();
     await page.waitForFunction(
-      "document.activeElement?.classList.contains('report-comment-input')",
+      "document.activeElement?.classList.contains('report-comment-edit')",
     );
     expect(
       Math.abs(
@@ -1774,7 +1780,7 @@ export const tests: BrowserTest[] = [
     await page.locator(".report-comment-popover-submit").click();
     expect(await page.locator(".report-comment").count()).toBe(1);
     await page.waitForFunction(
-      "document.activeElement?.classList.contains('report-comment-input') && !getSelection()?.toString()",
+      "document.activeElement?.classList.contains('report-comment-edit') && !getSelection()?.toString()",
     );
     await dispatchArtifactSelection(page, "touch", "Browser artifact");
     const stagedPopover = page.locator(".report-comment-popover:not([hidden])");

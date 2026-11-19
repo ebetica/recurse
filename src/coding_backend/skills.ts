@@ -12,12 +12,12 @@ export const RECURSE_SETTINGS_SKILL = fileURLToPath(
   new URL("../../skills/recurse-settings/SKILL.md", import.meta.url),
 );
 
-export interface SkillInfo {
+interface SkillInfo {
   name: string;
   description: string;
 }
 
-export interface ListSkillsOptions {
+interface ListSkillsOptions {
   cwd: string;
   skillPaths?: readonly string[];
   home?: string;

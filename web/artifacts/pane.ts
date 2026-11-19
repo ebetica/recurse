@@ -525,7 +525,7 @@ function navigateArtifact(pane: ArtifactEl, command: PaneNavigation): boolean {
   return browsing && command !== "top" && command !== "bottom";
 }
 
-export function renderShell(pane: ArtifactEl): void {
+function renderShell(pane: ArtifactEl): void {
   const rs = pane._rs,
     cache = rs.agentId ? entry(rs.agentId) : null;
   const list = listFor(rs.agentId);

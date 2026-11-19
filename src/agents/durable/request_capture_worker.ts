@@ -1,7 +1,7 @@
 // One lazy host-owned serializer snapshots before providers can mutate input.
 // Failures reject inspection instead of serving stale JSON.
 import { Worker } from "node:worker_threads";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 
 export class RequestCaptureWorker {
   private worker?: Worker;

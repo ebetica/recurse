@@ -8,7 +8,7 @@ export type SafetyConfig = {
   error?: string;
 };
 
-export function safetyConfigPath(configDir: string): string {
+function safetyConfigPath(configDir: string): string {
   return join(configDir, "pi-safety.json");
 }
 
@@ -47,7 +47,7 @@ export function parseSafetyConfig(value: unknown, path: string): SafetyConfig {
 
 // Recurse-global operator instructions for the reviewer, as free-form Markdown,
 // beside pi-safety.json. The file is optional.
-export function safetyPromptPath(configDir: string): string {
+function safetyPromptPath(configDir: string): string {
   return join(configDir, "pi-safety.md");
 }
 

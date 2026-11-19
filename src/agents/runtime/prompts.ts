@@ -25,17 +25,17 @@ import { escapeOriginMarkers, formatHiddenMessages } from "./prompt_stamp";
 import { uploadDiskPaths } from "./attachments/published";
 
 export type Conv = Record<string, unknown>;
-export const DIGEST_MAX_CHILDREN = 100;
-export const CAPTURED_PROMPT_VERSION = 1;
-export const CAPTURED_PROMPT_MAX_BYTES = 8 * 1024 * 1024;
-export const INSPECT_ENTRY_BYTES = 64 << 10;
+const DIGEST_MAX_CHILDREN = 100;
+const CAPTURED_PROMPT_VERSION = 1;
+const CAPTURED_PROMPT_MAX_BYTES = 8 * 1024 * 1024;
+const INSPECT_ENTRY_BYTES = 64 << 10;
 
 export interface DigestInputs {
   convs: Conv[];
   live: Record<string, { queued: number }>;
 }
 
-export interface CollectionSnapshot {
+interface CollectionSnapshot {
   collection: string;
   owner: string;
 }

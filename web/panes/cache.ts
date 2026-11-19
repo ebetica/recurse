@@ -4,7 +4,7 @@
 // identity/freshness/cleanup.
 import type { PaneCacheDef, PaneContext } from "../types.js";
 
-export interface PaneCacheScope {
+interface PaneCacheScope {
   paneId: string;
   ownerId: string;
   instanceKey: string;
@@ -18,7 +18,7 @@ interface Entry<T> {
   generation: string | null | undefined;
 }
 
-export const MAX_RETAINED_PANES = 12;
+const MAX_RETAINED_PANES = 12;
 
 function key(scope: PaneCacheScope): string {
   return JSON.stringify([scope.paneId, scope.ownerId, scope.instanceKey]);

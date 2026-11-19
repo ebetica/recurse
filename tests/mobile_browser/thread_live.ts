@@ -1,5 +1,4 @@
 type HTMLElement = any;
-declare const document: any;
 declare const innerWidth: number;
 declare const requestAnimationFrame: any;
 import { expect } from "bun:test";
@@ -1125,7 +1124,7 @@ export const liveTests: BrowserTest[] = [
         expect(
           await shortPage.locator("#scroll").evaluate((scroll: any) => {
             const content = document
-              .querySelector("#messages")
+              .querySelector("#messages")!
               .getBoundingClientRect().height;
             return {
               top: scroll.scrollTop,
@@ -1170,17 +1169,17 @@ export const liveTests: BrowserTest[] = [
             ).findLast((element: any) =>
               element.textContent.includes("Queued while working."),
             ) as any;
-            const scroll = document.querySelector("#scroll");
+            const scroll = document.querySelector("#scroll")!;
             return {
               scrollTop: scroll.scrollTop,
               extraSpace:
                 scroll.scrollHeight -
                 Math.max(
                   scroll.clientHeight,
-                  document.querySelector("#messages").getBoundingClientRect()
+                  document.querySelector("#messages")!.getBoundingClientRect()
                     .height +
                     parseFloat(
-                      document.defaultView.getComputedStyle(scroll)
+                      document.defaultView!.getComputedStyle(scroll)
                         .paddingBottom,
                     ),
                 ),
@@ -1193,7 +1192,7 @@ export const liveTests: BrowserTest[] = [
               bar: box("#live-bar .working"),
               composer: box("#composer"),
               jump: document
-                .querySelector("#scroll-btn")
+                .querySelector("#scroll-btn")!
                 .classList.contains("visible"),
             };
           });
@@ -1211,16 +1210,16 @@ export const liveTests: BrowserTest[] = [
         expect(short.padding).toBe(false);
         expect(Math.abs(short.extraSpace)).toBeLessThanOrEqual(1);
         expect(short.fromBottom).toBeLessThanOrEqual(1);
-        expect(short.sent.top - short.scroll.top).toBeGreaterThan(40);
+        expect(short.sent.top - short.scroll!.top).toBeGreaterThan(40);
         await releaseParagraph("First");
         const pinned = await geometry();
         expect(
-          Math.abs(pinned.sent.top - pinned.scroll.top),
+          Math.abs(pinned.sent.top - pinned.scroll!.top),
         ).toBeLessThanOrEqual(1);
         expect(pinned.fromBottom).toBeGreaterThan(0);
         expect(pinned.jump).toBe(true);
-        expect(pinned.bar.top).toBeGreaterThanOrEqual(pinned.scroll.bottom);
-        expect(pinned.bar.bottom).toBeLessThanOrEqual(pinned.composer.top);
+        expect(pinned.bar!.top).toBeGreaterThanOrEqual(pinned.scroll!.bottom);
+        expect(pinned.bar!.bottom).toBeLessThanOrEqual(pinned.composer!.top);
         await releaseParagraph("Second");
         const held = await geometry();
         expect(held.scrollTop).toBe(pinned.scrollTop);
@@ -1244,11 +1243,11 @@ export const liveTests: BrowserTest[] = [
           await touch("touchEnd", 200);
         } else {
           await page.evaluate(() => {
-            document.querySelector("#scroll").scrollTop -= 400;
+            document.querySelector("#scroll")!.scrollTop -= 400;
           });
         }
         await page.waitForFunction(
-          (top) => document.querySelector("#scroll").scrollTop < top - 200,
+          (top) => document.querySelector("#scroll")!.scrollTop < top - 200,
           held.scrollTop,
         );
         await waitForLayout(page);
@@ -1257,7 +1256,7 @@ export const liveTests: BrowserTest[] = [
         const grown = await geometry();
         expect(grown.scrollTop).toBe(reading.scrollTop);
         expect(grown.sent.top).toBe(reading.sent.top);
-        expect(grown.bar.top).toBeGreaterThanOrEqual(grown.scroll.bottom);
+        expect(grown.bar!.top).toBeGreaterThanOrEqual(grown.scroll!.bottom);
 
         await page.locator("#input").fill("Queued while working.");
         await page.locator("#send").click();
@@ -1268,16 +1267,16 @@ export const liveTests: BrowserTest[] = [
         expect((await geometry()).scrollTop).toBe(reading.scrollTop);
         await page.locator("#scroll-btn.visible").click();
         await page.waitForFunction(() => {
-          const scroll = document.querySelector("#scroll");
+          const scroll = document.querySelector("#scroll")!;
           return (
             scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 2
           );
         });
         await waitForLayout(page);
         const latest = await geometry();
-        expect(latest.queued.top).toBeGreaterThanOrEqual(latest.scroll.top);
-        expect(latest.queued.bottom).toBeLessThanOrEqual(latest.scroll.bottom);
-        expect(latest.queued.bottom).toBeLessThanOrEqual(latest.bar.top);
+        expect(latest.queued.top).toBeGreaterThanOrEqual(latest.scroll!.top);
+        expect(latest.queued.bottom).toBeLessThanOrEqual(latest.scroll!.bottom);
+        expect(latest.queued.bottom).toBeLessThanOrEqual(latest.bar!.top);
         await page.locator("#input").fill("Queued at the bottom.");
         await page.locator("#send").click();
         await page
@@ -1390,7 +1389,7 @@ export const liveTests: BrowserTest[] = [
     expect(
       await rows.last().evaluate((row) => {
         const box = row.getBoundingClientRect();
-        const view = document.querySelector("#scroll").getBoundingClientRect();
+        const view = document.querySelector("#scroll")!.getBoundingClientRect();
         return box.bottom > view.top && box.top < view.bottom;
       }),
     ).toBe(true);
@@ -1425,10 +1424,12 @@ export const liveTests: BrowserTest[] = [
     expect(
       await page
         .locator("#messages img")
-        .evaluateAll((images) => images.map((image) => image.complete)),
+        .evaluateAll((images) =>
+          images.map((image) => (image as HTMLImageElement).complete),
+        ),
     ).toEqual([true, true, true]);
     const offCentre = await row.evaluate((el) => {
-      const scroll = document.querySelector("#scroll");
+      const scroll = document.querySelector("#scroll")!;
       const box = el.getBoundingClientRect();
       const view = scroll.getBoundingClientRect();
       return box.top - view.top - (scroll.clientHeight - box.height) / 2;

@@ -1449,7 +1449,7 @@ registerPane({
 });
 
 /** Open a file path from a reply in the shared viewer, at any location. */
-export async function openFilePath(cid: string, path: string): Promise<void> {
+async function openFilePath(cid: string, path: string): Promise<void> {
   try {
     const preview = await read<ExplorerPreview>(
       cid,

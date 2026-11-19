@@ -1,6 +1,6 @@
 // Load the Durable runtime (runtime.ts) once, on first use, so importing the
 // host keeps the server's --check import path light.
-import { awaitedSpan } from "../../../observability/slow_span";
+import { awaitedSpan } from "../../../observability/slow-span";
 
 export type Runtime = typeof import("./runtime.ts");
 

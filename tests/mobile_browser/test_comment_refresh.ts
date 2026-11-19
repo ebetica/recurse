@@ -109,7 +109,7 @@ export const tests: BrowserTest[] = [
         .getByRole("button", { name: "Comment", exact: true })
         .click();
       await page.waitForFunction(
-        "document.activeElement?.classList.contains('report-comment-input')",
+        "document.activeElement?.classList.contains('report-comment-edit')",
       );
       await dispatchArtifactSelection(page, "mouse", "Second anchor");
       await popover.waitFor();
@@ -130,7 +130,7 @@ export const tests: BrowserTest[] = [
       expect(await page.locator("#report-selection-comment").inputValue()).toBe(
         "Artifact draft still being typed",
       );
-      expect(await page.locator(".report-comment-input").inputValue()).toBe(
+      expect(await page.locator(".report-comment-text").textContent()).toBe(
         "Staged artifact note",
       );
       expect(await activeText()).toBe("Artifact draft still being typed");

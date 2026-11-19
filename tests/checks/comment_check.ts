@@ -1,10 +1,11 @@
 /**
- * JS/TS comment policy. CLI: --help lists modes; tests/check.sh enforces it.
+ * JS/TS comment policy: short docs, headers and body comments; no ordinary
+ * comments in tests. CLI: --help lists modes; tests/check.sh enforces it.
  */
 import { lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import ts from "typescript";
-import { resolveConfig } from "prettier";
 import { leadingModuleHelp } from "../../src/skill_context";
+import { hasCommentOpener, scanTsComments } from "./ts_comments.ts";
 
 const TEST_FUNCTION =
   /(?:async function test_\w+\s*\(|(?:export )?const \w+\s*:\s*BrowserTest\s*=\s*async\s*\()/y;
@@ -20,36 +21,22 @@ export type Violation = {
   reason: string;
 };
 
-export function checkComments(
-  file: string,
-  text: string,
-  width = 80,
-): Violation[] {
-  const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true);
-  const ranges = new Map<number, ts.CommentRange>();
+export function checkComments(file: string, text: string): Violation[] {
+  if (!hasCommentOpener(text)) return [];
+  const source = ts.createSourceFile(
+    file,
+    text,
+    {
+      languageVersion: ts.ScriptTarget.Latest,
+      jsDocParsingMode: ts.JSDocParsingMode.ParseNone,
+    },
+    true,
+  );
   const nodes: ts.Node[] = [];
-  const scanned = new Set<number>();
-  const scan = (pos: number) => {
-    if (scanned.has(pos)) return;
-    scanned.add(pos);
-    for (const range of ts.getLeadingCommentRanges(text, pos) ?? [])
-      ranges.set(range.pos, range);
-    for (const range of ts.getTrailingCommentRanges(text, pos) ?? [])
-      ranges.set(range.pos, range);
-  };
-  const collect = (node: ts.Node) => {
+  const { top, ranges } = scanTsComments(source, (node) => {
     nodes.push(node);
-    scan(node.pos);
-    scan(node.end);
-    for (const child of node.getChildren(source)) collect(child);
-  };
-  collect(source);
-  const literals = nodes.filter((node) => ts.isJsxText(node));
-  let comments = [...ranges.values()]
-    .filter(
-      (c) => !literals.some((node) => c.pos >= node.pos && c.pos < node.end),
-    )
-    .sort((a, b) => a.pos - b.pos);
+  });
+  if (ranges.length === 0) return [];
   const violations: Violation[] = [];
   const line = (pos: number) =>
     source.getLineAndCharacterOfPosition(pos).line + 1;
@@ -62,7 +49,6 @@ export function checkComments(
       .replace(/\*\/$/, "")
       .replace(/^\s*(?:\*|\/\/) ?/gm, "")
       .trim();
-  const top = text.startsWith("#!") ? text.indexOf("\n") + 1 : 0;
   const firstCode = source.statements[0]?.getStart(source) ?? text.length;
   const directive = (c: ts.CommentRange) =>
     /^(?:@ts-(?:expect-error|ignore|nocheck)\b|prettier-ignore\b|(?:color|font|svg)-check: allow\b|(?:oxlint|eslint)-disable(?:-next-line|-line)?\b)/.test(
@@ -91,7 +77,7 @@ export function checkComments(
     ) &&
     leadingModuleHelp(text) !== null;
   const helpComment = toolHelpSource
-    ? comments.find((c) => raw(c).startsWith("/**"))
+    ? ranges.find((c) => raw(c).startsWith("/**"))
     : undefined;
   let testStarts: number[] | undefined;
   const testFollows = (c: ts.CommentRange) => {
@@ -137,7 +123,7 @@ export function checkComments(
   const ownLine = (c: ts.CommentRange) =>
     text.slice(text.lastIndexOf("\n", c.pos - 1) + 1, c.pos).trim() === "";
   const groups: ts.CommentRange[] = [];
-  for (const c of comments) {
+  for (const c of ranges) {
     const last = groups.at(-1);
     if (
       last &&
@@ -153,24 +139,26 @@ export function checkComments(
       last.end = c.end;
     else groups.push({ ...c });
   }
-  comments = groups;
+  const comments = groups;
   const isTest =
     file.split("/").includes("tests") && !/^tests\/(?:checks|dev)\//.test(file);
-  const attached = new Map<number, number>();
-  const bodies = nodes.flatMap((node) =>
-    ts.isBlock(node)
-      ? [node]
-      : ts.isFunctionLike(node) && "body" in node && node.body
-        ? [node.body as ts.Node]
-        : [],
-  );
-  const bodyRanges = bodies.map((body) => [body.getStart(source), body.end]);
-  const inBody = (c: ts.CommentRange) =>
-    bodyRanges.some(([start, end]) => c.pos >= start! && c.end <= end!);
   const kept = comments.filter((c) => !exempt(c));
-  const endsSorted = kept.every(
-    (c, index) => index === 0 || kept[index - 1]!.end <= c.end,
-  );
+  if (kept.length === 0) return [];
+  const attached = new Map<number, number>();
+  const bodyRanges: { start: number; end: number }[] = [];
+  for (const node of nodes) {
+    if (node.end <= (bodyRanges.at(-1)?.end ?? 0)) continue;
+    if (
+      ts.isBlock(node) ||
+      (node.parent &&
+        ts.isFunctionLike(node.parent) &&
+        "body" in node.parent &&
+        node.parent.body === node)
+    )
+      bodyRanges.push({ start: node.getStart(source), end: node.end });
+  }
+  const inBody = (c: ts.CommentRange) =>
+    bodyRanges.some(({ start, end }) => c.pos >= start && c.end <= end);
   const firstAtLeast = (
     list: ts.CommentRange[],
     value: number,
@@ -212,9 +200,7 @@ export function checkComments(
         : undefined;
     if (limit === undefined) continue;
     const start = node.getStart(source);
-    const c = endsSorted
-      ? kept[firstAtLeast(kept, start + 1, (c) => c.end) - 1]
-      : kept.filter((c) => c.end <= start).at(-1);
+    const c = kept[firstAtLeast(kept, start + 1, (c) => c.end) - 1];
     const gap = c ? text.slice(c.end, start) : "";
     const direct = c && /^\s*$/.test(gap) && line(start) === line(c.end) + 1;
     const leading = direct && c && ownLine(c);
@@ -251,13 +237,12 @@ export function checkComments(
       const isHeader =
         !doc && !header && text.slice(headerStart, c.pos).trim() === "";
       if (isHeader) header = true;
-      const allowed =
-        doc || isHeader || (body && /^(?:Invariant:|Spec:)/.test(content(c)));
+      const allowed = doc || isHeader || body;
       if (!allowed)
         add(
           c.pos,
           "unexpected-comment",
-          "comment is not an allowed doc, header, invariant or spec",
+          "comment is not a doc, header or body comment",
         );
       const limit = doc ?? 4;
       if (allowed && line(c.end) - line(c.pos) + 1 > limit)
@@ -267,20 +252,13 @@ export function checkComments(
           `comment exceeds ${limit} line${limit === 1 ? "" : "s"}`,
         );
     }
-    let pos = c.pos;
-    for (const part of raw(c).replace(/\r$/, "").split(/\r?\n/)) {
-      const column = source.getLineAndCharacterOfPosition(pos).character;
-      if (column + part.length > width)
-        add(pos, "comment-width", `comment line exceeds print width ${width}`);
-      pos += part.length + (text[pos + part.length] === "\r" ? 2 : 1);
-    }
   }
   return violations.sort(
     (a, b) => a.line - b.line || a.rule.localeCompare(b.rule),
   );
 }
 
-export function report(violations: Violation[], summary = false): string {
+function report(violations: Violation[], summary = false): string {
   const lines = violations
     .slice(0, summary ? 50 : undefined)
     .map((v) => `${v.file}:${v.line} ${v.rule} ${v.reason}`);
@@ -304,13 +282,14 @@ export function report(violations: Violation[], summary = false): string {
 if (import.meta.main) {
   if (process.argv.includes("--help")) {
     console.log(`Usage: bun tests/checks/comment_check.ts [--strict] [--summary]
-Check tracked JS/TS files outside fixtures.
-Comment lines use the file's Prettier print width (default 80), including indent.
+Check tracked JS/TS files outside fixtures. Ordinary body comments, file
+headers and declaration docs may span up to four lines; data declaration docs
+must fit on one line. In tests only tags, tool directives and licenses are allowed.
 --strict         Fail on any finding (tests/check.sh ts).
 --summary        Print at most 50 findings, retaining full counts.
 Without --strict, findings only warn.
 JS/TS results are cached in the checkout's git directory, keyed by this
-checker's source and each file's path, width and content.`);
+checker's source and each file's path and content.`);
     process.exit(0);
   }
   const tracked = Bun.spawnSync([
@@ -331,14 +310,10 @@ checker's source and each file's path, width and content.`);
     .split("\0")
     .filter(
       (file) =>
-        file &&
-        !lstatSync(file).isSymbolicLink() &&
         /\.[cm]?[jt]sx?$/i.test(file) &&
-        !file.split("/").includes("fixtures"),
+        !file.split("/").includes("fixtures") &&
+        !lstatSync(file).isSymbolicLink(),
     );
-  const widths = await Promise.all(
-    files.map(async (file) => (await resolveConfig(file))?.printWidth ?? 80),
-  );
   const cachePath = Bun.spawnSync([
     "git",
     "rev-parse",
@@ -350,6 +325,7 @@ checker's source and each file's path, width and content.`);
   const version = Bun.hash(
     [
       readFileSync(import.meta.path, "utf8"),
+      readFileSync(new URL("./ts_comments.ts", import.meta.url), "utf8"),
       readFileSync(
         new URL("../../src/skill_context.ts", import.meta.url),
         "utf8",
@@ -363,10 +339,9 @@ checker's source and each file's path, width and content.`);
   } catch {}
   const results: Record<string, Violation[]> = {};
   const violations: Violation[] = [];
-  for (const [index, file] of files.entries()) {
-    const width = widths[index]!;
+  for (const file of files) {
     const text = readFileSync(file, "utf8");
-    const key = `${version}:${width}:${Bun.hash(`${file}\0${text}`).toString(36)}`;
+    const key = `${version}:${Bun.hash(`${file}\0${text}`).toString(36)}`;
     const hit = cached[key];
     results[key] =
       Array.isArray(hit) &&
@@ -378,7 +353,7 @@ checker's source and each file's path, width and content.`);
           typeof v.reason === "string",
       )
         ? hit
-        : checkComments(file, text, width);
+        : checkComments(file, text);
     violations.push(...results[key]);
   }
   try {

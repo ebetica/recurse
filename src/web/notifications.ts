@@ -12,7 +12,7 @@ import {
   PushSubscriptionError,
   type PushNotifications,
 } from "../push_notifications";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Router } from "./router";
 
 export function registerNotificationRoutes(

@@ -11,11 +11,11 @@ import {
   logException,
   type RuntimeLogger,
 } from "../observability/runtime_logging";
-import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
+import { parsePythonJson, pyCompactJson } from "../utils/python-json";
 import { Cancelled, checkAbort } from "../utils/tasks";
 import type { SpawnOutcome, SpawnOutcomes } from "./agent_tree";
 import { SPAWN_OUTCOME_MAX_BYTES } from "./agent_tree";
-import type { ConversationRecord } from "./conversation_store";
+import type { ConversationRecord } from "./storage";
 import type { DeliverOptions } from "./supervisor/delivery";
 import { entryEpoch } from "./supervisor/delivery";
 import { AsyncJsonlRangeReader, HEADER_BYTES } from "./view/session_entries";
@@ -23,10 +23,9 @@ import { AsyncJsonlRangeReader, HEADER_BYTES } from "./view/session_entries";
 type Json = Record<string, any>;
 
 /** One in-memory tick should take milliseconds; slower names its sections. */
-export const WATCH_TICK_SLOW_SECONDS = 1.0;
-export const RESTART_RESUME_JOB = "turn_resume_after_restart";
-export const RESTART_RESUME_NOTE_PREFIX =
-  "Recurse restarted while you were working";
+const WATCH_TICK_SLOW_SECONDS = 1.0;
+const RESTART_RESUME_JOB = "turn_resume_after_restart";
+const RESTART_RESUME_NOTE_PREFIX = "Recurse restarted while you were working";
 const MAX_PY_EPOCH = 253402300800;
 const RESTART_RESUME_TAIL_BYTES = 64 * 1024;
 const RESTART_RESUME_TAIL_ROWS = 50;
@@ -40,7 +39,7 @@ export interface ReconcileNode {
   restoreSendable(intent: Json): string;
 }
 
-export interface ReconcileSupervisor {
+interface ReconcileSupervisor {
   deliver(
     cid: string,
     content: string,
@@ -135,7 +134,7 @@ const rethrowCancelled = (error: unknown) => {
 };
 
 /** The platform-origin note that resumes one interrupted turn. */
-export function restartResumeNote(interruptedAt: string): string {
+function restartResumeNote(interruptedAt: string): string {
   return (
     `${RESTART_RESUME_NOTE_PREFIX}; your turn was interrupted ` +
     `at ${interruptedAt}. Continue from where you left off \u2014 ` +
@@ -145,7 +144,7 @@ export function restartResumeNote(interruptedAt: string): string {
 }
 
 /** One session timestamp as ``HH:MM UTC`` for the resume note. */
-export function resumeInterruptionTime(value: unknown): string {
+function resumeInterruptionTime(value: unknown): string {
   const epoch = entryEpoch({ timestamp: value });
   if (epoch === null || epoch < 0) return "an unknown time";
   // Invariant: datetime.fromtimestamp raises past 9999-12-31T23:59:59 UTC.
@@ -159,7 +158,7 @@ export function resumeInterruptionTime(value: unknown): string {
 }
 
 /** Whether this intent body or live entry is a restart-resume note. */
-export function isRestartResumeNote(entry: unknown): boolean {
+function isRestartResumeNote(entry: unknown): boolean {
   if (!isDict(entry)) return false;
   const content = entry.content;
   if (

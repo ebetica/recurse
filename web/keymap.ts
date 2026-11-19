@@ -4,7 +4,7 @@
 import type { PaneNavigation } from "./types.js";
 import type { WindowCommand } from "./dock/commands.js";
 
-export const CHORD_TIMEOUT_MS = 1600;
+const CHORD_TIMEOUT_MS = 1600;
 
 export type KeyboardMode =
   | "normal"
@@ -60,7 +60,7 @@ export type KeyCommand =
   | "invalid-chord"
   | "unavailable-stop";
 
-export interface KeyResult {
+interface KeyResult {
   state: KeymapState;
   command: KeyCommand | null;
   handled: boolean;
@@ -100,7 +100,7 @@ export interface KeyContext {
   commentAvailable?: boolean;
 }
 
-export interface Binding {
+interface Binding {
   keys: readonly string[];
   command: KeyCommand;
   description: string;
@@ -122,7 +122,7 @@ export function effortStepForKey(
   return 0;
 }
 
-export const NORMAL_BINDINGS: readonly Binding[] = [
+const NORMAL_BINDINGS: readonly Binding[] = [
   {
     keys: ["h", "ArrowLeft"],
     command: "parent",
@@ -286,11 +286,11 @@ const RESIZE_BINDINGS: readonly Binding[] = [
   { keys: ["j"], command: "window-resize-down", description: "taller" },
 ];
 
-export const PREFIX_BINDINGS: readonly Binding[] = [
+const PREFIX_BINDINGS: readonly Binding[] = [
   { keys: ["t"], command: "new-agent", description: "new agent" },
 ];
 
-export interface ShortcutItem {
+interface ShortcutItem {
   keys: readonly string[];
   description: string;
   command?: KeyCommand;
@@ -298,7 +298,7 @@ export interface ShortcutItem {
   shift?: boolean;
 }
 
-export interface ShortcutGroup {
+interface ShortcutGroup {
   id: "normal" | "insert" | "prefix" | "pane" | "window" | "resize";
   title: string;
   items: readonly ShortcutItem[];

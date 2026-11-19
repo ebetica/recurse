@@ -6,7 +6,7 @@ import { dlopen, FFIType, ptr } from "bun:ffi";
 import fs from "node:fs";
 import { opendir, readFile, readdir, stat } from "node:fs/promises";
 import { errno } from "./libc";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 
 export const PROC = "/proc";
 export const BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id";
@@ -204,7 +204,7 @@ export function procEntryExists(pid: number | string, root = PROC): boolean {
 }
 
 /** The kernel boot id: Linux boot_id, macOS kern.bootsessionuuid. */
-export function bootIdTextSync(path = BOOT_ID_PATH): string {
+function bootIdTextSync(path = BOOT_ID_PATH): string {
   if (!mac || path !== BOOT_ID_PATH)
     return slowSpan("boot_identity_read_sync", undefined, () =>
       // oxlint-disable-next-line no-restricted-properties -- known: main-thread process identity/safety probes still use synchronous procfs helpers

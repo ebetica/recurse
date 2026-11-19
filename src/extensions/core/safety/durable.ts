@@ -1,7 +1,7 @@
 // Direct and nested ToolTask calls share review policy/evidence; direct MCP
-// stays blocked. Only authenticated host toggles review off. Host owns
-// identity/trusted policy/roots, never mutable tool env. Outcomes/denials
-// survive restart; hook throws fail closed.
+// stays blocked. The authenticated host owns identity, policy and the toggle.
+// Outcomes survive restart. Sanitized, capped failure details go only to the
+// operator log and tool view, never to a model or the memo.
 
 import type { Context } from "@earendil-works/chord/context";
 import type { Models, Usage } from "@earendil-works/pi-ai";
@@ -26,6 +26,7 @@ import {
   type ToolExecutionResult,
   type ToolHookCall,
 } from "@earendil-works/pi-durable";
+import { formatRedactedLogText } from "../../../tool_projection/index";
 import { DENIAL_LIMIT, DenialCircuitBreaker } from "./circuit-breaker.ts";
 import { loadSafetyConfig, type SafetyConfig } from "./config.ts";
 import {
@@ -60,6 +61,7 @@ import { updateReviewerJournal } from "./review-journal.ts";
 import { ReviewHistory } from "./review-history.ts";
 import {
   reviewAction,
+  type ReviewFailureDetail,
   type SafetyReviewAttempt,
   type SafetyVerdict,
 } from "./review.ts";
@@ -83,7 +85,7 @@ const SafetyDoc = defineDoc<{ off: boolean; unavailable?: string }>({
 
 type UsageTotals = Omit<Usage, "cost"> & { cost: Usage["cost"] };
 
-export type DeniedReviewState = {
+type DeniedReviewState = {
   calls: number;
   /** Attempts whose spend the provider did not report. */
   unreportedAttempts: number;
@@ -186,7 +188,7 @@ function unavailableReason(outcome: Outcome): string {
   return "provider error";
 }
 
-export type DurableSafetyAgent = {
+type DurableSafetyAgent = {
   // Host conversation id, independent of Durable's numeric id.
   id: string;
   /** Host-owned title, never inferred from tool environment or evidence. */
@@ -200,7 +202,7 @@ export type DurableSafetyAgent = {
   stopRun(): void;
 };
 
-export type SafetyTrusted = {
+type SafetyTrusted = {
   modelPolicy?: string;
   workspaceRoot?: string;
   worktreesRoot?: string;
@@ -210,7 +212,7 @@ export type SafetyTrusted = {
   statsRoot?: string;
 };
 
-export type SafetyOptions = {
+type SafetyOptions = {
   models: Models;
   /** Trusted catalog, optionally capture-bound to the reviewed conversation. */
   reviewModels: Models | ((conversationId: string) => Models);
@@ -274,25 +276,18 @@ function reviewContext(
       classify: models.classify.bind(models),
 
       getApiKeyAndHeaders: async (target: Parameters<Models["getAuth"]>[0]) => {
-        try {
-          const resolution = await models.getAuth(target);
-          if (!resolution)
-            return {
-              ok: false,
-              error: `No API key found for "${(target as { provider: string }).provider}"`,
-            };
-          return {
-            ok: true,
-            apiKey: resolution.auth.apiKey,
-            headers: resolution.auth.headers,
-            env: resolution.env,
-          };
-        } catch (error) {
+        const resolution = await models.getAuth(target);
+        if (!resolution)
           return {
             ok: false,
-            error: error instanceof Error ? error.message : String(error),
+            error: `No API key found for "${(target as { provider: string }).provider}"`,
           };
-        }
+        return {
+          ok: true,
+          apiKey: resolution.auth.apiKey,
+          headers: resolution.auth.headers,
+          env: resolution.env,
+        };
       },
     },
     sessionManager: { getSessionId: () => sessionId },
@@ -308,7 +303,7 @@ type ReviewRow = {
 
 // Project the active context as Pi evidence rows. Evidence starts at the
 // nearest compaction; its verbatim retained entries are not evidence.
-export function reviewRows(view: ContextView): ReviewRow[] {
+function reviewRows(view: ContextView): ReviewRow[] {
   const rows: ReviewRow[] = [];
   const head = view.entries[0];
   const compacted = head !== undefined && head.kind === CompactionEntry.kind;
@@ -378,7 +373,10 @@ export function createDurableSafety(host: SafetyOptions): Extension {
   const runs = new Map<string, { key: string; state: Promise<RunState> }>();
   const reviewTails = new Map<string, Promise<void>>();
   const histories = new WeakMap<Conversation, ReviewHistory>();
-  const started = new Map<string, number>();
+  const started = new Map<
+    string,
+    { ms: number; operatorFailure?: ReviewFailureDetail }
+  >();
 
   // A run starts with its first input; a new run gets a fresh denial budget
   // and reloads the policy, as a new Pi agent loop does.
@@ -479,14 +477,19 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     safetyStartedMs: number,
     context: Context,
     nested?: { parentCallId: string; mcpServer?: string },
-  ): Promise<Outcome> {
+  ): Promise<{ outcome: Outcome; operatorFailure?: ReviewFailureDetail }> {
     const conversationId = agent.id;
     const reviewModels =
       typeof host.reviewModels === "function"
         ? host.reviewModels(conversationId)
         : host.reviewModels;
     const complete = ((model, request, options) => {
-      const { apiKey, headers, env, ...ownedOptions } = options ?? {};
+      const {
+        apiKey: _apiKey,
+        headers: _headers,
+        env: _env,
+        ...ownedOptions
+      } = options ?? {};
       return reviewModels.completeSimple(model, request, ownedOptions);
     }) as typeof completeSimple;
     const active = run.actingModel
@@ -625,16 +628,22 @@ export function createDurableSafety(host: SafetyOptions): Extension {
           cid: conversationId,
           stage: logged.stage,
           category: logged.category,
-          ...(reviewer ?? {}),
+          ...reviewer,
           elapsed_ms: positiveElapsedMs(safetyStartedMs, now()) ?? 0,
           attempts: verdict.reviewAttempts?.length ?? 0,
+          ...(verdict.operatorFailure?.status === undefined
+            ? {}
+            : { http_status: verdict.operatorFailure.status }),
+          ...(verdict.operatorFailure?.message
+            ? { error: formatRedactedLogText(verdict.operatorFailure.message) }
+            : {}),
         });
       } catch {
         // Invariant: Diagnostics never reverse the fail-open decision.
       }
     }
     // Invariant: The memo keeps classified fields, never provider error text.
-    return {
+    const outcome: Outcome = {
       decision: configurationFailure ? "allow" : verdict.decision,
       reason: failure ? failure.summary : verdict.reason,
       ...(failure ? { failure } : {}),
@@ -646,6 +655,7 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         : {}),
       ...(safetyWaitMs === undefined ? {} : { safetyWaitMs }),
     };
+    return { outcome, operatorFailure: verdict.operatorFailure };
   }
 
   async function recordDenied(
@@ -697,11 +707,13 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     const changed = Object.keys(args).some(
       (field) => args[field] !== call.arguments[field],
     );
-    const allow = () => {
-      // Invariant: Aborts skip afterTool removal, so the timing map must be
-      // bounded.
+    const allow = (operatorFailure?: ReviewFailureDetail) => {
+      // Invariant: Aborts skip afterTool removal, so the pending map is bounded.
       if (started.size >= 1024) started.delete(started.keys().next().value!);
-      started.set(`${api.taskId}\u0000${call.id}`, startedMs);
+      started.set(`${api.taskId}\u0000${call.id}`, {
+        ms: startedMs,
+        operatorFailure,
+      });
       return changed ? { arguments: args as JsonObject } : undefined;
     };
     const mcp = isMcpTool(call.name);
@@ -729,22 +741,26 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     const release = await acquireReviewSlot(key);
     try {
       if (run.open && !resumedDenial) return { block: BREAKER_OPEN };
-      const outcome =
-        (await api.memo<Outcome>(memoKey(call.id), context)) ??
-        (await api.memo<Outcome>(
-          memoKey(call.id),
-          await reviewCall(
-            call.name,
-            args,
-            api,
-            agent,
-            run,
-            startedMs,
-            context,
-            nested,
-          ),
+      let outcome = await api.memo<Outcome>(memoKey(call.id), context);
+      let operatorFailure: ReviewFailureDetail | undefined;
+      if (!outcome) {
+        const review = await reviewCall(
+          call.name,
+          args,
+          api,
+          agent,
+          run,
+          startedMs,
           context,
-        ));
+          nested,
+        );
+        outcome = await api.memo<Outcome>(
+          memoKey(call.id),
+          review.outcome,
+          context,
+        );
+        operatorFailure = review.operatorFailure;
+      }
       if (context.abortSignal?.aborted) return { block: CANCELLED };
       try {
         await agent.conversation.commit(async (tx) => {
@@ -756,7 +772,8 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       } catch {
         safeLog("[pi-safety] Availability display state could not be saved.");
       }
-      if (outcome.procedural || outcome.configurationFailure) return allow();
+      if (outcome.procedural || outcome.configurationFailure)
+        return allow(call.parent ? undefined : operatorFailure);
       if (outcome.decision === "allow") return allow();
       await recordDenied(agent, run.key, denialKey, outcome, context);
       let breaker = {
@@ -784,7 +801,7 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     context: Context,
   ): Promise<ToolExecutionResult | undefined> => {
     const startKey = `${api.taskId}\u0000${call.id}`;
-    const startedMs = started.get(startKey);
+    const pending = started.get(startKey);
     started.delete(startKey);
     const outcome = await api.memo<Outcome>(memoKey(call.id), context);
     const prior =
@@ -797,7 +814,7 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       RESERVED_RESULT_DETAILS.has(field),
     );
     const totalMs =
-      startedMs === undefined ? undefined : positiveElapsedMs(startedMs, now());
+      pending === undefined ? undefined : positiveElapsedMs(pending.ms, now());
     if (!outcome && totalMs === undefined && !hadReserved) return undefined;
     const safetyWaitMs =
       totalMs !== undefined &&
@@ -844,6 +861,12 @@ export function createDurableSafety(host: SafetyOptions): Extension {
                 outcome,
                 Boolean(outcome.journalFailure),
               ),
+              // Invariant: Pi renders only severity/message into model content.
+              // Only direct calls carry this field; nested diagnostics go to
+              // the calling program. The tool-details route gates this metadata.
+              ...(pending?.operatorFailure
+                ? { operatorFailure: pending.operatorFailure }
+                : {}),
             },
           ]
         : [];

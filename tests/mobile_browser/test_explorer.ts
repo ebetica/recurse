@@ -185,7 +185,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
             await page.keyboard.press("k");
             expect(await cursor.getAttribute("data-path")).toBe(paths[0]);
             await page.keyboard.press("Shift+G");
-            expect(await cursor.getAttribute("data-path")).toBe(paths.at(-1));
+            expect(await cursor.getAttribute("data-path")).toBe(paths.at(-1)!);
             await page.keyboard.press("g");
             await page.keyboard.press("g");
             expect(await cursor.getAttribute("data-path")).toBe(paths[0]);

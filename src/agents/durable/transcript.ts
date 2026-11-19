@@ -62,7 +62,7 @@ type TranscriptReader = (
 ) => Promise<EntryRecord[]>;
 
 /** The same bounded window for a closed, read-only archive. */
-export async function transcriptEntries(
+async function transcriptEntries(
   read: TranscriptReader,
   options: TranscriptQuery,
 ): Promise<{ rows: Row[]; prev: number; next: number }> {

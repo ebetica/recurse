@@ -3,11 +3,12 @@
  * tests/checks/static.ts runs it.
  */
 import ts from "typescript";
+import { StyleFile, type StyleText } from "./style_file.ts";
 
-export type Finding = { line: number; literal: string };
+type Finding = { line: number; literal: string };
 
 /** Files still carrying colour literals, with their exact counts. */
-export const PENDING: Readonly<Record<string, number>> = {};
+const PENDING: Readonly<Record<string, number>> = {};
 
 const TOKEN_FILE = "web/theme.css";
 const ALLOW = "color-check: allow";
@@ -65,22 +66,6 @@ function scanMarkup(text: string, hits: Hit[]) {
   for (const match of text.matchAll(COLOR_ATTRIBUTE))
     scan(match[3]!, NAMED, match.index + match[1]!.length, hits);
   return text;
-}
-
-/** TypeScript source with its comments blanked. */
-export function tsCode(source: ts.SourceFile, text: string): string {
-  const chars = text.split("");
-  const visit = (node: ts.Node) => {
-    for (const range of [
-      ...(ts.getLeadingCommentRanges(text, node.pos) ?? []),
-      ...(ts.getTrailingCommentRanges(text, node.end) ?? []),
-    ])
-      for (let i = range.pos; i < range.end; i++)
-        if (chars[i] !== "\n") chars[i] = " ";
-    node.getChildren(source).forEach(visit);
-  };
-  visit(source);
-  return chars.join("");
 }
 
 const UNIT =
@@ -141,19 +126,14 @@ function scanStyleValues(source: ts.SourceFile, hits: Hit[]) {
   visit(source);
 }
 
-/** Colour literals in one file's text. */
-export function findColors(file: string, text: string): Finding[] {
+function findColorsIn(input: StyleText): Finding[] {
+  const { file, text } = input;
   const hits: Hit[] = [];
   if (file.endsWith(".css")) scanCss(text, 0, hits);
   else if (file.endsWith(".ts")) {
-    const source = ts.createSourceFile(
-      file,
-      text,
-      ts.ScriptTarget.Latest,
-      true,
-    );
-    scan(tsCode(source, text), LITERAL, 0, hits);
-    scanStyleValues(source, hits);
+    const syntax = StyleFile.from(input);
+    scan(syntax.code, LITERAL, 0, hits);
+    scanStyleValues(syntax.source, hits);
   } else {
     const markup = blank(text, /<!--[\s\S]*?-->/g);
     scan(scanMarkup(markup, hits), LITERAL, 0, hits);
@@ -168,15 +148,21 @@ export function findColors(file: string, text: string): Finding[] {
     .sort((a, b) => a.line - b.line);
 }
 
+/** Colour literals in one file's text. */
+export function findColors(file: string, text: string): Finding[] {
+  return findColorsIn({ file, text });
+}
+
 /** Error lines for the given files; empty when the policy holds. */
 export function checkFiles(
-  files: readonly { file: string; text: string }[],
+  files: readonly StyleText[],
   pending: Readonly<Record<string, number>> = PENDING,
 ): string[] {
   const errors: string[] = [];
-  for (const { file, text } of files) {
+  for (const input of files) {
+    const { file } = input;
     if (file === TOKEN_FILE) continue;
-    const findings = findColors(file, text);
+    const findings = findColorsIn(input);
     const allowed = pending[file];
     if (allowed === undefined)
       for (const { line, literal } of findings)

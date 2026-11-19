@@ -3,12 +3,12 @@
 // stops holding rechecks all held reports.
 import type { LiveRow } from "./follow.ts";
 
-export interface HeldReporter {
+interface HeldReporter {
   readonly caughtUp: boolean;
   kick(): Promise<void>;
 }
 
-export type Holding = "turn" | "report";
+type Holding = "turn" | "report";
 
 export class ReportHolds {
   private readonly reporters = new Map<string, HeldReporter>();

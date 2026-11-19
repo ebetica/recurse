@@ -100,7 +100,7 @@ const settingsBackend = $<HTMLSelectElement>("#settings-backend")!;
 settingsBackend.onchange = () => renderSettings(settingsBackend.value);
 let showCategory: (cat: Category, drill: boolean) => void = () => {};
 /** Open Settings; a category opens that page directly, also on phones. */
-export function openSettings(cat?: Category) {
+function openSettings(cat?: Category) {
   const active =
     document.activeElement instanceof HTMLElement
       ? document.activeElement
@@ -361,9 +361,9 @@ function buildDeletedHistorySection(body: HTMLElement): void {
     <div class="group"><label class="item">Keep deleted agents' history
       <span class="control"><input id="deleted-agent-history" type="number"
         aria-label="Keep deleted agents' history (days)" min="1" max="36500"
-        step="1" required> days</span></label></div>
+        step="1" required disabled> days</span></label></div>
     <div class="actions"><p class="msg"></p>
-      <button type="submit" class="primary">Save</button></div></form>`;
+      <button type="submit" class="primary" disabled>Save</button></div></form>`;
   const form = body.querySelector("form")!;
   const input = body.querySelector("input")!;
   const button = body.querySelector("button")!;
@@ -379,7 +379,10 @@ function buildDeletedHistorySection(body: HTMLElement): void {
     })
     .catch(() => {
       msg.textContent = "Couldn't load deleted agents' history settings.";
-    });
+    })
+    // Invariant: the stored value loads before the operator can type, so it
+    // never replaces their edit.
+    .finally(() => (input.disabled = button.disabled = false));
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
     button.disabled = true;
@@ -419,7 +422,7 @@ function buildMcpSection(body: HTMLElement): void {
   body.innerHTML = `
     <form>
       <textarea class="tokenjson" rows="10" autocomplete="off"
-        spellcheck="false" aria-label="MCP servers JSON"></textarea>
+        spellcheck="false" aria-label="MCP servers JSON" disabled></textarea>
       <p class="msg err json-err" role="alert" hidden></p>
       <div class="actions"><p class="msg"></p>
         <button type="submit" class="primary" disabled>Save</button></div>
@@ -442,20 +445,22 @@ function buildMcpSection(body: HTMLElement): void {
     msg.className = "msg " + cls;
     msg.textContent = text;
   };
+  show("", "Loading…");
   api("/api/settings/mcp-servers")
     .then(async (r) => {
       if (r.status === 400) {
         show("err", `${await errDetail(r, "")}. Saving replaces the file.`);
         loaded = true;
-        button.disabled = false;
+        input.disabled = button.disabled = false;
         return;
       }
       if (!r.ok) throw new Error(await errDetail(r, ""));
       input.value = ((await r.json()) as { text: string }).text;
-      // Invariant: Save replaces the whole file, so it waits for the stored
-      // servers.
+      show("", "");
+      // Invariant: Save replaces the whole file, and the stored servers would
+      // replace typed text, so editing and Save wait for them.
       loaded = true;
-      button.disabled = false;
+      input.disabled = button.disabled = false;
     })
     .catch((error: Error) =>
       show("err", error.message || "Couldn't load the MCP servers."),
@@ -467,7 +472,9 @@ function buildMcpSection(body: HTMLElement): void {
     const invalid = mcpJsonError(input.value);
     showJsonErr(invalid ?? "");
     if (invalid) return;
-    button.disabled = true;
+    // Invariant: the saved text replaces the box, so it stays read-only, not
+    // disabled (which would drop its focus), until the save settles.
+    input.readOnly = button.disabled = true;
     try {
       const r = await api("/api/settings/mcp-servers", {
         method: "PUT",
@@ -484,6 +491,7 @@ function buildMcpSection(body: HTMLElement): void {
     } catch {
       show("err", "Network error. Try again.");
     } finally {
+      input.readOnly = false;
       button.disabled = !loaded;
     }
   });

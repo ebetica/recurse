@@ -10,7 +10,7 @@ const PATH_FIELDS: Readonly<Record<string, readonly string[]>> = {
   artifact: ["from_file"],
 };
 
-export function expandPath(raw: string, env: NodeJS.ProcessEnv): string {
+function expandPath(raw: string, env: NodeJS.ProcessEnv): string {
   let expanded = raw;
   if (expanded === "~" || expanded.startsWith("~/")) {
     const home = env.HOME;

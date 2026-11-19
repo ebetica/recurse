@@ -19,6 +19,7 @@ import { reviewDocument } from "../document-review.js";
 import { DRAFT, state } from "../state.js";
 import { entry, errorText, refreshList, selectedInfo } from "./list-cache.js";
 import {
+  canEditPendingComment,
   cancelSelectionComment,
   cmap,
   commentKey,
@@ -27,9 +28,12 @@ import {
   comments,
   currentCommentKey,
   dropComments,
+  editPendingComment,
+  editingPendingComment,
   orderedComments,
   pendingFor,
   stageSelectionForSend,
+  syncSelectionDraft,
   unmark,
   unmarkAll,
 } from "./selection-comments.js";
@@ -60,25 +64,49 @@ function cardT(pane: CommentPane, comment: Comment): TemplateResult {
     comment.crop?.release();
     for (const root of commentRoots(pane)) unmark(root, comment.cid);
     renderComments(pane);
+    syncSelectionDraft();
   };
   const shortQuote =
     comment.quote.length > 80
       ? `${comment.quote.slice(0, 77)}…`
       : comment.quote;
   return html`<div class="report-comment" data-cid=${comment.cid}>
-    <blockquote class="report-comment-quote">${comment.quote}</blockquote>
-    <label class="sr-only" for=${`artifact-comment-${comment.cid}`}
-      >Comment on “${shortQuote}”</label
-    >
-    <textarea
-      id=${`artifact-comment-${comment.cid}`}
-      class="report-comment-input text-field"
-      rows="2"
-      placeholder="Leave a comment…"
-      .value=${live(comment.text)}
-      @input=${onInput}
-      ?disabled=${pane._rs.deleting}
-    ></textarea>
+    ${canEditPendingComment(pane, comment)
+      ? html`<button
+          type="button"
+          class="btn report-comment-edit"
+          aria-label=${comment.text
+            ? `Edit comment: ${comment.text}`
+            : "Edit comment"}
+          @click=${(event: Event) =>
+            editPendingComment(
+              pane,
+              comment.cid,
+              event.currentTarget as HTMLElement,
+            )}
+          ?disabled=${pane._rs.deleting}
+        >
+          <span class="report-comment-quote">${comment.quote}</span>
+          <span class="report-comment-text"
+            >${comment.text || "Edit comment"}</span
+          >
+        </button>`
+      : html`<blockquote
+            class="report-comment-quote"
+            .textContent=${comment.quote}
+          ></blockquote>
+          <label class="sr-only" for=${`artifact-comment-${comment.cid}`}
+            >Comment on “${shortQuote}”</label
+          >
+          <textarea
+            id=${`artifact-comment-${comment.cid}`}
+            class="report-comment-input text-field"
+            rows="2"
+            placeholder="Leave a comment…"
+            .value=${live(comment.text)}
+            @input=${onInput}
+            ?disabled=${pane._rs.deleting}
+          ></textarea>`}
     <div class="report-comment-foot">
       <button
         class="report-comment-del"
@@ -228,7 +256,8 @@ export function renderBar(pane: CommentPane): void {
   const rs = pane._rs,
     total = pendingFor(currentCommentKey(pane)),
     target = commentTarget();
-  const ready = !!composeMessage(pane);
+  const editing = editingPendingComment(pane);
+  const ready = !editing && !!composeMessage(pane);
   const sidebar = pane.querySelector(".image-comment-sidebar");
   if (!total) sidebar?.classList.remove("comments-open");
   const countLabel = total === 1 ? "1 comment" : `${total} comments`;
@@ -323,11 +352,13 @@ export function renderBar(pane: CommentPane): void {
     renderComments(pane);
     pane.dispatchEvent(new Event("comments-submitting", { bubbles: true }));
   };
-  const sendLabel = rs.sending
-    ? "Submitting…"
-    : rs.sendFailed
-      ? "Couldn’t save comments — retry"
-      : "Submit comments";
+  const sendLabel = editing
+    ? "Finish editing"
+    : rs.sending
+      ? "Submitting…"
+      : rs.sendFailed
+        ? "Couldn’t save comments — retry"
+        : "Submit comments";
   render(
     html`<div class=${`report-sendbar ${total ? "on" : ""}`} aria-live="polite">
       <span class="report-sendbar-label">${countLabel}</span>
@@ -361,7 +392,9 @@ export function renderBar(pane: CommentPane): void {
       <button
         class="btn primary report-sendbar-send"
         aria-label=${sendLabel}
-        title=${`${sendLabel} (${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"}+Enter)`}
+        title=${editing
+          ? "Save or cancel the edit before submitting"
+          : `${sendLabel} (${/Mac|iPhone|iPad/.test(navigator.platform) ? "⌘" : "Ctrl"}+Enter)`}
         @click=${send}
         ?disabled=${!ready || !target || rs.sending || rs.deleting}
       >

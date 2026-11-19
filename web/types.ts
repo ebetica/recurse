@@ -3,7 +3,7 @@
 // Activity counts use closed labels, never paths, commands or raw arguments.
 // Pane selection defaults to session privacy; local ids must be non-sensitive.
 
-export type AgentStatus =
+type AgentStatus =
   | "idle"
   | "running"
   | "interrupting"
@@ -146,6 +146,7 @@ export interface Message {
   model_responses?: ModelResponse[];
   /** Persisted Pi request-to-assistant-response duration in milliseconds. */
   model_time_ms?: number;
+  thinking_key?: string;
   /** Set while this assistant row's thinking is still streaming. */
   live_thinking?: boolean;
   /** Server-relative elapsed thinking time for a live request. */
@@ -260,6 +261,7 @@ export interface ToolEntry {
   thinking_entry_id?: string;
   /** Provider sent thinking for this request, even without a title. */
   has_thinking?: boolean;
+  thinking_key?: string;
   /** Set when the request is still receiving thinking deltas. */
   live_thinking?: boolean;
   /** Server-relative elapsed thinking time for a live request. */
@@ -284,8 +286,6 @@ export interface MessageEntry extends Message {
   // shell-notice full text, or a compact marker's notice line
   detail?: string;
 }
-
-export type TurnEntry = ToolEntry | MessageEntry;
 
 export interface TurnSegment {
   user: MessageEntry[];
@@ -419,6 +419,7 @@ export interface ToolArtifact {
   finished_at?: number;
   input: ToolArtifactEvent | null;
   latest_update: ToolArtifactEvent | null;
+  safety_review_failure?: { status?: number; message: string };
   result: ToolArtifactEvent | null;
   background_latest: ToolArtifactEvent | null;
   update_count: number;
@@ -448,7 +449,7 @@ export interface BackgroundShell {
   elapsed_seconds: number;
 }
 
-export interface BackgroundShellView {
+interface BackgroundShellView {
   status: "ready" | "disabled" | "unavailable";
   scope: "selected_agent_current_session";
   agent_id: string;
@@ -512,6 +513,7 @@ export interface Conversation {
   // Active physical JSONL generation; advances on compact.
   message_log_generation?: number;
   active_run?: string | null;
+  active_run_start?: number | null;
   run_state_clock?: [string, number];
   retry_notice?: string | null;
 }
@@ -615,7 +617,7 @@ export type PaneNavigation =
   | "filter"
   | "copy";
 
-export interface PaneFinderItem {
+interface PaneFinderItem {
   key: string;
   name: string;
   open(): void;

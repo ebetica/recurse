@@ -2,8 +2,7 @@
  * Every var(--name) the app reads is declared in markup, a stylesheet or the
  * generated theme; setProperty overrides still need a resting declaration.
  */
-import ts from "typescript";
-import { tsCode } from "./color_check.ts";
+import { StyleFile, type StyleText } from "./style_file.ts";
 
 const DECLARATION = /(?<![\w-])(--[\w-]+)\s*:/g;
 const COMMENT = /\/\*[\s\S]*?\*\/|<!--[\s\S]*?-->/g;
@@ -13,17 +12,14 @@ const blank = (text: string) => text.replace(/[^\n]/g, " ");
 
 /** Error lines for references no file or extra name declares. */
 export function checkFiles(
-  files: readonly { file: string; text: string }[],
+  files: readonly StyleText[],
   declaredElsewhere: Iterable<string> = [],
 ): string[] {
-  const views = files.map(({ file, text }) => ({
-    file,
-    view: (file.endsWith(".ts")
-      ? tsCode(
-          ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true),
-          text,
-        )
-      : text
+  const views = files.map((input) => ({
+    file: input.file,
+    view: (input.file.endsWith(".ts")
+      ? StyleFile.from(input).code
+      : input.text
     ).replace(COMMENT, blank),
   }));
   const declared = new Set(declaredElsewhere);

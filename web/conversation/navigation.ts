@@ -21,7 +21,7 @@ import {
   jumpThreadScroll,
   queueThreadJump,
   threadJumpAwaited,
-} from "./scroll-ledger.js";
+} from "../thread-scroll/index.js";
 
 // Completion and retained context are different places: resolve the summary's
 // boundary, then reuse the row jump to load/reveal/focus the kept message.

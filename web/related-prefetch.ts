@@ -3,16 +3,16 @@
 // hits; each poll issues only a few background requests.
 import type { TreeNode } from "./types.js";
 
-export const RELATED_LIMIT = 12;
-export const PREFETCH_PER_POLL = 4;
-export const PREFETCH_COOLDOWN_MS = 2000;
+const RELATED_LIMIT = 12;
+const PREFETCH_PER_POLL = 4;
+const PREFETCH_COOLDOWN_MS = 2000;
 
 function updatedAt(node: TreeNode | undefined): number {
   return node?.updated || 0;
 }
 
 /** The selection's parent, then its siblings and children, freshest first. */
-export function relatedIds(
+function relatedIds(
   nodes: Record<string, TreeNode>,
   selectedId: string,
   limit = RELATED_LIMIT,

@@ -16,7 +16,7 @@ import { ReportDoc } from "../report";
 import { ReviveDoc } from "../revive_doc";
 import { SideDoc } from "../side_conversations";
 import { runtime } from "./load";
-import { awaitedSpan, slowSpan } from "../../../observability/slow_span";
+import { awaitedSpan, slowSpan } from "../../../observability/slow-span";
 
 /** True only when stored tasks, input or lifecycle work need an open. */
 export async function needsRecovery(

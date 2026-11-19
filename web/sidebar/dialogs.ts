@@ -7,7 +7,7 @@ import { state } from "../state.js";
 import { shownTags } from "./tag-state.js";
 
 /** Snooze presets: label and epoch seconds, from `now` (ms) in local time. */
-export function snoozePresets(now = Date.now()): [string, number][] {
+function snoozePresets(now = Date.now()): [string, number][] {
   const at = (days: number, hour: number) => {
     const d = new Date(now);
     d.setDate(d.getDate() + days);

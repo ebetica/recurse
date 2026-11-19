@@ -1,5 +1,5 @@
 // Only plain prose references; a URL's fragment is not a PR reference.
-export function prReferences(text: string): RegExpMatchArray[] {
+function prReferences(text: string): RegExpMatchArray[] {
   return [
     ...text.matchAll(/(?<![\p{L}\p{N}&#])#([1-9]\d{0,5})(?![\p{L}\p{N}])/gu),
   ].filter((match) => {

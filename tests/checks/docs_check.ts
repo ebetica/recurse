@@ -1,15 +1,15 @@
 #!/usr/bin/env bun
 // Docs check: core Markdown links and backticked repo paths resolve, the code
-// map names every source part, and tracked Markdown stays under the length
-// limit. The root README may link outside core.
+// map names every source part, and oversized Markdown needs an architecture
+// sweep. The root README may link outside core.
 import { existsSync } from "node:fs";
 import { lstat, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { readSweepLedger, sweepProblem } from "./size_check.ts";
 
 const ROOTS = /^(?:src|web|docs|tools|scripts|tests)\//;
 const BUILT = /^web\/dist(?:\/|$)/;
 const MAP = "docs/agents/repository-map.md";
-const MARKDOWN_LIMIT = 15_000;
 
 async function tracked(...specs: string[]): Promise<string[]> {
   const proc = Bun.spawn(["git", "ls-files", "-z", "--", ...specs], {
@@ -75,17 +75,16 @@ for (const part of parts)
 const markdown = (
   await tracked(".", ":(glob,exclude)" + ["play", "ground"].join("") + "/**")
 ).filter((file) => file.endsWith(".md"));
+const ledger = readSweepLedger();
 for (const file of markdown) {
   if ((await lstat(file)).isSymbolicLink()) continue;
   const count = Array.from(await readFile(file, "utf8")).length;
-  if (count >= MARKDOWN_LIMIT)
-    problems.push(
-      `${file}: ${count} characters (limit: fewer than ${MARKDOWN_LIMIT})`,
-    );
+  const problem = sweepProblem(file, count, ledger);
+  if (problem) problems.push(problem);
 }
 
 for (const problem of problems) console.error(problem);
 if (problems.length) process.exit(1);
 console.log(
-  `docs check: ${docs.length} files, ${parts.size} code-map parts, ${markdown.length} Markdown files under ${MARKDOWN_LIMIT} characters`,
+  `docs check: ${docs.length} files, ${parts.size} code-map parts, ${markdown.length} Markdown files checked`,
 );

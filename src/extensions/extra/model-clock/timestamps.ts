@@ -6,7 +6,7 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 
 /** Ten minutes: a reminder may attach at most this often per session. */
-export const REMINDER_INTERVAL_MS_DEFAULT = 10 * 60 * 1000;
+const REMINDER_INTERVAL_MS_DEFAULT = 10 * 60 * 1000;
 
 const reminderIntervalMs = REMINDER_INTERVAL_MS_DEFAULT;
 
@@ -15,7 +15,7 @@ function pad2(value: number): string {
 }
 
 /** `2026-09-16 21:40`: minute-precision UTC wall clock, minimal tokens. */
-export function formatClockMinute(nowMs: number): string {
+function formatClockMinute(nowMs: number): string {
   const date = new Date(nowMs);
   return (
     `${date.getUTCFullYear()}-${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())}` +
@@ -24,16 +24,16 @@ export function formatClockMinute(nowMs: number): string {
 }
 
 /** `[2026-09-16 21:40 UTC]`: the per-user-message stamp. */
-export function userStamp(nowMs: number): string {
+function userStamp(nowMs: number): string {
   return `[${formatClockMinute(nowMs)} UTC]`;
 }
 
 /** `[time: 2026-09-16 21:51 UTC]`: the between-tool-calls reminder. */
-export function reminderStamp(nowMs: number): string {
+function reminderStamp(nowMs: number): string {
   return `[time: ${formatClockMinute(nowMs)} UTC]`;
 }
 
-export interface TimestampState {
+interface TimestampState {
   stamps: Map<string, { text: string; at: number }>;
   lastSeenMs: number | null;
 }

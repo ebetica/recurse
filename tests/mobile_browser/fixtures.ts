@@ -58,5 +58,3 @@ export const compactConv = () =>
       { kind: "marker", origin: "custom", meta: { compact_marker: true } },
     ),
   ]);
-export const threadConv = (text = "Hello from the fixture") =>
-  idleConv([row("u1", "user", "go"), row("a1", "assistant", text)]);

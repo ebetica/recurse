@@ -8,13 +8,13 @@ import {
   logEvent,
   type RuntimeLogger,
 } from "./observability/runtime_logging";
-import { retirePath } from "./utils/trash_sweep";
+import { retirePath } from "./utils/trash-sweep";
 
 type Row = Record<string, unknown>;
 const nonEmpty = (value: unknown): value is string =>
   typeof value === "string" && value !== "" && !value.includes("\0");
 
-export interface PiSessionRetirementOptions {
+interface PiSessionRetirementOptions {
   trashDir: string;
   sessions: Pick<SessionIndex, "sessionDir" | "boundSessionFile">;
   logger: RuntimeLogger;

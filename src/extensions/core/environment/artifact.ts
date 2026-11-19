@@ -89,7 +89,7 @@ export function createArtifact(context: ArtifactContext, owner: string) {
                   title: item.title,
                   path: artifactWorkingPath(owner, id),
                   entry: item.entry,
-                  link: `[${String(item.title).replace(/[\[\]<>\\]/g, "\\$&")}](#artifact=${id})`,
+                  link: `[${String(item.title).replace(/[[\]<>\\]/g, "\\$&")}](#artifact=${id})`,
                 }),
               },
             ],

@@ -40,7 +40,7 @@ export interface ArtifactPaneViewState {
   artifactId: string | null;
 }
 
-export interface ArtifactViewSnapshot {
+interface ArtifactViewSnapshot {
   selectedId: string | null;
   selectedVersion: string | null;
   displayedId: string | null;
@@ -84,7 +84,7 @@ export function restoreArtifactSelection(
   return availableIds[0] || null;
 }
 
-export function artifactViewIsStable(view: ArtifactViewSnapshot): boolean {
+function artifactViewIsStable(view: ArtifactViewSnapshot): boolean {
   return (
     view.shown &&
     !!view.selectedId &&

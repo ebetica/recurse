@@ -3,7 +3,7 @@
 // file and publish snapshots only after atomic, private-mode disk replacement.
 // Older reads cannot undo own writes; close aborts reads and drains writes.
 import { randomUUID } from "node:crypto";
-import { slowSpan } from "./observability/slow_span";
+import { slowSpan } from "./observability/slow-span";
 import fs from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";

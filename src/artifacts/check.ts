@@ -28,7 +28,7 @@ const CONTROLS =
 /** The browser could not run, so the page was not checked. */
 export class ArtifactCheck extends ArtifactError {}
 
-export interface CheckIssue {
+interface CheckIssue {
   level: "error" | "warning";
   message: string;
   /** Source file:line:column, when the source map names one. */
@@ -40,7 +40,7 @@ export interface CheckIssue {
 
 type Width = keyof typeof WIDTHS;
 
-export interface CheckReport {
+interface CheckReport {
   ok: boolean;
   issues: CheckIssue[];
   screenshots: Record<Width, string>;
@@ -130,7 +130,7 @@ function scriptStart(html: string, offset: number): number {
 // Map a 1-based page line and column, as Chromium reports them, to the source.
 // Bun inlines the bundle into one module script that ends with the map's debug
 // id; the map's positions are relative to that script's text.
-export function sourceMapper(html: string, sourceMap: string | null): Mapper {
+function sourceMapper(html: string, sourceMap: string | null): Mapper {
   if (!sourceMap) return () => undefined;
   const map = JSON.parse(sourceMap) as {
     sources: string[];

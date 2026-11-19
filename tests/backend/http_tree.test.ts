@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { activeRunId } from "../../src/agents/conversation_store";
+import { activeRunId } from "../../src/agents/storage/conversation_store";
 import type { RuntimeLogRecord } from "../../src/observability/runtime_logging";
 import { logger } from "../../src/observability/runtime_logging";
 import {

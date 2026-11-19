@@ -85,7 +85,7 @@ interface Token {
 function tokens(root: Element): Token[] {
   const list: Token[] = [];
   const walk = (node: Node) => {
-    for (const child of [...node.childNodes]) {
+    for (const child of node.childNodes) {
       if (child instanceof Text) {
         for (const match of child.data.matchAll(WORD))
           list.push({

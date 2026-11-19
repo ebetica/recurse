@@ -13,6 +13,7 @@ import {
 } from "../comments/selection-draft/index.js";
 import { resizeTextarea } from "../composer/textarea.js";
 import { placeBox } from "../files/index.js";
+import { PEN_ICON } from "../icons.js";
 import { prepareCommentCrop } from "./comment-crops.js";
 import { displayedInfo } from "./artifact-state.js";
 import type {
@@ -46,13 +47,13 @@ export function cmap(id: string): Map<string, Comment> {
 export function pendingFor(id: string | null): number {
   return (
     (id ? comments.get(id)?.size || 0 : 0) +
-    (selectionDraft?.key === id ? 1 : 0)
+    (selectionDraft?.key === id && !selectionDraft.edit ? 1 : 0)
   );
 }
 export function pendingTotal(): number {
   let count = 0;
   for (const map of comments.values()) count += map.size;
-  return count + (selectionDraft ? 1 : 0);
+  return count + (selectionDraft && !selectionDraft.edit ? 1 : 0);
 }
 export const commentKey = (
   agentId: string | null,
@@ -84,7 +85,7 @@ export function hasStagedCommentsIn(root: Element): boolean {
   return !!pane && root.contains(pane) && !!id && !!comments.get(id)?.size;
 }
 
-export function markRange(range: Range, cid: string): HTMLElement[] {
+function markRange(range: Range, cid: string): HTMLElement[] {
   const root = range.commonAncestorContainer;
   const scope = (root.nodeType === 3 ? root.parentNode : root) ?? root;
   const owner = scope.ownerDocument || document;
@@ -112,7 +113,7 @@ export function markRange(range: Range, cid: string): HTMLElement[] {
   return marks;
 }
 /** The image or PDF page frame in `root` that a box on `page` belongs to. */
-export function boxFrame(root: Element, page?: number): HTMLElement | null {
+function boxFrame(root: Element, page?: number): HTMLElement | null {
   const selector = `.report-box-frame${page ? `[data-page="${page}"]` : ""}`;
   return root.matches(selector)
     ? (root as HTMLElement)
@@ -126,17 +127,29 @@ function unwrapMark(mark: Element): void {
   // Invariant: Normalizing an image frame removes Lit's empty text nodes.
   if (!box) parent.normalize();
 }
+const commentMarkers = ":is(mark.report-cmark, .report-comment-anchor)";
+function removeMarkers(doc: Element | null, selector: string): void {
+  for (const marker of doc?.querySelectorAll(selector) ?? []) {
+    if (marker.matches("mark")) unwrapMark(marker);
+    else marker.remove();
+  }
+}
 export function unmark(doc: Element | null, cid: string): void {
-  if (!doc) return;
-  for (const mark of doc.querySelectorAll(
-    `mark.report-cmark[data-cid="${cid}"]`,
-  ))
-    unwrapMark(mark);
+  removeMarkers(doc, `${commentMarkers}[data-cid="${cid}"]`);
 }
 export function unmarkAll(doc: Element | null): void {
-  if (!doc) return;
-  for (const mark of doc.querySelectorAll("mark.report-cmark"))
-    unwrapMark(mark);
+  removeMarkers(doc, commentMarkers);
+}
+const interactiveText = 'a[href], button, summary, [role="button"]';
+function appendEditAnchor(mark: HTMLElement, cid: string): void {
+  const button = mark.ownerDocument.createElement("button");
+  button.type = "button";
+  button.className = "btn sm quiet report-comment-anchor";
+  button.dataset.cid = cid;
+  button.title = "Edit highlighted comment";
+  button.setAttribute("aria-label", button.title);
+  button.innerHTML = PEN_ICON;
+  (mark.closest(interactiveText) ?? mark).after(button);
 }
 export function orderedComments(
   id: string | null,
@@ -160,12 +173,11 @@ export function orderedComments(
 const popover = document.createElement("div");
 popover.className = "menu form report-comment-popover";
 popover.setAttribute("role", "dialog");
-popover.setAttribute("aria-label", "Comment on selected text");
+popover.setAttribute("aria-labelledby", "report-comment-label");
 popover.hidden = true;
 const popoverLabel = document.createElement("label");
-popoverLabel.className = "sr-only";
+popoverLabel.id = "report-comment-label";
 popoverLabel.htmlFor = "report-selection-comment";
-popoverLabel.textContent = "Comment on selected text";
 const popoverInput = document.createElement("textarea");
 popoverInput.id = "report-selection-comment";
 popoverInput.className = "text-field";
@@ -190,11 +202,13 @@ export function cancelSelectionComment(owner?: HTMLElement): void {
   // selectionchange fires for every caret move anywhere, and dropping ranges
   // unconditionally wipes the caret out of whatever input the reader is typing
   // in.
-  const owned = selectionDraft !== null || !popover.hidden;
+  const pane = selectionDraft?.pane;
+  const owned = !!pane || !popover.hidden;
   selectionDraft?.mark?.remove();
   selectionDraft?.crop?.release();
   setSelectionDraft(null);
   popover.hidden = true;
+  if (popover.parentNode !== document.body) document.body.append(popover);
   popoverInput.value = "";
   if (!owned) {
     selectionRoot = null;
@@ -202,12 +216,18 @@ export function cancelSelectionComment(owner?: HTMLElement): void {
   }
   window.getSelection()?.removeAllRanges();
   selectionRoot = null;
-  if (commentMount.current)
-    commentPanes.get(commentMount.current)!.renderBar(commentMount.current);
+  if (pane) commentPanes.get(pane)!.renderBar(pane);
 }
-popoverCancel.addEventListener("click", () => cancelSelectionComment());
+function finishPendingEdit(): void {
+  const anchor = selectionDraft?.edit?.anchor;
+  cancelSelectionComment();
+  anchor?.focus({ preventScroll: true });
+}
+popoverCancel.addEventListener("click", finishPendingEdit);
 popoverInput.addEventListener("input", () => {
   if (popover.classList.contains("composer-box")) resizeTextarea(popoverInput);
+  if (selectionDraft?.edit)
+    popoverComment.disabled = !popoverInput.value.trim();
 });
 popoverInput.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && closeSelectionCommentFromKeyboard()) {
@@ -217,14 +237,26 @@ popoverInput.addEventListener("keydown", (event) => {
   if (isSendShortcut(event)) {
     event.preventDefault();
     event.stopPropagation();
-    closeSelectionCommentFromKeyboard();
+    if (selectionDraft?.edit) stageSelectionComment();
+    else closeSelectionCommentFromKeyboard();
   }
 });
 popoverComment.addEventListener("click", () => stageSelectionComment());
-/** Close only the floating editor, retaining a nonempty comment. */
-export function closeSelectionCommentFromKeyboard(): boolean {
-  if (popover.hidden || !selectionDraft) return false;
-  const pane = commentMount.current;
+/** Close the floating editor in the given viewer, or handle app-wide Escape. */
+export function closeSelectionCommentFromKeyboard(
+  owner?: HTMLElement,
+): boolean {
+  if (
+    popover.hidden ||
+    !selectionDraft ||
+    (owner && owner !== selectionDraft.pane)
+  )
+    return false;
+  if (selectionDraft.edit) {
+    finishPendingEdit();
+    return true;
+  }
+  const pane = selectionDraft.pane;
   stageSelectionComment(true, false);
   if (!selectionDraft) {
     const target =
@@ -239,49 +271,62 @@ export function closeSelectionCommentFromKeyboard(): boolean {
 export function stageSelectionForSend(pane: CommentPane): boolean {
   if (
     !selectionDraft ||
-    commentMount.current !== pane ||
+    selectionDraft.pane !== pane ||
     selectionDraft.key !== currentCommentKey(pane)
   )
     return true;
+  if (selectionDraft.edit) return false;
   stageSelectionComment(true);
   return !selectionDraft;
 }
+/** Whether this viewer needs to finish an edit before submitting. */
+export function editingPendingComment(pane: CommentPane): boolean {
+  return selectionDraft?.pane === pane && !!selectionDraft.edit;
+}
 // Never stage a draft whose text/box left the page after a file/version swap.
 const draftDetached = (draft: SelectionDraft): boolean =>
-  !(draft.mark ?? draft.range.startContainer).isConnected;
-function positionPopover(range = selectionDraft?.range): void {
+  !(draft.edit?.anchor ?? draft.mark ?? draft.range.startContainer).isConnected;
+function positionPopover(): void {
   if (selectionDraft && draftDetached(selectionDraft)) cancelSelectionComment();
-  const displayed = commentMount.current && displayedInfo(commentMount.current);
+  const draft = selectionDraft;
   if (
-    !range ||
-    !commentMount.current ||
-    selectionDraft?.key !== activeId() ||
-    !selectionDraft ||
-    !sourceIsCurrent(selectionDraft.source) ||
-    !displayed ||
-    selectionDraft.version !== displayed.version
+    !draft ||
+    draft.key !== currentCommentKey(draft.pane) ||
+    !sourceIsCurrent(draft.source) ||
+    draft.version !== displayedInfo(draft.pane)?.version
   ) {
     popover.hidden = true;
     return;
   }
-  const rects = range.getClientRects(),
-    rect = rects[rects.length - 1];
+  const rects = (draft.edit?.anchor ?? draft.range).getClientRects();
+  const rect = rects[rects.length - 1];
   if (!rect) {
     popover.hidden = true;
     return;
   }
-  const file = !!commentMount.current.closest(
-    '.image-popout, [data-pane="files"]',
-  );
+  const pane = draft.pane;
+  const parent = pane.querySelector(".image-comment-sidebar") ?? document.body;
+  if (popover.parentNode !== parent) parent.append(popover);
+  const file = !!pane.closest('.image-popout, [data-pane="files"]');
   popover.className = file
     ? "composer-box files-comment-composer report-comment-popover"
     : "menu form report-comment-popover";
+  popover.classList.toggle("editing", !!draft.edit);
   popoverInput.className = file ? "composer-input" : "text-field";
   popoverInput.rows = file ? 1 : 3;
   popoverInput.style.height = "";
+  popoverLabel.className = draft.edit ? "" : "sr-only";
+  popoverLabel.textContent = draft.edit
+    ? "Edit comment"
+    : "Comment on selected text";
+  popoverComment.textContent = draft.edit ? "Save" : "Comment";
+  popoverComment.disabled = !!draft.edit && !popoverInput.value.trim();
   popover.hidden = false;
   if (file) resizeTextarea(popoverInput);
-  const left = Math.min(rect.right + 8, innerWidth - popover.offsetWidth - 8);
+  const paneRight = draft.edit
+    ? pane.getBoundingClientRect().right
+    : innerWidth;
+  const left = Math.min(rect.right + 8, paneRight - popover.offsetWidth - 8);
   const below = rect.bottom + 8;
   const top =
     below + popover.offsetHeight <= innerHeight - 8
@@ -327,14 +372,12 @@ function sameRange(a: Range, b: Range): boolean {
 }
 function createSelectionSource(
   doc: Document,
-  pane: CommentPane | null,
   agentId: string | null,
   artifactId: string | null,
   version: string | null,
 ): SelectionSource {
   return {
     doc,
-    pane,
     agentId,
     artifactId,
     version,
@@ -349,7 +392,19 @@ function createSelectionSource(
     offerToken: 0,
   };
 }
+function editorHasChanges(): boolean {
+  return (
+    !!selectionDraft &&
+    popoverInput.value.trim() !==
+      (selectionDraft.edit?.comment.text.trim() ?? "")
+  );
+}
 function offerSelectionComment(source: SelectionSource): void {
+  if (
+    selectionDraft?.edit ||
+    (selectionDraft?.pane !== commentMount.current && editorHasChanges())
+  )
+    return;
   const selected = selectionRange(source),
     pane = commentMount.current,
     id = activeId();
@@ -367,7 +422,9 @@ function offerSelectionComment(source: SelectionSource): void {
     .trim()
     .slice(0, 600);
   if (!quote) return;
+  const previousPane = selectionDraft?.pane;
   const same =
+    previousPane === pane &&
     selectionDraft?.key === id &&
     selectionDraft.version === version &&
     selectionDraft.root === selected.root &&
@@ -377,6 +434,7 @@ function offerSelectionComment(source: SelectionSource): void {
     selectionDraft?.mark?.remove();
     selectionDraft?.crop?.release();
     setSelectionDraft({
+      pane,
       key: id,
       version,
       root: selected.root,
@@ -386,7 +444,9 @@ function offerSelectionComment(source: SelectionSource): void {
     });
     popoverInput.value = "";
   }
-  positionPopover(selected.range);
+  positionPopover();
+  if (previousPane && previousPane !== pane)
+    commentPanes.get(previousPane)!.renderBar(previousPane);
   commentPanes.get(pane)!.renderBar(pane);
 }
 function selectionInteractionActive(source: SelectionSource): boolean {
@@ -418,7 +478,14 @@ export function offerBoxComment(
   const pane = commentMount.current,
     id = activeId(),
     version = pane && displayedInfo(pane)?.version;
-  if (!pane || !id || !version || pane._rs.deleting || !pane.contains(frame)) {
+  if (
+    !pane ||
+    !id ||
+    !version ||
+    pane._rs.deleting ||
+    !pane.contains(frame) ||
+    (selectionDraft?.pane !== pane && editorHasChanges())
+  ) {
     mark.remove();
     return;
   }
@@ -426,6 +493,7 @@ export function offerBoxComment(
   const range = frame.ownerDocument.createRange();
   range.selectNode(mark);
   setSelectionDraft({
+    pane,
     key: id,
     version,
     root: frame,
@@ -436,8 +504,61 @@ export function offerBoxComment(
     crop: prepareCommentCrop(pane, box),
     mark,
   });
-  positionPopover(range);
+  positionPopover();
   popoverInput.focus({ preventScroll: true });
+}
+/** Artifact text comments use the floating editor for their pending entries. */
+export function canEditPendingComment(
+  pane: CommentPane,
+  comment: Comment,
+): boolean {
+  return pane.dataset.pane === "report" && !comment.box;
+}
+
+/** Open the same editor from the highlighted text or its pending card. */
+export function editPendingComment(
+  pane: CommentPane,
+  cid: string,
+  anchor: HTMLElement,
+): boolean {
+  const key = currentCommentKey(pane);
+  const comment = key ? comments.get(key)?.get(cid) : undefined;
+  if (
+    !key ||
+    !comment ||
+    !canEditPendingComment(pane, comment) ||
+    pane._rs.deleting ||
+    comment.version !== displayedInfo(pane)?.version
+  )
+    return false;
+  const same = selectionDraft?.edit?.comment === comment;
+  if (
+    !same &&
+    editorHasChanges() &&
+    !confirm("Discard what you typed in the open comment box?")
+  ) {
+    popoverInput.focus({ preventScroll: true });
+    return true;
+  }
+  const value = same ? popoverInput.value : comment.text;
+  cancelSelectionComment();
+  commentMount.current = pane;
+  setSelectionDraft({
+    pane,
+    key,
+    version: comment.version,
+    root: pane,
+    source: mainSelectionSource,
+    range: comment.range,
+    quote: comment.quote,
+    edit: { comment, anchor },
+  });
+  if (anchor.matches("mark")) anchor.tabIndex = -1;
+  popoverInput.value = value;
+  commentPanes.get(pane)!.renderBar(pane);
+  positionPopover();
+  popoverInput.focus({ preventScroll: true });
+  return true;
 }
 function isSendShortcut(event: KeyboardEvent): boolean {
   const mac = /Mac|iPhone|iPad/.test(navigator.platform);
@@ -456,8 +577,8 @@ export function handleCommentShortcut(
 ): void {
   if (!isSendShortcut(event)) return;
   if (
-    commentMount.current === root &&
-    !stageSelectionForSend(commentMount.current)
+    selectionDraft?.pane === root &&
+    !stageSelectionForSend(selectionDraft.pane)
   )
     return;
   const button = root.querySelector<HTMLButtonElement>(".report-sendbar-send");
@@ -478,6 +599,37 @@ export function claimComments(
     pane.addEventListener("keydown", (event) =>
       handleCommentShortcut(event, pane),
     );
+    if (pane.dataset.pane === "report")
+      pane.addEventListener(
+        "click",
+        (event) => {
+          if (
+            event.defaultPrevented ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.shiftKey ||
+            !(event.target instanceof Element)
+          )
+            return;
+          const anchor = event.target.closest<HTMLElement>(
+            `.report-doc ${commentMarkers}[data-cid]`,
+          );
+          if (
+            !anchor ||
+            (anchor.matches("mark") &&
+              (anchor.closest(interactiveText) ||
+                !window.getSelection()?.isCollapsed))
+          )
+            return;
+          const cid = anchor.dataset.cid;
+          if (cid && editPendingComment(pane, cid, anchor)) {
+            event.preventDefault();
+            event.stopPropagation();
+          }
+        },
+        { capture: true },
+      );
   }
   if (!commentMount.current?.isConnected) commentMount.current = pane;
 }
@@ -590,13 +742,7 @@ function installSelectionInteractions(source: SelectionSource): void {
   doc.addEventListener("touchcancel", onTouchCancel, true);
   doc.addEventListener("scroll", onScroll, true);
 }
-const mainSelectionSource = createSelectionSource(
-  document,
-  null,
-  null,
-  null,
-  null,
-);
+const mainSelectionSource = createSelectionSource(document, null, null, null);
 installSelectionInteractions(mainSelectionSource);
 addEventListener(
   "scroll",
@@ -605,28 +751,34 @@ addEventListener(
 );
 addEventListener("resize", () => positionPopover());
 function stageSelectionComment(allowEmpty = false, focusCard = true): void {
-  const draft = selectionDraft,
-    id = activeId();
+  const draft = selectionDraft;
+  if (!draft) return;
+  const { pane } = draft;
+  const id = currentCommentKey(pane);
   const note = popoverInput.value.trim();
-  const displayed = commentMount.current
-    ? displayedInfo(commentMount.current)
-    : null;
-  if (draft && draftDetached(draft)) {
+  const displayed = displayedInfo(pane);
+  if (draftDetached(draft)) {
     cancelSelectionComment();
     return;
   }
   if (
-    !draft ||
     !id ||
-    !commentMount.current ||
-    commentMount.current._rs.deleting ||
+    draft.key !== id ||
+    pane._rs.deleting ||
     !sourceIsCurrent(draft.source) ||
     !displayed?.version ||
     draft.version !== displayed.version
   )
     return;
-  if (!note && !allowEmpty) {
+  if (!note && (!allowEmpty || draft.edit)) {
     popoverInput.focus();
+    return;
+  }
+  if (draft.edit) {
+    const { comment } = draft.edit;
+    if (comments.get(id)?.get(comment.cid) === comment) comment.text = note;
+    finishPendingEdit();
+    commentPanes.get(pane)!.renderComments(pane);
     return;
   }
   const cid = `ac${++cidSeq}`;
@@ -637,10 +789,12 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
     cancelSelectionComment();
     return;
   }
+  if (pane.dataset.pane === "report" && !draft.box)
+    appendEditAnchor(marks[0]!, cid);
   cmap(id).set(cid, {
     cid,
-    agentId: commentMount.current._rs.agentId!,
-    artifactId: commentMount.current._rs.selId!,
+    agentId: pane._rs.agentId!,
+    artifactId: pane._rs.selId!,
     version: displayed.version,
     range: draft.range.cloneRange(),
     quote: draft.quote,
@@ -650,11 +804,11 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
   });
   draft.crop = undefined;
   cancelSelectionComment();
-  commentPanes.get(commentMount.current)!.renderComments(commentMount.current);
+  commentPanes.get(pane)!.renderComments(pane);
   if (focusCard)
-    commentMount.current
-      ?.querySelector<HTMLTextAreaElement>(
-        `.report-comment[data-cid="${cid}"] textarea`,
+    pane
+      .querySelector<HTMLElement>(
+        `.report-comment[data-cid="${cid}"] :is(textarea, .report-comment-edit)`,
       )
       ?.focus({ preventScroll: true });
 }
@@ -731,7 +885,9 @@ export function reanchor(pane: CommentPane, id: string): void {
     for (const doc of commentRoots(pane)) {
       const range = findQuote(doc, comment.quote);
       if (range) {
-        markRange(range, comment.cid);
+        const first = markRange(range, comment.cid)[0];
+        if (first && canEditPendingComment(pane, comment))
+          appendEditAnchor(first, comment.cid);
         break;
       }
     }

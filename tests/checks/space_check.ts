@@ -4,10 +4,10 @@
  */
 import { cssView } from "./radius_check.ts";
 
-export type Finding = { line: number; value: string };
+type Finding = { line: number; value: string };
 
 /** Files still carrying raw spacing lengths, with their exact counts. */
-export const PENDING: Readonly<Record<string, number>> = {};
+const PENDING: Readonly<Record<string, number>> = {};
 
 const ALLOW = "space-check: allow";
 const SPACING =

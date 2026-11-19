@@ -3,6 +3,7 @@
  * or a scrollbar can resize one box but not the other.
  */
 import ts from "typescript";
+import { StyleFile, type StyleText } from "./style_file.ts";
 
 const OPTIONS: ts.CompilerOptions = {
   lib: ["lib.es2022.d.ts", "lib.dom.d.ts"],
@@ -18,27 +19,23 @@ const isResizeObserver = (type: ts.Type): boolean =>
     : type.getSymbol()?.getName() === "ResizeObserver";
 
 /** Error lines for observe() calls on a ResizeObserver without a box option. */
-export function checkFiles(
-  files: readonly { file: string; text: string }[],
-): string[] {
-  const texts = new Map(
+export function checkFiles(files: readonly StyleText[]): string[] {
+  const inputs = new Map(
     files
       .filter(
         ({ file, text }) => file.endsWith(".ts") && /ResizeObserver/.test(text),
       )
-      .map(({ file, text }) => [file, text]),
+      .map((input) => [input.file, StyleFile.from(input)]),
   );
-  if (!texts.size) return [];
+  if (!inputs.size) return [];
   const host = ts.createCompilerHost(OPTIONS);
   const readLib = host.getSourceFile;
   host.getSourceFile = (name, version) =>
-    texts.has(name)
-      ? ts.createSourceFile(name, texts.get(name)!, version, true)
-      : readLib(name, version);
-  const program = ts.createProgram([...texts.keys()], OPTIONS, host);
+    inputs.get(name)?.source ?? readLib(name, version);
+  const program = ts.createProgram([...inputs.keys()], OPTIONS, host);
   const checker = program.getTypeChecker();
   const errors: string[] = [];
-  for (const file of texts.keys()) {
+  for (const file of inputs.keys()) {
     const source = program.getSourceFile(file)!;
     const visit = (node: ts.Node) => {
       if (

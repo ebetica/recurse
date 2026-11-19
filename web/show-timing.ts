@@ -3,22 +3,22 @@
 // window.recurseShowTiming() for read-only inspection.
 import { interactionTrace, recordUiTiming } from "./interaction-timing.js";
 
-export interface StageTiming {
+interface StageTiming {
   readonly name: string;
   readonly at: number;
 }
 
-export interface InteractionTiming {
+interface InteractionTiming {
   readonly id: string;
   readonly ms: number;
 }
 
-export interface ConversationRequestTiming {
+interface ConversationRequestTiming {
   readonly traceId: string;
   readonly clickToDispatchMs: number;
 }
 
-export interface ShowTimingSnapshot {
+interface ShowTimingSnapshot {
   readonly coldStages: StageTiming[];
   readonly coldComplete: boolean;
   readonly recentSwitches: InteractionTiming[];
@@ -26,9 +26,9 @@ export interface ShowTimingSnapshot {
   readonly medianSwitchMs: number | null;
 }
 
-export const RECENT_SWITCH_LIMIT = 20;
+const RECENT_SWITCH_LIMIT = 20;
 
-export class ShowTimingLog {
+class ShowTimingLog {
   private readonly stages: StageTiming[] = [];
   private readonly seenStages = new Set<string>();
   private readonly recent: InteractionTiming[] = [];
@@ -110,7 +110,7 @@ export class ShowTimingLog {
 
 export const COLD_TREE = "tree-read";
 export const COLD_FOCUSED = "focused-read";
-export const COLD_PAINTED = "first-turn-painted";
+const COLD_PAINTED = "first-turn-painted";
 
 const hasPerformance = typeof performance !== "undefined";
 const log = new ShowTimingLog(() =>
@@ -193,7 +193,7 @@ export function conversationPainted(id: string): void {
   }
 }
 
-export function showTimingSnapshot(): ShowTimingSnapshot {
+function showTimingSnapshot(): ShowTimingSnapshot {
   return log.snapshot();
 }
 

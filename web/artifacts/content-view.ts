@@ -27,6 +27,7 @@ window.addEventListener("recurse:theme-changed", () => {
   for (const frame of document.querySelectorAll<HTMLIFrameElement>(
     "iframe.artifact-embed-page[src]",
   ))
+    // oxlint-disable-next-line no-self-assign -- Reload each Artifact embed with the new theme.
     frame.src = frame.src;
 });
 

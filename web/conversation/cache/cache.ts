@@ -1,7 +1,7 @@
 // Bounded conversation cache and response ownership; no orchestration imports.
 import type { Conversation } from "../../types.js";
 
-export const MAX_CACHED_CONVERSATIONS = 8;
+const MAX_CACHED_CONVERSATIONS = 8;
 
 /** Only a real view promotes an entry; prefetched entries are evicted first. */
 export class ConversationCache {

@@ -7,7 +7,7 @@ import {
   canonicalMetadata,
   type ConversationRecord,
   type ConversationStore,
-} from "../conversation_store";
+} from "../storage";
 import type { DurableHost } from "../durable/host";
 import type { AgentNodes } from "../runtime/agent_nodes";
 import type { AgentNode, NodeStore } from "../runtime/agent_node";
@@ -16,7 +16,7 @@ import type { ProcessLifecycle } from "../../process_lifecycle";
 import type { ShellRegistry } from "../../pi_bg_shell";
 
 type Rec = ConversationRecord;
-export interface SwitchoverDeps {
+interface SwitchoverDeps {
   conversations: ConversationStore;
   durable: DurableHost;
   nodes: AgentNodes<AgentNode, NodeStore>;

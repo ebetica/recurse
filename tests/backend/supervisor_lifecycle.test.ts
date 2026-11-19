@@ -42,7 +42,7 @@ import {
   abortable,
   ignoringCancelled,
 } from "../../src/utils/tasks";
-import { AgentStore } from "../../src/agents/agent_store";
+import { AgentStore } from "../../src/agents/storage/agent_store";
 import { LoopLag } from "../../src/observability/loop_lag";
 import { logger } from "../../src/observability/runtime_logging";
 import { startServer } from "../../src/server";

@@ -53,7 +53,7 @@ function scripted(spec: ScriptedResponse): Response {
   });
 }
 
-export function buildRouter(): Router {
+function buildRouter(): Router {
   const router = new Router();
   router.add(["GET", "HEAD"], "/r/{name}", async (ex) =>
     scripted(RESPONSES[ex.params.name!]!),

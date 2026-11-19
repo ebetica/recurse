@@ -31,7 +31,7 @@ import { HttpError, jsonResponse, type Handler, type Router } from "./router";
 import { API_MAJOR, API_REVISION } from "./api_v1/schema";
 
 /** Content types for the static frontend assets served at /static. */
-export const STATIC_TYPES: Readonly<Record<string, string>> = {
+const STATIC_TYPES: Readonly<Record<string, string>> = {
   ".js": "application/javascript",
   ".css": "text/css",
   ".map": "application/json",
@@ -42,13 +42,13 @@ export const STATIC_TYPES: Readonly<Record<string, string>> = {
   ".woff2": "font/woff2",
   ".wasm": "application/wasm",
 };
-export const FRONTEND_ASSET_NAMES = ["app.js", "app.css"] as const;
-export const FRONTEND_REFRESH_MS = 1000;
+const FRONTEND_ASSET_NAMES = ["app.js", "app.css"] as const;
+const FRONTEND_REFRESH_MS = 1000;
 /** Split chunks carry a content hash (bun: name-<hash>.js). */
 const SPLIT_CHUNK_RE = /-[A-Za-z0-9]{6,}\.js$/;
 const CID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
-export type FrontendSnapshot = readonly [
+type FrontendSnapshot = readonly [
   shell: string,
   assets: ReadonlyMap<string, Uint8Array>,
   version: string,
@@ -80,7 +80,7 @@ export async function frontendGeneration(
 }
 
 /** Content identity for one complete, already-read frontend snapshot. */
-export function frontendGenerationBytes(
+function frontendGenerationBytes(
   shell: string,
   assets: ReadonlyMap<string, Uint8Array>,
 ): string {
@@ -632,7 +632,7 @@ function respondRanged(
   });
 }
 
-export interface StaticRoutesDeps {
+interface StaticRoutesDeps {
   readonly frontend: Pick<FrontendCache, "snapshot">;
   /** The checkout's web/dist, for uncommon auxiliary assets. */
   readonly staticDir: string;

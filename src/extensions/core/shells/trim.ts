@@ -42,7 +42,7 @@ export function clampLineLimit(
 
 // Numbers-only omission marker plus registry-owned log path and Read hint;
 // never log content.
-export function truncationMarker(
+function truncationMarker(
   omittedLines: number,
   omittedBytes: number,
   logPath: string | undefined,

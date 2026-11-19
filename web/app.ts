@@ -6,7 +6,7 @@ import { startMainThreadTiming } from "./main-thread-timing.js";
 import { installPhonePaneHistory } from "./phone-nav.js";
 import * as threadState from "./row-thread-state.js";
 import { rowThreads } from "./row-thread-state/index.js";
-import { startBackendDiscovery } from "./backends/discovery.js";
+import { startBackendDiscovery } from "./backends/discovery/index.js";
 import { backends } from "./backends/backend.js";
 import { treeOf } from "./backends/tree.js";
 import { keepSubagentsOpen } from "./sidebar/agent-folds.js";
@@ -21,21 +21,28 @@ import { startInteractionTiming } from "./interaction-timing.js";
 import { configureAgentFocus } from "./sidebar/focus.js";
 import { configureSidebarActions } from "./sidebar/index.js";
 import { configureArtifactRendering } from "./artifacts/artifact-state.js";
+import { commentOutbox } from "./artifacts/index.js";
 import { renderContent } from "./artifacts/content-view.js";
 import { configureDisclosure } from "./conversation/disclosure.js";
+import * as threadRender from "./thread-render.js";
+import { configureRowPaint } from "./thread-render/index.js";
 import { configureBoxCommentOffer } from "./files/index.js";
 
 configureAgentFocus(renderSidebar);
 configureArtifactRendering(renderContent);
 configureBoxCommentOffer(offerBoxComment);
-configureDisclosure(threadState, {
-  paint,
-  anchoredPaint,
-  loadOlder: threadState.loadOlder,
-});
+configureRowPaint({ paint, anchoredPaint });
+configureThreadTemplates(threadRender, commentOutbox);
+configureDisclosure(threadState, threadState.loadOlder);
+threadState.configureRowFileUpdates(files);
 configureOperatorSendScroll(prepareOperatorSendScroll);
 configureSidePane(poll);
-configureSidebarActions({ refreshTags: poll, startDraft: startNewAgent });
+configureSidebarActions({
+  refreshTree: poll,
+  startDraft: startNewAgent,
+  renderActiveAgentRow: activeAgentRowT,
+  openAgent: selectAgent,
+});
 $("#panes")!.addEventListener("keydown", (event) => {
   const pane = paneForTarget(event.target);
   if (pane) handleCommentShortcut(event, pane);
@@ -91,6 +98,7 @@ import {
   type KeyTarget,
 } from "./keymap.js";
 import {
+  activeAgentRowT,
   renderSidebar,
   visibleRows,
   moveCursor,
@@ -119,6 +127,7 @@ import {
 } from "./conversation/shell-surface.js";
 import {
   anchoredPaint,
+  configureThreadTemplates,
   paint,
   prepareOperatorSendScroll,
   toggleLatestTurnEye,
@@ -127,7 +136,7 @@ import {
   poll,
   startPolling,
   waitForInitialAuthoritativeRead,
-} from "./conversation/poll.js";
+} from "./polling/index.js";
 import { requestStop, stopPublicationPending } from "./conversation/stop.js";
 import {
   closeSafetyConfirmation,
@@ -200,7 +209,7 @@ import {
 } from "./artifacts/pane.js";
 import { openPullRequestFinder } from "./diff.js";
 import { configureSidePane, relaySideKey } from "./side-pane.js";
-import { closeImageFromKeyboard } from "./files.js";
+import * as files from "./files.js";
 import { explorerSearchOwnsKey } from "./explorer.js";
 import {
   closeSelectionCommentFromKeyboard,
@@ -382,7 +391,7 @@ function closeLocalLayer(): void {
   let closed =
     closeSafetyConfirmation() ||
     closeDrawingFromKeyboard() ||
-    closeImageFromKeyboard() ||
+    files.closeImageFromKeyboard() ||
     closeArtifactVersionMenuKeyboardLayer() ||
     cancelRename() ||
     closeSettings() ||
@@ -675,7 +684,7 @@ function dispatchKey(event: KeyboardEvent, target?: KeyTarget): boolean {
     event.preventDefault();
     event.stopPropagation();
     if (result.command !== "comment" && result.command !== "cancel-local")
-      closeImageFromKeyboard();
+      files.closeImageFromKeyboard();
   }
   setKeyState(result.state);
   execute(result.command);
@@ -773,6 +782,16 @@ document.addEventListener(
     }
     // Invariant: The drawing editor owns its keys; idle Escape still closes.
     if (drawingEditorOwnsKey(event)) return;
+    if (
+      event.key === "Escape" &&
+      event.target instanceof Element &&
+      event.target.closest("dialog.image-popout[open]")
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      files.handleImageEscape();
+      return;
+    }
     if (
       event.key === "Escape" &&
       (!isTextEditorTarget(event.target) ||

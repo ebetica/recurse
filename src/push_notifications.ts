@@ -15,7 +15,7 @@ import {
 import { open, readFile, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 
-export const PUSH_FILE_NAME = "recurse-push.json";
+const PUSH_FILE_NAME = "recurse-push.json";
 const MAX_DEVICES = 20;
 const SEND_TIMEOUT_MS = 10_000;
 const TITLE_CHARS = 80;
@@ -34,7 +34,7 @@ interface Stored {
   devices: Device[];
 }
 
-export interface Notice {
+interface Notice {
   cid: string;
   title: string;
   body: string;
@@ -46,7 +46,7 @@ const b64url = (bytes: Uint8Array) => Buffer.from(bytes).toString("base64url");
 const unb64url = (text: string) =>
   new Uint8Array(Buffer.from(text, "base64url"));
 const bytes = (text: string) => new TextEncoder().encode(text);
-function concat(...parts: Uint8Array[]): Uint8Array {
+function concat(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
   const out = new Uint8Array(parts.reduce((n, part) => n + part.length, 0));
   let at = 0;
   for (const part of parts) {
@@ -115,7 +115,7 @@ export function finishedNotice(
 }
 
 /** RFC 8291: the aes128gcm body for one device. */
-function encrypt(device: Device, payload: Uint8Array): Uint8Array {
+function encrypt(device: Device, payload: Uint8Array): Uint8Array<ArrayBuffer> {
   const uaPublic = unb64url(device.p256dh);
   const ecdh = createECDH("prime256v1");
   const asPublic = new Uint8Array(ecdh.generateKeys());

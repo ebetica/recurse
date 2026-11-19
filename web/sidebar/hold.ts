@@ -124,7 +124,7 @@ export function releaseHold(x: number, y: number): void {
   if (open.moved) closeHold();
 }
 
-export function closeHold(): void {
+function closeHold(): void {
   open = null;
   document.removeEventListener("pointerdown", outside, true);
   document.removeEventListener("keydown", escape, true);

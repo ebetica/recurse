@@ -3,8 +3,8 @@
 // only notify; first discovery baselines existing artifacts silently, and
 // attention survives navigation in one record per live conversation.
 
-export type ArtifactGeneration = string | null | undefined;
-export type AutoOpenAnnouncement = "opened" | "available" | null;
+type ArtifactGeneration = string | null | undefined;
+type AutoOpenAnnouncement = "opened" | "available" | null;
 
 export interface ArtifactAutoOpenObservation {
   agentId: string;
@@ -20,7 +20,7 @@ export interface ArtifactAutoOpenObservation {
   mobile: boolean;
 }
 
-export interface ArtifactAutoOpenDecision {
+interface ArtifactAutoOpenDecision {
   open: boolean;
   badged: boolean;
   announcement: AutoOpenAnnouncement;

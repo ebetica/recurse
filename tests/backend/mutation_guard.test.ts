@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { claimChecked } from "../../src/agents/claim_checked";
+import { claimChecked } from "../../src/agents/supervisor/claim_checked";
 import {
   TreeLifecycle,
   TreeLifecycleBusy,
   fenced,
   type LeaseToken,
-} from "../../src/agents/mutation_guard";
+} from "../../src/agents/lifecycle/mutation_guard";
 import {
   RuntimeLogger,
   type RuntimeLogRecord,

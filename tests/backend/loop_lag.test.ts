@@ -4,7 +4,7 @@ import {
   slowSpan,
   startOpenPhase,
   startSlowSpan,
-} from "../../src/observability/slow_span";
+} from "../../src/observability/slow-span";
 import {
   logger,
   type RuntimeLogRecord,
@@ -52,22 +52,27 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
     const state = (loopLag as unknown as { observer: { state: BigInt64Array } })
       .observer.state;
     const version = Atomics.load(state, 1);
-    slowSpan("blocking_route", "c1", () => {
-      for (let i = 0; i < 6; i++)
-        slowSpan("view_projection", "abcdef012345", () => {
-          const until = performance.now() + 60;
-          while (performance.now() < until) {}
-        });
-      const finish = startSlowSpan("paired_route", "c1");
-      const until = performance.now() + 100;
+    let at = performance.now();
+    const now = () => at;
+    const busy = (ms: number) => {
+      const until = performance.now() + ms;
       while (performance.now() < until) {}
-      finish();
-      finish();
-    });
-    slowSpan("later_short_work", "c1", () => {
-      const until = performance.now() + 51;
-      while (performance.now() < until) {}
-    });
+      at += ms;
+    };
+    slowSpan(
+      "blocking_route",
+      "c1",
+      () => {
+        for (let i = 0; i < 6; i++)
+          slowSpan("view_projection", "abcdef012345", () => busy(60), now);
+        const finish = startSlowSpan("paired_route", "c1", now);
+        busy(100);
+        finish();
+        finish();
+      },
+      now,
+    );
+    slowSpan("later_short_work", "c1", () => busy(51), now);
     publishedDuringBlock = Atomics.load(state, 1) > version;
     return jsonResponse({ ok: true });
   });
@@ -110,13 +115,9 @@ test("a CPU-blocking request logs one stall with bounded completed spans", async
   expect(stalls[0]!.message).not.toMatch(
     / (?:cpu_ms|main_cpu_ms|heap_mb|rss_mb)=/,
   );
-  const spans = / spans=(\S+)/.exec(stalls[0]!.message)?.[1];
-  expect(spans).toMatch(/(?:^|,)blocking_route:c1:\d+(?:,|$)/);
-  expect(spans?.split(",")).toHaveLength(3);
-  expect(spans).not.toContain("later_short_work:");
-  expect(
-    spans?.split(",").filter((span) => span.startsWith("paired_route:c1:")),
-  ).toHaveLength(1);
+  expect(/ spans=(\S+)/.exec(stalls[0]!.message)?.[1]).toBe(
+    "blocking_route:c1:460,paired_route:c1:100,view_projection:abcdef012345:60",
+  );
   const windowMs = Number(/ window_ms=(\d+)/.exec(stalls[0]!.message)?.[1]);
   expect(windowMs).toBeGreaterThan(ms);
   expect(windowMs).toBeLessThanOrEqual(preDiagnosticsWindowMs);

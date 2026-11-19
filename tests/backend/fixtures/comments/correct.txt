@@ -16,12 +16,12 @@ var third = `/* not a comment */`;
  */
 function work(parameter: number) {
   let local = parameter;
-  /* Invariant: local stays positive.
-   * The input is not changed.
-   * This is a high-level guarantee.
+  /* Keep the original input.
+   * Later calculations can mutate the working value.
+   * The caller does not observe those changes.
    */
   if (local) {
-    // Spec: return the supplied value.
+    // This line explains why the supplied value is returned without requiring a special label or a configured print width.
     return local;
   }
 }

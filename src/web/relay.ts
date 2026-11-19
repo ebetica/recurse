@@ -3,7 +3,7 @@
 // Only named local agents read outcomes; bounded waits detach on disconnect.
 // Revoked connections stop polls; sleeping instances queue sends to homes.
 import type { ConnectedBackends } from "../backends/connected";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 import type { HomeCallbacks } from "../backends/home_callbacks";
 import { requireLocalAgent } from "./backends";
 import {
@@ -21,7 +21,7 @@ import {
 } from "../backends/remote_client";
 import { SERVICE_MESSAGE_MAX_CHARS } from "../auth/service";
 import { CLIENT_KEY_RE } from "../agents/supervisor/delivery";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import type { RelayQueue } from "./relay_queue";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 

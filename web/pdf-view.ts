@@ -5,7 +5,7 @@
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import type { CommentBox } from "./artifacts/artifact-state.js";
 
-export const MAX_PAGES = 100;
+const MAX_PAGES = 100;
 const MAX_CANVAS_PIXELS = 1 << 23;
 const ASSETS = "/static/pdfjs/";
 

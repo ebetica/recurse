@@ -87,7 +87,7 @@ export interface ArtifactState {
   /** Set while the shown document highlights what is new. */
   changes?: DocumentChanges | null;
 }
-export interface CommentDoc {
+interface CommentDoc {
   id: string;
   owner_agent_id?: string;
   title: string;
@@ -130,7 +130,7 @@ export interface ArtifactEl extends HTMLElement {
   /** Show the selected revision after a list or comment action. */
   showArtifact(): Promise<void>;
 }
-export type ArtifactContentRenderer = (
+type ArtifactContentRenderer = (
   pane: ArtifactEl,
   info: ArtifactInfo,
   content: string | null,

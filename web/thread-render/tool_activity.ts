@@ -3,7 +3,7 @@
 // stay bounded so long paths cannot hide the operation.
 import type { ToolCall, ToolEntry } from "../types";
 
-export interface WorkingActivityView {
+interface WorkingActivityView {
   text: string;
   title: string;
   ariaLabel: string;
@@ -80,23 +80,12 @@ const REDACTED_THINKING =
   /^(?:\[?(?:redacted|encrypted)(?:[ _-](?:thinking|reasoning))?\]?|<encrypted>)+$/iu;
 
 // Formats thinking titles; only the live pill's available width clips.
-export function thinkingSummaryLabel(value: unknown): string {
+function thinkingSummaryLabel(value: unknown): string {
   if (typeof value !== "string") return "Thinking";
   const latest = [...value.matchAll(/\*\*(.+?)\*\*/gu)].at(-1)?.[1] ?? value;
   const title = latest.replaceAll("**", "").trim();
   if (!title || REDACTED_THINKING.test(title)) return "Thinking";
   return title;
-}
-
-// Keeps thinking prose newest-first without clipping provider text. The bounded
-// endpoint feeds layout's four-line clamp and tail anchoring.
-export function thinkingSummaryTail(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const heading = [...value.matchAll(/\*\*(.+?)\*\*/gu)].at(-1);
-  const body = heading
-    ? value.slice((heading.index ?? 0) + heading[0].length)
-    : value;
-  return body.trim();
 }
 
 /** Plain prose beneath the title already shown by the live bar. */
@@ -134,6 +123,8 @@ function actionText(call: ToolCall): string {
 
 export interface LiveActivityRow {
   id?: string;
+  offset?: number;
+  thinking_key?: string;
   running?: boolean;
   name?: string | null;
   input?: string | null;
@@ -152,9 +143,9 @@ export interface LiveActivityRow {
   stop_reason?: string | null;
 }
 
-export type LiveActivityKind = "tool" | "thinking" | "starting";
+type LiveActivityKind = "tool" | "thinking" | "starting";
 
-export interface LiveActivityPanel {
+interface LiveActivityPanel {
   kind: LiveActivityKind;
   label: string;
   title: string;
@@ -164,15 +155,17 @@ export interface LiveActivityPanel {
   args?: string;
   // Elapsed thinking time is rendered in its own ticking span.
   thinkingElapsedMs?: number;
-  hasThinking?: boolean;
+  thinkingRow?: LiveActivityRow;
   thinkingActive?: boolean;
 }
 
-// Shows the current turn's latest thinking title, independent of tools. Only
-// rows after its final user row qualify; old titles/tools never leak.
+// Admission excludes settled history. Once the run has a thought, later
+// replies and tool rows cannot fence it off.
 export function liveActivityState(
   rows: readonly LiveActivityRow[],
   promptAccepted?: boolean,
+  selected?: LiveActivityRow | null,
+  runStart?: number | null,
 ): LiveActivityPanel {
   let turnStart = 0;
   let hasBoundary = false;
@@ -190,14 +183,22 @@ export function liveActivityState(
       row.stop_reason !== "toolUse" &&
       Boolean(row.text?.trim() || row.stop_reason),
   );
-  const currentRunRows = currentRows.slice(lastReply + 1);
+  const currentRunRows =
+    runStart != null
+      ? rows.filter((row) => row.live || (row.offset ?? -1) >= runStart)
+      : currentRows.slice(lastReply + 1);
   const isThinking = (row: LiveActivityRow): boolean =>
+    row.kind === "text" &&
+    row.role === "assistant" &&
     Boolean(
-      row.has_thinking || row.thinking_title?.trim() || row.thinking?.trim(),
+      row.live_thinking ||
+      row.has_thinking ||
+      row.thinking_title?.trim() ||
+      row.thinking?.trim(),
     );
-  // Invariant: Settled final replies fence off the prior turn during admission;
-  // persisted thinking in an unfinished tool round survives quiet model waits.
   if (
+    runStart == null &&
+    selected === undefined &&
     promptAccepted !== undefined &&
     (!hasBoundary ||
       !currentRunRows.some(
@@ -221,15 +222,22 @@ export function liveActivityState(
           title: "Starting agent…",
           key: "starting",
         };
-  const latestThinking = [...currentRunRows].reverse().find(isThinking);
+  const latestThinking =
+    selected === undefined ? currentRunRows.findLast(isThinking) : selected;
+  const currentThinking = latestThinking?.id
+    ? (currentRunRows.find((row) => row.id === latestThinking.id) ??
+      latestThinking)
+    : latestThinking;
   const thinkingActive = Boolean(
-    latestThinking &&
-    (latestThinking.live || latestThinking.live_thinking) &&
-    (!latestThinking.stop_reason || latestThinking.stop_reason === "pending") &&
-    !latestThinking.text?.trim() &&
-    !currentRunRows
-      .slice(currentRunRows.indexOf(latestThinking) + 1)
-      .some((row) => row.kind === "tool_call"),
+    currentThinking &&
+    (currentThinking.live || currentThinking.live_thinking) &&
+    (!currentThinking.stop_reason ||
+      currentThinking.stop_reason === "pending") &&
+    !currentThinking.text?.trim() &&
+    (!currentRunRows.includes(currentThinking) ||
+      !currentRunRows
+        .slice(currentRunRows.indexOf(currentThinking) + 1)
+        .some((row) => row.kind === "tool_call")),
   );
   const summary = thinkingSummaryLabel(
     latestThinking?.thinking_title ?? latestThinking?.thinking,
@@ -239,9 +247,9 @@ export function liveActivityState(
       ? "Waiting"
       : summary;
   const thinkingElapsedMs =
-    typeof latestThinking?.thinking_elapsed_ms === "number" &&
-    Number.isFinite(latestThinking.thinking_elapsed_ms)
-      ? Math.max(0, latestThinking.thinking_elapsed_ms)
+    typeof currentThinking?.thinking_elapsed_ms === "number" &&
+    Number.isFinite(currentThinking.thinking_elapsed_ms)
+      ? Math.max(0, currentThinking.thinking_elapsed_ms)
       : undefined;
   const hasContent = currentRunRows.some(
     (row) =>
@@ -260,7 +268,9 @@ export function liveActivityState(
       title: thinking,
       key: `thinking:${latestThinking?.id ?? currentRunRows[0]?.id ?? "current"}\0${thinking}`,
       thinkingElapsedMs,
-      ...(latestThinking ? { hasThinking: true, thinkingActive } : {}),
+      ...(latestThinking
+        ? { thinkingRow: latestThinking, thinkingActive }
+        : {}),
     };
   return {
     kind: "starting",

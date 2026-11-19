@@ -14,16 +14,18 @@ import {
 } from "../observability/runtime_logging";
 import { cleanTitle } from "../title_text";
 import { Cancelled, checkAbort } from "../utils/tasks";
-import { AgentClosed, MailboxFull, type AgentStore } from "./agent_store";
 import type { ActionRequest, ParkedActions } from "./compaction";
 import {
+  AgentClosed,
   CID_RE,
+  MailboxFull,
   validLevel,
+  type AgentStore,
   type ConversationRecord,
   type ConversationStore,
-} from "./conversation_store";
-import { TreeLifecycleBusy, type TreeLifecycle } from "./mutation_guard";
-import { RetrySchedule } from "./retry_schedule";
+} from "./storage";
+import { TreeLifecycleBusy, type TreeLifecycle } from "./lifecycle";
+import { RetrySchedule } from "./lifecycle/retry";
 import type { AgentNode, NodeStore } from "./runtime/agent_node";
 import type { AgentNodes } from "./runtime/agent_nodes";
 import type { DurableHost } from "./durable/host";
@@ -31,16 +33,14 @@ import type { Prompts } from "./runtime/prompts";
 import type { CreateOptions } from "./supervisor/create";
 import type { DeliverOptions } from "./supervisor/delivery";
 
-export const SPAWN_NOTICE_DELAY = 6.0;
-export const SPAWN_REQUEST_MAX_ROWS = 256;
-export const SPAWN_REQUEST_MAX_BYTES = 1024 * 1024;
-export const SPAWN_OUTCOME_MAX_ROWS = 256;
+const SPAWN_NOTICE_DELAY = 6.0;
+const SPAWN_OUTCOME_MAX_ROWS = 256;
 export const SPAWN_OUTCOME_MAX_BYTES = 8 * 1024;
-export const SPAWN_ACCEPTED_TTL = 60.0;
-export const SPAWN_OUTCOME_TICK_INTERVAL = 3.0;
-export const PARKED_ACTION_VISIBLE_AFTER = 5;
+const SPAWN_ACCEPTED_TTL = 60.0;
+const SPAWN_OUTCOME_TICK_INTERVAL = 3.0;
+const PARKED_ACTION_VISIBLE_AFTER = 5;
 
-export const SPAWN_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
+const SPAWN_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
   worktree_not_shareable:
     "The parent's projected worktree is no longer active or shareable. " +
     "Let its pending worktree change settle (or enter the intended " +
@@ -59,8 +59,8 @@ export const SPAWN_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
 };
 
 type Json = Record<string, unknown>;
-export type SpawnItem = { cid: unknown; req: unknown; store_id?: string };
-export type DoomedScan = [
+type SpawnItem = { cid: unknown; req: unknown; store_id?: string };
+type DoomedScan = [
   epoch: number,
   doomed: string[],
   protectedIds: Set<string>,
@@ -68,7 +68,7 @@ export type DoomedScan = [
 ];
 export type SpawnOutcome = Json & { id: string; status?: unknown };
 
-export interface TreeSupervisor {
+interface TreeSupervisor {
   create(
     options: CreateOptions,
     signal?: AbortSignal,
@@ -231,7 +231,7 @@ const errorName = (error: unknown) =>
     : typeof error;
 
 /** Map internal failures to bounded actionable text with no raw details. */
-export function safeSpawnRejection(error: unknown): [string, string] {
+function safeSpawnRejection(error: unknown): [string, string] {
   const text = errorText(error);
   let code: string;
   if (isValueError(error) && text.toLowerCase().includes("conflicting"))

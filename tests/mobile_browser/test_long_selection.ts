@@ -1,5 +1,4 @@
 import { expect } from "bun:test";
-declare const document: any;
 declare const getSelection: any;
 declare const PointerEvent: any;
 declare const requestAnimationFrame: any;
@@ -31,7 +30,7 @@ const thread = {
 async function dragPastEdge(page: any, edge: "top" | "bottom"): Promise<any> {
   return page.evaluate(async (edge: "top" | "bottom") => {
     const frame = () => new Promise((r) => requestAnimationFrame(r));
-    const scroll = document.querySelector("#scroll");
+    const scroll = document.querySelector("#scroll")!;
     scroll.scrollTop = scroll.scrollHeight / 2 - scroll.clientHeight / 2;
     await frame();
     const view = scroll.getBoundingClientRect();
@@ -48,7 +47,7 @@ async function dragPastEdge(page: any, edge: "top" | "bottom"): Promise<any> {
       .map((p: any) => p.textContent);
     const chrome = document.querySelector(
       edge === "top" ? "#conv-title" : "#composer-wrap .lbl",
-    ).firstChild;
+    )!.firstChild;
     start.dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }),
     );
@@ -61,7 +60,7 @@ async function dragPastEdge(page: any, edge: "top" | "bottom"): Promise<any> {
       await frame().then(frame);
       tops.push(scroll.scrollTop);
       strayEnd ||= !document
-        .querySelector("#messages")
+        .querySelector("#messages")!
         .contains(selection.focusNode);
     }
     const screens = scroll.scrollHeight / scroll.clientHeight;

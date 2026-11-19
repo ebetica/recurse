@@ -19,26 +19,27 @@ import {
   MAX_REPORTED_PROCESSES,
   type ProcessBlocker,
 } from "../../process_lifecycle";
-import { retireAll } from "../../utils/trash_sweep";
+import { retireAll } from "../../utils/trash-sweep";
 import {
   Cancelled,
   abortable,
   checkAbort,
   type TaskSet,
 } from "../../utils/tasks";
-import type {
-  ConversationRecord,
-  ConversationStore,
-  ConversationStoreHooks,
-} from "../conversation_store";
-import { ServiceStorageUnavailable, activeRunId } from "../conversation_store";
-import { TreeLifecycleBusy, type TreeLifecycle } from "../mutation_guard";
+import {
+  ServiceStorageUnavailable,
+  activeRunId,
+  type ConversationRecord,
+  type ConversationStore,
+  type ConversationStoreHooks,
+} from "../storage";
+import { TreeLifecycleBusy, type TreeLifecycle } from "../lifecycle";
 import {
   attemptOf,
   pySlice,
   type DeferredReaps,
   type ReapRequest,
-} from "../retry_schedule";
+} from "../lifecycle/retry";
 import {
   KeyError,
   type AgentNode,
@@ -48,9 +49,9 @@ import type { AgentNodes } from "../runtime/agent_nodes";
 import type { CropOperation } from "../runtime/attachments/crop";
 
 /** Seconds one agent-store close may take inside a reap. */
-export const STORE_CLOSE_TIMEOUT = 10.0;
+const STORE_CLOSE_TIMEOUT = 10.0;
 /** Rescans of a mutating topology before the subtree parks as unstable. */
-export const REAP_RESCAN_BOUND = 3;
+const REAP_RESCAN_BOUND = 3;
 
 const TEMP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const NEVER = new AbortController().signal;
@@ -63,12 +64,12 @@ export type DoomedScan = [
 ];
 
 /** Python's RuntimeError, so logs and park reasons name the same class. */
-export class RuntimeError extends Error {
+class RuntimeError extends Error {
   override name = "RuntimeError";
 }
 
 /** The root conversation store failed to retire (Python RuntimeError). */
-export class ReapRootRetireFailed extends RuntimeError {}
+class ReapRootRetireFailed extends RuntimeError {}
 
 type SessionTuple = [ConversationRecord, Set<string>, Set<string>];
 type TempEntry = [string, string | null];
@@ -79,7 +80,7 @@ type MemberOutcome = [
   temp: TempEntry,
 ];
 
-export interface ReapPaths {
+interface ReapPaths {
   /** MSG_DIR: per-conversation ledger residue. */
   msgDir: string;
   /** TRASH_DIR. */
@@ -90,7 +91,7 @@ export interface ReapPaths {
   reviewerJournalRoot: string;
 }
 
-export interface ReapErrors {
+interface ReapErrors {
   ProcessCleanupPending: new (message: string) => Error;
   TakenOverReapBlocked: new (cid: string, title?: string | null) => Error;
 }
@@ -302,14 +303,14 @@ function liveArchiveFailure(code: string | null): string {
 }
 
 /** A safe stage label for a failed retirement diagnostic. */
-export function retireReasonCode(reason: string): string {
+function retireReasonCode(reason: string): string {
   for (const [prefix, code] of RETIRE_STAGES)
     if (reason === prefix || reason.startsWith(prefix + ":")) return code;
   return "retirement_failed";
 }
 
 /** The parent notice for a completed subtree deletion. */
-export function deletionNotice(
+function deletionNotice(
   cid: string,
   root: ConversationRecord,
   deleted: readonly string[],
@@ -351,7 +352,7 @@ function pyStr(value: unknown): string {
 }
 
 /** The idle-stop row text, or null when nothing is reported. */
-export function stopProcessesMessage(
+function stopProcessesMessage(
   stopped: number,
   pending: number,
   convStatus: string | null,

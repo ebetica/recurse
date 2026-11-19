@@ -3,13 +3,13 @@
 // GIFs, animated PNGs, sizes outside THUMBNAIL_MIN/MAX_BYTES, oversized
 // decodes and results that are not smaller keep the original bytes.
 /** 2x the thread's widest inline image; full-screen views use the original. */
-export const THUMBNAIL_LONG_SIDE = 1024;
+const THUMBNAIL_LONG_SIDE = 1024;
 /** Smaller originals are sent as they are. */
-export const THUMBNAIL_MIN_BYTES = 128 * 1024;
+const THUMBNAIL_MIN_BYTES = 128 * 1024;
 /** Larger originals are sent as they are (read memory bound per slot). */
-export const THUMBNAIL_MAX_BYTES = 25 * 1024 * 1024;
+const THUMBNAIL_MAX_BYTES = 25 * 1024 * 1024;
 /** Decoded pixels above this are never thumbnailed (decode memory bound). */
-export const THUMBNAIL_MAX_PIXELS = 50_000_000;
+const THUMBNAIL_MAX_PIXELS = 50_000_000;
 const QUALITY = 80;
 const RESIZABLE = new Set(["image/png", "image/jpeg", "image/webp"]);
 

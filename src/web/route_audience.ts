@@ -1,7 +1,7 @@
 // Loopback callers use v1 or explicitly bundled-tool routes; default to web.
 // Tool markers are compatibility guidance, not same-user isolation.
 
-export type LoopbackAudience = "public" | "v1" | "tool" | "web";
+type LoopbackAudience = "public" | "v1" | "tool" | "web";
 
 /** Classify a decoded request path and method at the loopback boundary. */
 export function loopbackAudience(

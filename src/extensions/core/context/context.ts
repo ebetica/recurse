@@ -17,7 +17,7 @@ import {
   type DurableCompactionHost,
 } from "./durable-compaction.ts";
 
-export interface ContextOptions {
+interface ContextOptions {
   models: Models;
   maximumContextWindow(): number;
   currentModel(): { provider: string; modelId: string };
@@ -30,10 +30,7 @@ export interface ContextOptions {
 }
 
 /** Cap the registered window; the provider still serves its own window. */
-export function withContextWindowCap(
-  models: Models,
-  maximum: () => number,
-): Models {
+function withContextWindowCap(models: Models, maximum: () => number): Models {
   return new Proxy(models, {
     get(target, key) {
       const value: unknown = Reflect.get(target, key, target);

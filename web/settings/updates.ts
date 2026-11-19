@@ -5,7 +5,7 @@
 import { api, jpost } from "../api.js";
 import { settingsClient, settingsLabel } from "./target.js";
 
-export interface UpdateStatus {
+interface UpdateStatus {
   release: { version: string; commit: string | null };
   skipped: string | null;
   checking: boolean;
@@ -47,7 +47,7 @@ function channelLabel(channel: string | null): string {
 }
 
 /** One sentence for the status, and whether it is an error. */
-export function updateStatusText(status: UpdateStatus): [string, boolean] {
+function updateStatusText(status: UpdateStatus): [string, boolean] {
   const update = status.update;
   if (update?.state === "updating") return ["Downloading the update…", false];
   if (update?.state === "building")

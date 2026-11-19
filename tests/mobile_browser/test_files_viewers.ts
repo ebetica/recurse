@@ -234,9 +234,9 @@ export const tests: BrowserTest[] = [
         () => !(globalThis as any).history.state?.imagePopout,
       );
       if (width === 1280) {
-        expect(
-          await report.locator(".report-comment textarea").inputValue(),
-        ).toBe("Preserve the picture selection");
+        expect(await report.locator(".report-comment-text").textContent()).toBe(
+          "Preserve the picture selection",
+        );
         await report.locator(".report-comment-del").click();
       }
       await report

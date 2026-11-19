@@ -2,15 +2,12 @@
 // branch PR and PRs its tool calls created with `gh pr create`. Lookups run
 // after each run, when the Changes pane opens and when a PR is created; reads
 // never wait on GitHub and `prs_revision` marks snapshot changes.
-import type {
-  ConversationRecord,
-  ConversationStore,
-} from "./conversation_store";
+import type { ConversationRecord, ConversationStore } from "./storage";
 import type { TaskSet } from "../utils/tasks";
 import type { PrValue, WorkdirGit } from "../workdir_git";
 import { prIdentity } from "../pull_request";
 
-export interface LinkedPr {
+interface LinkedPr {
   /** owner/repo, lower case. */
   repo: string;
   number: number;
@@ -68,18 +65,6 @@ export function linkedPrList(
     .map((pr) => ({ ...pr, detected_at: latest.get(pr.url)! }))
     .sort((a, b) => first(b) - first(a) || b.detected_at - a.detected_at)
     .filter((pr) => !seen.has(pr.url) && !!seen.add(pr.url));
-}
-
-/**
- * The PR a successful bash `command` created: a `gh pr create` command's last
- * output line that is a PR URL, as `gh pr create` prints it.
- */
-export function createdPrUrls(command: string, output: string): string[] {
-  if (!/(?:^|[;&|(\n])\s*gh\s+pr\s+create\b/u.test(command)) return [];
-  const urls = output
-    .split("\n")
-    .flatMap((line) => prIdentity(line.trim()) ?? []);
-  return urls.length ? [urls.at(-1)!.url] : [];
 }
 
 export class ConversationPrs {

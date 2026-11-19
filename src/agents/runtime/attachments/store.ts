@@ -143,7 +143,7 @@ export async function readManifest(
   }
 }
 
-export function manifestFieldsValid(
+function manifestFieldsValid(
   value: unknown,
   id: string,
   owner: string,
@@ -184,7 +184,7 @@ export function manifestFieldsValid(
   );
 }
 
-export function validBinding(value: Manifest): boolean {
+function validBinding(value: Manifest): boolean {
   if (
     (Object.hasOwn(value, "source") ? value.source : SOURCE_PUBLICATION) ===
     SOURCE_UPLOAD

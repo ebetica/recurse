@@ -13,10 +13,10 @@ import {
 } from "./launcher/update";
 import type { Release } from "./release";
 
-export const CHECK_INTERVAL_SECONDS = 24 * 3600;
-export const CHECK_TIMEOUT_SECONDS = 60;
+const CHECK_INTERVAL_SECONDS = 24 * 3600;
+const CHECK_TIMEOUT_SECONDS = 60;
 
-export interface UpdateCheck {
+interface UpdateCheck {
   /** The installed release and commit this check is cached for. */
   readonly key: string;
   readonly checked_at: number;
@@ -30,7 +30,7 @@ export interface UpdateCheck {
   readonly error: string | null;
 }
 
-export interface RecurseUpdateStatus {
+interface RecurseUpdateStatus {
   readonly release: Release;
   /** Why this Recurse is not checked or updated from Settings, or null. */
   readonly skipped: string | null;
@@ -44,7 +44,7 @@ export interface RecurseUpdateStatus {
   readonly update: Pick<UpdateReport, "state" | "detail"> | null;
 }
 
-export interface RecurseUpdatesDeps {
+interface RecurseUpdatesDeps {
   readonly sourceRoot: string;
   /** The JSON file the last check is cached in. */
   readonly cacheFile: string;

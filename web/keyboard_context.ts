@@ -49,7 +49,7 @@ export function visibleCommentControl():
   return controls.sort((a, b) => rank(a) - rank(b))[0] ?? null;
 }
 
-export interface FocusLayers {
+interface FocusLayers {
   composer: boolean;
   rename: boolean;
   finder: boolean;

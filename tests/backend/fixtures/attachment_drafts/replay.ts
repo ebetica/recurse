@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { createConfig } from "../../../../src/config";
-import type { ConversationRecord } from "../../../../src/agents/conversation_store";
+import type { ConversationRecord } from "../../../../src/agents/storage/conversation_store";
 import {
   AttachmentDrafts,
   type DraftDirs,
@@ -15,13 +15,13 @@ const CONV_KEY = `${DAY}-agent`;
 const NOW = 1_790_000_000.5;
 const id = (n: number): string => n.toString(16).padStart(32, "0");
 type Leaf = { json?: unknown; hex?: string; link?: string; mode?: number };
-export interface DraftSpec {
+interface DraftSpec {
   tree?: Record<string, Leaf>;
   owners?: Array<{ id: string; tmp_key: string }>;
   conversation?: Record<string, unknown>;
   ops: Array<Record<string, unknown>>;
 }
-export interface RunOutput {
+interface RunOutput {
   events: unknown[];
   tokens: string[];
   tree: Array<Record<string, unknown>>;
@@ -171,5 +171,3 @@ export async function runSpec(
   }
   return { events, tokens, tree: snapshot(root) };
 }
-export const fixtureTime = NOW;
-export const fixtureConversationKey = CONV_KEY;

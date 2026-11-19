@@ -31,7 +31,7 @@ import { versionLine } from "./release";
 import { pyResolve } from "./workdir_git";
 
 export { HERE };
-export const BUN_MIN_VERSION = "1.4.0";
+const BUN_MIN_VERSION = "1.4.0";
 
 export const PREBUILT_ARTIFACTS = [
   "web/index.html",
@@ -49,9 +49,9 @@ export const PREBUILT_ARTIFACTS = [
   ...ARTIFACT_PATHS,
 ] as const;
 
-export const USAGE =
+const USAGE =
   "usage: src/local.ts [-h] [--version] [--once] [--prebuilt] [repo]";
-export const HELP = `${USAGE}
+const HELP = `${USAGE}
 
 Run Recurse locally. See the header of src/local.ts.
 
@@ -89,7 +89,7 @@ Bun ${BUN_MIN_VERSION} or newer runs the launcher and the server.
  * Minimal .env loader: `KEY=VALUE` lines, `#` comments, optional surrounding
  * quotes. Never overrides a variable already set in the real environment.
  */
-export async function loadDotenv(path: string): Promise<void> {
+async function loadDotenv(path: string): Promise<void> {
   let text: string;
   try {
     text = await Bun.file(path).text();
@@ -241,7 +241,7 @@ export async function validatePrebuiltArtifacts(
 }
 
 /** Resolve and prepare the persistent roots, then publish RECURSE_HOME. */
-export async function prepareLocalEnvironment(
+async function prepareLocalEnvironment(
   prepare: () => Promise<Roots> = async () => {
     const roots = resolveRoots();
     await preparePiAgentDir(roots);
@@ -279,7 +279,7 @@ export function bunGate(
   );
 }
 
-export interface MainDeps {
+interface MainDeps {
   validateLaunchEnvironment: typeof validateLaunchEnvironment;
   validateIsolatedEnvironment: typeof validateIsolatedEnvironment;
   validatePrebuiltArtifacts: () => Promise<void>;
@@ -361,14 +361,14 @@ export async function serveOnce(
   );
 }
 
-export interface Args {
+interface Args {
   repo: string | null;
   once: boolean;
   prebuilt: boolean;
 }
 
 /** argparse's grammar: flags anywhere, at most one positional. */
-export function parseArgs(argv: readonly string[]): Args | "help" | "version" {
+function parseArgs(argv: readonly string[]): Args | "help" | "version" {
   const args: Args = { repo: null, once: false, prebuilt: false };
   let positional = false;
   for (const arg of argv) {

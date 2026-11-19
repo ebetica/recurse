@@ -1,9 +1,13 @@
 import { expect } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { captureErrors, postFixture, type BrowserTest } from "./common";
-import { test_last_thinking_survives_wait_and_reload } from "./last_thinking";
+import {
+  test_last_thinking_survives_wait_and_reload,
+  test_unreadable_thinking_waits_after_commit_and_reload,
+} from "./last_thinking";
 export const tests: BrowserTest[] = [
   test_last_thinking_survives_wait_and_reload,
+  test_unreadable_thinking_waits_after_commit_and_reload,
   // Regression: #2854 folded summaries omitted nested script writes and commands, including calls past the display cap. (also Regression #2341 script labels and expanded read diagnostics exposed internal wording.)
   async function test_script_labels_and_plain_read_diagnostics(browser, base) {
     const page = await browser.newPage();

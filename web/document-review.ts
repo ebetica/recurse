@@ -14,7 +14,7 @@ export function reviewedVersion(doc: string, seen: string): string {
   return reviewed.get(doc)!;
 }
 
-export function setReviewed(doc: string, version: string): void {
+function setReviewed(doc: string, version: string): void {
   reviewed.set(doc, version);
 }
 

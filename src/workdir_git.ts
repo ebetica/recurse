@@ -9,7 +9,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { isolatedSubprocessEnvironment } from "./local_roots";
 import * as startupMetrics from "./observability/startup_metrics";
 import { timed } from "./observability/request_timing";
-import { slowSpan } from "./observability/slow_span";
+import { slowSpan } from "./observability/slow-span";
 import { prIdentity } from "./pull_request";
 import { pullRequestFiles } from "./pull_request/index";
 import { selectedWork, type SelectedWork } from "./workdir_git_work";
@@ -24,7 +24,7 @@ function pyStrip(text: string): string {
 
 type Env = Readonly<Record<string, string | undefined>>;
 
-export interface WorkdirGitInputs {
+interface WorkdirGitInputs {
   repoUrl: string;
   repoDir: string;
   dataDir: string;
@@ -59,13 +59,13 @@ export function safeGitEnv(environ: Env): Record<string, string> {
 }
 
 export const DIFF_REQUEST_TIMEOUT_MS = 10_000;
-export const MAX_DIFF_BYTES = 1_000_000;
-export const MAX_DIFF_STAT_BYTES = 64 * 1024;
-export const MAX_NUMSTAT_BYTES = 512 * 1024;
-export const MAX_DIFF_FILES = 200;
-export const MAX_FILE_PATCH_BYTES = 200 * 1024;
-export const MAX_FILE_CONTENT_BYTES = 1_000_000;
-export const MAX_UNTRACKED_NAMES = 500;
+const MAX_DIFF_BYTES = 1_000_000;
+const MAX_DIFF_STAT_BYTES = 64 * 1024;
+const MAX_NUMSTAT_BYTES = 512 * 1024;
+const MAX_DIFF_FILES = 200;
+const MAX_FILE_PATCH_BYTES = 200 * 1024;
+const MAX_FILE_CONTENT_BYTES = 1_000_000;
+const MAX_UNTRACKED_NAMES = 500;
 const DIFF_TIMEOUT = 10.0;
 const CANDIDATE_TIMEOUT = 5.0;
 const GH_TIMEOUT = 4.0;
@@ -363,14 +363,14 @@ function prValue(row: Record<string, unknown> | undefined): PrValue | null {
   };
 }
 
-export interface DiffFile {
+interface DiffFile {
   path: string;
   additions: number | null;
   deletions: number | null;
   status: string;
 }
 
-export interface DiffState {
+interface DiffState {
   available: boolean;
   reason: string | null;
   base: string | null;

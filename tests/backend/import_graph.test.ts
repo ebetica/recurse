@@ -41,6 +41,13 @@ async function fixture() {
     write,
     baseline,
     run,
+    read: (file: string) => Bun.file(join(root, file)).text(),
+    snapshot: () =>
+      Promise.all(
+        ["baseline.json", "modules.json"].map((file) =>
+          Bun.file(join(root, file)).bytes(),
+        ),
+      ),
     reject: async (...messages: string[]) => {
       const result = await run();
       expect(result.code).toBe(1);
@@ -51,8 +58,8 @@ async function fixture() {
 }
 
 // Feature: #3404 enforce a shrinking runtime import-cycle baseline through the CLI.
-test("import graph CLI rejects new, enlarged and stale cycles", async () => {
-  const { write, baseline, run, dispose } = await fixture();
+test("import graph CLI rejects new or enlarged cycles and commits no stale debt", async () => {
+  const { write, baseline, run, read, snapshot, dispose } = await fixture();
   try {
     await write(
       "tsconfig.json",
@@ -82,6 +89,7 @@ test("import graph CLI rejects new, enlarged and stale cycles", async () => {
     );
     await write("web/entry.ts", 'import "../src/a.js";');
     await baseline([]);
+    const beforeNew = await snapshot();
     const rejected = await run();
     expect(rejected.code).toBe(1);
     expect(rejected.error).toContain(
@@ -90,6 +98,7 @@ test("import graph CLI rejects new, enlarged and stale cycles", async () => {
     expect(rejected.error).toContain(
       "move the shared code into a lower module or pass a callback",
     );
+    expect(await snapshot()).toEqual(beforeNew);
     await baseline([["src/a.ts", "src/nested/index.ts"]]);
     expect((await run()).code).toBe(0);
     const dot = await run("--dot");
@@ -102,31 +111,54 @@ test("import graph CLI rejects new, enlarged and stale cycles", async () => {
       'import { a, type T } from "../third.js"; export const b = a;',
     );
     await write("src/third.ts", 'export { a } from "./a.js";');
+    const before = await snapshot();
     const enlarged = await run();
     expect(enlarged.code).toBe(1);
     expect(enlarged.error).toContain(
       "src/a.ts → src/nested/index.ts → src/third.ts → src/a.ts",
     );
+    expect(await snapshot()).toEqual(before);
     await baseline([["src/a.ts", "src/nested/index.ts", "src/third.ts"]]);
     await write(
       "src/nested/index.ts",
       'import { a } from "@/a"; export const b = a;',
     );
     const shrunk = await run();
-    expect(shrunk.code).toBe(1);
-    expect(shrunk.error).toContain(
-      "Stale import cycle baseline; remove or shrink",
+    expect(shrunk.code).toBe(0);
+    expect(shrunk.out).toContain(
+      "Shrank baseline.json; commit the updated baseline.",
     );
-    await baseline([["src/a.ts", "src/nested/index.ts"]]);
-    expect((await run()).code).toBe(0);
+    expect(shrunk.out).toContain(
+      "Shrank modules.json; commit the updated baseline.",
+    );
+    expect(JSON.parse(await read("baseline.json"))).toEqual([
+      ["src/a.ts", "src/nested/index.ts"],
+    ]);
+    expect(JSON.parse(await read("modules.json")).cycles).toEqual([
+      ["src/a.ts", "src/nested"],
+    ]);
     await write("src/nested/index.ts", "export const b = 1;");
-    const stale = await run();
-    expect(stale.code).toBe(1);
-    expect(stale.error).toContain(
-      "Stale import cycle baseline; remove or shrink",
-    );
-    await baseline([]);
+    const removable = await snapshot();
+    for (const flag of [
+      "--dynamic",
+      "--modules",
+      "--dot",
+      "--dirs",
+      "--cycles",
+      "--height",
+    ]) {
+      const diagnostic = await run(flag);
+      expect(diagnostic.code).toBe(0);
+      expect(diagnostic.out).not.toContain("Shrank");
+      expect(await snapshot()).toEqual(removable);
+    }
     expect((await run()).code).toBe(0);
+    expect(JSON.parse(await read("baseline.json"))).toEqual([]);
+    const current = await snapshot();
+    const unchanged = await run();
+    expect(unchanged.code).toBe(0);
+    expect(unchanged.out).not.toContain("Shrank");
+    expect(await snapshot()).toEqual(current);
     await write(
       "src/nested/index.ts",
       'export const b = () => import("../a.js");',
@@ -142,6 +174,33 @@ test("import graph CLI rejects new, enlarged and stale cycles", async () => {
     const self = await run();
     expect(self.code).toBe(1);
     expect(self.error).toContain("src/nested/index.ts → src/nested/index.ts");
+    await write("src/nested/index.ts", 'export { b } from "./b.js";');
+    await write("src/nested/a.ts", 'import "./b.js";');
+    await write("src/nested/b.ts", 'import "./a.js"; export const b = 1;');
+    await baseline([["src/nested/a.ts", "src/nested/b.ts"]]);
+    await write(
+      "src/nested/b.ts",
+      'import "./a.js"; import "./c.js"; export const b = 1;',
+    );
+    await write("src/nested/c.ts", 'import "./b.js";');
+    const sameModule = await run();
+    expect(sameModule.code).toBe(1);
+    expect(sameModule.error).toContain(
+      "Unbaselined import cycle component: src/nested/a.ts, src/nested/b.ts, src/nested/c.ts",
+    );
+    await write("src/nested/c.ts", 'import "./b.js"; import "./d.js";');
+    await write("src/nested/d.ts", 'import "./c.js";');
+    const halves = [
+      ["src/nested/a.ts", "src/nested/b.ts"],
+      ["src/nested/c.ts", "src/nested/d.ts"],
+    ];
+    const joined = [halves.flat()];
+    expect(JSON.parse((await run("--cycles")).out)).toEqual(joined);
+    await baseline(joined);
+    await write("src/nested/b.ts", 'import "./a.js"; export const b = 1;');
+    await write("src/nested/c.ts", 'import "./d.js";');
+    expect((await run()).code).toBe(0);
+    expect(JSON.parse(await read("baseline.json"))).toEqual(halves);
   } finally {
     dispose();
   }
@@ -149,7 +208,7 @@ test("import graph CLI rejects new, enlarged and stale cycles", async () => {
 
 // Feature: #3416 enforce folder entries, module-cycle debt and module height through the CLI.
 test("import graph CLI ratchets module boundaries and reports height", async () => {
-  const { write, baseline, run, reject, dispose } = await fixture();
+  const { write, baseline, run, read, reject, dispose } = await fixture();
   try {
     await write("src/a.ts", 'export { b } from "./nested/index.js";');
     await write("web/entry.ts", 'import "../src/a.js";');
@@ -164,8 +223,8 @@ test("import graph CLI ratchets module boundaries and reports height", async () 
     await baseline([]);
     expect((await run()).code).toBe(0);
     await write("src/nested/other.ts", "export const other = 1;");
-    await reject("Stale module cycle baseline");
-    await baseline([]);
+    expect((await run()).code).toBe(0);
+    expect(JSON.parse(await read("modules.json")).cycles).toEqual([]);
     await write("src/consumer.ts", 'export { b } from "./nested/value.js";');
     await reject(
       "Unbaselined module entry bypass: src/consumer.ts → src/nested/value.ts",
@@ -173,8 +232,8 @@ test("import graph CLI ratchets module boundaries and reports height", async () 
     await baseline([]);
     expect((await run()).code).toBe(0);
     await write("src/consumer.ts", 'export { b } from "./nested/index.js";');
-    await reject("Stale module entry bypass baseline");
-    await baseline([]);
+    expect((await run()).code).toBe(0);
+    expect(JSON.parse(await read("modules.json")).bypasses).toEqual([]);
     await write(
       "src/nested/deeper/index.ts",
       'export { b } from "./value.js";',
@@ -194,23 +253,33 @@ test("import graph CLI ratchets module boundaries and reports height", async () 
     expect((await run("--dot", "--modules")).out).toContain(
       '"src/nested" -> "src/nested/deeper";',
     );
-    await write("src/nested/index.ts", 'export * from "./value.js";');
+    const thicker = 'export * from "./value.js"; export const extra = 1;';
+    await write("src/nested/index.ts", thicker);
     await write("src/no-entry/private.ts", "export const value = 1;");
     await reject(
-      "src/nested: 1 statements other than named re-exports",
+      "src/nested: 2 statements other than named re-exports",
       "src/no-entry: missing index.ts",
     );
     await baseline([]);
     expect((await run()).code).toBe(0);
-    await write("src/nested/index.ts", 'export { b } from "./value.js";');
+    await write("src/nested/index.ts", 'export * from "./value.js";');
+    await write("src/no-entry/index.ts", 'export * from "./private.js";');
+    expect((await run()).code).toBe(0);
+    expect(JSON.parse(await read("modules.json")).entries).toEqual({
+      "src/nested": 1,
+      "src/no-entry": 1,
+    });
+    await write("src/nested/index.ts", thicker);
     await write(
       "src/no-entry/index.ts",
       'export { value } from "./private.js";',
     );
-    await reject(
-      "Stale module entry baseline; remove or shrink: src/nested:",
-      "Stale module entry baseline; remove or shrink: src/no-entry:",
-    );
+    const before = await read("modules.json");
+    await reject("src/nested: 2 statements other than named re-exports");
+    expect(await read("modules.json")).toBe(before);
+    await write("src/nested/index.ts", 'export { b } from "./value.js";');
+    expect((await run()).code).toBe(0);
+    expect(JSON.parse(await read("modules.json")).entries).toEqual({});
   } finally {
     dispose();
   }

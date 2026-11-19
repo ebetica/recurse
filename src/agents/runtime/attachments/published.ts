@@ -2,13 +2,11 @@
 // collection's identity is checked before every scan.
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
-import { readdirAt } from "../../../utils/dir_fd";
 import {
   AttachmentError,
   ATTACHMENT_REFERENCE_REGEX,
   DRAFT_ATTACHMENT_REGEX,
   FILE_ID_REGEX,
-  RUN_ID_REGEX,
   CALL_ID_REGEX,
   type Manifest,
   displayName,
@@ -16,10 +14,8 @@ import {
 import { describe, publicMetadata, readDownload } from "./preview";
 import {
   collectionIdentityMatches,
-  existingForCall,
   iterManifests,
   openCollection,
-  readManifest,
 } from "./store";
 
 const MAX_PROMPT_IMAGE_BASE64_BYTES = Math.trunc(4.5 * 1024 * 1024);
@@ -114,68 +110,6 @@ export async function uploadPromptParts(
   }
   return [paths, images];
 }
-export async function rewriteUploadUrls(
-  text: string,
-  collection: string,
-  owner: string,
-  baseUrl: string,
-): Promise<string> {
-  if (typeof collection !== "string") return text;
-  for (const id of textUploadIds(text, ATTACHMENT_REFERENCE_REGEX)) {
-    try {
-      if (await describe(collection, owner, id))
-        text = text.replaceAll(
-          `/api/attachments/${id}`,
-          () => `${baseUrl}/${id}`,
-        );
-    } catch (error) {
-      if (!(error instanceof AttachmentError)) throw error;
-    }
-  }
-  for (const id of textUploadIds(text, DRAFT_ATTACHMENT_REGEX)) {
-    try {
-      if (await describe(collection, owner, id))
-        text = text.replace(
-          new RegExp(
-            `/api/attachment-drafts/[a-f0-9]{32}/${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-            "g",
-          ),
-          () => `${baseUrl}/${id}`,
-        );
-    } catch (error) {
-      if (!(error instanceof AttachmentError)) throw error;
-    }
-  }
-  return text;
-}
-export async function forCall(
-  collection: string,
-  owner: string,
-  runId: string,
-  toolCallId: string,
-): Promise<Manifest | null> {
-  if (!RUN_ID_REGEX.test(runId || "") || !CALL_ID_REGEX.test(toolCallId || ""))
-    return null;
-  try {
-    const fd = await openCollection(collection);
-    try {
-      if (!(await collectionIdentityMatches(collection, fd))) return null;
-      const manifest = await existingForCall(
-        fd,
-        owner,
-        runId,
-        toolCallId,
-        true,
-      );
-      return manifest ? publicMetadata(manifest) : null;
-    } finally {
-      await fd.close();
-    }
-  } catch (error) {
-    if (error instanceof AttachmentError) return null;
-    throw error;
-  }
-}
 export async function lookupByCall(
   collection: string,
   owner: string,
@@ -197,32 +131,6 @@ export async function lookupByCall(
     if (error instanceof AttachmentError) return null;
     throw error;
   }
-}
-export async function publishedCallIndex(
-  collection: string,
-  owner: string,
-): Promise<Record<string, Manifest>> {
-  const index: Record<string, Manifest> = Object.create(null);
-  try {
-    const fd = await openCollection(collection);
-    try {
-      if (!(await collectionIdentityMatches(collection, fd))) return index;
-      for (const [, manifest] of await iterManifests(fd, owner)) {
-        const call = manifest.tool_call_id;
-        if (
-          manifest.published === true &&
-          typeof call === "string" &&
-          !Object.hasOwn(index, call)
-        )
-          index[call] = publicMetadata(manifest);
-      }
-    } finally {
-      await fd.close();
-    }
-  } catch (error) {
-    if (!(error instanceof AttachmentError)) throw error;
-  }
-  return index;
 }
 // Every published file per tool call, oldest first: a bash call may publish
 // many.
@@ -279,44 +187,6 @@ export async function publishedFiles(
     }
   } catch (error) {
     if (error instanceof AttachmentError) return [];
-    throw error;
-  }
-}
-const PAGE_DEBRIS_SLACK = 64;
-// Bounded manifest attempts, with honest truncation for debris/foreign rows.
-export async function publishedPage(
-  collection: string,
-  owner: string,
-  limit: number,
-): Promise<[Manifest[], boolean]> {
-  const rows: Manifest[] = [];
-  try {
-    const fd = await openCollection(collection);
-    try {
-      if (!(await collectionIdentityMatches(collection, fd)))
-        return [rows, false];
-      let names: string[];
-      try {
-        names = await readdirAt(fd.fd);
-      } catch {
-        return [rows, false];
-      }
-      let reads = 0;
-      for (const name of names) {
-        if (rows.length >= limit || reads >= limit + PAGE_DEBRIS_SLACK)
-          return [rows, true];
-        if (!name.endsWith(".json") || !FILE_ID_REGEX.test(name.slice(0, -5)))
-          continue;
-        reads++;
-        const manifest = await readManifest(fd, owner, name.slice(0, -5));
-        if (manifest?.published === true) rows.push(publicMetadata(manifest));
-      }
-      return [rows, false];
-    } finally {
-      await fd.close();
-    }
-  } catch (error) {
-    if (error instanceof AttachmentError) return [rows, false];
     throw error;
   }
 }

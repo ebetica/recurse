@@ -18,7 +18,7 @@ import {
   type AgentTreeDeps,
   type SpawnOutcome,
 } from "../../src/agents/agent_tree";
-import { AgentClosed, MailboxFull } from "../../src/agents/agent_store";
+import { AgentClosed, MailboxFull } from "../../src/agents/storage/agent_store";
 import { ParkedActions } from "../../src/agents/compaction";
 import { ValueError, KeyError } from "../../src/agents/runtime/agent_node";
 import { PiRPCError } from "../../src/agents/runtime/pi_protocol";
@@ -27,7 +27,7 @@ import {
   type RuntimeLogRecord,
 } from "../../src/observability/runtime_logging";
 import { PiSessionRetirement } from "../../src/pi_session_retirement";
-import { pyCompactJson } from "../../src/utils/py_compact_json";
+import { pyCompactJson } from "../../src/utils/python-json";
 import { Cancelled } from "../../src/utils/tasks";
 import { buildWorld, counter } from "./fixtures/agent_node/world";
 import { switchoverWorld, until } from "./fixtures/durable_host/host";

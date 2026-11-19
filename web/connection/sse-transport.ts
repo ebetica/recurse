@@ -2,19 +2,19 @@
 // frames immediately; server retry plus capped exponential backoff handles
 // consecutive failures, reset by any dispatched event.
 
-export interface SseFrame {
+interface SseFrame {
   kind: string;
   id: string | null;
   data: string;
 }
 
-export interface SseParser {
+interface SseParser {
   readonly lastEventId: string | null;
   readonly retryMs: number;
   push(chunk: string): SseFrame[];
 }
 
-export function createSseParser(initialId: string | null = null): SseParser {
+function createSseParser(initialId: string | null = null): SseParser {
   let buffer = "";
   let event = "";
   let data: string[] = [];

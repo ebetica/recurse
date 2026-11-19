@@ -7,12 +7,12 @@ import {
   type ProviderCredentialStore,
 } from "./provider_store";
 
-export const PROVIDER = "openrouter";
-export const ENV_VAR = "OPENROUTER_API_KEY";
+const PROVIDER = "openrouter";
+const ENV_VAR = "OPENROUTER_API_KEY";
 
 type Dict = Record<string, unknown>;
 
-export interface OpenRouterOptions {
+interface OpenRouterOptions {
   store: ProviderCredentialStore;
   env: Readonly<Record<string, string | undefined>>;
 }

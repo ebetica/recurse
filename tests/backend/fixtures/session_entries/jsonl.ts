@@ -1,13 +1,13 @@
-export interface JsonlTextSegment {
+interface JsonlTextSegment {
   text: string;
 }
 
-export interface JsonlFillSegment {
+interface JsonlFillSegment {
   fill_byte: number;
   count: number;
 }
 
-export interface GeneratedJsonl {
+interface GeneratedJsonl {
   segments: Array<JsonlTextSegment | JsonlFillSegment>;
 }
 

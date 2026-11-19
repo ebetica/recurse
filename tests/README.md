@@ -1,7 +1,8 @@
 # Tests
 
 Tests run on real paths: a real server, Durable store, Git, processes, Chromium
-on the built app, or data recorded from real runs. Read the
+on the built app, or data recorded from real runs. Browser tests use
+`tsconfig.browser-tests.json` for DOM types; the backend does not. Read the
 [test-writing workflow](../docs/agents/develop.md#writing-tests-and-comments);
 `tests/checks/test_check.ts` enforces what it can.
 
@@ -89,12 +90,15 @@ sampling a viewport-preservation baseline.
 
 `tests/checks/` holds the documentation, comment, test-policy and web style
 checks. [static.ts](checks/static.ts) runs them all, as the quick check and
-before every `tests/check.sh` stage. The separate PR-validation command
-`bun tests/checks/test_check.ts --diff REF --pr-body BODY --strict` gates growing
-large files through the [simplification procedure](../docs/agents/simplify-review.md).
-`--diff` uses `git merge-base REF HEAD` (normally REF is `origin/dev`) and prints
-the base SHA; `--diff-exact BASE` uses an exact base instead. Without either diff
-flag, growth reviews are skipped; the static hard cap remains.
+before every `tests/check.sh` stage. Web style checks share each TypeScript
+file's parse and reuse the comment check's scanner to blank comment trivia.
+The [comment check](checks/comment_check.ts) allows short body comments without
+labels and checks declaration docs and test comment exemptions. The static gate
+checks the [architecture sweep ledger](../docs/agents/simplify-review.md).
+PR test policy runs separately with
+`bun tests/checks/test_check.ts --diff REF --pr-body BODY --strict`.
+`--diff` uses the merge base (normally with `origin/dev`); `--diff-exact BASE`
+uses an exact base instead.
 T6 rejects positive `expect(await locator.isVisible())` snapshots in browser tests;
 use `await locator.waitFor()` or `await browserExpect(locator).toBeVisible()`.
 Existing snapshots have shrinking per-file caps; removing one requires lowering
@@ -108,6 +112,7 @@ Changing tag kind while keeping the ids does not remove their protection.
 named-export-only entries against shrinking baselines. Nested folders are separate
 modules; root `src/` and `web/` files stand alone. `--modules` dumps module debt;
 `--height` reports a longest condensed module chain without enforcing a cap.
+TypeScript unused-export check: `dead_export_check.ts`.
 `browser_import_check.ts` bundles the browser
 entries from `package.json` in memory and checks Bun's resolved import graph,
 including literal dynamic imports and dependencies, without writing `web/dist`.
@@ -117,6 +122,10 @@ Type-only imports are erased by Bun and do not cross this boundary. Splitting is
 disabled only for this in-memory build so dynamic edges retain their source paths
 in the graph. Forbidden imports stay external so their transitive dependencies
 cannot hide the chain behind a bundler error.
+[standalone_import_check.ts](checks/standalone_import_check.ts) keeps release,
+setup, build and agent CLIs independent of the server. It follows runtime imports
+transitively, allowing Node built-ins and an exact allowlist for each entrypoint.
+It does not check the post-setup server launcher or server-owned workers.
 
 `bun tests/checks/operator_send_check.ts` checks browser source syntax for direct
 message delivery outside the shared send module, low-level transport and
@@ -134,10 +143,10 @@ prompt content is retained. It prints canonical section sizes, rejects totals of
 resources at a longer checkout path to verify equal budgets. The check also runs
 in the static gate.
 
-Every stage also runs the blocking Oxlint rules in
-[.oxlintrc.blocking.jsonc](../.oxlintrc.blocking.jsonc) over `src/`: synchronous
-filesystem imports/properties, native process counters, synchronous subprocesses
-and SQLite imports are errors. General Oxlint remains advisory.
+Every stage runs two blocking Oxlint checks. `bun run lint` covers `web/`,
+`tests/web/`, and extensions. [Server rules](../.oxlintrc.blocking.jsonc) cover
+`src/` and ban synchronous filesystem APIs and subprocesses, native process
+counters, and SQLite imports.
 Worker entrypoints and worker-only helpers end in `.worker.ts` (or `.worker.mjs`);
 launcher-only modules end in `.cli.ts`. The public `src/local.ts` and
 `src/launch_cli.ts` entrypoints retain their installed names. These paths may use

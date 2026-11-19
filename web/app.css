@@ -550,9 +550,24 @@ ins.doc-diff-added { color: inherit; text-decoration: none;
 mark.report-cmark { background: color-mix(in srgb, var(--highlight) 28%, transparent); color: inherit;
   border-radius: 2px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--highlight) 35%, transparent); } /* radius-check: allow a highlight mark */
 mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, transparent); }
+.pane-body[data-pane="report"] mark.report-cmark[data-cid]:not(.report-cbox, :is(a[href], button, summary, [role="button"]) *) {
+  cursor: pointer;
+}
+.btn.report-comment-anchor {
+  width: 36px;
+  padding: 0;
+  vertical-align: middle;
+  border-radius: 8px;
+  user-select: none;
+  color: var(--accent);
+}
 
 .report-comment-popover { position: fixed; z-index: calc(var(--z-dialog) + 2); width: min(300px, calc(100vw - 16px)); }
 .report-comment-popover[hidden] { display: none; }
+.report-comment-popover label:not(.sr-only) {
+  display: block;
+  margin-bottom: var(--space-2);
+}
 .report-comment-popover textarea { width: 100%; resize: vertical; min-height: 58px; }
 .report-comment-popover-actions { display: flex; justify-content: flex-end; gap: var(--space-3);
   margin-top: var(--space-3); }
@@ -566,6 +581,22 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
   padding: var(--space-1) 0 var(--space-1) var(--space-3);
   border-left: 2px solid var(--accent-dim); color: var(--muted);
   font-size: 0.78125rem; line-height: 1.4; max-height: 3.2em; overflow: hidden; }
+.btn.report-comment-edit {
+  display: block;
+  width: 100%;
+  text-align: start;
+  min-height: 44px;
+  padding: var(--space-3) var(--space-4);
+  border-radius: inherit;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.report-comment-edit > span {
+  display: block;
+}
+.report-comment-text {
+  white-space: pre-wrap;
+}
 /* Sits on a panel-2 comment card, so it takes the panel fill to stay visible. */
 .report-comment-input { width: 100%; resize: vertical; min-height: 40px;
   background: var(--panel); }
@@ -657,6 +688,14 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
 }
 
 @media (pointer: coarse) {
+  .btn.report-comment-anchor {
+    width: 48px;
+    min-height: 48px;
+  }
+  .report-comment-popover.editing .btn {
+    min-width: 72px;
+    min-height: 48px;
+  }
   .icon-btn, .rail-btn, #pane-fab, .pane-head .fs, .pane-head .x, .artifact-icon-btn,
   .artifact-delete-btn, .artifact-title-select, .report-comment-popover button,
   .report-comment-del, .report-comment-input, .report-sendbar button, .artifact-errors button {

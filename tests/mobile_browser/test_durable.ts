@@ -1,5 +1,4 @@
 import { expect } from "bun:test";
-declare const document: any;
 declare const window: any;
 declare const MutationObserver: any;
 declare const requestAnimationFrame: any;
@@ -293,7 +292,7 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  // Regression: #2274 thinking stays readable across tool commit (also #2357 expanded thinking remains whole in page flow.; #2357 collapsed handover must fetch stored prose, not keep reading offset=-1.; #2357 expanded groups must not duplicate thought prose or running summaries.)
+  // Regression: #2274 thinking stays readable across tool commit (also #2357 expanded thinking remains whole in page flow.; #2357 collapsed handover must fetch stored prose, not keep reading offset=-1.; #2357 expanded groups must not duplicate running summaries.)
   async function test_running_thought_loads_and_survives_its_commit(
     browser,
     base,
@@ -407,7 +406,7 @@ export const tests: BrowserTest[] = [
     await page.waitForFunction(
       (text) =>
         document
-          .querySelector(".live-thinking-summary")
+          .querySelector<HTMLElement>(".live-thinking-summary")
           ?.innerText.replace(/\s+/g, " ")
           .trim() === text,
       recordedThinking.thinking.replace(/\s+/g, " ").trim(),
@@ -478,19 +477,24 @@ export const tests: BrowserTest[] = [
       .locator('.live-thinking-copy[aria-expanded="false"]')
       .all())
       await toggle.click();
+    await summary
+      .getByText("Now running the sample command.", { exact: false })
+      .waitFor();
     await sample("expanded-committed");
     expect(storedReadWhileCollapsed).toBeTrue();
     expect(samples).toEqual([
       { state: "collapsed-live", thoughts: 1, running: 0, completed: 0 },
       { state: "expanded-live", thoughts: 1, running: 0, completed: 0 },
       { state: "collapsed-committed", thoughts: 1, running: 1, completed: 0 },
-      { state: "expanded-committed", thoughts: 1, running: 1, completed: 0 },
+      { state: "expanded-committed", thoughts: 2, running: 1, completed: 0 },
     ]);
     expect(await thought.getAttribute("aria-expanded")).toBe("true");
     expect((await body.innerText()).trim()).toBe(
       recordedThinking.thinking.replace(/\s+/g, " "),
     );
-    expect(await summary.count()).toBe(0);
+    expect((await summary.innerText()).trim()).toBe(
+      recordedThinking.thinking.trim(),
+    );
     expect(await page.locator("#conv-status.running").count()).toBe(1);
     await postFixture(base, "release", { agent, gate: "reply" });
     const secondThought = page.locator(".turn-thinking-toggle").nth(1);
@@ -1212,12 +1216,12 @@ export const tests: BrowserTest[] = [
         reader.evaluate(
           (row) =>
             row.getBoundingClientRect().top -
-            document.querySelector("#scroll").getBoundingClientRect().top,
+            document.querySelector("#scroll")!.getBoundingClientRect().top,
         );
       await waitForLayout(page);
       await reader.evaluate((row) => {
         row.scrollIntoView({ block: "start" });
-        document.querySelector("#scroll").scrollTop += 4;
+        document.querySelector("#scroll")!.scrollTop += 4;
       });
       await waitForLayout(page);
       const left = await readerTop();
@@ -1256,7 +1260,7 @@ export const tests: BrowserTest[] = [
       expect(await readerTop()).toBeCloseTo(left, 0);
       const fromBottom = () =>
         page.evaluate(() => {
-          const scroll = document.querySelector("#scroll");
+          const scroll = document.querySelector("#scroll")!;
           return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
         });
       const beforeJump = await page
@@ -1264,7 +1268,7 @@ export const tests: BrowserTest[] = [
         .evaluate((el) => el.scrollTop);
       await page.locator("#scroll-btn.visible").click();
       await page.waitForFunction((before) => {
-        const scroll = document.querySelector("#scroll");
+        const scroll = document.querySelector("#scroll")!;
         return (
           scroll.scrollTop > before &&
           scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 140
@@ -1277,7 +1281,7 @@ export const tests: BrowserTest[] = [
       });
       await page.getByText("Answer 128", { exact: true }).waitFor();
       await page.waitForFunction(() => {
-        const scroll = document.querySelector("#scroll");
+        const scroll = document.querySelector("#scroll")!;
         return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 1;
       });
       await open("main", "Agent");
@@ -1346,7 +1350,7 @@ export const tests: BrowserTest[] = [
     const kept = page.locator(`[data-row-id="${await highlighted()}"]`);
     const inView = (row: any) => {
       const box = row.getBoundingClientRect();
-      const view = document.querySelector("#scroll").getBoundingClientRect();
+      const view = document.querySelector("#scroll")!.getBoundingClientRect();
       return box.bottom > view.top && box.top < view.bottom;
     };
     await waitForLayout(page);

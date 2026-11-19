@@ -5,8 +5,8 @@ import {
   type ConversationRecord,
   type ConversationStorePaths,
   type ConversationStoreHooks,
-} from "../../../../src/agents/conversation_store";
-import { AgentStore } from "../../../../src/agents/agent_store";
+} from "../../../../src/agents/storage/conversation_store";
+import { AgentStore } from "../../../../src/agents/storage/agent_store";
 import { Config } from "../../../../src/config";
 
 export interface ConversationCase {

@@ -5,8 +5,8 @@ import { backendFor } from "../backends/backend.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 import { artifactWorkingPath } from "../../src/artifacts/working_path.js";
 
-export type ArtifactStatus = "draft" | "ready" | "error";
-export type ArtifactFormat =
+type ArtifactStatus = "draft" | "ready" | "error";
+type ArtifactFormat =
   | "markdown"
   | "html"
   | "text"
@@ -36,29 +36,6 @@ export interface ArtifactVersion {
   status: ArtifactStatus;
 }
 
-// Iframe event targets cross realms; parent-window instanceof is unsafe.
-export const COMMENT_ELEMENT_SELECTOR =
-  ".artifact-file-card, img, figure, article, section, [role], h1, h2, h3, h4, h5, h6";
-
-type CommentTargetLike = {
-  nodeType?: unknown;
-  parentElement?: CommentTargetLike | null;
-  parentNode?: CommentTargetLike | null;
-  closest?: (selectors: string) => CommentTargetLike | null;
-};
-
-export function closestCommentElement<T = CommentTargetLike>(
-  target: unknown,
-  selectors = COMMENT_ELEMENT_SELECTOR,
-): T | null {
-  let value = target as CommentTargetLike | null;
-  if (value?.nodeType === 3)
-    value = value.parentElement || value.parentNode || null;
-  if (!value || value.nodeType !== 1 || typeof value.closest !== "function")
-    return null;
-  return value.closest(selectors) as T | null;
-}
-
 const FORMATS = new Set<ArtifactFormat>([
   "markdown",
   "html",
@@ -83,7 +60,7 @@ function isoTime(value: unknown): string {
   return Number.isFinite(time) ? new Date(time).toISOString() : "";
 }
 
-export function normalizeArtifactInfo(value: unknown): ArtifactInfo | null {
+function normalizeArtifactInfo(value: unknown): ArtifactInfo | null {
   const obj = record(value);
   if (
     !obj ||
@@ -219,15 +196,6 @@ export const artifactRestoreUrl = (id: string): string =>
   artifactPath(id, "/restore");
 export const artifactDeleteUrl = (id: string): string => artifactPath(id);
 
-export function selectedVersion(
-  info: ArtifactInfo,
-  requested: string | null,
-): string | null {
-  return requested && SHA_RE.test(requested)
-    ? requested.toLowerCase()
-    : info.version;
-}
-
 export function isFullVersion(
   value: string | null | undefined,
 ): value is string {
@@ -238,7 +206,7 @@ export function isSafeRasterFilename(filename: string): boolean {
   return /\.(?:png|jpe?g|gif|webp|avif)$/i.test(filename);
 }
 
-export interface ArtifactImagePreviewTarget {
+interface ArtifactImagePreviewTarget {
   url: string;
   alt: string;
 }

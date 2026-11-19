@@ -3,7 +3,7 @@
 // fences admissions, drains finders, and stops the owned process group.
 import { fileURLToPath } from "node:url";
 import { abortable, Cancelled } from "../../../utils/tasks.ts";
-import { slowSpan } from "../../../observability/slow_span";
+import { slowSpan } from "../../../observability/slow-span";
 import type { OwnedProcess } from "../../../process_lifecycle.ts";
 import type { FffDefinition, FffFlags } from "./fff_tools.ts";
 import type {
@@ -235,12 +235,11 @@ export class FffWorker {
       )?.name,
     });
     let closing: Promise<void> | undefined;
-    const thisWorker = this;
     const definitions: FffDefinition[] = tools.map((tool) => ({
       ...tool,
-      async execute(_id, args, signal, onUpdate, ctx) {
+      execute: async (_id, args, signal, onUpdate, ctx) => {
         if (closing) throw new Error("Search connection closed");
-        const result = await thisWorker.request(
+        const result = await this.request(
           { op: "execute", connection, cwd: ctx.cwd, name: tool.name, args },
           signal,
           onUpdate,

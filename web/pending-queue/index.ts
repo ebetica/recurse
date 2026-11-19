@@ -12,7 +12,10 @@ export {
   type OptimisticEntry,
 } from "./pending-message.js";
 export {
-  discardOptimisticPending,
+  configurePendingMessageRefresh,
+  pendingMessageActions,
+} from "./pending-actions.js";
+export {
   optPending,
   pruneOptimistic,
   recordOptimisticPending,

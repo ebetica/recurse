@@ -35,7 +35,7 @@ import { Config } from "../../src/config";
 import { RECURSE_SETTINGS_SKILL } from "../../src/coding_backend/skills";
 import type { RuntimeLogRecord } from "../../src/observability/runtime_logging";
 import { Cancelled } from "../../src/utils/tasks";
-import { TreeLifecycleBusy } from "../../src/agents/mutation_guard";
+import { TreeLifecycleBusy } from "../../src/agents/lifecycle/mutation_guard";
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { AuthStorage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { buildConversationsApp } from "./http_conversations_app";

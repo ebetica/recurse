@@ -2,7 +2,7 @@
 // Stream with allowed headers and sandboxing; redact echoed keys.
 // API v1 JSON is bounded and decoded before redaction, including escaped keys.
 // Trusted agent markers require keys; never derive them from operator headers.
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 
 export interface RemoteTiming {
   route_class: string;
@@ -107,9 +107,11 @@ export async function remoteStream(
     headers.set("authorization", `Bearer ${backend.key}`);
     if (agent) headers.set("x-recurse-agent-caller", agent);
   }
-  // Invariant: Raw prompt markers restrict reads, never assert identity.
+  // Invariant: Raw agent markers restrict inspector reads, never assert identity.
   if (
-    /^\/api\/conversations\/[^/?]+\/prompt\/?(?:\?|$)/.test(path) &&
+    /^\/api\/conversations\/[^/?]+\/(?:prompt|tool-details\/[^/?]+)\/?(?:\?|$)/.test(
+      path,
+    ) &&
     (request.headers.has("x-recurse-agent") ||
       request.headers.has("x-recurse-agent-caller"))
   )
@@ -266,7 +268,12 @@ export async function remoteStream(
           if (!key) {
             if (!next.done) sink.enqueue(next.value);
           } else {
-            pending = Buffer.concat([pending, next.value ?? new Uint8Array()]);
+            // Bun's Buffer extends Uint8Array at runtime, but its older type
+            // declarations differ from the DOM project's iterator types.
+            pending = Buffer.concat([
+              pending as unknown as Uint8Array,
+              next.value ?? new Uint8Array(),
+            ]);
             let index: number;
             while ((index = pending.indexOf(new Uint8Array(key))) !== -1) {
               sink.enqueue(new Uint8Array(pending.subarray(0, index)));

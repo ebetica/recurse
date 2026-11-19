@@ -13,12 +13,7 @@ import {
   retriedNotice,
   retryReason,
 } from "./failure_sentences";
-import {
-  entry as sessionEntry,
-  entryIdentity,
-  LINE_BYTES,
-  type JsonObject,
-} from "./session_entries";
+import { entryIdentity, type JsonObject } from "./session_entries";
 import {
   oneLine,
   providerUsage,
@@ -34,15 +29,14 @@ import {
   TOOL_COMMAND_MAX,
 } from "../../tool_projection/__init__";
 
-export type { JsonObject } from "./session_entries";
-
-export interface Block {
+interface Block {
   readonly id: string;
   readonly kind: string;
   readonly role: string;
   readonly text: string;
   /** Bounded latest bold heading; full thinking is lazy-loaded by offset. */
   readonly thinking?: string | null;
+  readonly thinking_key?: string;
   readonly has_thinking?: true;
   readonly thinking_start_ms?: number;
   /** Set while a live thinking title overlays this persisted row. */
@@ -101,7 +95,7 @@ function textDelta(row: Block, held: TextMark | null | undefined): Block {
   };
 }
 
-export interface Snapshot {
+interface Snapshot {
   readonly instance_id: string;
   readonly revision: number;
   readonly blocks: readonly Block[];
@@ -111,7 +105,7 @@ export interface Snapshot {
   readonly reset: boolean;
 }
 
-export interface ToolTiming {
+interface ToolTiming {
   total_ms?: number;
   safety_ms?: number;
   command_ms?: number;
@@ -152,29 +146,29 @@ const THINKING_HEADING_MAX_CHARS = 200;
 const REDACTED_THINKING =
   /^(?:\[?(?:redacted|encrypted)(?:[ _-](?:thinking|reasoning))?\]?|<encrypted>)+$/iu;
 
-export interface ThinkingInfo {
+interface ThinkingInfo {
   title: string | null;
   hasThinking: boolean;
 }
 
-/** Extract only a bounded title and presence flag; prose stays session-only. */
+/** Extract a bounded heading or opening line; full prose stays session-only. */
 export function thinkingInfo(content: unknown): ThinkingInfo {
   if (!Array.isArray(content)) return { title: null, hasThinking: false };
   let title: string | null = null;
   let hasThinking = false;
   for (const block of content) {
-    if (!block || typeof block !== "object" || Array.isArray(block)) continue;
-    if ((block as JsonObject).type !== "thinking") continue;
-    const thinking = (block as JsonObject).thinking;
+    if (!object(block) || block.type !== "thinking") continue;
+    const thinking = block.thinking;
     if (typeof thinking !== "string") continue;
     hasThinking = true;
     const text = thinking.trim();
-    if (!text || REDACTED_THINKING.test(text)) continue;
-    for (const match of thinking.matchAll(/\*\*(.+?)\*\*/gu)) {
-      const heading = match[1]?.trim();
-      if (heading)
-        title = [...heading].slice(0, THINKING_HEADING_MAX_CHARS).join("");
-    }
+    if (!text || block.redacted === true || REDACTED_THINKING.test(text))
+      continue;
+    let heading = "";
+    for (const match of text.matchAll(/\*\*(.+?)\*\*/gu))
+      heading = match[1]?.trim() || heading;
+    const line = heading || text.split("\n", 1)[0]!.trimEnd();
+    title = codePointSlice(line, THINKING_HEADING_MAX_CHARS);
   }
   return { title, hasThinking };
 }
@@ -207,7 +201,7 @@ const PYTHON_TRIM_RE = new RegExp(
 const PYTHON_LINES_GLOBAL_RE = /\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]/gu;
 
 // Native, nested and historical publication calls look up owned files.
-export function publishesFiles(row: {
+function publishesFiles(row: {
   name: string | null;
   args: string;
   input: string | null;
@@ -403,43 +397,6 @@ function compactionSeatOrder(
   if (predecessor === null) return successor === null ? 0 : successor.order - 1;
   if (successor === null) return predecessor.order + 1;
   return (predecessor.order + successor.order) / 2;
-}
-
-/** Parse complete JSONL lines and retain the final partial line. */
-export function splitComplete(buffer: Uint8Array): [JsonObject[], Uint8Array] {
-  const entries: JsonObject[] = [];
-  let start = 0;
-  for (let index = 0; index < buffer.length; index += 1) {
-    if (buffer[index] !== 10) continue;
-    const raw = buffer.subarray(start, index);
-    start = index + 1;
-    let hasContent = false;
-    for (const byte of raw) {
-      if (![9, 10, 11, 12, 13, 28, 29, 30, 31, 32].includes(byte)) {
-        hasContent = true;
-        break;
-      }
-    }
-    if (!hasContent) continue;
-    try {
-      const parsed = sessionEntry(raw);
-      if (parsed !== null) {
-        entries.push(parsed);
-      } else if (raw.length > LINE_BYTES) {
-        // Invariant: split_complete historically did not cap a line. Keep that
-        // behavior for a valid oversized Pi record while normal rows share the
-        // bounded session-entry decoder.
-        const oversized: unknown = JSON.parse(
-          new TextDecoder("utf-8", { fatal: true }).decode(raw),
-        );
-        if (object(oversized)) entries.push(oversized);
-      }
-    } catch {
-      // Invariant: A malformed complete line is ignored; only a trailing
-      // partial is held.
-    }
-  }
-  return [entries, buffer.slice(start)];
 }
 
 function text(content: unknown): string {
@@ -1495,28 +1452,21 @@ export class ConversationView {
   }
 
   private supersedeProvisionalCompactions(entry: JsonObject): number {
-    const firstKept =
-      typeof entry.firstKeptEntryId === "string" && entry.firstKeptEntryId
-        ? entry.firstKeptEntryId
-        : null;
-    const timestamp = entryEpoch(entry.timestamp);
-    if (firstKept === null && timestamp === null) return 0;
-    const durableMs = timestamp === null ? null : timestamp * 1000;
+    const durable = durableKeys(entry);
+    if (durable.every((value) => value === null)) return 0;
     let removed = 0;
     for (const row of [...this.blocks]) {
-      const provisional = object(row.meta)
-        ? row.meta.compact_provisional
-        : null;
+      const provisional = row.meta?.compact_provisional;
       if (!object(provisional)) continue;
-      let superseded = firstKept !== null && provisional.pointId === firstKept;
-      if (!superseded && durableMs !== null) {
-        const appliedAt = provisional.appliedAt;
-        superseded =
-          typeof appliedAt === "number" &&
-          Number.isFinite(appliedAt) &&
-          durableMs >= appliedAt;
-      }
-      if (superseded && this.removeBlock(row.id)) removed += 1;
+      const point =
+        typeof provisional.pointId === "string" ? provisional.pointId : "";
+      const at =
+        typeof provisional.appliedAt === "number" &&
+        Number.isFinite(provisional.appliedAt)
+          ? provisional.appliedAt
+          : Infinity;
+      if (durableSupersedes(durable, point, at) && this.removeBlock(row.id))
+        removed += 1;
     }
     return removed;
   }
@@ -1670,7 +1620,10 @@ export class ConversationView {
         ...(modelTime === null ? {} : { model_time_ms: modelTime }),
         ...(thinking === null ? {} : { thinking }),
         ...(info?.hasThinking || entry.hasThinking === true
-          ? { has_thinking: true }
+          ? {
+              has_thinking: true,
+              thinking_key: String(entry.thinkingKey ?? "") || undefined,
+            }
           : {}),
         ...(typeof entry.thinkingStartMs === "number"
           ? { thinking_start_ms: entry.thinkingStartMs }

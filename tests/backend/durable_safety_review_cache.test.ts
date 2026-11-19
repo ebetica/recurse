@@ -17,7 +17,7 @@ import { idle, testDeps, until } from "./fixtures/durable_host/host";
 import { requestBody, type Recording } from "./fixtures/provider_replay/server";
 
 type Review = {
-  instructions: string;
+  instructions?: string;
   input: unknown[];
   prompt_cache_key?: string;
 };
@@ -80,7 +80,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
   const models = createModels();
   const faux = fauxProvider({ tokensPerSecond: 20_000 });
   models.setProvider(faux.provider);
-  const model = recording.model;
+  const model = { ...recording.model, id: "gpt-6.2-sol" };
   const changedModel = { ...model, id: "recorded-cache-alternate" };
   const codex = builtinProviders().find((p) => p.id === model.provider)!;
   const token = `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "cache-test" } })).toString("base64url")}.test`;
@@ -155,7 +155,6 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     for (let index = 1; index < reviews.length; index++) {
       const previous = reviews[index - 1]!;
       const current = reviews[index]!;
-      expect(current.instructions).toBe(previous.instructions);
       const stable = previous.input;
       expect(stable.length).toBeGreaterThan(0);
       expect(JSON.stringify(current.input.slice(0, stable.length))).toBe(
@@ -178,6 +177,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     const roles = (review: Review) =>
       review.input.flatMap((item: any) => (item.role ? [item.role] : []));
     expect(roles(reviews[2]!)).toEqual([
+      "developer",
       "user",
       "user",
       "user",
@@ -208,7 +208,15 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
       provider: model.provider,
       modelId: model.id,
     });
-    expect(capture.context.systemPrompt).toBe(reviews[2]!.instructions);
+    const policyItem = {
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text: capture.context.systemPrompt }],
+    };
+    for (const review of reviews) {
+      expect(review).not.toHaveProperty("instructions");
+      expect(review.input[0]).toEqual(policyItem);
+    }
     expect(capture.context.messages.map((message) => message.role)).toEqual([
       "user",
       "user",
@@ -265,10 +273,10 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     await until(idle(host));
     expect(reviews).toHaveLength(4);
     expect(reviews[3]!.prompt_cache_key).toBe(reviews[0]!.prompt_cache_key!);
-    expect(reviews[3]!.instructions).toBe(reviews[0]!.instructions);
+    expect(reviews[3]!.input[0]).toEqual(policyItem);
     expect(JSON.stringify(reviews[3]!.input)).toContain("create one more file");
     expect(JSON.stringify(reviews[3]!.input)).toContain("touch three");
-    expect(roles(reviews[3]!)).toEqual(Array(5).fill("user"));
+    expect(roles(reviews[3]!)).toEqual(["developer", ...Array(5).fill("user")]);
     const live = await host.open("c1");
     await config.setEffortLevel(
       1,

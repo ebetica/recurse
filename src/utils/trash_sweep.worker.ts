@@ -15,7 +15,7 @@ import type {
   TrashFailure,
   TrashReply,
   TrashWork,
-} from "./trash_sweep";
+} from "./trash-sweep";
 
 declare const self: Worker;
 

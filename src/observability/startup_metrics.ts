@@ -4,7 +4,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { performance } from "node:perf_hooks";
 
-export class StartupMeasurement {
+class StartupMeasurement {
   readonly counters = new Map<string, number>();
 
   constructor(
@@ -17,7 +17,7 @@ export class StartupMeasurement {
   }
 }
 
-export interface MeasureOptions {
+interface MeasureOptions {
   /** Monotonic seconds; defaults to performance.now() converted to seconds. */
   readonly now?: () => number;
   /** Receives one complete line; defaults to stdout. */

@@ -1,7 +1,7 @@
 // Desktop "type to compose" policy. Keep the keyboard classification and text
 // insertion pure so the exclusions can be regression-tested without a browser
 // DOM; app.ts supplies the live focus/dialog/composer state.
-export interface TypeToComposeKey {
+interface TypeToComposeKey {
   key: string;
   defaultPrevented: boolean;
   isComposing: boolean;
@@ -11,7 +11,7 @@ export interface TypeToComposeKey {
   altKey: boolean;
 }
 
-export interface TypeToComposeContext {
+interface TypeToComposeContext {
   desktop: boolean;
   composerFocused: boolean;
   paneFocused: boolean;
@@ -73,7 +73,7 @@ export function isDialogTarget(target: EventTarget | null): boolean {
   return false;
 }
 
-export interface TextInsertion {
+interface TextInsertion {
   value: string;
   caret: number;
 }

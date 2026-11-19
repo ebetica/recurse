@@ -3,7 +3,7 @@
 // the server's dry run both use it; callers check the sections it returns.
 import { EvalFlags, QuickJS } from "quickjs-wasi";
 
-export const RUN_MS = 50;
+const RUN_MS = 50;
 export const MAX_SCRIPT_BYTES = 16 * 1024;
 const MEMORY = 16 * 1024 * 1024;
 const MAX_ERROR = 300;

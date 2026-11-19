@@ -2,7 +2,7 @@
 // whole words on ingest and make progress every tick; completion flushes fast.
 // Caller owns timers/DOM; chunking is plain text.
 
-export const STREAM_REVEAL_MAX_CHARS = 400;
+const STREAM_REVEAL_MAX_CHARS = 400;
 export const STREAM_REVEAL_MS = 500;
 
 export interface StreamRevealState {
@@ -15,13 +15,13 @@ export function createStreamReveal(): StreamRevealState {
   return { received: "", shown: "", settled: false };
 }
 
-export interface StreamRevealOptions {
+interface StreamRevealOptions {
   completed?: boolean;
   reducedMotion?: boolean;
   instant?: boolean;
 }
 
-export interface StreamRevealResult {
+interface StreamRevealResult {
   display: string;
   changed: boolean;
   pending: number;
@@ -141,7 +141,7 @@ export function advanceStreamReveal(state: StreamRevealState): boolean {
   return true;
 }
 
-export interface LiveRevealPlan {
+interface LiveRevealPlan {
   instant: boolean;
   // Chunked text when animating; the full text when instant.
   display: string;
@@ -164,12 +164,12 @@ export function planLiveReveal(
   return { instant: false, display: res.display, pending: res.pending };
 }
 
-export interface SettledRevealSlot {
+interface SettledRevealSlot {
   state: StreamRevealState;
   settledChunks: string[] | null;
 }
 
-export interface SettledRevealPlan {
+interface SettledRevealPlan {
   instant: boolean;
   full: string;
   chunks: string[];

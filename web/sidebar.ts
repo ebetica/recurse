@@ -4,7 +4,7 @@
 // Rows keep title, badges and time on one line; models stay in the composer.
 import { sharedTrees, reloadChangedTreeLink } from "./shared-trees.js";
 import { copyText } from "./tool_details.js";
-import { remoteSectionHeader } from "./backends/discovery.js";
+import { remoteSectionHeader } from "./backends/discovery/index.js";
 import { treeFor, treeOf } from "./backends/tree.js";
 import { backendFor, backends } from "./backends/backend.js";
 import { parseConversationId } from "./backends/conversation-id/index.js";
@@ -41,13 +41,9 @@ import {
 import {
   abandonBackgroundWarming,
   refreshConv,
-  showCached,
+  showSelectedConversation,
 } from "./conversation/fetch.js";
-import {
-  noteConversationSwitch,
-  renderEmptyAgentList,
-} from "./conversation/chrome.js";
-import { poll } from "./conversation/poll.js";
+import { renderEmptyAgentList } from "./conversation/chrome.js";
 import { beginShowingConversation } from "./show-timing.js";
 import { beginPaneVisit, syncPanes } from "./panes.js";
 import { openArtifactLink } from "./artifacts/pane.js";
@@ -95,7 +91,12 @@ import { canDrop } from "./reparent.js";
 import { initAgentDrag, isDraggingAgent } from "./sidebar/drag.js";
 import type { TreeNode } from "./types.js";
 import type { Action, Section } from "../src/sidebar_script/index.js";
-import { SIDEBAR_CHANGE, shownTags, startDraft } from "./sidebar/index.js";
+import {
+  SIDEBAR_CHANGE,
+  refreshSidebarTree,
+  shownTags,
+  startDraft,
+} from "./sidebar/index.js";
 import * as folds from "./sidebar/agent-folds.js";
 import { holdOpen, moveHold, openHold, releaseHold } from "./sidebar/hold.js";
 import {
@@ -145,7 +146,7 @@ const RELATIONSHIP_DESCRIPTION: Record<TreeRelationship, string> = {
   child: "Child agent",
 };
 
-export const isArmed = (): boolean => deleteArmed;
+const isArmed = (): boolean => deleteArmed;
 
 // Frozen ranks prevent jumping; hourly resorts put newly born agents first.
 let sortRank: Record<string, number> = {};
@@ -690,8 +691,7 @@ export function selectAgent(
   // Invariant: Warm cached threads stay interactive while reconciling. Cold
   // switches stand down old chrome; owner-preserving draft promotion is already
   // this conversation and must never dim or become inert.
-  if (id !== DRAFT)
-    noteConversationSwitch(id, showCached(id) || preserveAttachments);
+  if (id !== DRAFT) showSelectedConversation(id, preserveAttachments);
   preloadSkills();
   // Invariant: Start the focused read BEFORE rendering the panels. It holds the
   // background queue for its whole flight, so a closed panel's availability
@@ -706,7 +706,7 @@ export function selectAgent(
 
 // Climbs the live routing parent via goUp; browser Back remains a separate
 // return-to-previous-view action, regardless of navigation depth.
-export function currentParent(): string | null {
+function currentParent(): string | null {
   if (state.draft) return state.draft.parent;
   if (!state.selectedId || state.selectedId === DRAFT) return null;
   return (
@@ -715,7 +715,7 @@ export function currentParent(): string | null {
     null
   );
 }
-export function goUp(): boolean {
+function goUp(): boolean {
   const target = currentParent();
   if (!target) return false;
   if (!guardLeaveComments()) return false;
@@ -754,8 +754,7 @@ export function syncHistoryToSelection(): void {
   } catch {}
 }
 
-// Corrects the current history entry without creating an unchosen Back step.
-// Used by boot restore, history replay, deletion and login recovery.
+// Corrects the current entry without creating an unchosen Back step.
 export function asHistoryCorrection<T>(select: () => T): T {
   correctingHistory = true;
   try {
@@ -770,9 +769,7 @@ export function canonicalizeAgentUrl(): void {
   asHistoryCorrection(syncHistoryToSelection);
 }
 
-// Unopenable history entries remain addressable across transient tree misses.
-// Only rejected cold-load links strip: there is no prior entry worth
-// preserving.
+// Rejected cold links strip; history replay keeps its entry on transient misses.
 function keepEntryAddressing(view: HistoryView): void {
   const base =
     history.state && typeof history.state === "object" ? history.state : {};
@@ -785,18 +782,19 @@ function keepEntryAddressing(view: HistoryView): void {
   } catch {}
 }
 
-export function reportAgentUnavailable(): void {
-  // Invariant: Deliberately one message for unknown, malformed, deleted, and
-  // no-longer- visible ids: the reader learns the link cannot be opened, and
-  // nothing distinguishes an agent that never existed from one that is not
-  // theirs.
+function reportAgentUnavailable(): void {
+  // Invariant: Malformed, missing, deleted and hidden links look the same.
   requestUiStatus("That agent link is not available");
 }
 
-// URL traversals can be undone for unsent work; app push/replace fire no event.
+export function finishBootLink(unavailable = false): void {
+  canonicalizeAgentUrl();
+  if (unavailable) reportAgentUnavailable();
+  else openArtifactLink();
+}
+// URL traversals can be undone for unsent work; push/replace fire no event.
 let lastHandledEntry = "";
 const LINK_WAIT_MS = 5000;
-/** Open embedded link {id} once a tree read lists it, or fail after 5 s. */
 function openWhenListed(id: string, traversed: boolean): void {
   const hash = location.hash;
   const finish = () => {
@@ -807,14 +805,12 @@ function openWhenListed(id: string, traversed: boolean): void {
   const listed = () => visibleAgent(id) && finish();
   const bound = setTimeout(finish, LINK_WAIT_MS);
   addEventListener("recurse:tree-authoritative", listed);
-  void poll();
+  void refreshSidebarTree();
 }
 function openHistoryEntry(traversed: boolean, listed = false): void {
   if (reloadChangedTreeLink() || phoneListEntry()) return;
-  // Invariant: Before the first tree read nothing can be resolved, and boot
-  // restore will consume whatever the URL says. Leave both the selection and
-  // the URL alone rather than reporting an agent unavailable that was simply
-  // not read yet.
+  // Invariant: Boot restores the URL after the first tree read. Until then
+  // leave the URL and selection alone instead of reporting the link missing.
   const fallback = visibleRows()[0]?.id;
   if (!fallback) return;
   const entry = readHistoryView(history.state, location.hash);
@@ -1073,7 +1069,7 @@ export function hasPendingDeleteSelection(id: string): boolean {
 // Keyboard and swipe deletion share the same confirmation and navigation path.
 // A refused deletion carries the server's own diagnostic: prefer it, fall
 // back to the bare status, and keep the line bounded for the status banner.
-export function deleteFailureMessage(status: number, body: unknown): string {
+function deleteFailureMessage(status: number, body: unknown): string {
   const detail = (body as { detail?: unknown } | null)?.detail;
   if (typeof detail !== "string" || !detail) return `HTTP ${status}`;
   return detail.length > 240 ? detail.slice(0, 239) + "…" : detail;
@@ -1081,7 +1077,7 @@ export function deleteFailureMessage(status: number, body: unknown): string {
 
 class DeleteRefused extends Error {}
 
-export function killAgent(dying: string | null | undefined): void {
+function killAgent(dying: string | null | undefined): void {
   if (!dying || !state.nodes[dying]) return;
   trashHold.hide();
   const before = { ...state.nodes };
@@ -1211,7 +1207,7 @@ export function killAgent(dying: string | null | undefined): void {
         state.cursorId = state.selectedId;
       renderSidebar();
     })
-    .finally(() => poll());
+    .finally(() => refreshSidebarTree());
 }
 
 interface PendingReparent {
@@ -1241,7 +1237,7 @@ export function applyPendingReparentMasks(nodes: TreeNode[]): TreeNode[] {
   return nodes;
 }
 
-export function reparentAgent(source: string, target: string | null): void {
+function reparentAgent(source: string, target: string | null): void {
   // Invariant: Agents never move between backends or within a remote.
   if (
     parseConversationId(source).label ||
@@ -1275,7 +1271,7 @@ export function reparentAgent(source: string, target: string | null): void {
       announceMove(`Move of ${node.title} was rejected`);
       renderSidebar();
     })
-    .finally(() => poll());
+    .finally(() => refreshSidebarTree());
 }
 
 const shareBtn = $<HTMLButtonElement>("#share-link-btn")!;
@@ -1433,7 +1429,7 @@ export async function renameConversation(
       state.pendingTitles[id]?.title === val
     )
       delete state.pendingTitles[id];
-    poll();
+    refreshSidebarTree();
     return false;
   }
 }

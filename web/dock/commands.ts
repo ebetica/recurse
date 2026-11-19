@@ -10,7 +10,7 @@ import {
   type SerializedDockview,
 } from "dockview";
 
-export type WindowDirection = "left" | "right" | "up" | "down";
+type WindowDirection = "left" | "right" | "up" | "down";
 export type WindowCommand =
   | `focus-${WindowDirection}`
   | `move-${WindowDirection}`
@@ -174,7 +174,7 @@ export function createWindowCommands(
       if (command === "close-all") {
         restoreWindows();
         cancel();
-        for (const panel of [...api.panels])
+        for (const panel of api.panels.slice())
           if (panel.id !== "chat") callbacks.close(panel.id, false);
         focusPanel(api.getPanel("chat"));
         callbacks.arranged();

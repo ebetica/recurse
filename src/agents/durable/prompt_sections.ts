@@ -29,7 +29,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { escapeReminderMarkers } from "../../reminder_text";
 import { escapeOriginMarkers } from "../runtime/prompt_stamp";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 import { type Conv, type DigestInputs, Prompts } from "../runtime/prompts";
 import { systemBeforeUserHook } from "./system_order";
 import type { PromptResources } from "./prompt_resources";

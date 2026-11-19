@@ -18,7 +18,7 @@ export type CoverageMap = {
   tokens: Record<string, number[]>;
 };
 
-export type Rule = {
+type Rule = {
   key: string;
   start: number;
   end: number;
@@ -94,7 +94,7 @@ export function cssRules(source: string): Rule[] {
 /**
  * Class/id tokens one selector needs, or null when it names none.
  */
-export function selectorNeeds(selector: string): Array<string[] | null> {
+function selectorNeeds(selector: string): Array<string[] | null> {
   let flat = selector.replace(/\[[^\]]*\]/g, "");
   for (let prev = ""; prev !== flat; ) {
     prev = flat;
@@ -184,7 +184,7 @@ export function functionSpans(file: string, text: string): Span[] {
 }
 
 /** The innermost span containing [start, end), as an index, or -1. */
-export function innermost(spans: Span[], start: number, end = start): number {
+function innermost(spans: Span[], start: number, end = start): number {
   let found = -1;
   for (let k = 0; k < spans.length; k++)
     if (spans[k]!.start <= start && end <= spans[k]!.end) found = k;
@@ -278,7 +278,7 @@ export function fileChanges(diff: string): FileChange[] {
   return out;
 }
 
-export type BrowserPlan = {
+type BrowserPlan = {
   /** Group labels a change reaches through the map. */
   labels: Set<string>;
   /** Why the whole suite must run; empty when the map placed everything. */

@@ -1,7 +1,7 @@
 // Shared admission errors and the submission envelope. The Pi RPC codecs
 // left with the Pi process runtime.
 
-export type JsonObject = Record<string, any>;
+type JsonObject = Record<string, any>;
 export class PiRPCError extends Error {}
 export class ProcessCleanupPending extends Error {
   override name = "ProcessCleanupPending";

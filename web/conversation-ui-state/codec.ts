@@ -70,9 +70,7 @@ export function parseComposer(value: unknown): ComposerViewState {
   };
 }
 
-export function parsePaneStates(
-  value: unknown,
-): Record<string, StoredPaneState> {
+function parsePaneStates(value: unknown): Record<string, StoredPaneState> {
   const result: Record<string, StoredPaneState> = Object.create(null) as Record<
     string,
     StoredPaneState
@@ -140,15 +138,6 @@ export function parseLocalUiState(
 ): Pick<ConversationUiState, "pane" | "localPanes"> | null {
   const parsed = parseRecord(raw, "local") as LocalState | null;
   return parsed ? { pane: parsed.pane, localPanes: parsed.panes } : null;
-}
-
-export function parseSessionUiState(
-  raw: string | null,
-): Pick<ConversationUiState, "composer" | "sessionPanes"> | null {
-  const parsed = parseRecord(raw, "session") as SessionState | null;
-  return parsed
-    ? { composer: parsed.composer, sessionPanes: parsed.panes }
-    : null;
 }
 
 export function clonePaneStates(
@@ -226,7 +215,7 @@ export interface ParsedOwnerIndex {
   valid: boolean;
   entries: OwnerSlot[];
 }
-export interface PluginFieldRecord extends StoredPaneState {
+interface PluginFieldRecord extends StoredPaneState {
   owner: string;
   touched: number;
   key: string;

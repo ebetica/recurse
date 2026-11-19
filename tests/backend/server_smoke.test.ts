@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
 import { groupMembers, expectGroupGone } from "./pi_real_support";
-import { AgentStore } from "../../src/agents/agent_store";
+import { AgentStore } from "../../src/agents/storage/agent_store";
 
 const REPO = join(import.meta.dir, "..", "..");
 const PASSWORD = "smoke-test-password-1";

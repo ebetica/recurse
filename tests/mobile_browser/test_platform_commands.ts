@@ -456,7 +456,7 @@ export const tests: BrowserTest[] = [
     const cursor = pane.locator(".pane-item-cursor");
     expect(await cursor.getAttribute("data-side")).toBe(secondId);
     await page.keyboard.press("Shift+G");
-    expect(await cursor.getAttribute("data-side")).toBe(ids.at(-1));
+    expect(await cursor.getAttribute("data-side")).toBe(ids.at(-1)!);
     await page.keyboard.press("g");
     await page.keyboard.press("g");
     expect(await cursor.getAttribute("data-side")).toBe(ids[0]);

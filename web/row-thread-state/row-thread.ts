@@ -31,9 +31,10 @@ export interface RowThread {
   // Session identity rotates on Clear, not on same-session view rebuilds.
   sessionKey?: string;
   retryNotice?: string | null;
+  latestThinking?: ViewPage["latest_thinking"];
 }
 
-export interface RowFold {
+interface RowFold {
   state: RowThread | null;
   changed: boolean;
   reset: boolean;
@@ -108,6 +109,7 @@ function rowEqual(a: ViewBlock, b: ViewBlock): boolean {
     a.role === b.role &&
     a.text === b.text &&
     a.thinking_title === b.thinking_title &&
+    a.thinking_key === b.thinking_key &&
     a.has_thinking === b.has_thinking &&
     a.origin === b.origin &&
     a.name === b.name &&
@@ -214,6 +216,7 @@ export function foldRowThread(
         rows: [...prefix, ...fresh],
         sessionKey: page.session,
         retryNotice: page.retry_notice,
+        latestThinking: page.latest_thinking,
       },
       changed: true,
       reset: true,
@@ -222,7 +225,11 @@ export function foldRowThread(
   if (
     prev.revision === page.revision &&
     direction === "newer" &&
-    (page.retry_notice === undefined || page.retry_notice === prev.retryNotice)
+    (page.retry_notice === undefined ||
+      page.retry_notice === prev.retryNotice) &&
+    (page.latest_thinking === undefined ||
+      JSON.stringify(page.latest_thinking) ===
+        JSON.stringify(prev.latestThinking))
   )
     return { state: prev, changed: false, reset: false };
   // Invariant: An older window can carry rows never held even when nothing
@@ -256,8 +263,7 @@ export function foldRowThread(
     return {
       state: changed
         ? {
-            instanceId: prev.instanceId,
-            revision: prev.revision,
+            ...prev,
             rows,
             sessionKey: page.session ?? prev.sessionKey,
             retryNotice:
@@ -281,6 +287,9 @@ export function foldRowThread(
       sessionKey: page.session ?? prev.sessionKey,
       retryNotice:
         page.retry_notice !== undefined ? page.retry_notice : prev.retryNotice,
+      latestThinking: stale
+        ? prev.latestThinking
+        : (page.latest_thinking ?? prev.latestThinking),
     },
     changed: true,
     reset: false,
@@ -331,7 +340,7 @@ function stripSenderLines(lines: string[]): string[] {
   return rest;
 }
 
-export function stripRowEnvelope(text: string): string {
+function stripRowEnvelope(text: string): string {
   const bare = text.replace(DELIVERY_TRAILER, "");
   const head = bare.match(ORIGIN_TAG_HEAD);
   if (head?.[0])
@@ -686,6 +695,7 @@ interface TurnBuild {
   requestModelTimeMs?: number;
   requestThinking?: string | null;
   requestThinkingEntryId?: string;
+  requestThinkingKey?: string;
   requestHasThinking?: boolean;
   requestLiveThinking?: boolean;
   requestThinkingElapsedMs?: number;
@@ -1045,10 +1055,12 @@ export function rowsToTurns(
                 : row.args || undefined))
             : (detailStreaming ?? undefined),
         call_id: callId,
+        artifact_id: row.artifact_id,
         timing: row.timing ?? undefined,
         model_time_ms: active.requestModelTimeMs,
         thinking: active.requestThinking,
         thinking_entry_id: active.requestThinkingEntryId,
+        thinking_key: active.requestThinkingKey,
         has_thinking: active.requestHasThinking,
         live_thinking: active.requestLiveThinking,
         thinking_elapsed_ms: active.requestThinkingElapsedMs,
@@ -1065,6 +1077,7 @@ export function rowsToTurns(
       });
       active.requestThinking = undefined;
       active.requestThinkingEntryId = undefined;
+      active.requestThinkingKey = undefined;
       active.requestHasThinking = undefined;
       active.requestLiveThinking = undefined;
       active.requestThinkingElapsedMs = undefined;
@@ -1082,6 +1095,7 @@ export function rowsToTurns(
       active.requestModelTimeMs = row.model_time_ms ?? undefined;
       active.requestThinking = row.thinking_title;
       active.requestThinkingEntryId = `row:${row.id}`;
+      active.requestThinkingKey = row.thinking_key;
       active.requestHasThinking = row.has_thinking === true;
       active.requestLiveThinking = row.live_thinking === true;
       active.requestThinkingElapsedMs =
@@ -1131,6 +1145,7 @@ export function rowsToTurns(
           id: `row:${row.id}`,
           content: row.text,
           thinking: row.thinking_title,
+          thinking_key: row.thinking_key,
           has_thinking: row.has_thinking,
           live_thinking: row.live_thinking === true,
           thinking_elapsed_ms: row.thinking_elapsed_ms,
@@ -1150,7 +1165,9 @@ export function rowsToTurns(
           ? `${held.content}\n\n${row.text}`
           : row.text;
         held.id = `row:${row.id}`;
+        held.offset = row.offset ?? -1;
         held.thinking = row.thinking_title;
+        held.thinking_key = row.thinking_key;
         held.has_thinking = row.has_thinking;
         held.live_thinking = row.live_thinking === true;
         held.thinking_elapsed_ms = row.thinking_elapsed_ms;

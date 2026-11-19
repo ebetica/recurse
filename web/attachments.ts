@@ -30,13 +30,13 @@ function invalidateOwnedFiles(id: string): void {
   void import("./files.js").then((m) => m.invalidateFiles(id));
 }
 
-export interface ReadyAttachment {
+interface ReadyAttachment {
   url: string;
   isImage: boolean;
   filename: string;
 }
 
-export interface RecoverableAttachment extends ReadyAttachment {
+interface RecoverableAttachment extends ReadyAttachment {
   owner: AttachmentOwner;
   uiOwnerId: string;
 }

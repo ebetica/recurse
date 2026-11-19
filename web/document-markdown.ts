@@ -56,7 +56,7 @@ function removeUrlSurfaces(root: ParentNode): void {
     blocked.remove();
   for (const element of root.querySelectorAll<HTMLElement>("*")) {
     element.removeAttribute("style");
-    for (const attribute of [...element.attributes]) {
+    for (const attribute of Array.from(element.attributes)) {
       const name = attribute.name.toLowerCase();
       const localName = attribute.localName.toLowerCase();
       if (
@@ -144,7 +144,7 @@ export async function revealArtifactImage(
   }
 }
 
-export interface DocumentMarkdownOptions {
+interface DocumentMarkdownOptions {
   resolveRelative: (path: string, image: boolean) => string | null;
   openRelative: (path: string, fragment: string) => boolean;
   signal: AbortSignal;

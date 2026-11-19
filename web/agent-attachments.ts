@@ -37,7 +37,7 @@ type AttachmentSummary = {
   unavailable?: "copied" | "missing";
 };
 
-export type AgentAttachmentView =
+type AgentAttachmentView =
   | {
       kind: "image";
       id: string;
@@ -118,21 +118,10 @@ export function agentAttachmentLayout(items: AttachmentSummary[]): string {
   return "images-none";
 }
 
-export function attachmentUnavailableLabel(
+function attachmentUnavailableLabel(
   reason: AttachmentSummary["unavailable"],
 ): string {
   return reason === "copied"
     ? "Unavailable in copied conversation"
     : "File unavailable";
-}
-
-export function attachmentPreview(
-  items: AttachmentSummary[] | undefined,
-): string {
-  if (!items?.length) return "";
-  const available = items.filter((item) => item.id && !item.unavailable);
-  if (available.length === 1)
-    return `Attached file: ${available[0].name || "File"}`;
-  if (available.length > 1) return `${available.length} attached files`;
-  return "Attached file unavailable";
 }

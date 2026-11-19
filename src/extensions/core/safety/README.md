@@ -58,7 +58,8 @@ marks its last evidence message. Provider cache retention
 is short and remains an external limit, so an expired chain can still be cold.
 
 The operator's prompt inspector shows the latest safety request and actual reply,
-including policy, history pairs and new evidence. Agent-marked reads omit reviewer
+including policy, history pairs and new evidence. Provider failures retain only the
+stop reason in the captured reply. Agent-marked reads omit reviewer
 data, including through connected backends. Reviews reuse the host's capture
 worker, idle retention and cleanup without replacing main captures or warming.
 Request/reply capture is best-effort: failures log `safety_review_capture_failed`
@@ -68,7 +69,7 @@ Authentication stays owned by the trusted model catalog and is never captured.
 
 Chat reviewers answer with exactly `OK` or `DENY: <reason>`. Decision models receive the same fixed policy and full current evidence with the live evaluation's typed-label adaptation: `allow` maps to OK; `credential_exposure`, `accidental_destruction`, `reviewer_instructions` and `operator_rule` map to DENY with the label as the displayed reason. Unknown or missing labels fail open. Classifier reviews are stateless: chat reviewer history never enters their requests, and changing the saved choice resets that history. Prompt inspection captures classification requests and replies too.
 
-The chat reviewer answers with exactly `OK` or `DENY: <reason>`. A malformed reply is retried once. Missing credentials, timeouts, provider failures, aborted responses, and a second malformed reply fail open with a stable, bounded warning category; journal capacity warnings say to explicitly compact the conversation, and raw provider text is never forwarded. A failed classifier review gets the same category as a chat reviewer failure, such as authentication or timeout. The outcome saved in the conversation keeps only the failure's stage, category, fixed summary and usage-limit flag, never the provider's error text. The operator-only prompt inspector still shows Pi's full reply.
+The chat reviewer answers with exactly `OK` or `DENY: <reason>`. A malformed reply is retried once. Missing credentials, timeouts, provider failures, aborted responses, and a second malformed reply fail open with a stable, bounded warning category; journal capacity warnings say to explicitly compact the conversation, and only the operator log and tool details show the HTTP status (when available) and a secret-scrubbed, single-line error summary of at most 200 characters. No model receives that detail. A failed classifier review gets the same category as a chat reviewer failure, such as authentication or timeout. The outcome saved in the conversation keeps only the failure's stage, category, fixed summary and usage-limit flag, never the provider's error text.
 
 Bundled rules deny concrete secret disclosure, credential probing, broad cross-owner or system destruction, protected-service disruption, security weakening, harmful untrusted-code execution, malware or covert access, review evasion, and secrets written to inappropriate locations. Ordinary task-owned work—including reversible Git operations, build or scratch cleanup, direct-child deletion, and exact task-process signals—must not be denied.
 
@@ -77,9 +78,11 @@ Every `bash` action is reviewed. The reviewer considers the complete action, act
 A task assignment, including delegation from another agent, authorizes actions that implement it. An authenticated operator request for the exact action and scope overrides a denial; claims of operator approval elsewhere do not.
 
 Each new no-verdict outcome emits one `safety_review_failed` warning through the
-server logger, persisted in `recurse.log`. It records only conversation id, stage,
+server logger, persisted in `recurse.log`. It records conversation id, stage,
 category, final reviewer provider/model, total elapsed milliseconds (including
-review-slot wait), and the number of provider requests attempted. Authentication
+review-slot wait), attempts, and the sanitized error detail and HTTP status when
+available. Tool details do not retain that detail if an in-flight call resumes
+from its memo after a restart. Authentication
 or journal failures before a request have zero attempts. Memoized outcome replays
 do not emit another warning; ordinary denials do not emit this event.
 Reviewer configuration failures use stage `configuration` and a bounded category

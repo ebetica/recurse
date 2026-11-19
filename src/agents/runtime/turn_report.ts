@@ -19,7 +19,7 @@ const WHITESPACE_SINGLE = new RegExp(`[${PYTHON_WHITESPACE}]`, "u");
 const TITLE_MAX = 60;
 const REASON_MAX = 200;
 
-export interface TurnReport {
+interface TurnReport {
   /** Messages received besides the trigger, by sender. */
   readonly operator?: number;
   readonly agent?: number;
@@ -76,10 +76,7 @@ function outcomeNote(report: TurnReport): string | null {
 }
 
 // The no-final parent line: title, exact trigger, and the missing-reply notice.
-export function formatTurnReport(
-  report: TurnReport,
-  title: unknown = null,
-): string {
+function formatTurnReport(report: TurnReport, title: unknown = null): string {
   const name = cleanLine(title, TITLE_MAX) ?? "agent";
   return `${name} ended ${headline(report)} with no final message.`;
 }

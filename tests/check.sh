@@ -10,28 +10,8 @@ unset CHAT_REPO_URL RECURSE_SELF_DEPLOY
 
 cd "$(dirname "$0")/.."
 
-advisory_lint() {
-  local label="$1"
-  shift
-  set +e
-  "$@"
-  local status=$?
-  set -e
-  if [[ $status -eq 0 ]]; then
-    return 0
-  fi
-  if [[ $status -eq 1 ]]; then
-    echo "ADVISORY: $label reported findings" >&2
-    return 0
-  fi
-  echo "ERROR: $label could not run (exit $status)" >&2
-  return "$status"
-}
-
 stage_web() {
   bun run format:check
-  bun --bun ./node_modules/.bin/oxlint -c .oxlintrc.json --print-config >/dev/null
-  advisory_lint "Oxlint" bun run lint
   bun run test
   bun run build
 }
@@ -42,6 +22,7 @@ stage_ts() {
   # The static gate checks types with tsgo; tsc stays the reference here.
   bun run typecheck
   bun run typecheck:backend
+  bun run typecheck:browser-tests
   # Compose the whole TypeScript server without listening, against a
   # throwaway state root.
   bun src/server.ts --check

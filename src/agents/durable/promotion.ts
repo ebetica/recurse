@@ -10,14 +10,14 @@ import {
   BACKGROUND_CONTEXT as context,
   withAbortSignal,
 } from "@earendil-works/chord/context";
-import { retirePath } from "../../utils/trash_sweep";
+import { retirePath } from "../../utils/trash-sweep";
 import type { Opened } from "./host/open.ts";
 
 const runtime = () => import("./host/runtime.ts");
 
 export type PromotionRecord = Pick<PromotionDeps, "promotion" | "promoted">;
 
-export interface PromotionDeps {
+interface PromotionDeps {
   dataDir: string;
   trashDir: string;
   load(cid: string, fields: readonly string[]): Record<string, unknown> | null;

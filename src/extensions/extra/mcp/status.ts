@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { validateMcpServerConfig } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/core/mcp-servers.js";
 import type { McpServerEntry } from "../../../../node_modules/@earendil-works/pi-coding-agent/dist/extensions/mcp/config.js";
 
-export type McpStatus = {
+type McpStatus = {
   name: string;
   state: "connected" | "failed" | "needs-sign-in" | "disabled" | "not-used";
   checkedAt: number | null;

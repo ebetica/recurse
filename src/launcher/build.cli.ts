@@ -37,10 +37,7 @@ export async function checkoutBun(_codeDir: string): Promise<string> {
 }
 
 /** Recover the previous frontend when a kill orphaned its backup name. */
-export async function restoreDistBackup(
-  webDir: string,
-  dist: string,
-): Promise<void> {
+async function restoreDistBackup(webDir: string, dist: string): Promise<void> {
   if (await exists(dist)) return;
   let names: string[];
   try {
@@ -61,7 +58,7 @@ export async function restoreDistBackup(
 }
 
 /** Atomically replace the live frontend, rolling back on interruption. */
-export async function publishStagedFrontend(
+async function publishStagedFrontend(
   staging: string,
   dist: string,
   backup: string,
@@ -78,7 +75,7 @@ export async function publishStagedFrontend(
   await rm(backup, { recursive: true, force: true }).catch(() => {});
 }
 
-export interface BuildDeps {
+interface BuildDeps {
   readonly run: typeof run;
   readonly bun: (codeDir: string) => Promise<string>;
 }
@@ -190,7 +187,7 @@ export async function buildFrontend(
   }
 }
 
-export interface GenerationDeps {
+interface GenerationDeps {
   readonly run: typeof run;
   readonly buildFrontend: typeof buildFrontend;
   readonly matches: (root: string) => boolean;
@@ -198,7 +195,7 @@ export interface GenerationDeps {
   readonly writeStamp: (root: string, expected: SourceState) => boolean;
 }
 
-export const GENERATION_DEPS: GenerationDeps = {
+const GENERATION_DEPS: GenerationDeps = {
   run,
   buildFrontend,
   matches: (root) => buildStamp.matches(root),

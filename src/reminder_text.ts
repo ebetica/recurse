@@ -9,7 +9,7 @@ const LEGACY_OPEN = "<system-reminder>";
 const LEGACY_CLOSE = "</system-reminder>";
 
 /** Conversation growth between two copies of one advice or status kind. */
-export const REMINDER_SPACING_TOKENS = 30_000;
+const REMINDER_SPACING_TOKENS = 30_000;
 export const ADVICE_MAX_CHARS = 200;
 /** Bytes the reminder markers add around a body. */
 export const REMINDER_MARKER_BYTES = OPEN.length + CLOSE.length + 2;

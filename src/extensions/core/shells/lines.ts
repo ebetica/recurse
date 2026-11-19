@@ -2,7 +2,7 @@
 // forward. Flush caps retain recent lines and summarize overflow so fast
 // writers cannot flood the agent.
 
-export interface SplitResult {
+interface SplitResult {
   /** Complete lines (without their trailing newline). */
   lines: string[];
   /** Leftover partial line not yet terminated by a newline. */
@@ -23,7 +23,7 @@ export function splitCompleteLines(
   return { lines, pending: newPending };
 }
 
-export interface CapResult {
+interface CapResult {
   /** Lines to actually deliver. */
   shown: string[];
   /** How many lines were dropped (0 when nothing was capped). */

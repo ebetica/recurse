@@ -5,7 +5,7 @@
 import { api, jpost } from "../api.js";
 import { agentLinkUrl } from "../deep-link.js";
 
-export const NOTIFY_LABEL = "Notify me when a top-level agent finishes";
+const NOTIFY_LABEL = "Notify me when a top-level agent finishes";
 
 const supported = () =>
   window.isSecureContext &&

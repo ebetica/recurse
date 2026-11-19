@@ -15,7 +15,7 @@ export type Work =
       files: SearchFile[];
       options: Omit<SearchOptions, "signal">;
     };
-export type Request = (Work & { id: number }) | { op: "cancel"; id: number };
+type Request = (Work & { id: number }) | { op: "cancel"; id: number };
 
 const controllers = new Map<number, AbortController>();
 declare const self: Worker;

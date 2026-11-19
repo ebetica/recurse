@@ -21,6 +21,8 @@ import { tests as hold } from "./test_hold_confirm";
 import { tests as recovery } from "./test_recovery";
 import { tests as wake } from "./test_wake";
 import { tests as settings } from "./test_settings";
+import { tests as settingsEffortLevels } from "./test_settings_effort_levels";
+import { tests as settingsSignIn } from "./test_settings_sign_in";
 import { tests as twoFactor } from "./test_two_factor";
 import { tests as notifications } from "./test_notification_clicks";
 import { tests as remotes } from "./test_remotes";
@@ -52,6 +54,7 @@ import { tests as sideHistory } from "./test_side_history";
 import { tests as waitingTakeover } from "./test_waiting_takeover";
 import { tests as steers } from "./test_steers";
 import { tests as turns } from "./test_turns";
+import { tests as focusedSettle } from "./test_focused_settle";
 import { tests as thread } from "./test_thread";
 import { tests as threadFocus } from "./test_thread_focus";
 import { tests as messageMarkdown } from "./test_message_markdown";
@@ -87,6 +90,8 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["recovery", recovery],
   ["wake", wake],
   ["settings", settings],
+  ["settings-effort-levels", settingsEffortLevels],
+  ["settings-sign-in", settingsSignIn],
   ["two-factor", twoFactor],
   ["notifications", notifications],
   ["remotes", remotes],
@@ -113,6 +118,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["waiting-takeover", waitingTakeover],
   ["steers", steers],
   ["turns", turns],
+  ["focused-settle", focusedSettle],
   ["thread", thread],
   ["thread-focus", threadFocus],
   ["message-markdown", messageMarkdown],

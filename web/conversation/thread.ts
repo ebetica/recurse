@@ -1,25 +1,20 @@
 // Owns thread assembly, paint state, change keys and saved reading viewports.
 // Focused reads render the thread after updating chrome; other callers repaint.
-// Holds keep rows or bottom; unrecorded offsets (scroll-ledger.ts) release.
+// Holds keep rows or bottom; unrecorded offsets release them.
 // Phone thread drags blur the field; scrolling/composer gestures do not.
-import { commentOutbox } from "../artifacts/comment-outbox.js";
 import { outboxBubbles } from "../composer/outbox.js";
 import { showModelResponse } from "../model-response.js";
 import { activeDescendantCount } from "../active-agents.js";
-import { backendFor } from "../backends/index.js";
-import { refreshConv } from "./fetch.js";
 import {
   boundaryHasHiddenActivity,
   boundaryIsLive,
   planVEyePress,
 } from "../thread-render/activity-boundary.js";
 import { turnGroupBlocks } from "../thread-render/turn-groups.js";
-import { resetCommittedStep } from "./thinking-paint.js";
 import {
   activityBoundaryKey,
   backfillOldestBoundary,
   expandedActivityBoundaries,
-  prepareLiveReveal,
   revealActivityBoundary,
   revealRowMessage,
 } from "./disclosure.js";
@@ -27,32 +22,30 @@ import { liveBarEl, msgsEl, scrollEl } from "../dom.js";
 import { phoneNavigation } from "../phone-nav.js";
 import {
   BOTTOM_FOLLOW_THRESHOLD_PX,
-  captureViewport,
-  type SavedViewport,
-  shouldFollowConversationBottom,
-  type ScrollAnchorRow,
-  withScrollAnchor,
-} from "./scroll-anchor.js";
-import {
   cancelThreadBottom,
+  captureViewport,
   followThreadBottom,
   recordThreadScroll,
+  shouldFollowConversationBottom,
   threadJumping,
   threadScrolledByReader,
   updateScrollBtn,
+  withScrollAnchor,
   writeThreadScroll,
-} from "./scroll-ledger.js";
+  type SavedViewport,
+  type ScrollAnchorRow,
+} from "../thread-scroll/index.js";
 import { renderMermaidIn } from "../mermaid.js";
 import { renderMathIn } from "../math.js";
 import {
   RETRY_QUEUED_MESSAGE_LABEL,
   acceptedOptimisticEntries,
   canRemovePendingMessage,
-  discardOptimisticPending,
   hasSendablePending,
   isDeliveryReceipt,
   isFailedPending,
   optPending,
+  pendingMessageActions,
   pendingMessageDismissButton,
   pendingMessageRemoveButton,
   recordOptimisticPending,
@@ -69,7 +62,7 @@ import {
   rowReadStatus,
   rowThreadOlder,
 } from "../row-thread-state.js";
-import { rowThreads } from "../row-thread-state/index.js";
+import { prepareLiveReveal, rowThreads } from "../row-thread-state/index.js";
 import {
   activeShells,
   agentSurfaceAgent,
@@ -83,13 +76,10 @@ import {
 import { contextUsageKey } from "../context/tokens.js";
 import { conversationPainted } from "../show-timing.js";
 import { state } from "../state.js";
-import {
-  activityBoundaryT,
-  activityMessageT,
-  pendingActionT,
-} from "../thread-render.js";
+import type * as ThreadRender from "../thread-render.js";
 import { userBubble } from "../thread-render/index.js";
 import {
+  clearLivePanel,
   queuedT,
   shellUnavailableT,
   waitingPanelT,
@@ -103,6 +93,23 @@ import { type ViewBlock } from "../row-thread-state/view-blocks.js";
 import { type TemplateResult, html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { beginCopyFeedback, copyFeedbackIsCurrent } from "./copy.js";
+
+type ThreadTemplates = Pick<
+  typeof ThreadRender,
+  "activityBoundaryT" | "activityMessageT" | "pendingActionT"
+>;
+let activityBoundaryT: ThreadTemplates["activityBoundaryT"];
+let activityMessageT: ThreadTemplates["activityMessageT"];
+let pendingActionT: ThreadTemplates["pendingActionT"];
+let commentOutbox: (recipient: string) => TemplateResult[];
+
+export function configureThreadTemplates(
+  templates: ThreadTemplates,
+  renderCommentOutbox: typeof commentOutbox,
+): void {
+  ({ activityBoundaryT, activityMessageT, pendingActionT } = templates);
+  commentOutbox = renderCommentOutbox;
+}
 
 const pausedImages = new WeakMap<
   HTMLImageElement,
@@ -591,29 +598,7 @@ if (typeof ResizeObserver !== "undefined") {
 }
 
 function pendingBubble(conv: Conversation, m: Message): TemplateResult {
-  const cancel = async (e: Event) => {
-    const el = (e.currentTarget as HTMLElement).closest<HTMLElement>(".msg");
-    if (el) el.style.display = "none";
-    const r = await backendFor(conv.id).api(
-      `/api/conversations/${conv.id}/messages/${m.id}`,
-      {
-        method: "DELETE",
-      },
-    );
-    if (r.ok && m.id) discardOptimisticPending(conv.id, m.id);
-    if (el && !r.ok) el.style.display = "";
-    state.openConvHash = "";
-    refreshConv();
-  };
-  const retry = async () => {
-    const r = await backendFor(conv.id).api(
-      `/api/conversations/${conv.id}/messages/${m.id}/retry`,
-      { method: "POST" },
-    );
-    state.openConvHash = "";
-    refreshConv();
-    return r.ok;
-  };
+  const { cancel, retry } = pendingMessageActions(conv, m);
   const btn = canRemovePendingMessage(m)
     ? pendingMessageRemoveButton(cancel)
     : nothing;
@@ -691,7 +676,7 @@ function acceptedBubble(o: OptimisticEntry): TemplateResult {
 // built after the thread renders: it reads which thinking the thread shows.
 function threadTemplate(
   conv: Conversation,
-): [TemplateResult, (() => TemplateResult) | null] {
+): [TemplateResult, TemplateResult | null] {
   const running = conv.status === "running" || conv.status === "interrupting";
   // Invariant: A conversation the server is deleting has no Pi history to read
   // back: its session is already retired, so say what is happening instead of
@@ -779,11 +764,9 @@ function threadTemplate(
     !queued &&
     blocks.length === 0 &&
     activityStatusKind(false, tailShells, tailAgents) === "waiting";
-  const liveBar = liveBlock
-    ? () => workingT(conv, liveBlock)
-    : running && !queuedPanel && !currentTurnOpen
-      ? () => workingT(conv)
-      : null;
+  const liveBar =
+    running && (liveBlock || !currentTurnOpen) ? workingT(conv) : null;
+  if (!liveBar) clearLivePanel();
   const thread = html` ${promptBanner(conv, paint)} ${piHistoryNotice}
   ${repeat(
     blocks,
@@ -858,7 +841,7 @@ export function paint(conv: Conversation): void {
     viewportHold = null;
   }
   toolDetailConversation = conv.id;
-  prepareLiveReveal(conv);
+  prepareLiveReveal(conv, loaded, renderedLogGeneration, thread);
   // Invariant: Mid-jump, neither a captured hold nor being near the bottom
   // may write the offset; either write stops the smooth scroll short.
   const jumping = threadJumping();
@@ -895,10 +878,9 @@ export function paint(conv: Conversation): void {
   if (followBottom) bottomFollowConversation = conv.id;
   // Invariant: the thread renders before the live bar, which reads the
   // committed thinking step recorded while building the thread template.
-  resetCommittedStep();
   const [threadT, liveBar] = threadTemplate(conv);
   render(threadT, msgsEl);
-  render(liveBar ? liveBar() : nothing, liveBarEl);
+  render(liveBar ?? nothing, liveBarEl);
   liveBarEl.hidden = !liveBar;
   for (const image of msgsEl.querySelectorAll<HTMLImageElement>("img")) {
     const paused = pausedImages.get(image);
@@ -1008,6 +990,7 @@ export function takeToolDetailConversation(): string | null {
   const current = toolDetailConversation;
   if (current) saveViewport(current);
   toolDetailConversation = null;
+  clearLivePanel();
   render(nothing, liveBarEl);
   liveBarEl.hidden = true;
   return current;

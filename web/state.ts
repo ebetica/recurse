@@ -22,7 +22,7 @@ export function embeddedFrameHidden(): boolean {
   );
 }
 
-export interface AppState {
+interface AppState {
   nodes: Record<string, TreeNode>;
   // Side conversations (tree rows with side_of), kept out of nodes.
   sides: TreeNode[];
@@ -73,11 +73,9 @@ export function currentUiOwnerId(): string {
 }
 
 // Detects platform modifier once for key dispatch and help symbols.
-export const IS_MAC = /Mac|iP(hone|ad|od)/.test(
+const IS_MAC = /Mac|iP(hone|ad|od)/.test(
   navigator.platform || navigator.userAgent,
 );
-export const modDown = (e: KeyboardEvent): boolean =>
-  IS_MAC ? e.metaKey : e.ctrlKey;
 // Coarse primary pointer selects touch UI/native Enter behavior.
 export const primaryPointerIsCoarse = (): boolean =>
   matchMedia("(pointer: coarse)").matches;

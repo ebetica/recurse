@@ -10,7 +10,7 @@ import {
   parseConversationId,
 } from "./conversation-id/index.js";
 
-export type TreeStatus =
+type TreeStatus =
   | "loading"
   | "connected"
   | "unreachable"
@@ -50,7 +50,7 @@ function applyDelta(
   });
 }
 
-export class BackendTree {
+class BackendTree {
   status: TreeStatus = "loading";
   private remoteBody: string | null = null;
   private homeSnapshot: HomeSnapshot | null = null;

@@ -2,9 +2,9 @@
 // context viewer.
 import type { ContextTokenEstimate, ContextUsageDetail } from "../types.js";
 
-export type ContextSplitKey = keyof ContextTokenEstimate;
+type ContextSplitKey = keyof ContextTokenEstimate;
 
-export interface ContextBarSegment {
+interface ContextBarSegment {
   id: ContextSplitKey | "used";
   label: string;
   tokens: number;
@@ -138,7 +138,7 @@ export function contextMiniBarCollapsed(containerWidth: number): boolean {
   return !Number.isFinite(containerWidth) || containerWidth < 620;
 }
 
-export type ContextDetailFetcher = (
+type ContextDetailFetcher = (
   id: string,
   signal: AbortSignal,
 ) => Promise<ContextUsageDetail>;

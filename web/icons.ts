@@ -6,9 +6,6 @@ export const PEN_ICON = outline(
   '<path d="m16 3 5 5-12 12-6 1 1-6Z M14 5l5 5"/>',
 );
 
-export const DOWNGRADE_ICON = outline(
-  '<path d="M12 3v12m-5-5 5 5 5-5M5 21h14"/>',
-);
 export const PROMOTE_ICON = outline(
   '<path d="M12 15V3m-5 5 5-5 5 5M5 21h14"/>',
 );

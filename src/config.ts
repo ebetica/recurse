@@ -26,12 +26,12 @@ export type Thinking = (typeof Thinking)[keyof typeof Thinking];
 export const AGENT_TEMP_KEY_RE = /^\p{Nd}{8}-[A-Za-z0-9][A-Za-z0-9_-]{0,160}$/u;
 export const AGENT_DRAFT_KEY_RE = /^draft-\p{Nd}{8}-[a-f0-9]{32}$/u;
 
-export interface ModelRoute {
+interface ModelRoute {
   provider: string;
   model: string;
   effort: Thinking;
 }
-export interface ModelPolicy {
+interface ModelPolicy {
   label: string;
   catalog_provider: string;
   conversation_effort: Thinking;
@@ -40,15 +40,15 @@ export interface ModelPolicy {
   reviewer_fallbacks: ModelRoute[];
   context_window: number | null;
 }
-export interface ModelOption {
+interface ModelOption {
   id: string;
   label: string;
   provider: string;
   effort: string;
   context_window?: number;
 }
-export type Environment = Readonly<Record<string, string | undefined>>;
-export interface ConfigOptions {
+type Environment = Readonly<Record<string, string | undefined>>;
+interface ConfigOptions {
   readonly env?: Environment;
   readonly cwd?: string;
   readonly toolsDir?: string | null;
@@ -61,7 +61,7 @@ export interface ConfigOptions {
   readonly storedCustomProviders?: () => Iterable<string>;
   readonly warn?: (event: string, fields: Record<string, number>) => void;
 }
-export interface StatePaths {
+interface StatePaths {
   DATA_DIR: string;
   RECURSE_SERVICE_TOKEN_FILE: string | null;
   RECURSE_SERVICE_PRINCIPALS_FILE: string | null;
@@ -132,14 +132,14 @@ export interface StatePaths {
   PI_SAFETY_ENABLED: boolean;
 }
 
-export const DEFAULT_MAXIMUM_CONTEXT_WINDOW = 400_000;
-export const MINIMUM_CONTEXT_WINDOW = 64_000;
-export const MAXIMUM_CONTEXT_WINDOW = 1_000_000;
+const DEFAULT_MAXIMUM_CONTEXT_WINDOW = 400_000;
+const MINIMUM_CONTEXT_WINDOW = 64_000;
+const MAXIMUM_CONTEXT_WINDOW = 1_000_000;
 export const EFFORT_MIN_LEVEL = 1;
 export const EFFORT_MAX_LEVEL = 5;
-export const DEFAULT_EFFORT_LEVEL = 3;
-export const EFFORT_LEVELS_VERSION = 1;
-export const AVAILABLE_MODELS_VERSION = 1;
+const DEFAULT_EFFORT_LEVEL = 3;
+const EFFORT_LEVELS_VERSION = 1;
+const AVAILABLE_MODELS_VERSION = 1;
 export const RECURSE_REPO_URL = "https://github.com/ebetica/recurse.git";
 
 type Dict = Record<string, unknown>;
@@ -253,7 +253,7 @@ type CatalogInputs = {
   reasoningLevels?: Map<string, Thinking[]>;
 };
 
-export interface PiModel {
+interface PiModel {
   id: string;
   name: string;
   context_window: number;

@@ -19,9 +19,13 @@ import {
 } from "../../extensions/core/context/server-compaction";
 import { ReportDoc } from "./report";
 import { ReplyTimesDoc } from "./reply_times";
-import { ConversationView, LOST_STOP_REASON } from "../view/conversation";
+import {
+  ConversationView,
+  LOST_STOP_REASON,
+  thinkingInfo,
+} from "../view/conversation";
 import { splitPiUserText } from "../view/session_entries";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 import { displayToolContent } from "./display_content";
 import {
   needsOlder,
@@ -36,9 +40,9 @@ type Rec = Record<string, unknown>;
 export type ViewConversation = Pick<Conversation, "id" | "entries">;
 export type ViewSession = Pick<Harness, "snapshot" | "getTask">;
 
-export type ReplyTimes = Readonly<Record<string, number>>;
+type ReplyTimes = Readonly<Record<string, number>>;
 
-export type ProjectionEntry = Rec & { id: string; parentId: string | null };
+type ProjectionEntry = Rec & { id: string; parentId: string | null };
 
 const PAGE = 100;
 /** New-entry pages one read follows before it reloads the newest page. */
@@ -110,13 +114,14 @@ function shellNotice(content: unknown): string | null {
     : null;
 }
 
-export interface RowState {
+interface RowState {
   /** Context size at the newest reply, for the compaction notice. */
   tokens: number | null;
   /** The newest tool round's call ids and their assistant entry id. */
   calls: Map<string, string>;
-  /** The current turn's newest reply that thought, as a live overlay. */
+  /** Newest readable thought and newest unavailable fallback. */
   thinking: ProjectionEntry | null;
+  unavailableThinking: ProjectionEntry | null;
   /** Highest successfully completed generation task id. */
   completedGeneration: number;
 }
@@ -125,6 +130,7 @@ export const rowState = (): RowState => ({
   tokens: null,
   calls: new Map(),
   thinking: null,
+  unavailableThinking: null,
   completedGeneration: 0,
 });
 
@@ -138,6 +144,13 @@ const chainId = (entry: EntryRecord): string =>
   !importedEntry(entry)
     ? `${String(entry.id)}:notice`
     : String(entry.id);
+
+// Pi preserves the request's message timestamp when it appends the reply.
+export function thinkingKey(task: unknown, message: Rec): string | undefined {
+  return task != null && typeof message.timestamp === "number"
+    ? `${String(task)}:${message.timestamp}`
+    : undefined;
+}
 
 /**
  * Projection entries for `records` in id order, the first one a child of
@@ -161,7 +174,6 @@ export function projectionEntries(
     const note =
       entry.kind === "pi.user" ? shellNotice(message?.content) : null;
     if (note !== null) {
-      state.thinking = null;
       out.push({
         ...base,
         type: "custom_message",
@@ -175,7 +187,10 @@ export function projectionEntries(
         entry.kind,
       )
     ) {
-      if (message.role === "user") state.thinking = null;
+      const key =
+        entry.kind === "pi.assistant"
+          ? thinkingKey(entry.byTaskId, message)
+          : undefined;
       if (entry.kind === "pi.assistant") {
         if (
           entry.byTaskId !== undefined &&
@@ -192,16 +207,19 @@ export function projectionEntries(
         const usage = message.usage as Rec | undefined;
         if (typeof usage?.totalTokens === "number" && usage.totalTokens > 0)
           state.tokens = usage.totalTokens;
-        if (thinkingText(message) !== null)
-          state.thinking = {
-            ...base,
-            type: "message",
-            message,
-            hasThinking: true,
-            ...(typeof message.timestamp === "number"
-              ? { thinkingStartMs: message.timestamp }
-              : {}),
-          };
+        const thinking = thinkingInfo(message.content);
+        if (thinking.hasThinking)
+          state[thinking.title === null ? "unavailableThinking" : "thinking"] =
+            {
+              ...base,
+              type: "message",
+              message,
+              hasThinking: true,
+              thinkingKey: key,
+              ...(typeof message.timestamp === "number"
+                ? { thinkingStartMs: message.timestamp }
+                : {}),
+            };
       }
       const finished =
         entry.kind === "pi.assistant"
@@ -211,6 +229,7 @@ export function projectionEntries(
         ...imported,
         ...base,
         type: "message",
+        thinkingKey: key,
         message:
           entry.kind === "pi.tool-result" && !imported
             ? {
@@ -297,16 +316,28 @@ export function projectionEntries(
   return out;
 }
 
+function liveThinkingRowId(live: Readonly<LiveState> | undefined) {
+  return live?.run && live.generation
+    ? `live:${String(live.run.taskId)}:${live.generation.attempt}`
+    : undefined;
+}
+
 // Project live replies, tools and compactions. Keep the newest thinking
 // reply live while the run continues; newest is the newest ingested entry ID.
-export function liveEntries(
+function liveEntries(
   live: Readonly<LiveState> | undefined,
   newest: string | null,
   state: RowState,
   inbox?: Readonly<InboxState>,
 ): ProjectionEntry[] {
   const out: ProjectionEntry[] = [];
-  if (live?.run && state.thinking) out.push(state.thinking);
+  const first = live?.run?.first;
+  if (first !== undefined) {
+    const thought = [state.thinking, state.unavailableThinking].find(
+      (row) => row && Number(row._offset) >= Number(first),
+    );
+    if (thought) out.push(thought);
+  }
   const message = live?.generation?.message as Rec | undefined;
   if (
     message &&
@@ -319,10 +350,11 @@ export function liveEntries(
       Array.isArray(message.content) &&
       message.content.some((part: Rec) => part?.type === "thinking");
     out.push({
-      id: `live:${String(live.run.taskId)}:${live.generation!.attempt}`,
+      id: liveThinkingRowId(live)!,
       parentId: newest,
       type: "message",
       message,
+      thinkingKey: thinkingKey(live.run.taskId, message),
       ...(thinking && typeof message.timestamp === "number"
         ? { thinkingStartMs: message.timestamp }
         : {}),
@@ -386,6 +418,34 @@ export function liveEntries(
   return out;
 }
 
+function latestThinkingRow(rows: readonly ProjectionEntry[]) {
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]!;
+    const message = row.message;
+    if (
+      row.type !== "message" ||
+      !record(message) ||
+      message.role !== "assistant"
+    )
+      continue;
+    const info = thinkingInfo(message.content);
+    if (!info.hasThinking || (info.title === null && row._offset === undefined))
+      continue;
+    return {
+      id: row.id,
+      offset: row._offset,
+      thinking_key: row.thinkingKey,
+      thinking_title: info.title,
+      has_thinking: true,
+      kind: "text",
+      role: "assistant",
+      live: row._offset === undefined,
+      stop_reason: message.stopReason,
+    };
+  }
+  return null;
+}
+
 /** Queued inputs as the conversation's pending rows. */
 export function pendingRows(
   inbox: Readonly<InboxState> | undefined,
@@ -435,6 +495,12 @@ export class DurableRows {
   /** The parent id of the next new entry. */
   private tail: string | null = null;
   private readonly state = rowState();
+  private thinkingScan?: {
+    first: EntryId;
+    last: EntryId;
+    cursor?: Cursor | null;
+    busy: boolean;
+  };
   private readonly publishedNested = new Map<string, string>();
   private activeCodemode = new Set<string>();
   // Invariant: Incomplete scans retry with backoff; new publications wake them.
@@ -461,6 +527,7 @@ export class DurableRows {
     replyTimes: () => Promise<ReplyTimes> = async () => ({}),
     files: PublishedFiles = async () => ({ files: {}, complete: true }),
     inbox?: Readonly<InboxState>,
+    notify?: () => void,
   ): Promise<Rec> {
     this.replyTimes = replyTimes;
     await this.catchUp(conversation, context);
@@ -470,7 +537,15 @@ export class DurableRows {
       await this.loadOlder(conversation, context);
 
     const newest = this.newest === null ? null : String(this.newest);
+    const run = live?.run;
     const liveRows = liveEntries(live, newest, this.state, inbox);
+    const latestThinking = run ? latestThinkingRow(liveRows) : null;
+    const recoveringThinking = !!(
+      notify &&
+      latestThinking?.thinking_title == null &&
+      run?.first !== undefined &&
+      this.scheduleOlderThinking(conversation, context, run.first, notify)
+    );
     this.view.syncLive(liveRows, { caughtUp: true });
     const active = (live?.tools ?? [])
       .filter((slot) => slot.name === "codemode" && slot.status === "running")
@@ -541,7 +616,7 @@ export class DurableRows {
       }
     }
     this.activeCodemode = new Set(active);
-    return slowSpan("view_projection", this.cid, () =>
+    const page = await slowSpan("view_projection", this.cid, () =>
       window(
         this.view,
         {
@@ -560,6 +635,64 @@ export class DurableRows {
         { caughtUp: true, liveSynced: true, ...options, before, limit },
       ),
     );
+    return {
+      ...page,
+      latest_thinking: {
+        run_start: run?.first === undefined ? null : Number(run.first),
+        row: latestThinking,
+        recovering: recoveringThinking || undefined,
+      },
+    };
+  }
+
+  // Recover a cold thought behind the row window without delaying a paint.
+  // Each view schedules at most one bounded page, only inside its active run.
+  private scheduleOlderThinking(
+    conversation: ViewConversation,
+    context: Context,
+    first: EntryId,
+    notify: () => void,
+  ): boolean {
+    if (this.held === undefined || this.held.id < first) return false;
+    if (this.thinkingScan?.first !== first)
+      this.thinkingScan = { first, last: this.held.id, busy: false };
+    const scan = this.thinkingScan;
+    if (scan.busy) return true;
+    if (scan.cursor === null) return false;
+    scan.busy = true;
+    void conversation
+      .entries(
+        { minEntryId: first, maxEntryId: scan.last },
+        this.pageSize,
+        scan.cursor,
+        context,
+      )
+      .then((page) => {
+        if (this.thinkingScan !== scan) return;
+        let unavailable: EntryRecord | undefined;
+        const entry = page.items.find((item) => {
+          if (item.kind !== "pi.assistant") return false;
+          const info = thinkingInfo(
+            (item.model?.[0] as Rec | undefined)?.content,
+          );
+          if (info.title !== null) return true;
+          if (info.hasThinking) unavailable ??= item;
+          return false;
+        });
+        scan.cursor = entry ? null : (page.next ?? null);
+        const recovered = rowState();
+        if (entry) projectionEntries([entry], recovered);
+        if (unavailable) projectionEntries([unavailable], recovered);
+        this.mergeThinking(recovered);
+      })
+      .catch(() => {
+        scan.cursor = null;
+      })
+      .finally(() => {
+        scan.busy = false;
+        if (this.thinkingScan === scan) notify();
+      });
+    return true;
   }
 
   /**
@@ -603,6 +736,7 @@ export class DurableRows {
         this.filesRetryDelay = 5000;
         this.newest = null;
         this.held = undefined;
+        this.thinkingScan = undefined;
         Object.assign(this.state, rowState());
         return this.catchUp(conversation, context);
       }
@@ -649,6 +783,17 @@ export class DurableRows {
     this.tail = chainId(records.at(-1)!);
   }
 
+  private mergeThinking(older: RowState): void {
+    for (const key of ["thinking", "unavailableThinking"] as const) {
+      const thought = older[key];
+      if (
+        thought &&
+        Number(thought._offset) > Number(this.state[key]?._offset ?? -1)
+      )
+        this.state[key] = thought;
+    }
+  }
+
   private async loadOlder(
     conversation: ViewConversation,
     context: Context,
@@ -660,15 +805,17 @@ export class DurableRows {
       context,
     );
     const { records, parent } = this.olderPage(page.items, page.next);
+    const older = rowState();
     this.view.prepend(
       projectionEntries(
         records,
-        rowState(),
+        older,
         parent,
         this.artifactPrefix,
         await this.finished(records),
       ),
     );
+    this.mergeThinking(older);
   }
 }
 
@@ -702,18 +849,21 @@ export class DurableViews {
     envelope: Rec,
     options: PageOptions,
     files?: PublishedFiles,
+    notify?: () => void,
   ): Promise<Rec> {
-    const generation = (await harness.snapshot(
-      ReportDoc,
-      conversation.id,
-      context,
-    ))!.generation;
-    const live = await harness.snapshot(LiveDoc, conversation.id, context);
-    const inbox = await harness.snapshot(InboxDoc, conversation.id, context);
-    const artifactPrefix = `d-${generation}`;
+    let live: Readonly<LiveState> | undefined;
+    let artifactPrefix: string | undefined;
     let page: Rec = unavailable();
     for await (const view of this.cache.acquire(cid)) {
       if (view === null) return page;
+      const [report, snapshot, inbox] = await Promise.all([
+        harness.snapshot(ReportDoc, conversation.id, context),
+        harness.snapshot(LiveDoc, conversation.id, context),
+        harness.snapshot(InboxDoc, conversation.id, context),
+      ]);
+      const generation = report!.generation;
+      artifactPrefix = `d-${generation}`;
+      live = snapshot;
       let cached = this.rows.get(view);
       if (cached === undefined || cached.generation !== generation) {
         if (cached !== undefined) view.reset("durable");
@@ -738,6 +888,7 @@ export class DurableViews {
             ?.finished ?? {},
         files,
         inbox,
+        notify,
       );
       break;
     }

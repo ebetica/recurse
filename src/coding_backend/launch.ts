@@ -16,7 +16,7 @@ export interface LaunchEnvInputs {
   checkoutRoot: string;
 }
 
-export interface BuildEnvOptions {
+interface BuildEnvOptions {
   cid?: string | null;
   safetyOff?: boolean;
   model?: string | null;

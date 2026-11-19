@@ -437,30 +437,112 @@ export const tests: BrowserTest[] = [
 
   async function compactComposerTargets(browser, base) {
     for (const width of [412, 1280]) {
+      const mobile = width === 412;
       const context = await browser.newContext({
-        viewport: { width, height: 844 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
+        viewport: { width, height: 915 },
+        isMobile: mobile,
+        hasTouch: mobile,
       });
-      const page = await context.newPage();
-      await gotoRoot(page, base);
-      await page.locator(".agent").first().waitFor();
-      await page.locator("#input").fill("A message");
-      const composer = (await page.locator("#composer").boundingBox())!;
-      const input = (await page.locator("#input").boundingBox())!;
-      expect(composer.height - input.height).toBeLessThanOrEqual(10);
-      for (const selector of ["#attach", "#send"]) {
-        const button = page.locator(selector);
-        const box = (await button.boundingBox())!;
-        expect(box.width).toBe(28);
-        expect(box.height).toBe(28);
+      try {
+        const page = await context.newPage();
+        await gotoRoot(page, base);
+        await page.locator(".agent.selected").waitFor({ state: "attached" });
+        await waitForLayout(page);
+        const composer = page.locator("#composer");
+        const input = page.locator("#input");
+        const buttons = [page.locator("#attach"), page.locator("#send")];
+        const centerY = ({ y, height }: { y: number; height: number }) =>
+          y + height / 2;
+        const expectAligned = async (state: string, ...centers: number[]) => {
+          centers.push(
+            ...(await Promise.all(
+              buttons.map(async (button) =>
+                centerY((await button.boundingBox())!),
+              ),
+            )),
+          );
+          expect(
+            Math.max(...centers) - Math.min(...centers),
+            `${width}px ${state}: centres ${centers.join(", ")}`,
+          ).toBeLessThanOrEqual(1);
+        };
+        const textGeometry = () =>
+          input.evaluate((field) => {
+            const box = field.getBoundingClientRect();
+            const style =
+              field.ownerDocument.defaultView!.getComputedStyle(field);
+            const lineHeight = parseFloat(style.lineHeight);
+            const top =
+              box.top +
+              parseFloat(style.borderTopWidth) +
+              parseFloat(style.paddingTop);
+            const bottom =
+              box.bottom -
+              parseFloat(style.borderBottomWidth) -
+              parseFloat(style.paddingBottom);
+            return {
+              lineHeight,
+              contentHeight: bottom - top,
+              firstLine: top + lineHeight / 2,
+              lastLine: bottom - lineHeight / 2,
+            };
+          });
+        for (const text of ["", "A typical one-line message"]) {
+          await input.fill(text);
+          const { firstLine, contentHeight, lineHeight } = await textGeometry();
+          expect(Math.abs(contentHeight - lineHeight)).toBeLessThanOrEqual(1);
+          const box = (await composer.boundingBox())!;
+          await expectAligned(
+            text ? "typed" : "placeholder",
+            firstLine,
+            centerY(box),
+          );
+        }
+        const surrounding = (await composer.boundingBox())!;
+        const field = (await input.boundingBox())!;
+        expect(surrounding.height - field.height).toBeLessThanOrEqual(10);
+        expect(field.x - surrounding.x).toBeLessThanOrEqual(42);
+        expect(field.width / surrounding.width).toBeGreaterThan(0.75);
+        const singleLine = await textGeometry();
+        for (const button of buttons) {
+          await browserExpect(button).toBeEnabled();
+          if (mobile) {
+            expect(
+              await button.evaluate((el) => {
+                const { x, y, width, height } = el.getBoundingClientRect();
+                const insetCorners = [-21.5, 21.5];
+                return insetCorners.every((dx) =>
+                  insetCorners.every((dy) =>
+                    el.contains(
+                      el.ownerDocument.elementFromPoint(
+                        x + width / 2 + dx,
+                        y + height / 2 + dy,
+                      ),
+                    ),
+                  ),
+                );
+              }),
+              `${button} should be hit at all four inset corners`,
+            ).toBeTrue();
+          }
+        }
+        const lines = ["First line", "Second line", "Third line", "Last line"];
+        await input.fill(lines.join("\n"));
+        const { lastLine, contentHeight, lineHeight } = await textGeometry();
+        expect(
+          Math.abs(
+            contentHeight -
+              singleLine.contentHeight -
+              (lines.length - 1) * lineHeight,
+          ),
+        ).toBeLessThanOrEqual(1);
+        await expectAligned("multiline last line", lastLine);
+        expect((await composer.boundingBox())!.height).toBeGreaterThan(
+          surrounding.height,
+        );
+      } finally {
+        await context.close();
       }
-      expect(input.x - composer.x).toBeLessThanOrEqual(42);
-      await page.locator("#input").fill("More text\n".repeat(5));
-      expect(
-        (await page.locator("#composer").boundingBox())!.height,
-      ).toBeGreaterThan(composer.height);
-      await context.close();
     }
   },
   modelSelectionError,
@@ -774,8 +856,8 @@ export const tests: BrowserTest[] = [
         const choice5 = labelFor(at5.model);
         if (shots && width !== 390)
           await page.screenshot({ path: `${shots}/effort-open-${width}.png` });
-        await range.evaluate((el: { value: string }) => {
-          el.value = "5";
+        await range.evaluate((el) => {
+          (el as HTMLInputElement).value = "5";
         });
         await range.dispatchEvent("input");
         await browserExpect(range).toHaveValue("5");

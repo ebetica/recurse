@@ -8,16 +8,16 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ShellRecord, ShellRegistry } from "./pi_bg_shell";
 import { bootId, procStat, sessionMemberState } from "./utils/proc_stat";
 import { PROC } from "./utils/process_table";
-import { slowSpan } from "./observability/slow_span";
+import { slowSpan } from "./observability/slow-span";
 
 import type { ProcStat } from "./utils/proc_stat";
 import { AsyncMutex, TaskSet } from "./utils/tasks";
 
 export const STOP_GRACE_MS = 2000;
 export const MAX_REPORTED_PROCESSES = 12;
-export const UNVERIFIED_IDENTITY = "unverified";
+const UNVERIFIED_IDENTITY = "unverified";
 
-export class ProcessRegistryUnreadable extends Error {
+class ProcessRegistryUnreadable extends Error {
   override name = "ProcessRegistryUnreadable";
 }
 
@@ -53,9 +53,9 @@ export interface OwnedProcess {
   readonly exited: Promise<number>;
 }
 
-export type Row = Record<string, unknown>;
+type Row = Record<string, unknown>;
 
-export interface ProcessLifecycleOptions {
+interface ProcessLifecycleOptions {
   registry: ShellRegistry;
   shellStateDir: string;
   procRoot?: string;
@@ -106,7 +106,7 @@ export function returncode(proc: OwnedProcess): number | null {
 
 const ALNUM = /^[\p{L}\p{N}]$/u;
 
-export function safeRegistryId(value: unknown): value is string {
+function safeRegistryId(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > 128)
     return false;
   if (value === "." || value === "..") return false;
@@ -120,7 +120,7 @@ function pyStr(value: unknown): string {
   return String(value);
 }
 
-export function recordFromBgShell(
+function recordFromBgShell(
   shell: ShellRecord,
   instanceId: string,
   cid: string | null,
@@ -169,17 +169,6 @@ function shellsForOwner(shells: Row[], owner: unknown): Row[] {
 
 function eventKey(record: Row): string {
   return `${pyStr(record.kind)}:${pyStr(record.pid)}:${pyStr(record.start_time)}`;
-}
-
-/** Stable, content-free inbox id making cleanup delivery idempotent. */
-export function deterministicNoticeKey(
-  notice: CleanupNotice,
-  targetCid: string,
-): string {
-  return createHash("sha256")
-    .update(`${notice.eventId}:${targetCid}`)
-    .digest("hex")
-    .slice(0, 24);
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

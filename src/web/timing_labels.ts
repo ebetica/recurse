@@ -8,7 +8,7 @@ export const STALL_MARKERS = [
   "tree-authoritative",
   "stream-batch",
 ] as const;
-export const REMOTE_STATUSES = [
+const REMOTE_STATUSES = [
   "loading",
   "connected",
   "unreachable",

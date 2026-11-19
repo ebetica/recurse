@@ -5,7 +5,7 @@
 import type { TreeNode } from "./types.js";
 import { descendantIds } from "./selection.js";
 
-export type ReparentReason =
+type ReparentReason =
   | "ok"
   | "noop"
   | "missing-source"
@@ -25,16 +25,6 @@ export function reparentValidity(
   if (descendantIds(nodes, sourceId).includes(targetId)) return "descendant";
   if (nodes[sourceId].parent === targetId) return "noop";
   return "ok";
-}
-
-// A target the source can actually be dropped onto and moved (excludes noop:
-// dropping onto the current parent is not an error, but highlights nothing).
-export function isValidDropTarget(
-  nodes: Record<string, TreeNode>,
-  sourceId: string,
-  targetId: string,
-): boolean {
-  return reparentValidity(nodes, sourceId, targetId) === "ok";
 }
 
 // Whether a drop should be accepted at all (a no-op counts: releasing on the

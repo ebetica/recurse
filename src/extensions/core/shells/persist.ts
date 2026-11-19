@@ -76,7 +76,7 @@ function sanitizeSegment(s: string): string {
   return s.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "_";
 }
 
-export interface StoreOptions {
+interface StoreOptions {
   /** Cap on retained terminated records before the oldest are dropped. */
   keepTerminated?: number;
   /** Age past which a terminated record is dropped (ms). */

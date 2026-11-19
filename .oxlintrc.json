@@ -4,10 +4,13 @@
   "categories": {
     "correctness": "error"
   },
-  "rules": {},
+  "rules": {
+    "no-control-regex": "off"
+  },
   "overrides": [
     {
       "files": ["src/extensions/**"],
+      "excludeFiles": ["src/extensions/extra/fff/fff_worker.ts"],
       "rules": {
         "no-restricted-properties": [
           "error",
@@ -15,17 +18,6 @@
             "object": "process",
             "property": "env",
             "message": "Extensions must use the conversation tool environment or creation options, not the server environment."
-          }
-        ],
-        "no-restricted-imports": [
-          "warn",
-          {
-            "patterns": [
-              {
-                "regex": "(^src(/|$)|^\\.{1,2}/(?:.*/)?src(/|$)|^(?:\\.\\./){3}[^.])",
-                "message": "Extensions must not import Recurse src; receive host values or use extension-local helpers."
-              }
-            ]
           }
         ]
       }

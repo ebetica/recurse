@@ -10,7 +10,7 @@ import {
   onOpenPhase,
   openPhaseCount,
   overlappingOpenPhases,
-} from "./slow_span";
+} from "./slow-span";
 import {
   INFO,
   WARNING,
@@ -21,7 +21,7 @@ import {
 
 const SHOWN = 3;
 
-export interface LoopLagOptions {
+interface LoopLagOptions {
   readonly logger: RuntimeLogger;
 
   readonly runningCount: () => number;
@@ -37,7 +37,7 @@ export interface LoopLagOptions {
   readonly now?: () => number;
 }
 
-export interface TrackedRequest {
+interface TrackedRequest {
   readonly route: string | null;
 }
 

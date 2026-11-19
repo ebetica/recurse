@@ -20,7 +20,7 @@ export interface ArchivePage {
   next_offset: number | null;
 }
 
-export const REVIVE_PAGE = 20;
+const REVIVE_PAGE = 20;
 
 export function archiveSearchPath(query: string, offset = 0): string {
   const params = new URLSearchParams({

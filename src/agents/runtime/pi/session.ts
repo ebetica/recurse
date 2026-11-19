@@ -1,7 +1,7 @@
 // Read-only normalization of legacy conversation bindings for history views.
 import { pyPath } from "../../../coding_backend/session_index";
 
-export interface SessionBinding {
+interface SessionBinding {
   readonly sessionId: string;
   readonly sessionFile: string;
   readonly cwd: string;

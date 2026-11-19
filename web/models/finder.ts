@@ -109,7 +109,7 @@ export function indexModels(models: readonly FinderModel[]): IndexedModel[] {
   });
 }
 
-export interface RouteMatches {
+interface RouteMatches {
   route: string;
   models: FinderModel[];
   /** Every match on this route, shown or not. */
@@ -215,7 +215,7 @@ export function clampReasoning(
   return choices[0] ?? "off";
 }
 
-export type ModelBoxKeyAction =
+type ModelBoxKeyAction =
   | "open"
   | "close"
   | "next"

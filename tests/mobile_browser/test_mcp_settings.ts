@@ -11,6 +11,7 @@ import {
 import { startOAuthMcpServer } from "../backend/fixtures/mcp_oauth_server";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3539 typed MCP servers JSON survives the settings load.
   async function test_real_mcp_checks_show_safe_status_without_a_conversation(
     browser,
     base,
@@ -46,6 +47,16 @@ export const tests: BrowserTest[] = [
       await gotoRoot(page, base);
       await page.locator(".agent").first().waitFor();
       const agents = await page.locator(".agent").count();
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      let releaseSave!: () => void;
+      const saving = new Promise<void>((resolve) => (releaseSave = resolve));
+      await page.route("**/api/settings/mcp-servers", async (route) => {
+        const method = route.request().method();
+        if (method === "GET") await held;
+        if (method === "PUT") await saving;
+        await route.fallback();
+      });
       await page.locator("#settings-btn").click();
       await page.locator('#settings-nav button[data-cat="agents"]').click();
       await page.getByRole("button", { name: /^MCP servers / }).click();
@@ -67,16 +78,15 @@ export const tests: BrowserTest[] = [
         .getByRole("button", { name: "Copy callback URL", exact: true })
         .waitFor();
       const input = page.getByRole("textbox", { name: "MCP servers JSON" });
-      await page.waitForFunction(
-        () =>
-          !(globalThis as any).document
-            .querySelector('textarea[aria-label="MCP servers JSON"]')
-            .closest("form")
-            .querySelector("button").disabled,
-      );
+      await browserExpect(input).toBeDisabled();
+      release();
+      await browserExpect(input).toBeEnabled();
       await input.fill(JSON.stringify(config, null, 2));
       await section.getByRole("button", { name: "Save", exact: true }).click();
+      await browserExpect(input).not.toBeEditable();
+      releaseSave();
       await section.locator(".msg.ok").waitFor();
+      await browserExpect(input).toBeEditable();
       const row = (name: string) =>
         page
           .locator(".mcp-server")

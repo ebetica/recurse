@@ -3,7 +3,7 @@
 // cannot leave the colored marker saying one thing and its text saying another.
 import type { TreeNode } from "./types.js";
 
-export type AgentStateKey =
+type AgentStateKey =
   | "idle"
   | "running"
   | "working"
@@ -16,13 +16,13 @@ export type AgentStateKey =
   | "deleting"
   | "unknown";
 
-export interface AgentStatePresentation {
+interface AgentStatePresentation {
   key: AgentStateKey;
   label: string;
   description: string;
 }
 
-export const RESTART_PARKED_DESCRIPTION = "Interrupted by a server restart";
+const RESTART_PARKED_DESCRIPTION = "Interrupted by a server restart";
 export const RESTART_PARKED_STATUS = "interrupted by a server restart";
 
 const STATES: Record<

@@ -9,7 +9,7 @@ export interface ComposerCommand {
 }
 
 // Order = the order shown in the autocomplete's Actions group.
-export const COMPOSER_COMMANDS: ComposerCommand[] = [
+const COMPOSER_COMMANDS: ComposerCommand[] = [
   {
     name: "compact",
     description: "Summarize context and continue with less history · Action",
@@ -47,7 +47,7 @@ export const COMPOSER_COMMAND_ENDPOINT: Record<string, string> = {
   rename: "rename",
 };
 
-export interface ComposerCommandMatch {
+interface ComposerCommandMatch {
   name: string;
   question?: string;
 }

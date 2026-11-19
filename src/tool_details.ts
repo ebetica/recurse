@@ -4,7 +4,7 @@
 import { createHash } from "node:crypto";
 import { readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { retireAll, retireDirectory } from "./utils/trash_sweep";
+import { retireAll, retireDirectory } from "./utils/trash-sweep";
 
 // Retire legacy owner directories off-thread; no new owner dirs are written.
 // The Worker's check and rename stay await-free.

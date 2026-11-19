@@ -54,7 +54,7 @@ const RESERVED = new Set([
   ".markers",
 ]);
 
-export interface Root {
+interface Root {
   dataDir: string;
   worktrees: string;
   markers: string;
@@ -69,7 +69,7 @@ export interface MembershipConfig {
   timeout: number;
 }
 
-export type MembershipSnapshot = [
+type MembershipSnapshot = [
   number,
   Set<string> | typeof UNKNOWN,
   boolean,
@@ -171,7 +171,7 @@ export function rootFromEnv(explicit?: string | null): Root {
 }
 
 /** Return the current agent identifier, if supplied. */
-export function selfId(): string | null {
+function selfId(): string | null {
   return process.env.RECURSE_AGENT_ID ?? null;
 }
 
@@ -563,7 +563,7 @@ async function migrateLegacy(root: Root): Promise<void> {
 }
 
 // Read membership from env or the published server file.
-export function membershipFromEnv(root: Root): MembershipConfig | null {
+function membershipFromEnv(root: Root): MembershipConfig | null {
   const baseUrl = process.env.WORKTREE_MEMBERSHIP_URL;
   const token = process.env.WORKTREE_MEMBERSHIP_TOKEN;
   if (baseUrl && token) {
@@ -1010,7 +1010,7 @@ function sweepLog(root: Root, message: string): void {
 }
 
 /** Retire, then reclaim incrementally; ignore duplicate sweep commands. */
-export async function sweepOnce(
+async function sweepOnce(
   root: Root,
   retired?: (result: string) => void,
 ): Promise<string> {
@@ -1295,7 +1295,7 @@ async function runEnter(args: EnterArgs): Promise<number> {
 }
 
 /** Run the CLI, allowing module imports to be used without side effects. */
-export async function main(args = process.argv.slice(2)): Promise<number> {
+async function main(args = process.argv.slice(2)): Promise<number> {
   let parsed: EnterArgs | { sweepRoot: string | null } | "help" | "enter-help";
   try {
     parsed = parseArgs(args);

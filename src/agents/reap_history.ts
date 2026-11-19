@@ -8,8 +8,8 @@ import {
   expire as expirePartitions,
   type ExpiryResult,
 } from "../utils/partition_expiry";
-import { retirePath } from "../utils/trash_sweep";
-import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
+import { retirePath } from "../utils/trash-sweep";
+import { parsePythonJson, pyCompactJson } from "../utils/python-json";
 
 export interface ReapHistoryPaths {
   historyDir: string;

@@ -21,8 +21,8 @@ import {
   type ConversationRecord,
   type ConversationStore,
   type ConversationStoreHooks,
-} from "../conversation_store";
-import { TreeLifecycleBusy, type TreeLifecycle } from "../mutation_guard";
+} from "../storage";
+import { TreeLifecycleBusy, type TreeLifecycle } from "../lifecycle";
 import {
   KeyError,
   ValueError,
@@ -30,11 +30,10 @@ import {
   type NodeStore,
 } from "../runtime/agent_node";
 import type { AgentNodes } from "../runtime/agent_nodes";
-import type { SessionBinding as PiBinding } from "../runtime/pi/session";
 import type { ConfigActions } from "../runtime/config_actions";
 
-export const SERVICE_CREATE_BUSY_RETRIES = 20;
-export const SERVICE_CREATE_BUSY_RETRY_DELAY_SECONDS = 0.05;
+const SERVICE_CREATE_BUSY_RETRIES = 20;
+const SERVICE_CREATE_BUSY_RETRY_DELAY_SECONDS = 0.05;
 
 const THINKING_VALUES: ReadonlySet<string> = new Set([
   "off",
@@ -163,62 +162,6 @@ const NEVER = new AbortController().signal;
 
 function fullmatch(re: RegExp, value: unknown): value is string {
   return typeof value === "string" && re.test(value);
-}
-
-export interface BindingRuntime {
-  RuntimeError: new (message: string, options?: ErrorOptions) => Error;
-  binding(sessionId: string, sessionFile: string, cwd: string): PiBinding;
-}
-
-/** pi/process sameBinding: value equality of the frozen triple. */
-export function sameBinding(
-  a: PiBinding | null | undefined,
-  b: PiBinding | null | undefined,
-): boolean {
-  if (!a || !b) return a == b;
-  return (
-    a.sessionId === b.sessionId &&
-    a.sessionFile === b.sessionFile &&
-    a.cwd === b.cwd
-  );
-}
-
-// conversation's recorded (id, file, cwd), null when unset; throws when
-// partial.
-export function recordBinding(
-  rt: BindingRuntime,
-  conv: ConversationRecord,
-): PiBinding | null {
-  const id = conv.session_id ?? null;
-  const file = conv.session_file ?? null;
-  const cwd = conv.session_cwd ?? null;
-  if (id === null && file === null && cwd === null) return null;
-  if (
-    typeof id !== "string" ||
-    !id ||
-    typeof file !== "string" ||
-    !file ||
-    typeof cwd !== "string" ||
-    !cwd
-  )
-    throw new rt.RuntimeError(
-      "conversation has an incomplete Pi session binding",
-    );
-  return rt.binding(id, file, cwd);
-}
-
-/** Whether the projection still carries the adopted triple; never throws. */
-export function projectionMatches(
-  rt: BindingRuntime,
-  conv: ConversationRecord | null,
-  recorded: PiBinding,
-): boolean {
-  try {
-    return sameBinding(recordBinding(rt, conv ?? {}), recorded);
-  } catch (error) {
-    if (error instanceof rt.RuntimeError) return false;
-    throw error;
-  }
 }
 
 /** The store hooks this PR closes. */

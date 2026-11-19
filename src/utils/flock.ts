@@ -4,7 +4,7 @@
 // Wall spans cover native attempts/unlocks, not asynchronous retry waits.
 import { constants } from "node:os";
 import { errno, libc } from "./libc";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 
 const LOCK_EX = 2;
 const LOCK_NB = 4;

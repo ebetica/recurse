@@ -3,7 +3,7 @@
 // operator sets or clears OPERATOR_TAGS. A tag whose `until` has passed is
 // expired: rows drop it when served, and the next change deletes it.
 
-export interface Tag {
+interface Tag {
   at: number;
   by: string;
   until?: number;
@@ -20,7 +20,7 @@ export const OPERATOR_TAGS: ReadonlySet<string> = new Set([
   "snoozed",
   "pinned",
 ]);
-export const MAX_TAGS = 16;
+const MAX_TAGS = 16;
 const NAME = /^[a-z0-9-]{1,24}$/;
 
 /** A refused change; its message is shown to the caller. */

@@ -8,7 +8,7 @@ import { randomBytes } from "node:crypto";
 
 const defaultRandom = (size: number): Uint8Array =>
   new Uint8Array(randomBytes(size));
-import { parsePythonJson } from "../utils/py_compact_json";
+import { parsePythonJson } from "../utils/python-json";
 import { OPENAI_CHOICE_MARKER } from "./provider_store";
 import {
   AuthInputError,
@@ -23,16 +23,16 @@ import {
   truthy,
 } from "./oauth";
 
-export const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-export const AUTH_BASE_URL = "https://auth.openai.com";
-export const AUTHORIZE_URL = `${AUTH_BASE_URL}/oauth/authorize`;
-export const TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
-export const REDIRECT_URI = "http://localhost:1455/auth/callback";
-export const SCOPES = "openid profile email offline_access";
-export const ORIGINATOR = "pi";
-export const PROVIDER = "openai-codex";
-export const API_PROVIDER = "openai";
-export const PENDING_FILE_NAME = "codex_oauth_pending.json";
+const CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const AUTH_BASE_URL = "https://auth.openai.com";
+const AUTHORIZE_URL = `${AUTH_BASE_URL}/oauth/authorize`;
+const TOKEN_URL = `${AUTH_BASE_URL}/oauth/token`;
+const REDIRECT_URI = "http://localhost:1455/auth/callback";
+const SCOPES = "openid profile email offline_access";
+const ORIGINATOR = "pi";
+const PROVIDER = "openai-codex";
+const API_PROVIDER = "openai";
+const PENDING_FILE_NAME = "codex_oauth_pending.json";
 const RESTART_HINT = "“Sign in with ChatGPT”";
 const NO_LOGIN =
   "No login in progress. Start over with “Sign in with ChatGPT”.";
@@ -45,7 +45,7 @@ interface OpenAIAuthStatus {
   api_key: "saved" | "environment" | null;
 }
 
-export interface CodexOptions {
+interface CodexOptions {
   store: OAuthStore;
   ambient: Readonly<Record<string, string | undefined>>;
   home?: string;
@@ -62,7 +62,7 @@ function isRecord(value: unknown): value is Json {
 const B64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 /** base64.urlsafe_b64decode (non-strict binascii); null where it raises. */
-export function pyUrlsafeB64decode(text: string): Uint8Array | null {
+function pyUrlsafeB64decode(text: string): Uint8Array | null {
   const input = text.replaceAll("-", "+").replaceAll("_", "/");
   const out: number[] = [];
   let quad = 0;
@@ -92,7 +92,7 @@ export function pyUrlsafeB64decode(text: string): Uint8Array | null {
 }
 
 /** Unverified JWT claims; the token never reaches a log or error. */
-export function jwtClaims(token: unknown): Json | null {
+function jwtClaims(token: unknown): Json | null {
   if (typeof token !== "string") return null;
   const parts = token.split(".");
   if (parts.length !== 3) return null;
@@ -110,7 +110,7 @@ export function jwtClaims(token: unknown): Json | null {
 }
 
 /** A JWT `exp` claim as Pi's absolute millisecond expiry, else 0. */
-export function jwtExpiry(token: unknown): number {
+function jwtExpiry(token: unknown): number {
   const expires = jwtClaims(token)?.exp;
   if (typeof expires === "number") {
     const ms = expires * 1000;

@@ -4,7 +4,7 @@
  */
 import { cssView } from "./radius_check.ts";
 
-export type Finding = { line: number; value: string; problem: string };
+type Finding = { line: number; value: string; problem: string };
 
 const SCALE = new Set([11, 11.5, 12.5, 13.5, 15, 16, 17, 20]);
 const WEIGHTS = new Set([400, 600, 700]);

@@ -35,14 +35,6 @@ export const storedFor = (
       return false;
     }
   })?.[1];
-export const slotKeys = (storage: MemoryStorage, prefix: string): string[] => {
-  const start = `${prefix}slot.`;
-  return [...storage.values.keys()]
-    .filter(
-      (key) => key.startsWith(start) && /^\d+$/.test(key.slice(start.length)),
-    )
-    .sort();
-};
 
 export function store(
   local = new MemoryStorage(),

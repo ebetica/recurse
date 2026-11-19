@@ -81,7 +81,7 @@ function reviewerFaux() {
     auth: {
       apiKey: {
         name: "Test",
-        resolve: async () => ({ auth: { apiKey: "k" } }),
+        resolve: async () => ({ auth: { apiKey: "401:fauxTestValue" } }),
       },
     },
     models: core.models,

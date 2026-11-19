@@ -20,9 +20,12 @@ migration. Recurse updates may require editing a custom script.
   between sidebar actions and the optional draft control.
 - `sections.ts` draws sections; `script.ts` manages the worker and saved script.
 - `actions.ts` and `hold.ts` handle tag actions and hold menus. App startup
-  supplies `action-handlers.ts` with the tree refresh and the composer draft
-  action used by sidebar sections and remote headers.
+  supplies `action-handlers.ts` with the tree refresh shared by link lookup
+  and sidebar mutations, the draft action for sections and remote headers, and
+  the row and selection actions used by the active-agent dialog.
 - `drag.ts` owns desktop agent drop targets and feedback.
+- Sidebar history completes boot links by correcting the URL before opening the
+  linked artifact or reporting an unavailable agent.
 - `focus.ts` refreshes the list before focusing its cursor, with the phone menu
   fallback. App startup supplies rendering; pane exits import only this helper.
 - `agent-folds.ts` remembers, on this device, which agents list their

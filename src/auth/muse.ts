@@ -2,36 +2,35 @@
 // Muse-code credentials never authenticate meta pay-as-you-go or other routes.
 // Errors expose status/machine code only, never response bodies or tokens.
 import type { Config } from "../config";
-import { parsePythonJson, pyCompactJson } from "../utils/py_compact_json";
+import { parsePythonJson, pyCompactJson } from "../utils/python-json";
 import {
   pyError,
   pyStrip,
   type ProviderCredentialStore,
 } from "./provider_store";
 
-export const CLIENT_ID = "1031625952748946";
+const CLIENT_ID = "1031625952748946";
 const AUTH_BASE = "https://auth.meta.com";
-export const DEVICE_URL = `${AUTH_BASE}/oidc/device/authorization/`;
-export const TOKEN_URL = `${AUTH_BASE}/oidc/device/token/`;
-export const KEY_URL = "https://api.meta.ai/muse-code/key";
-export const API_VERSION = "1.0.0";
+const DEVICE_URL = `${AUTH_BASE}/oidc/device/authorization/`;
+const TOKEN_URL = `${AUTH_BASE}/oidc/device/token/`;
+const KEY_URL = "https://api.meta.ai/muse-code/key";
+const API_VERSION = "1.0.0";
 const DEVICE_GRANT = "urn:ietf:params:oauth:grant-type:device_code";
-export const PROVIDER = "muse-code";
-export const META_PROVIDER = "meta";
-export const ENV_KEY = "MUSE_CODE_API_KEY";
+const PROVIDER = "muse-code";
+const ENV_KEY = "MUSE_CODE_API_KEY";
 const RESTART_HINT = "“Sign in with Muse”";
-export const PENDING_FILE_NAME = "muse_oauth_pending.json";
+const PENDING_FILE_NAME = "muse_oauth_pending.json";
 const DEFAULT_EXPIRES_IN = 600;
 const DEFAULT_INTERVAL = 5;
 
-export const MUSE_CODE_MODELS: [string, string][] = [
+const MUSE_CODE_MODELS: [string, string][] = [
   ["muse-spark-1.1", "Muse Spark 1.1 (Subscription)"],
   ["muse-spark-1.2", "Muse Spark 1.2 (Subscription)"],
   ["muse-spark-1.2-contributor", "Muse Spark 1.2 Contributor (Subscription)"],
   ["muse-spark-1.3", "Muse Spark 1.3 (Subscription)"],
   ["muse-spark-1.3-contributor", "Muse Spark 1.3 Contributor (Subscription)"],
 ];
-export const MUSE_CODE_CATALOG_ENTRY = {
+const MUSE_CODE_CATALOG_ENTRY = {
   base_url: "https://api.meta.ai/v1",
   env_key: ENV_KEY,
   wire_api: "responses",
@@ -46,7 +45,7 @@ export const MUSE_CODE_CATALOG_ENTRY = {
 type Dict = Record<string, unknown>;
 
 /** A Meta endpoint answered with an error status; carries no body or token. */
-export class MuseHttpError extends Error {
+class MuseHttpError extends Error {
   constructor(
     readonly status: number,
     readonly code: string,
@@ -100,7 +99,7 @@ function asSeconds(value: unknown, fallback: number): number {
   return fallback;
 }
 
-export interface MuseOptions {
+interface MuseOptions {
   store: ProviderCredentialStore;
   config: Pick<Config, "upsertCustomProvider">;
   env: Readonly<Record<string, string | undefined>>;

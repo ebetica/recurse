@@ -21,7 +21,7 @@ const BUILD_TIMEOUT_MS = 60_000;
 const LOG_MAX_CHARS = 4_000;
 
 // First-script pane error/CSP relay; inactive outside an embedding pane.
-export const PAGE_ERROR_RELAY =
+const PAGE_ERROR_RELAY =
   '<script id="recurse-errors">(()=>{if(parent===window)return;' +
   'const send=(t)=>{try{parent.postMessage({recurseArtifactError:String(t).slice(0,1000)},"*")}catch{}};' +
   'const text=(r)=>r instanceof Error?r.name+": "+r.message:String(r);' +
@@ -30,7 +30,7 @@ export const PAGE_ERROR_RELAY =
   'document.addEventListener("securitypolicyviolation",(e)=>send("The sandbox blocked "+(e.blockedURI||"a resource")+" ("+e.effectiveDirective+")"))' +
   "})()</script>";
 
-export type AppBuild =
+type AppBuild =
   | { ok: true; html: Buffer; sourceMap: string | null }
   | { ok: false; log: string };
 

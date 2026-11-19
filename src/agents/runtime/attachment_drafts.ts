@@ -12,8 +12,8 @@ import type {
   ConversationGuardToken,
   ConversationRecord,
   ConversationStore,
-} from "../conversation_store";
-import { atomicJson, openPinnedLockFile, readJson } from "../fs_utils";
+} from "../storage";
+import { atomicJson, openPinnedLockFile, readJson } from "../../utils";
 import {
   flockExclusive,
   TreeLifecycleBusy,
@@ -30,7 +30,7 @@ import * as attachmentPreview from "./attachments/preview";
 import * as publish from "./attachments/publish";
 import * as published from "./attachments/published";
 
-export type DraftMeta = Record<string, unknown>;
+type DraftMeta = Record<string, unknown>;
 export interface DraftDirs {
   utcDay(): string;
   ensureUploadsDir(tempKey: string): string | Promise<string>;
@@ -38,7 +38,7 @@ export interface DraftDirs {
   ensureAgentTemp(conv: ConversationRecord): unknown | Promise<unknown>;
   safeRemoveTempKey(tempKey: string): unknown | Promise<unknown>;
 }
-export interface DraftOptions {
+interface DraftOptions {
   /** 32-character lowercase hex ids, shared with attachment publication. */
   ids?: () => string;
 

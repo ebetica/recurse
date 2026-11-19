@@ -165,7 +165,7 @@ export async function prepareManagedDependencies(
     if (!ready) {
       process.stderr.write(`dependencies: preparing ${basename(checkout)}\n`);
       const staging = paths.staging;
-      const { retirePath } = await import("./utils/trash_sweep");
+      const { retirePath } = await import("./utils/trash-sweep");
       await retirePath(staging, paths.trash);
       await mkdir(staging, { mode: 0o700 });
       try {
@@ -208,7 +208,7 @@ export async function prepareManagedDependencies(
     const link = join(checkout, "node_modules");
     try {
       if (!(await lstat(link)).isSymbolicLink()) {
-        const { retirePath } = await import("./utils/trash_sweep");
+        const { retirePath } = await import("./utils/trash-sweep");
         await retirePath(link, join(dataDir, "worktrees", ".trash"));
       }
     } catch (error) {

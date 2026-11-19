@@ -5,7 +5,7 @@
 - `index.ts` exposes the HTTP transport's diagnostics through named reexports.
 - `runtime_logging.ts` redacts and persists bounded logs, and formats route templates.
 - `request_timing.ts` tracks bounded request-local phases and background work.
-- `slow_span.ts` collects wall spans, open phases and Worker reply observations.
+- `slow-span/` collects wall spans, open phases and Worker reply observations.
 - `loop_lag.ts` and `loop_lag.worker.ts` sample main and observer timer delays.
 - `startup_metrics.ts` measures startup operations and mechanism counters.
 
@@ -28,7 +28,7 @@ requires a new main window after the observer starts, excluding partial startup
 coverage. The Worker
 is unref'd, starts without waiting, emits no logs, and stops with LoopLag.
 
-[slow_span.ts](slow_span.ts) records bounded synchronous wall spans and open-phase
+[slow-span/span.ts](slow-span/span.ts) records bounded wall spans and open-phase
 intervals. `spans` describes the three longest completed synchronous sections
 in the delayed sample window, rather than the last three sections to finish.
 `phases` lists up to three `cid:phase:812ms` intervals overlapping that window.

@@ -21,6 +21,11 @@ ebetica/recurse; see [How Recurse is developed](../develop.md#how-recurse-is-dev
 5. Follow the [PR rules](../../AGENTS.md#pr-rules) and the evidence and review
    requirements below. Give commands and results at the exact head commit.
 
+Before pushing a PR's merged result, the merging agent must run
+`bun tests/checks/static.ts` in the merge checkout at the exact commit about to
+land, after the final squash, merge or rebase. Push only if it passes. If the
+landing commit changes, rerun the gate; a pass on the PR head is not enough.
+
 Before promoting `dev` to `main`, run `bun tests/live/reviewer_cache.ts` with live
 read-only sign-ins; require PASS (SKIPPED is not evidence) and record its reviewer usage.
 
@@ -70,22 +75,29 @@ and check that the evidence ran them. Before rerunning a failure you cannot
 explain, record the test, error, log, head SHA and time; never retry it away or
 call it a flake without that record.
 
-Prettier and `bun tests/checks/static.ts` (which runs both TypeScript checks)
-are the mandatory quick checks. Its tsgo accepts some newer lib APIs that tsc
-rejects, so the `ts` stage reruns `bun run typecheck` and `typecheck:backend`. `tests/check.sh` runs the static gate before every stage. It checks docs
+Prettier and `bun tests/checks/static.ts` are the mandatory quick checks. The
+static gate runs `bun run lint` (extra-extension imports and blocking Oxlint
+for the web, web tests, and extensions), the separate server-thread Oxlint
+rules, and tsgo for the web, backend, and browser-test projects.
+The `ts` stage checks the same projects with tsc via `bun run typecheck`,
+`bun run typecheck:backend`, and `bun run typecheck:browser-tests` to catch
+compiler differences. `tests/check.sh` runs the static gate before every stage.
+It checks docs
 links and Markdown length, source-size limits, the web style policy (including
-a stylesheet declaration for every `var(--name)`), the blocking
-Oxlint rules, browser imports, operator sends, the prompt budget, reminders, and
+a stylesheet declaration for every `var(--name)`), browser imports, operator
+sends, the prompt budget, reminders, and
 comment and test policy, then names each failed check (and lists large files only then). The operator-send check confines message delivery and
 foreground enqueueing to the shared send-scroll entry point. The prompt check renders
 a real fake-provider request with fixed dynamic inputs and prints section sizes;
-its [header](../../tests/checks/prompt_budget.ts) defines the measured prompt. Oxlint is advisory. Never commit `web/dist`. The
+its [header](../../tests/checks/prompt_budget.ts) defines the measured prompt. Never commit `web/dist`. The
 [static gate](../../tests/checks/static.ts) defines source-size limits and exclusions;
 simplify large files by deleting dead, duplicated or parallel code and giving each
 module one job, not by mechanically splitting files.
 The [import graph check](../../tests/checks/import_graph.ts) ratchets runtime file
 and folder-module cycles, imports bypassing module entries, and missing/non-thin
 entries. Nested folders are separate modules; root source files stand alone.
+The import graph and test policy checks shrink their baselines after a passing
+run. Commit the files they name; regressions fail without updating the baseline.
 Use `--dot --modules` for the module graph and `--height` for a longest chain.
 Changes to what the web UI downloads (polling, event streams, images, Artifact
 loading, caching, compression) run the bytes-over-the-wire budget:
@@ -97,12 +109,9 @@ lists the cases and how to update budgets. It is not part of `tests/check.sh`.
 Before READY, run `bun tests/checks/test_check.ts --diff REF --pr-body BODY --strict`
 with the PR base ref (normally `origin/dev`) and a local PR-body file. `--diff`
 uses `git merge-base REF HEAD` and prints the base SHA; `--diff-exact BASE` skips
-merge-base resolution. This PR-validation command gates source growth;
-ordinary static/suite runs only enforce the hard cap.
-Growing source files ending at 1,500+ lines need an independent
-[simplification review](simplify-review.md) by an effort-3 subagent created under
-the implementer; within 100 lines of the hard cap, use an effort-4 architecture
-sweep instead. A `follow-up #PR` verdict needs an operator-visible PR.
+merge-base resolution. The static gate separately checks source and Markdown
+sizes against the [architecture sweep ledger](simplify-review.md). Stop and
+report a sweep finding to the Coordinator; do not cut content to pass.
 
 ## Writing tests and comments
 
@@ -141,10 +150,10 @@ for classes that code cannot catch, a reviewer rule under
 add the check or rule only after the operator approves it.
 
 JS/TS comments are limited to short declaration docs, one file header, and
-`Invariant:`/`Spec:` comments in bodies. Tests have no comments except required
-test tags and tool/license comments. Tool and license comments are exempt
-throughout. `tests/checks/comment_check.ts --strict` makes JS/TS findings
-fail the static gate. Read its help for precise checks.
+short comments in bodies. Body comments need no special prefix. Tests have no
+comments except required test tags and tool/license comments. Tool and license
+comments are exempt throughout. `tests/checks/comment_check.ts --strict` makes
+JS/TS findings fail the static gate. Read its help for precise checks.
 
 ## Writing docs
 
@@ -157,7 +166,8 @@ fail the static gate. Read its help for precise checks.
   commits.
 - `bun tests/checks/docs_check.ts` (part of the static gate) fails on a broken link, a
   missing backticked repo path, a source directory missing from the
-  [code map](repository-map.md), or tracked Markdown of 15,000 characters or more.
+  [code map](repository-map.md), or tracked Markdown that needs an
+  [architecture sweep](simplify-review.md).
 
 ## Testing install changes
 

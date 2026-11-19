@@ -27,7 +27,7 @@ import { retire, sweep } from "../../src/utils/trash";
 import { testDeps, until } from "../backend/fixtures/durable_host/host";
 import fixture from "../backend/fixtures/extras/prompt.json";
 
-export interface PromptBudget {
+interface PromptBudget {
   total: number;
   sections: Record<string, string>;
   codemodeDescription: string;

@@ -16,9 +16,9 @@ import {
   type DoomedScan,
   type ReapDeps,
 } from "../../src/agents/supervisor";
-import { DeferredReaps } from "../../src/agents/retry_schedule";
+import { DeferredReaps } from "../../src/agents/lifecycle/retry/retry_schedule";
 import { archiveLiveRecord } from "../../src/agents/reap_history";
-import { TreeLifecycle } from "../../src/agents/mutation_guard";
+import { TreeLifecycle } from "../../src/agents/lifecycle/mutation_guard";
 import { flockExclusive } from "../../src/utils/flock";
 import { until } from "./fixtures/durable_host/host";
 import { buildConversationsApp } from "./http_conversations_app";

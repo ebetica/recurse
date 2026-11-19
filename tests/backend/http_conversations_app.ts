@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 
 import { KeyError, ValueError } from "../../src/agents/runtime/agent_node";
 import { AttachmentError } from "../../src/agents/runtime/attachments/base";
-import { ExternalKeyConflict } from "../../src/agents/conversation_store";
+import { ExternalKeyConflict } from "../../src/agents/storage/conversation_store";
 import {
   CompletedReplyCursorError,
   CompletedReplyCursorExpired,
@@ -60,7 +60,7 @@ export async function makeRepo(root: string): Promise<string> {
   return repo;
 }
 
-export class ScriptedWorld {
+class ScriptedWorld {
   readonly convs = new Map<string, Rec>();
   bindings: [string, string][];
   readonly external = new Map<string, string>();

@@ -1,110 +1,49 @@
 /**
- * Test policy: --strict fails all findings; --strict=T8,T9 selects fatal rules.
- * Usage: bun tests/checks/test_check.ts --help
+ * Passing checks shrink tracked caps and ask you to commit; cap regressions fail.
+ * Test policy and usage: bun tests/checks/test_check.ts --help
  */
-import { existsSync, lstatSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import ts from "typescript";
 import type { Violation } from "./comment_check";
 
-/** Findings ("rule reason") tolerated per file; a count above its cap fails. */
-const CAPS: Record<string, Record<string, number>> = {
-  "T3 hand-made deps cast": {
-    "tests/backend/durable_interrupt.test.ts": 1,
-    "tests/backend/durable_prompt.test.ts": 1,
-    "tests/backend/durable_turn_prompt.test.ts": 1,
-    "tests/backend/http_routes_app.ts": 1,
-    "tests/backend/http_tree.test.ts": 1,
-  },
-  "T10 links the shared node_modules; use linkDependencies": {
-    "tests/backend/affected_tests.test.ts": 1,
-    "tests/backend/server_smoke.test.ts": 1,
-  },
-  "T6 positive visibility snapshot; wait with locator.waitFor() or browserExpect(locator).toBeVisible()":
-    {
-      "tests/mobile_browser/common.ts": 1,
-      "tests/mobile_browser/test_active_agents.ts": 1,
-      "tests/mobile_browser/test_artifact_visit.ts": 2,
-      "tests/mobile_browser/test_changes_expand.ts": 1,
-      "tests/mobile_browser/test_composer.ts": 2,
-      "tests/mobile_browser/test_durable.ts": 1,
-      "tests/mobile_browser/test_explorer.ts": 3,
-      "tests/mobile_browser/test_files.ts": 9,
-      "tests/mobile_browser/test_header.ts": 4,
-      "tests/mobile_browser/test_image_box_crops.ts": 2,
-      "tests/mobile_browser/test_image_drawing.ts": 3,
-      "tests/mobile_browser/test_image_swipe.ts": 4,
-      "tests/mobile_browser/test_mobile_layout.ts": 1,
-      "tests/mobile_browser/test_pane_chrome.ts": 2,
-      "tests/mobile_browser/test_pane_hotkeys.ts": 15,
-      "tests/mobile_browser/test_pane_powerbar.ts": 1,
-      "tests/mobile_browser/test_panes_artifacts.ts": 16,
-      "tests/mobile_browser/test_platform_commands.ts": 7,
-      "tests/mobile_browser/test_selection_comments.ts": 3,
-      "tests/mobile_browser/test_settings.ts": 4,
-      "tests/mobile_browser/test_side_history.ts": 1,
-      "tests/mobile_browser/test_sidebar.ts": 2,
-      "tests/mobile_browser/test_turn_groups.ts": 8,
-      "tests/mobile_browser/test_turns.ts": 1,
-      "tests/mobile_browser/test_visible_attachments.ts": 5,
-      "tests/mobile_browser/test_waiting_takeover.ts": 2,
-      "tests/mobile_browser/thread_disclosures.ts": 1,
-      "tests/mobile_browser/thread_tools.ts": 1,
-    },
-  "T6 sleep of a second or more": {
-    "tests/mobile_browser/server/agents.ts": 1,
-    "tests/mobile_browser/test_durable.ts": 1,
-  },
-  "T6 explicit browser timeout": {
-    "tests/mobile_browser/artifact_reopen.ts": 1,
-    "tests/mobile_browser/common.ts": 1,
-    "tests/mobile_browser/logging.test.ts": 1,
-    "tests/mobile_browser/parallel.test.ts": 3,
-    "tests/mobile_browser/test_changes_expand.ts": 5,
-    "tests/mobile_browser/test_composer.ts": 5,
-    "tests/mobile_browser/test_durable.ts": 17,
-    "tests/mobile_browser/test_failed_send_hold.ts": 6,
-    "tests/mobile_browser/test_line_comments.ts": 3,
-    "tests/mobile_browser/test_model_response.ts": 1,
-    "tests/mobile_browser/test_panes_artifacts.ts": 6,
-    "tests/mobile_browser/test_platform_commands.ts": 2,
-    "tests/mobile_browser/test_recovery.ts": 2,
-    "tests/mobile_browser/test_remote_sidebar.ts": 3,
-    "tests/mobile_browser/test_remotes.ts": 5,
-    "tests/mobile_browser/test_themes.ts": 1,
-    "tests/mobile_browser/test_turn_groups.ts": 1,
-    "tests/mobile_browser/test_turns.ts": 2,
-    "tests/mobile_browser/test_wake.ts": 1,
-    "tests/mobile_browser/thread_disclosures.ts": 1,
-    "tests/mobile_browser/thread_tools.ts": 1,
-  },
-};
+type Caps = Record<string, Record<string, number>>;
+const capsPath = "tests/checks/test_check_caps.json";
 
 const bare = (node: ts.Expression): ts.Expression =>
   ts.isParenthesizedExpression(node) ? bare(node.expression) : node;
 const bareType = (node: ts.TypeNode): ts.TypeNode =>
   ts.isParenthesizedTypeNode(node) ? bareType(node.type) : node;
 
-/** Drop findings within their file's cap; flag caps that can be lowered. */
-function capped(file: string, findings: Violation[]): Violation[] {
-  const kept = [...findings];
-  for (const [key, caps] of Object.entries(CAPS)) {
-    const [rule, reason] = [key.split(" ")[0]!, key.replace(/^\S+ /, "")];
-    const cap = caps[file] ?? 0;
-    const hits = kept.filter((v) => v.rule === rule && v.reason === reason);
-    if (hits.length > cap)
-      for (const hit of hits) hit.reason = `${reason} (cap ${cap} here)`;
-    else {
-      for (const hit of hits) kept.splice(kept.indexOf(hit), 1);
-      if (hits.length < cap)
-        kept.push({
-          file,
-          line: 1,
-          rule,
-          reason: `${reason} cap is ${cap}; lower it to ${hits.length}`,
-        });
-    }
+function ratchetCaps(raw: Violation[], caps: Caps) {
+  const counts = new Map<string, number>();
+  const group = (v: Violation) => `${v.rule} ${v.reason}`;
+  const key = (reason: string, file: string) => `${reason}\0${file}`;
+  for (const v of raw) {
+    const id = key(group(v), v.file);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
   }
-  return kept;
+  let regressed = false;
+  const findings = raw.filter((v) => {
+    const reason = group(v);
+    if (!Object.hasOwn(caps, reason)) return true;
+    const cap = caps[reason]![v.file] ?? 0;
+    if (counts.get(key(reason, v.file))! <= cap) return false;
+    regressed = true;
+    v.reason += ` (cap ${cap} here)`;
+    return true;
+  });
+  const next = Object.fromEntries(
+    Object.entries(caps).map(([reason, files]) => [
+      reason,
+      Object.fromEntries(
+        Object.entries(files).flatMap(([file, cap]) => {
+          const count = Math.min(cap, counts.get(key(reason, file)) ?? 0);
+          return count > 0 ? [[file, count]] : [];
+        }),
+      ),
+    ]),
+  );
+  return { findings, next, regressed };
 }
 
 export function checkTests(file: string, text: string): Violation[] {
@@ -644,7 +583,7 @@ export function checkTests(file: string, text: string): Violation[] {
       add(offset, "T4", "fixture recorded by deleted Python implementation");
     offset += row.length + 1;
   }
-  return capped(file, findings);
+  return findings;
 }
 
 function testTitle(node: ts.Node, source: ts.SourceFile): string | undefined {
@@ -717,7 +656,7 @@ function testComments(file: string, text: string) {
 }
 
 /** Finds tag comments, including legacy tags inside cases or stacks. */
-export function taggedTests(file: string, text: string) {
+function taggedTests(file: string, text: string) {
   return testComments(file, text).flatMap((comment) => {
     const tag = comment.text.match(
       /^\/\/ (Regression|Feature): #(\d+) (\S[^\r\n]*)$/,
@@ -813,7 +752,7 @@ function allowances(file: string, text: string) {
   });
 }
 
-export function report(findings: Violation[], summary = false) {
+function report(findings: Violation[], summary = false) {
   const counts = (key: (finding: Violation) => string) => {
     const result = new Map<string, number>();
     for (const finding of findings)
@@ -839,9 +778,10 @@ if (import.meta.main) {
   if (args.includes("--help"))
     console.log(
       "bun tests/checks/test_check.ts [--strict[=T1,T2,...]] [--summary] [(--diff REF | --diff-exact BASE) --pr-body FILE]\n" +
+        `Cap regressions always fail. On success, lower any improved caps in ${capsPath} and print a reminder to commit the change.\n` +
         "--diff compares the working tree with git merge-base REF HEAD; --diff-exact uses BASE directly. The resolved base SHA is printed once. Use only one diff flag.\n" +
         "Both diff modes require every Feature/Regression tag PR id at the resolved base to remain in a tag directly above the same named test, including moves between test files and regardless of tag kind. Missing ids need a PR-body line Removes-feature: #PR <file> <test name> or Removes-regression: #PR <file> <test name>, matching the original kind; trailing reasons are allowed.\n" +
-        "Both diff modes require an exact PR-body line Test-review: PASS <full head SHA> for added or changed test-check-allow comments or allowance entries, including moved or renamed comments. The SHA must equal git HEAD and tests/ must have no uncommitted changes. The Coordinator adds this line only after an independent test reviewer passes that exact head under docs/agents/test-review.md. Old operator approval lines are not accepted. Growth reviews run only with an explicit diff flag and --pr-body FILE. Growing tracked source files within 100 lines of the hard cap require an effort-4 architecture sweep, recorded as Simplify-review: <path> architecture-sweep <full head SHA>. Other growing tracked source files ending at 1500 or more lines require Simplify-review: <path> <simplified|none-found|follow-up #PR> <full head SHA>, one exact line per file; see docs/agents/simplify-review.md.",
+        "Both diff modes require an exact PR-body line Test-review: PASS <full head SHA> for added or changed test-check-allow comments or allowance entries, including moved or renamed comments. The SHA must equal git HEAD and tests/ must have no uncommitted changes. The Coordinator adds this line only after an independent test reviewer passes that exact head under docs/agents/test-review.md. Old operator approval lines are not accepted. File size sweeps are checked by the static gate; see docs/agents/simplify-review.md.",
     );
   else {
     const strictFlags = args.filter(
@@ -886,7 +826,7 @@ if (import.meta.main) {
     const files = (await git("ls-files", "-z", "--", "tests/"))
       .split("\0")
       .filter(Boolean);
-    const findings: Violation[] = [];
+    const raw: Violation[] = [];
     for (const file of files) {
       if (
         /^tests\/(?:checks|dev)\//.test(file) ||
@@ -895,8 +835,10 @@ if (import.meta.main) {
         !/\.(?:[cm]?[jt]sx?|json|txt)$/.test(file)
       )
         continue;
-      findings.push(...checkTests(file, readFileSync(file, "utf8")));
+      raw.push(...checkTests(file, readFileSync(file, "utf8")));
     }
+    const caps: Caps = JSON.parse(readFileSync(capsPath, "utf8"));
+    const { findings, next, regressed } = ratchetCaps(raw, caps);
     const allowanceFile = "tests/test-check-allowances.json";
     if (existsSync(allowanceFile)) {
       const entries: unknown = JSON.parse(readFileSync(allowanceFile, "utf8"));
@@ -948,61 +890,6 @@ if (import.meta.main) {
       const newFeatures: Violation[] = [];
       const head = (await git("rev-parse", "HEAD")).trim();
       const bodyLines = body.split(/\r?\n/);
-      const simplified = new Set(
-        bodyLines.flatMap((line) => {
-          const match = line.match(
-            /^Simplify-review: (.+) (?:simplified|none-found|follow-up #[1-9]\d*|architecture-sweep) ([0-9a-f]{40})$/,
-          );
-          return match?.[2] === head ? [match[1]] : [];
-        }),
-      );
-      const source =
-        /\.(?:[cm]?[jt]sx?|py|sh|bash|html?|css|scss|sass|less|vue|svelte|c|h|cc|cpp|hpp|rs|go|java|rb)$/i;
-      const countLines = (text: string) =>
-        text.split("\n").length - Number(text.endsWith("\n") || !text);
-      for (const file of (
-        await git("diff", "--name-only", "-z", "--no-renames", base)
-      )
-        .split("\0")
-        .filter(Boolean)) {
-        if (
-          /^(?:web\/(?:vendor|dist)|scripts\/patches)\/|(?:^|\/)fixtures\/|\.lock$/.test(
-            file,
-          ) ||
-          !existsSync(file) ||
-          lstatSync(file).isSymbolicLink()
-        )
-          continue;
-        const text = readFileSync(file, "utf8");
-        if (!source.test(file) && !text.startsWith("#!")) continue;
-        const lines = countLines(text);
-        const sweep = lines >= 2400;
-        if (
-          lines < 1500 ||
-          (sweep
-            ? bodyLines.includes(
-                `Simplify-review: ${file} architecture-sweep ${head}`,
-              )
-            : simplified.has(file))
-        )
-          continue;
-        const existed = (
-          await git("ls-tree", "--name-only", base, "--", file)
-        ).trim();
-        if (
-          existed &&
-          lines <= countLines(await git("show", `${base}:${file}`))
-        )
-          continue;
-        findings.push({
-          file,
-          line: 1,
-          rule: "T8",
-          reason: sweep
-            ? `growing source file (${lines} lines) needs an architecture sweep: commission a read-only effort-4 subagent under docs/agents/simplify-review.md, then record Simplify-review: ${file} architecture-sweep ${head}. Removing lines merely to fit under the limit is not acceptable; the 2,500-line hard cap still applies.`
-            : `growing source file (${lines} lines) needs Simplify-review: ${file} <simplified|none-found|follow-up #PR> ${head}; see docs/agents/simplify-review.md`,
-        });
-      }
       const reviewed =
         bodyLines.includes(`Test-review: PASS ${head}`) &&
         !(await git("diff", "--name-only", "HEAD", "--", "tests/")).trim();
@@ -1118,16 +1005,19 @@ if (import.meta.main) {
     }
     console.log(report(findings, args.includes("--summary")));
     if (
+      regressed ||
       (args.includes("--strict") && findings.length) ||
       findings.some(
         (v) =>
           strictRules.includes(v.rule) ||
           (v.rule === "T8" &&
-            /^(?:deleted |a PR may add|new test allowance|growing source file)/.test(
-              v.reason,
-            )),
+            /^(?:deleted |a PR may add|new test allowance)/.test(v.reason)),
       )
-    )
+    ) {
       process.exitCode = 1;
+    } else if (JSON.stringify(caps) !== JSON.stringify(next)) {
+      writeFileSync(capsPath, `${JSON.stringify(next, null, 2)}\n`);
+      console.log(`Shrank ${capsPath}; commit the updated baseline.`);
+    }
   }
 }

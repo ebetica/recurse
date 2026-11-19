@@ -189,11 +189,11 @@ No current-code race is identified within these bounds.
 
 ## Admission correspondence
 
-[TreeLifecycle](../../src/agents/mutation_guard.ts) maps `Reserve`, `Wake` and
-`Expire` to `awaitReservation/reserve/nextRelease`; `Prepare`, `Flock` and `Poll`
-to `openLease` and [flockExclusive](../../src/utils/flock.ts). Nested entry/exit
+[TreeLifecycle](../../src/agents/lifecycle/mutation_guard.ts) maps `Reserve`,
+`Wake`, `Expire` to `awaitReservation/reserve/nextRelease`; `Prepare`, `Flock`,
+`Poll` to `openLease` and [flockExclusive](../../src/utils/flock.ts). Nesting
 and spent-token refusal map to `reserve/release/checkToken`; body completion,
-unlock, descriptor close and final release map to `body/closeLease/release`.
+unlock, descriptor close and release map to `body/closeLease/release`.
 
 Bounds: two fresh callers in one process, nested depth two, one external holder
 and one data-root inode. Wakes are unordered. Expiry crosses awaits; bodies and
@@ -215,7 +215,7 @@ The bulk stage runs:
 ## Viewport correspondence
 
 [Thread](../../web/conversation/thread.ts): `paint` → `Repaint`, `anchoredPaint`
-→ `Press`, `releaseBottomFollow` → `Release`. [Scroller](../../web/conversation/scroll-ledger.ts):
+→ `Press`, `releaseBottomFollow` → `Release`. [Scroller](../../web/thread-scroll/scroll-ledger.ts):
 `ToBottom`/`OnFrame`. `Repaint` latches natural bottom. `NaturalFollow` checks
 settled bottom; `PendingBottom` excludes viewport holds during a batch.
 `Press` paints/relatches, then releases before anchoring.

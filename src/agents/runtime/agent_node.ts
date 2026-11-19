@@ -14,13 +14,13 @@ import {
   abortable,
   type TaskSet,
 } from "../../utils/tasks";
-import { AgentClosed } from "../agent_store";
 import {
+  AgentClosed,
   SET_MODEL_MARKER,
   stripPendingKeys,
   type ConversationRecord,
   type ConversationStore,
-} from "../conversation_store";
+} from "../storage";
 import { describeSendFailure } from "../view/failure_sentences";
 import type { AgentNodes } from "./agent_nodes";
 import { ATTACHMENT_REFERENCE_REGEX, FILE_ID_REGEX } from "./attachments/base";
@@ -42,20 +42,17 @@ import {
   type TimerHandle,
 } from "./stall_timer";
 
-export type Intent = Record<string, unknown>;
-
-/** Message arrival to runtime acceptance past this names itself. */
-export const PROMPT_ACCEPT_WARN_SECONDS = 1.0;
+type Intent = Record<string, unknown>;
 /** Composer send receipts remembered per conversation. */
-export const ACKED_CLIENT_CAP = 200;
-export const FENCE_RETRY_BASE_SECONDS = 0.5;
-export const FENCE_RETRY_CAP_SECONDS = 5.0;
-export const FENCE_VISIBLE_ERROR_SECONDS = 15.0;
+const ACKED_CLIENT_CAP = 200;
+const FENCE_RETRY_BASE_SECONDS = 0.5;
+const FENCE_RETRY_CAP_SECONDS = 5.0;
+const FENCE_VISIBLE_ERROR_SECONDS = 15.0;
 /** A restart survivor whose prompt may have been written to Pi. */
-export const RESTART_UNCERTAIN_NOTICE =
+const RESTART_UNCERTAIN_NOTICE =
   "The server restarted while sending this message, so it may have reached the agent; Retry to send it again or Dismiss it.";
 /** Third consecutive strike also closes the durable store row. */
-export const SEND_FAIL_CAP = 3;
+const SEND_FAIL_CAP = 3;
 const DEBUG = 10;
 
 export interface NodeStore {
@@ -67,7 +64,7 @@ export interface NodeStore {
   status(cid: string): Record<string, unknown>;
 }
 
-export interface RuntimeErrors {
+interface RuntimeErrors {
   runtimeError: new (message: string, options?: ErrorOptions) => Error;
   buildSubmission(
     content: string,
@@ -145,7 +142,7 @@ const errorName = (error: unknown) =>
   error instanceof Error ? error.constructor.name : typeof error;
 
 /** Whether this intent is platform status, never operator input. */
-export function isPlatformNote(entry: Intent): boolean {
+function isPlatformNote(entry: Intent): boolean {
   return entry.origin === "platform";
 }
 

@@ -89,7 +89,7 @@ export function requestShape(request: Record<string, unknown>) {
 }
 
 /** Additional Recurse tools are allowed; recorded tools must remain intact. */
-export function checkRequest(
+function checkRequest(
   expected: Record<string, unknown>,
   body: Record<string, unknown>,
 ) {
@@ -113,10 +113,7 @@ export function checkRequest(
   }
 }
 
-/** Codex compresses HTTP requests, but sends plain JSON WebSocket frames. */
-export async function requestBody(
-  request: Request,
-): Promise<Record<string, unknown>> {
+async function requestText(request: Request): Promise<string> {
   const bytes = new Uint8Array(await request.arrayBuffer());
   const decoded =
     request.headers.get("content-encoding") === "zstd"
@@ -126,13 +123,26 @@ export async function requestBody(
           }
         ).zstdDecompressSync(bytes)
       : bytes;
-  return JSON.parse(new TextDecoder().decode(decoded));
+  return new TextDecoder().decode(decoded);
+}
+
+/** Codex compresses HTTP requests, but sends plain JSON WebSocket frames. */
+export async function requestBody(
+  request: Request,
+): Promise<Record<string, unknown>> {
+  return JSON.parse(await requestText(request));
 }
 
 /** Parser tests may scale delays to zero; live-state tests keep recorded pacing (default 1). */
 export function replayProvider(
   recording: Recording,
-  { timeScale = 1 }: { timeScale?: number } = {},
+  {
+    timeScale = 1,
+    sseRequestText,
+  }: {
+    timeScale?: number;
+    sseRequestText?: WeakMap<Record<string, unknown>, string>;
+  } = {},
 ) {
   if (!Number.isFinite(timeScale) || timeScale < 0)
     throw new Error("invalid replay time scale");
@@ -196,12 +206,10 @@ export function replayProvider(
       try {
         if (request.method !== "POST")
           throw new Error("request mismatch: method");
-        const exchange = select(
-          "sse",
-          path,
-          await requestBody(request),
-          request.headers,
-        );
+        const text = await requestText(request);
+        const body: Record<string, unknown> = JSON.parse(text);
+        const exchange = select("sse", path, body, request.headers);
+        sseRequestText?.set(body, text);
         return new Response(
           new ReadableStream({
             async start(controller) {

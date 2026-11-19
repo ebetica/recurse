@@ -4,14 +4,7 @@
 // script is default_sidebar.js.
 import type { SidebarRow, Tags } from "./rows.js";
 import { OPERATOR_TAGS } from "../agent_metadata/index.js";
-export {
-  liveTags,
-  sidebarRow,
-  sidebarRows,
-  type SidebarRow,
-  type Tag,
-  type Tags,
-} from "./rows.js";
+import "./rows.js";
 
 export interface NewAgent {
   ask?: "tag";
@@ -110,16 +103,8 @@ export interface Section {
   empty?: string;
 }
 
-export const ICONS = [
-  "archive",
-  "snooze",
-  "pin",
-  "unpin",
-  "restore",
-  "tag",
-  "new",
-];
-export const UNSORTED = "Unsorted";
+const ICONS = ["archive", "snooze", "pin", "unpin", "restore", "tag", "new"];
+const UNSORTED = "Unsorted";
 const LIMITS = {
   sections: 12,
   children: 12,

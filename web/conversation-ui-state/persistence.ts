@@ -66,7 +66,7 @@ export interface UiStateStoreState {
   flush(ownerId?: string): void;
 }
 
-export function writePluginFieldFor(
+function writePluginFieldFor(
   storage: StorageLike,
   retention: UiStateRetention,
   slot: number,
@@ -106,7 +106,7 @@ export function writePluginFieldFor(
     storage.setItem(fieldKeyFor(slot, retention, available), raw);
 }
 
-export function repairSlotsFor(
+function repairSlotsFor(
   s: UiStateStoreState,
   storage: StorageLike,
   retention: UiStateRetention,
@@ -160,7 +160,7 @@ export function repairSlotsFor(
   return { slot: found.entry.slot, raw: found.raw };
 }
 
-export function repairPendingFor(
+function repairPendingFor(
   s: UiStateStoreState,
   storage: StorageLike,
   retention: UiStateRetention,
@@ -249,7 +249,6 @@ export function findOwnerSlotFor(
   } catch {
     return null;
   }
-  return null;
 }
 
 export function markDirtyFor(
@@ -289,7 +288,7 @@ export function markDirtyFor(
   }, s.flushDelayMs);
 }
 
-export function mergedLocalFor(
+function mergedLocalFor(
   s: UiStateStoreState,
   ownerId: string,
   pending: LocalState,
@@ -337,7 +336,7 @@ export function mergedLocalFor(
   };
 }
 
-export function reserveOwnerSlotFor(
+function reserveOwnerSlotFor(
   s: UiStateStoreState,
   storage: StorageLike | null,
   retention: UiStateRetention,

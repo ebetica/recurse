@@ -9,8 +9,8 @@ import { Router } from "../../src/web/router";
 import { registerTreeRoutes, type TreeRoutesDeps } from "../../src/web/tree";
 import * as durable from "./fixtures/durable_host/host";
 import { serveOpen } from "./http_open_app";
-import { AgentStore } from "../../src/agents/agent_store";
-import { ConversationStore } from "../../src/agents/conversation_store";
+import { AgentStore } from "../../src/agents/storage/agent_store";
+import { ConversationStore } from "../../src/agents/storage/conversation_store";
 import { Config } from "../../src/config";
 import { fixtureHooks, paths } from "./fixtures/conversation_store/spec";
 

@@ -12,30 +12,25 @@ import {
 import type { TreeNode } from "./types.js";
 
 export const AGENT_MENTION_LIMIT = 12;
-export const AGENT_MENTION_MAX_INDEXED = 50_000;
+const AGENT_MENTION_MAX_INDEXED = 50_000;
 const MAX_QUERY = 96;
 
 export type MentionGroup = "related" | "siblings" | "other";
 export type AgentFinderMode = "mention" | "navigate" | "revive";
 
-export interface MentionAnchor {
+interface MentionAnchor {
   id: string;
   // Draft's eventual parent anchors unsaved-conversation search.
   parent?: string | null;
 }
 
-export interface MentionToken {
+interface MentionToken {
   start: number;
   end: number;
   query: string;
 }
 
-export type AgentFinderKeyAction =
-  | "close"
-  | "next"
-  | "previous"
-  | "choose"
-  | null;
+type AgentFinderKeyAction = "close" | "next" | "previous" | "choose" | null;
 
 export function agentFinderKeyAction(
   mode: AgentFinderMode | null,
@@ -101,7 +96,7 @@ export interface AgentMentionResult {
   takenOver: boolean;
 }
 
-export const normalizeMentionText = normalizeSearchText;
+const normalizeMentionText = normalizeSearchText;
 
 function compareStable(a: IndexedAgent, b: IndexedAgent): number {
   // Invariant: Code-point order is deterministic across browser locales
@@ -118,7 +113,7 @@ function cleanPathTitle(title: string): string {
   return oneLine.length > 30 ? oneLine.slice(0, 29) + "…" : oneLine;
 }
 
-export class AgentMentionIndex {
+class AgentMentionIndex {
   readonly sourceKey: string;
   readonly revision: string;
   readonly size: number;
@@ -345,7 +340,7 @@ export class AgentMentionIndex {
 // Small deterministic revision: enough to avoid rebuilding normalized strings
 // for identical polls. The source key remains separate, so equal trees in two
 // Recurse instances never share a cache identity.
-export function agentMentionRevision(nodes: MentionNode[]): string {
+function agentMentionRevision(nodes: MentionNode[]): string {
   let hash = 0x811c9dc5;
   // Invariant: /api/tree has a deterministic recent-first order. Including that
   // order is useful (a recency move changes ranking) and keeps unchanged 1.5s

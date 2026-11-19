@@ -5,23 +5,6 @@
 
 import type { PaneVisibility } from "../conversation-ui-state/schema.js";
 
-export type PaneActivation =
-  | { kind: "close"; id: string }
-  | { kind: "open"; id: string }
-  | null;
-
-export function resolvePaneActivation(
-  openIds: readonly string[],
-  availableIds: readonly string[],
-  preferredId?: string,
-): PaneActivation {
-  if (openIds.length > 0) return { kind: "close", id: openIds[0] };
-  if (preferredId && availableIds.includes(preferredId))
-    return { kind: "open", id: preferredId };
-  if (availableIds.length > 0) return { kind: "open", id: availableIds[0] };
-  return null;
-}
-
 // Preserve the remembered pane across explicit visibility changes.
 export function paneVisibilityAfterUserAction(
   prior: PaneVisibility,
@@ -40,20 +23,6 @@ export function paneIsActionable(
   availableIds: readonly string[],
 ): boolean {
   return openIds.length > 0 || availableIds.length > 0;
-}
-
-// Cycles available panes in registration order, wrapping deterministically.
-// Empty lists yield null; single/current-only choices are caller no-ops.
-export function cyclePane(
-  availableIds: readonly string[],
-  currentId: string | null,
-  delta: -1 | 1,
-): string | null {
-  if (availableIds.length === 0) return null;
-  const index = currentId ? availableIds.indexOf(currentId) : -1;
-  if (index < 0) return availableIds[delta > 0 ? 0 : availableIds.length - 1];
-  const next = (index + delta + availableIds.length) % availableIds.length;
-  return availableIds[next];
 }
 
 // The open pane that should carry the keyboard-focus indicator, given the pane

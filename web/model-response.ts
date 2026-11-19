@@ -33,10 +33,7 @@ function loadNames(): Promise<void> {
 
 /** "…" while the catalog loads, then the display name, else the raw id.
  * Spec: a label equal to the id is the server's fallback, not a name. */
-export function responseModelName(
-  id: string | undefined,
-  provider?: string,
-): string {
+function responseModelName(id: string | undefined, provider?: string): string {
   if (!id) return "unknown";
   if (!names) return "…";
   const scoped = `${provider}/${id}`;

@@ -5,7 +5,11 @@
 import { backendFor } from "../backends/backend.js";
 import { conversationId } from "../backends/conversation-id/index.js";
 import { backgroundWork, focusedPathReady } from "../background-work.js";
-import { applyFreshness, updateChrome } from "./chrome.js";
+import {
+  applyFreshness,
+  noteConversationSwitch,
+  updateChrome,
+} from "./chrome.js";
 import {
   type ConversationFetchPurpose,
   shouldCacheConversationResponse,
@@ -19,28 +23,210 @@ import {
 import { inputEl } from "../dom.js";
 import { notePaneConversationRendered, syncPanes } from "../panes.js";
 import {
-  clearFocusedEventsGone,
-  focusedEventsLive,
-  notePollActivity,
-  retargetFocusedEvents,
-} from "./poll.js";
+  configurePendingMessageRefresh,
+  optPending,
+} from "../pending-queue/index.js";
 import {
+  type FocusedSubscription,
+  subscribeFocusedEvents,
+} from "../focused-events.js";
+import { recordUiTiming } from "../interaction-timing.js";
+import { markMainThreadEvent } from "../main-thread-timing.js";
+import { phoneListEntry } from "../phone-nav.js";
+import {
+  applyFocusedEventPage,
+  catchUpRowThread,
   isDeletingConversation,
   refreshRowThread,
 } from "../row-thread-state.js";
+import { rowThreads } from "../row-thread-state/index.js";
 import {
   COLD_FOCUSED,
   coldStage,
   conversationRequestDispatched,
 } from "../show-timing.js";
-import { DRAFT, embeddedFrameHidden, state } from "../state.js";
-import { pollGeneration } from "./poll.js";
+import { DRAFT, embedded, embeddedFrameHidden, state } from "../state.js";
 import { convHash, renderThread } from "./thread.js";
 import { type Conversation } from "../types.js";
 import { type ViewPage } from "../row-thread-state/view-blocks.js";
 
+configurePendingMessageRefresh(refreshConv);
+
+let fallbackPoll: () => Promise<void>;
+let notePollActivity: () => void;
+
+export function configureFocusedPoll(
+  poll: typeof fallbackPoll,
+  activity: typeof notePollActivity,
+): void {
+  fallbackPoll = poll;
+  notePollActivity = activity;
+}
+
+export let pollGeneration = 0;
+export function advancePollGeneration(): number {
+  return ++pollGeneration;
+}
+
+// Focused SSE owns rows; polls keep chrome and provide a fallback.
+let focusedEventsId: string | null = null;
+let focusedEventsSub: FocusedSubscription | null = null;
+let focusedEventsHealthy = false;
+const ACTIVE_STREAM_STALL_MS = 12_000;
+let focusedEventsActivity = 0;
+let focusedEventsRun: {
+  run: string;
+  source: string;
+  settlingAt?: number;
+} | null = null;
+let focusedEventsGone: string | null = null;
+let wakePaint: { id: string; at: number } | null = null;
+
+export function noteWakePaint(id: string): void {
+  wakePaint = { id, at: performance.now() };
+}
+
+function finishWakePaint(id: string, requestedAt: number): void {
+  const timing = wakePaint;
+  if (!timing || timing.id !== id || requestedAt < timing.at) return;
+  wakePaint = null;
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() => {
+      if (!document.hidden && state.selectedId === id)
+        recordUiTiming("wake:painted", performance.now() - timing.at, id);
+    }),
+  );
+}
+
+// The stream replaces the focused row poll while subscribed: tail deltas
+// arrive as snapshot/rows frames (resyncing with Last-Event-ID on
+// reconnect), so the poll loop skips its own /view tail read for this id.
+function focusedEventsLive(id: string): boolean {
+  const running =
+    state.currentConv?.id === id && state.currentConv.status === "running";
+  const now = performance.now();
+  const settlingAt = focusedEventsRun?.settlingAt;
+  if (
+    focusedEventsId === id &&
+    focusedEventsHealthy &&
+    (now - focusedEventsActivity >
+      (running ? ACTIVE_STREAM_STALL_MS : 130_000) ||
+      (settlingAt !== undefined && now - settlingAt >= ACTIVE_STREAM_STALL_MS))
+  ) {
+    closeFocusedEvents();
+    retargetFocusedEvents(id);
+  }
+  return (
+    focusedEventsId === id && focusedEventsSub !== null && focusedEventsHealthy
+  );
+}
+
+/** Let a stream that acknowledged this run settle its rows. */
+function deferFocusedSettle(id: string, run: string, source: string): boolean {
+  if (!focusedEventsLive(id)) return false;
+  const active = focusedEventsRun;
+  if (!active || active.run !== run || active.source !== source) return false;
+  active.settlingAt ??= performance.now();
+  return true;
+}
+
+function focusedRowsSettling(id: string): boolean {
+  return focusedEventsId === id && focusedEventsRun?.settlingAt !== undefined;
+}
+
+export function closeFocusedEvents(): void {
+  focusedEventsSub?.close();
+  focusedEventsSub = null;
+  focusedEventsId = null;
+  focusedEventsHealthy = false;
+  focusedEventsActivity = 0;
+  focusedEventsRun = null;
+}
+
+export function retargetFocusedEvents(id: string | null): void {
+  if (focusedEventsGone !== null && focusedEventsGone !== id)
+    focusedEventsGone = null;
+  if (
+    !id ||
+    id === DRAFT ||
+    document.hidden ||
+    embeddedFrameHidden() ||
+    phoneListEntry()
+  ) {
+    if (focusedEventsSub) closeFocusedEvents();
+    return;
+  }
+  // Invariant: No stream for a deleting conversation: there is no history to
+  // feed it, only the retired session behind the Deleting notice.
+  if (isDeletingConversation(id)) {
+    if (focusedEventsId === id) closeFocusedEvents();
+    return;
+  }
+  if (focusedEventsId === id || focusedEventsGone === id) return;
+  closeFocusedEvents();
+  const held = rowThreads.get(id);
+  // Invariant: The stream resumes from rows a /view read already holds; with
+  // none it would resend that read's window as a snapshot.
+  if (!held) return;
+  const lastEventId = `${held.instanceId}:${held.revision}`;
+  const sub = subscribeFocusedEvents(
+    id,
+    {
+      onPage: (kind, page, at) => {
+        focusedEventsHealthy = true;
+        markMainThreadEvent("stream-batch");
+        if (applyFocusedEventPage(id, page, kind === "snapshot")) {
+          const source = page.run_state_clock?.[0];
+          const run = page.active_run;
+          if (!source || !run) focusedEventsRun = null;
+          else if (
+            focusedEventsRun?.source !== source ||
+            focusedEventsRun.run !== run
+          )
+            focusedEventsRun = { run, source };
+          applyFrameRunState(id, page, at);
+          finishWakePaint(id, at);
+        }
+      },
+      onTerminal: (status) => {
+        focusedEventsHealthy = false;
+        focusedEventsRun = null;
+        if (status === "gone") {
+          focusedEventsGone = id;
+          closeFocusedEvents();
+        }
+        // Invariant: Any other terminal frame (unavailable) leaves the
+        // subscription open: the server ended that attempt, and the transport
+        // reconnects on its own retry loop with the latest id.
+        void fallbackPoll();
+      },
+      onActivity: () => {
+        focusedEventsActivity = performance.now();
+        focusedEventsHealthy = true;
+      },
+      onTransportError: () => {
+        focusedEventsHealthy = false;
+        focusedEventsRun = null;
+        catchUpRowThread(id);
+        void fallbackPoll();
+      },
+    },
+    { lastEventId, viewing: !embedded },
+  );
+  if (sub) {
+    focusedEventsSub = sub;
+    focusedEventsId = id;
+  }
+}
+
+// Cleared by refreshConv when its focused read lands on the parked
+// id: a successful read supersedes the parked terminal marker.
+function clearFocusedEventsGone(id: string): void {
+  if (focusedEventsGone === id) focusedEventsGone = null;
+}
+
 // Caches views without rendering; only focused reads get full windows.
-export const fetchGeneration: Record<string, number> = {};
+const fetchGeneration: Record<string, number> = {};
 const stopFetchGeneration: Record<string, number> = {};
 async function fetchConvView(
   id: string,
@@ -146,10 +332,20 @@ function renderConv(conv: Conversation): void {
   renderThread(conv);
 }
 
+export function showSelectedConversation(
+  id: string,
+  preserveAttachments: boolean,
+): void {
+  noteConversationSwitch(id, showCached(id) || preserveAttachments);
+  // Invariant: The newly opened agent owns the one SSE subscription; the
+  // previously open one closes here so only the focused conversation streams.
+  retargetFocusedEvents(id);
+}
+
 // Paints a cached thread immediately and seeds its reconciliation hash. Panels
 // sync only after selectAgent starts the focused read, never before the
 // thread's data. Returns false on first visit.
-export function showCached(id: string): boolean {
+function showCached(id: string): boolean {
   const conv = state.convCache.view(id);
   if (!conv) return false;
   state.currentConv = conv;
@@ -159,13 +355,26 @@ export function showCached(id: string): boolean {
   return true;
 }
 
-// When each conversation's latest applied metadata read landed.
+// Only reads that apply run state can supersede a stream or Stop lookup.
 const convReadAt = new Map<string, number>();
-let latestRead: { id: string; started: number } | null = null;
+let latestRunRead: { id: string; started: number } | null = null;
+
+function newerRunState(
+  current: Conversation,
+  incoming: Conversation,
+  requestedAt: number,
+): boolean {
+  const latest = current.run_state_clock;
+  const read = incoming.run_state_clock;
+  return (
+    (latestRunRead?.id === current.id && latestRunRead.started > requestedAt) ||
+    (!!latest && !!read && latest[0] === read[0] && latest[1] > read[1])
+  );
+}
 
 // Server-side sample clocks order run-state reads without assuming a shared
 // client/server clock.
-export function applyFrameRunState(id: string, page: ViewPage, at: number) {
+function applyFrameRunState(id: string, page: ViewPage, at: number) {
   const conv = state.currentConv;
   if (conv?.id !== id || typeof page.turn_status !== "string") return;
   const clock = page.run_state_clock;
@@ -175,10 +384,16 @@ export function applyFrameRunState(id: string, page: ViewPage, at: number) {
     conv.run_state_clock = clock;
   } else if (at <= (convReadAt.get(id) ?? Infinity)) return;
   const run = page.active_run ?? null;
-  if (conv.status === page.turn_status && (conv.active_run ?? null) === run)
+  const start = page.active_run_start ?? null;
+  if (
+    conv.status === page.turn_status &&
+    (conv.active_run ?? null) === run &&
+    (conv.active_run_start ?? null) === start
+  )
     return;
   conv.status = page.turn_status as Conversation["status"];
   conv.active_run = run;
+  conv.active_run_start = start;
   state.openConvHash = convHash(conv);
   renderConv(conv);
 }
@@ -191,10 +406,11 @@ export async function refreshConv(
   inputEl.placeholder = "Message this agent…";
   const id = state.selectedId;
   const requestedAt = performance.now();
-  const wasRunning =
-    state.currentConv?.id === id &&
-    ["running", "interrupting"].includes(state.currentConv.status);
   const rowsFromEvents = focusedEventsLive(id);
+  const directRowRead =
+    purpose === "focused" &&
+    !isDeletingConversation(id) &&
+    (!rowsFromEvents || (generation === null && focusedRowsSettling(id)));
   let settledRowsChanged = false;
   // Invariant: Nothing best-effort may hold one of the browser's few per-origin
   // connections while the read the reader is waiting on is in flight.
@@ -202,10 +418,9 @@ export async function refreshConv(
   // Invariant: Served snapshots supply settled tool data without a second read.
   // During a run, only absent subscriptions use the /view fallback. A settled
   // read also catches up below; deleting sessions have no history to read.
-  const blocksPromise =
-    purpose === "focused" && !rowsFromEvents && !isDeletingConversation(id)
-      ? refreshRowThread(id)
-      : Promise.resolve(false);
+  const blocksPromise = directRowRead
+    ? refreshRowThread(id)
+    : Promise.resolve(false);
   const { status, conv } = await fetchConvView(
     id,
     true,
@@ -214,19 +429,37 @@ export async function refreshConv(
     undefined,
   )
     .then(async (result) => {
-      // Invariant: A settled read must reconcile the admitted send's real row
-      // before painting idle; otherwise its optimistic echo looks queued.
+      const current = state.currentConv;
+      const next = result.conv;
       if (
-        wasRunning &&
+        current?.id === id &&
+        (current.status === "running" || current.status === "interrupting") &&
         rowsFromEvents &&
+        !directRowRead &&
         !embeddedFrameHidden() &&
-        result.conv?.status === "idle" &&
-        !result.conv.active_run &&
+        next?.status === "idle" &&
+        !next.active_run &&
         id === state.selectedId &&
         (generation === null || generation === pollGeneration) &&
-        !isDeletingConversation(id)
-      )
-        settledRowsChanged = await refreshRowThread(id);
+        !isDeletingConversation(id) &&
+        !newerRunState(current, next, requestedAt)
+      ) {
+        // Invariant: Paint idle promptly, but reconcile unresolved optimistic
+        // inputs first so an accepted send cannot reappear as queued.
+        const latest = current.run_state_clock;
+        const read = next.run_state_clock;
+        const deferRows =
+          purpose === "focused" &&
+          generation !== null &&
+          optPending(id).length === 0 &&
+          !!current.active_run &&
+          !!latest &&
+          !!read &&
+          latest[0] === read[0] &&
+          latest[1] < read[1] &&
+          deferFocusedSettle(id, current.active_run, read[0]);
+        if (!deferRows) settledRowsChanged = await refreshRowThread(id);
+      }
       return result;
     })
     .finally(() => {
@@ -249,21 +482,16 @@ export async function refreshConv(
   }
   coldStage(COLD_FOCUSED);
   const current = state.currentConv;
-  const latest = current?.run_state_clock;
-  const read = conv.run_state_clock;
-  const olderRead = latestRead?.id === id && latestRead.started > requestedAt;
-  if (
-    current?.id === id &&
-    (olderRead ||
-      (latest && read && latest[0] === read[0] && latest[1] > read[1]))
-  ) {
+  if (current?.id === id && newerRunState(current, conv, requestedAt)) {
     conv.status = current.status;
     conv.active_run = current.active_run;
-    conv.run_state_clock = latest;
+    conv.active_run_start = current.active_run_start;
+    conv.run_state_clock = current.run_state_clock;
+  } else {
+    latestRunRead = { id, started: requestedAt };
+    convReadAt.set(id, performance.now());
   }
-  if (!olderRead) latestRead = { id, started: requestedAt };
   state.currentConv = conv;
-  convReadAt.set(id, performance.now());
   focusedRead.stopReadAuthoritativeId = id;
   // Invariant: A successful read proves the conversation exists: lift any
   // terminal park and make sure the focused subscription is live (a no-op while

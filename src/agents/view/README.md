@@ -18,9 +18,11 @@ Pi Durable's SQLite store is the history. The view merges live Harness updates
 with stored pages by entry identity, so each entry shows once whether it arrived
 live, from storage, or both. Old Pi JSONL sessions can still be read, but there
 is no second live transcript. Thinking rows retain a presence flag even when
-the provider supplies only encrypted or redacted thinking; titles remain
-readable text only. Script calls beyond the display cap retain grouped names
-and statistics without their arguments.
+the provider supplies only encrypted or redacted thinking. Readable thinking
+shows a bounded heading or opening line in the thread. The live panel selects
+the latest readable thought within the active run; an empty, redacted or
+encrypted block cannot displace it. Script calls beyond the display cap retain
+grouped names and statistics without their arguments.
 
 Authentication and model-availability failures retain the recorded agent's
 level-reselection guidance in both the visible sentence and raw detail.

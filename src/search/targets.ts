@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { AgentArchive, ArchivedAgent } from "../agents/durable/archive";
 import type { SearchTarget } from "./index";
 
-export interface SearchAgent {
+interface SearchAgent {
   id: string;
   title?: unknown;
   parent?: unknown;

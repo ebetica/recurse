@@ -37,7 +37,7 @@ export interface CorpusCase {
   readonly events?: readonly string[];
 }
 
-export const KEPT_HEADERS = new Set([
+const KEPT_HEADERS = new Set([
   "accept-encoding",
   "accept-ranges",
   "allow",
@@ -58,7 +58,6 @@ export const KEPT_HEADERS = new Set([
   "x-content-type-options",
   "x-scripted",
 ]);
-const TIMING_FIELDS = ["ms", "seconds", "window_s", "p50_ms_", "p95_ms_"];
 
 const latin1 = (text: string) => new Uint8Array(Buffer.from(text, "latin1"));
 const concat = (parts: readonly Uint8Array[]) =>
@@ -263,84 +262,4 @@ export function normalise(raw: Uint8Array, method: string): NormalisedResponse {
   else if (!body.length) rendered = { empty: true };
   else rendered = { bytes: body.length, sha256: sha256(body) };
   return { status: parsed.status, headers, body: rendered };
-}
-
-export function normaliseEvent(
-  line: string,
-  gzipIn: boolean,
-  gzipOut: boolean,
-): string {
-  const parts: string[] = [];
-  for (const part of line.split(" ")) {
-    const key = part.split("=")[0]!;
-    if (TIMING_FIELDS.some((prefix) => key.startsWith(prefix))) continue;
-    if (gzipIn && key === "bytes_in") parts.push("bytes_in=<gzip>");
-    else if (gzipOut && (key === "bytes_out" || /^bytes_\d+$/.test(key)))
-      parts.push(`${key}=<gzip>`);
-    else parts.push(part);
-  }
-  return parts.join(" ");
-}
-
-export interface Replayed {
-  readonly name: string;
-  readonly response: NormalisedResponse;
-  readonly events?: string[];
-}
-
-export async function runCases(
-  port: number,
-  cases: readonly CorpusCase[],
-  events?: string[],
-): Promise<Replayed[]> {
-  const out: Replayed[] = [];
-  for (const item of cases) {
-    const before = events?.length ?? 0;
-    const raw = await exchange(port, requestBytes(item.request));
-    const response = normalise(raw, item.request.method);
-    if (events === undefined) {
-      out.push({ name: item.name, response });
-      continue;
-    }
-    const deadline = Date.now() + 2000;
-    while (events.length === before && Date.now() < deadline)
-      await Bun.sleep(5);
-    await Bun.sleep(20);
-    out.push({
-      name: item.name,
-      response,
-      events: events
-        .slice(before)
-        .map((line) =>
-          normaliseEvent(
-            line,
-            item.request.gzip !== undefined,
-            response.headers["content-encoding"] === "gzip",
-          ),
-        ),
-    });
-  }
-  return out;
-}
-
-export function mismatches(
-  cases: readonly CorpusCase[],
-  replayed: readonly Replayed[],
-  expectEvents = true,
-): string[] {
-  const problems: string[] = [];
-  cases.forEach((item, index) => {
-    const got = replayed[index]!;
-    const want: Record<string, unknown> = { response: item.response };
-    const have: Record<string, unknown> = { response: got.response };
-    if (expectEvents && item.events !== undefined) {
-      want.events = item.events;
-      have.events = got.events;
-    }
-    if (!Bun.deepEquals(want, have))
-      problems.push(
-        `${item.name}:\n  want ${JSON.stringify(want)}\n  got  ${JSON.stringify(have)}`,
-      );
-  });
-  return problems;
 }

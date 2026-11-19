@@ -7,8 +7,6 @@ import {
   type JsonObject,
 } from "../view/session_entries";
 
-export type { JsonObject };
-
 const MAX_DETAIL_BYTES = 4 << 20;
 
 function pythonInt(value: number): number {

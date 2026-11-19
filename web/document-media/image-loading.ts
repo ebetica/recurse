@@ -1,5 +1,5 @@
 // Browser image load/decode boundary for Artifact placeholders.
-export interface ArtifactImageElement {
+interface ArtifactImageElement {
   src: string;
   complete: boolean;
   naturalWidth: number;
@@ -14,7 +14,7 @@ export interface ArtifactImageElement {
   decode?(): Promise<void>;
 }
 
-export interface DecodedArtifactImage {
+interface DecodedArtifactImage {
   width: number;
   height: number;
 }
@@ -34,7 +34,8 @@ export async function loadDecodedArtifactImage(
       image.removeEventListener("load", loaded);
       image.removeEventListener("error", failed);
       signal?.removeEventListener("abort", aborted);
-      error ? reject(error) : resolve();
+      if (error) reject(error);
+      else resolve();
     };
     const loaded = () => finish();
     const failed = () =>

@@ -188,7 +188,7 @@ function safeFailure(error: unknown): McpSignInError {
   );
 }
 
-export type ResolveValue = (value: string) => Promise<string>;
+type ResolveValue = (value: string) => Promise<string>;
 
 async function provider(
   entry: HttpEntry,

@@ -1,4 +1,4 @@
-export interface PaneLoadingSurface {
+interface PaneLoadingSurface {
   classList: Pick<DOMTokenList, "toggle">;
   setAttribute(name: string, value: string): void;
   inert: boolean;

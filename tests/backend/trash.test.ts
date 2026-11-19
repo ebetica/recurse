@@ -8,7 +8,7 @@ import {
 import {
   retireAll as retireAllWorker,
   sweepTrash,
-} from "../../src/utils/trash_sweep";
+} from "../../src/utils/trash-sweep";
 import fs from "node:fs";
 import {
   closeSync,

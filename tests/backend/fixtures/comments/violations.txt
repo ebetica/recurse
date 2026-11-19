@@ -28,7 +28,7 @@ function work(parameter: number) {
   // ordinary body comment
   const local = parameter; // trailing comment
   // const removed = 1;
-  /* Invariant:
+  /* This ordinary body comment is too long:
    * first
    * second
    * third
@@ -59,6 +59,7 @@ enum DuplicateMode {
 }
 function nested() {
   class Local {
+    /** Default local value. */
     field = 1; // Not a declaration doc inside a function.
   }
   const local = 1; // Not a module declaration.

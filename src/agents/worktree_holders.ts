@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { Cancelled, checkAbort } from "../utils/tasks";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 
 export class WorktreeHolders {
   constructor(private readonly dataDir: string) {}

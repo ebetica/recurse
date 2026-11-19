@@ -34,7 +34,7 @@ export function writeLockOwner(fd: number, ...pids: number[]): void {
 }
 
 /** The newest recorded pid that is still alive, else "unknown". */
-export function lockOwner(fd: number): string {
+function lockOwner(fd: number): string {
   let values: string[] = [];
   try {
     const buffer = new Uint8Array(256);
@@ -72,7 +72,7 @@ export function inheritedLockFd(dataDir: string): number | null {
   return null;
 }
 
-export interface SupervisorLock {
+interface SupervisorLock {
   readonly fd: number;
   /** Close the descriptor; the kernel lock drops with its last holder. */
   close(): void;

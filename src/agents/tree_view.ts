@@ -4,7 +4,7 @@
 // Serve does no record loads/scans; overlays derive from live in-memory rows.
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { ConversationRecord, LiveInputs } from "./conversation_store";
+import type { ConversationRecord, LiveInputs } from "./storage";
 import { liveTags } from "../agent_metadata/index";
 import {
   type RuntimeLogger,
@@ -15,19 +15,12 @@ import {
 type Conv = ConversationRecord;
 export type TreeRow = Readonly<Record<string, unknown>>;
 
-export const PERSISTED_AGENT_STATUSES: ReadonlySet<string> = new Set([
+const PERSISTED_AGENT_STATUSES: ReadonlySet<string> = new Set([
   "idle",
   "running",
   "interrupted",
   "error",
   "deleting",
-]);
-export const TREE_STATUSES: ReadonlySet<string> = new Set([
-  ...PERSISTED_AGENT_STATUSES,
-  "working",
-  "waiting",
-  "interrupting",
-  "unknown",
 ]);
 
 export const IDLE_LIVE: LiveInputs = Object.freeze({
@@ -84,7 +77,7 @@ function pyFloat(value: number | string | boolean): number {
 }
 
 /** One conversation's base (pre-overlay) tree status. */
-export function projectBase(conv: Conv, live: LiveInputs): string {
+function projectBase(conv: Conv, live: LiveInputs): string {
   if (live.status === "interrupting") return "interrupting";
   if (live.status === "running") return "running";
   const raw = conv.status;
@@ -120,7 +113,7 @@ function checkedParent(conv: Conv): string | null {
 }
 
 /** The operator's take-over marker; mute never counts. */
-export function isTakenOver(conv: Conv): boolean {
+function isTakenOver(conv: Conv): boolean {
   return pyTruthy(conv.taken_over);
 }
 
@@ -139,7 +132,7 @@ function markAncestors(
 }
 
 /** Working/waiting overlays over base statuses; taken-over agents sit out. */
-export function applyOverlays(
+function applyOverlays(
   base: ReadonlyMap<string, string>,
   parents: ReadonlyMap<string, string | null>,
   takenOver: ReadonlySet<string>,
@@ -194,7 +187,7 @@ export function projectStatuses(
 }
 
 /** One display row; `status` is the pre-overlay base. Python key order. */
-export function buildRow(
+function buildRow(
   conv: Conv,
   o: {
     base: string;
@@ -300,19 +293,19 @@ export function buildRow(
   };
 }
 
-export interface SkillContextSource {
+interface SkillContextSource {
   /** Installed snapshot only; never blocks (context_for_workdir_loop_safe). */
   contextForWorkdirLoopSafe(workdir: string | null): string | null;
   /** One shared render per rebuild (context_for_workdir + SkillRenderCache). */
   renderer(): (workdir: string | null) => Promise<string | null>;
 }
 
-export interface TreeViewDeps {
+interface TreeViewDeps {
   skills: SkillContextSource;
   logger: RuntimeLogger;
 }
 
-export interface TreeEntryInput {
+interface TreeEntryInput {
   record: Conv;
   live: LiveInputs;
   workdir: string | null;

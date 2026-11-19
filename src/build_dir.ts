@@ -32,11 +32,6 @@ function appendPath(path: string, child: string): string {
 
 export const BUILD_DIR = appendPath(CHECKOUT_ROOT, ".recurse");
 
-/** Return the build directory belonging to `checkout`. */
-export function forCheckout(checkout: string): string {
-  return appendPath(checkout, ".recurse");
-}
-
 /** The installed Pi package (`@earendil-works/pi-coding-agent`). */
 export const PI_PACKAGE_ROOT = appendPath(
   CHECKOUT_ROOT,

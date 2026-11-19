@@ -21,13 +21,10 @@ import {
 } from "../../config";
 import * as runtimeLogging from "../../observability/runtime_logging";
 import * as startupMetrics from "../../observability/startup_metrics";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 import { flockExclusive } from "../../utils/flock";
-import { retireAll, retirePath, sweepTrash } from "../../utils/trash_sweep";
-import type {
-  ConversationRecord,
-  ConversationStore,
-} from "../conversation_store";
+import { retireAll, retirePath, sweepTrash } from "../../utils/trash-sweep";
+import type { ConversationRecord, ConversationStore } from "../storage";
 import type { AttachmentDrafts, DraftDirs } from "./attachment_drafts";
 import { AttachmentError, type Manifest } from "./attachments/base";
 import type { CropOperation } from "./attachments/crop";
@@ -120,7 +117,7 @@ export interface AgentTempDeps {
   monotonic?: () => number;
 }
 
-export const TRASH_DRAIN_INTERVAL = 30.0;
+const TRASH_DRAIN_INTERVAL = 30.0;
 
 /** Scratch lifecycle for one instance; also the draft lifecycle's DraftDirs. */
 export class AgentTemp implements DraftDirs {

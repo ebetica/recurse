@@ -2,7 +2,7 @@
 // sanitized markdown. Track the initiating control and render scope so delayed
 // writes and older timers cannot update a reused control.
 
-export interface CopyFeedbackAttempt {
+interface CopyFeedbackAttempt {
   control: object;
   scope: string;
   token: symbol;

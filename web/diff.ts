@@ -1162,7 +1162,7 @@ function refreshFileViews(
     views = new Map();
     fileViews.set(agentId, views);
   }
-  for (const [path, view] of [...views]) {
+  for (const [path, view] of Array.from(views)) {
     if (!paths.has(path)) {
       views.delete(path);
       patches.get(agentId)?.delete(path);
@@ -1171,7 +1171,7 @@ function refreshFileViews(
 }
 
 // Diffs with at most this many changed files open every file on first paint.
-export const OPEN_ALL_FILES_MAX = 20;
+const OPEN_ALL_FILES_MAX = 20;
 
 function fileViewFor(
   agentId: string,
@@ -1992,11 +1992,11 @@ registerCommentSource({
   },
   discard: () => {
     const id = state.selectedId;
-    for (const scope of [...comments.keys()])
+    for (const scope of comments.keys())
       if (scope === id || scope.startsWith(id + "\n")) comments.delete(scope);
-    for (const scope of [...fileViews.keys()])
+    for (const scope of fileViews.keys())
       if (scope === id || scope.startsWith(id + "\n")) fileViews.delete(scope);
-    for (const scope of [...patches.keys()])
+    for (const scope of patches.keys())
       if (scope === id || scope.startsWith(id + "\n")) patches.delete(scope);
   },
 });

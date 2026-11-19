@@ -11,12 +11,9 @@ import {
   shellSplit,
   truncateToolDetail,
   SAFE_FILE_TOOLS,
-  TOOL_COMMAND_MAX,
   type JsonObject,
 } from "./redaction";
 import { bashReadTarget } from "./shaping";
-
-export type { JsonObject } from "./redaction";
 export type ToolStat = Record<string, number | string>;
 
 const TOOL_STAT_KINDS: Record<string, string> = {
@@ -101,29 +98,6 @@ function pythonRepr(value: unknown): string {
     .replaceAll("\r", "\\r")
     .replaceAll("\t", "\\t");
   return `${quote}${escaped}${quote}`;
-}
-
-// Collapse tool names in call order into a first-use-ordered name/count map.
-export function toolNameCounts(
-  names: readonly string[],
-): Record<string, number> {
-  const counts: Record<string, number> = {};
-  const order: string[] = [];
-  for (const name of names) {
-    const hasName = Object.hasOwn(counts, name);
-    const next = (hasName ? counts[name]! : 0) + 1;
-    if (!hasName) order.push(name);
-    Object.defineProperty(counts, name, {
-      value: next,
-      enumerable: true,
-      configurable: true,
-      writable: true,
-    });
-  }
-  // Invariant: Ordinary JS objects enumerate integer-looking keys numerically;
-  // the Python dict contract is first-use order even for such names, so
-  // preserve it here.
-  return new Proxy(counts, { ownKeys: () => order });
 }
 
 function toolInputObject(raw: unknown): JsonObject | null {
@@ -518,6 +492,4 @@ export class TurnStats {
     };
   }
 }
-
-export { TOOL_COMMAND_MAX };
-export { readLines, resultText };
+export { readLines };

@@ -10,7 +10,7 @@ import {
   SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker.ts";
 import { openFauxHarness } from "./fixtures/durable_sqlite/harness.ts";
-import { drainWorkerReplies } from "../../src/observability/slow_span";
+import { drainWorkerReplies } from "../../src/observability/slow-span";
 
 const root = mkdtempSync(join(tmpdir(), "durable-sqlite-"));
 const worker = new SqliteWorker();

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
 import {
   createModels,
+  type AssistantMessageEvent,
   type AssistantMessageEventStream,
   type FauxProviderHandle,
   type FauxResponseFactory,
@@ -47,7 +48,8 @@ export function createAgents(instance: Instance, { rootAgentId }: Storage) {
 
   function paceThinking(
     source: AssistantMessageEventStream,
-    commit: Promise<void>,
+    commit?: Promise<void>,
+    gate?: (event: AssistantMessageEvent) => Promise<void> | undefined,
   ) {
     const copied = createAssistantMessageEventStream();
     const paced = createAssistantMessageEventStream();
@@ -57,9 +59,11 @@ export function createAgents(instance: Instance, { rootAgentId }: Storage) {
     })();
     void (async () => {
       for await (const event of copied) {
-        if (event.type === "thinking_delta")
+        if (commit && event.type === "thinking_delta")
           await Bun.sleep((Math.ceil(event.delta.length / 4) / 80) * 1000);
-        if (event.type === "toolcall_end") await commit;
+        if (commit && event.type === "toolcall_end") await commit;
+        const held = gate?.(event);
+        if (held) await held;
         paced.push(event);
       }
       paced.end(await copied.result());
@@ -70,6 +74,7 @@ export function createAgents(instance: Instance, { rootAgentId }: Storage) {
     agent: string,
     tokensPerSecond = 20_000,
     commit?: Promise<void>,
+    gate?: (event: AssistantMessageEvent) => Promise<void> | undefined,
   ) {
     const existing = agents.get(agent)?.faux;
     if (existing) return existing;
@@ -78,13 +83,13 @@ export function createAgents(instance: Instance, { rootAgentId }: Storage) {
       tokensPerSecond: commit ? undefined : tokensPerSecond,
     });
     durableModels.setProvider(
-      commit
+      commit || gate
         ? {
             ...faux.provider,
             stream: (...args) =>
-              paceThinking(faux.provider.stream(...args), commit),
+              paceThinking(faux.provider.stream(...args), commit, gate),
             streamSimple: (...args) =>
-              paceThinking(faux.provider.streamSimple(...args), commit),
+              paceThinking(faux.provider.streamSimple(...args), commit, gate),
           }
         : faux.provider,
     );

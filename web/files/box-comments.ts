@@ -178,6 +178,25 @@ export function installBoxComments(pane: HTMLElement): void {
     },
     { capture: true },
   );
+  // Invariant: Capture phase releases a quick tap's hold before the image
+  // viewer's handler, so a busy page that ran the hold timer first still taps.
+  pane.addEventListener(
+    "pointerup",
+    (event) => {
+      if (event.pointerId !== press?.id) return;
+      const { frame, mark, time } = press;
+      if (
+        !mark?.classList.contains("files-box-start") ||
+        event.timeStamp - time >= HOLD_MS
+      )
+        return;
+      touchDrew = false;
+      frame.releasePointerCapture(event.pointerId);
+      mark.remove();
+      press.mark = undefined;
+    },
+    { capture: true },
+  );
   pane.addEventListener("pointerup", (event) => {
     if (event.pointerId !== press?.id) return;
     const { frame, from, mark, timer } = press;

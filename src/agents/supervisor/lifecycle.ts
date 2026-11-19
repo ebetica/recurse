@@ -4,7 +4,7 @@
 // Dispose the store after bounded HTTP drain; retry state stays durable.
 import { mkdir } from "node:fs/promises";
 import { backgroundWork } from "../../observability/request_timing";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 import { join } from "node:path";
 import {
   ERROR,
@@ -16,15 +16,15 @@ import {
 } from "../../observability/runtime_logging";
 import { STOP_GRACE_MS } from "../../process_lifecycle";
 import { HTTP_DRAIN_SECONDS } from "../../shutdown_budget";
-import { retireAll } from "../../utils/trash_sweep";
+import { retireAll } from "../../utils/trash-sweep";
 import { Cancelled, checkAbort, type TaskSet } from "../../utils/tasks";
-import type { ConversationRecord } from "../conversation_store";
-import { fenced, type HolderSnapshot } from "../mutation_guard";
+import type { ConversationRecord } from "../storage";
+import { fenced, type HolderSnapshot } from "../lifecycle";
 
 type Json = Record<string, unknown>;
 
 /** Pre-log file-world queue directories, retired once at watcher startup. */
-export const LEGACY_FILE_WORLD_DIRS = [
+const LEGACY_FILE_WORLD_DIRS = [
   "inbox",
   "model_requests",
   "mute_requests",
@@ -35,15 +35,15 @@ export const LEGACY_FILE_WORLD_DIRS = [
   "spawn_requests",
 ];
 /** The pre-migration on-disk process registry, retired once at startup. */
-export const PROCESS_REGISTRY_RESIDUE_DIR = "process_registry";
+const PROCESS_REGISTRY_RESIDUE_DIR = "process_registry";
 /** The BTW side-question store that side conversations replaced. */
-export const BTW_RESIDUE_DIR = "btw";
+const BTW_RESIDUE_DIR = "btw";
 /** A tight local tick picks up queued sends near-instantly. */
-export const WATCH_INTERVAL = 0.2;
+const WATCH_INTERVAL = 0.2;
 /** Upper bound on the shutdown join. */
-export const SHUTDOWN_JOIN_SECONDS = 3.0;
+const SHUTDOWN_JOIN_SECONDS = 3.0;
 /** process_lifecycle.STOP_GRACE, in milliseconds. */
-export const SHUTDOWN_STOP_GRACE_MS = STOP_GRACE_MS;
+const SHUTDOWN_STOP_GRACE_MS = STOP_GRACE_MS;
 
 export interface LifecycleNode {
   readonly turnTask: Promise<void> | null;
@@ -139,7 +139,7 @@ export interface LifecycleDeps {
   shutdownDrainSeconds?: number;
 }
 
-export interface Readiness {
+interface Readiness {
   ready: boolean;
   active_agents: number | null;
 }

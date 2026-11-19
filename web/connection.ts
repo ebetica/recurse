@@ -19,7 +19,7 @@ import {
   matchingGenerationUrl,
 } from "./connection/generation-recovery.js";
 
-export const VERSION_PROBE_INTERVAL_MS = 5_000;
+const VERSION_PROBE_INTERVAL_MS = 5_000;
 
 function elapsedLabel(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));

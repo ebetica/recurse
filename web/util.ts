@@ -5,7 +5,7 @@ import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { mathExtension } from "./math.js";
 import { PERSON_ICON } from "./icons.js";
-export { PERSON_ICON } from "./icons.js";
+import "./icons.js";
 import { parseMessageMarkdown } from "./util/message-markdown.js";
 import { strikethrough } from "./util/strikethrough.js";
 
@@ -23,8 +23,6 @@ function markdownHtml(t: string, message: boolean): string {
 const MARKDOWN_URI_POLICY = {
   ALLOWED_URI_REGEXP: /^(?!(?:javascript|vbscript|data):)/i,
 };
-export const md = (t: string, message = false): string =>
-  DOMPurify.sanitize(markdownHtml(t, message), MARKDOWN_URI_POLICY);
 
 /** Navigation schemes survive; script/data links stay inert and labelled. */
 function sanitizedMarkdownFragment(
@@ -75,16 +73,4 @@ export function relTime(ts: number): string {
   if (s < 3600) return Math.floor(s / 60) + "m";
   if (s < 86400) return Math.floor(s / 3600) + "h";
   return Math.floor(s / 86400) + "d";
-}
-
-// compact interval label from seconds: "30m", "2h", "1d", else "45s"
-export function fmtEvery(secs: number | null | undefined): string {
-  secs = Math.round(secs || 0);
-  for (const [u, d] of [
-    ["d", 86400],
-    ["h", 3600],
-    ["m", 60],
-  ] as const)
-    if (secs >= d && secs % d === 0) return secs / d + u;
-  return secs + "s";
 }

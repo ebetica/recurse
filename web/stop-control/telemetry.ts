@@ -1,7 +1,7 @@
 import { jpost } from "../api.js";
 import type { StopIdGenerator } from "./id.js";
 
-export type StopDiagnosticEvent =
+type StopDiagnosticEvent =
   | "capture_installed"
   | "capture_seen"
   | "dispatch_started"
@@ -9,20 +9,16 @@ export type StopDiagnosticEvent =
   | "request_id_fallback"
   | "request_result"
   | "request_failure";
-export type StopDiagnosticInput =
-  | "pointerdown"
-  | "touchstart"
-  | "click"
-  | "keyboard";
-export type StopDiagnosticPointer = "mouse" | "touch" | "pen" | "unknown";
-export type StopDiagnosticResult =
+type StopDiagnosticInput = "pointerdown" | "touchstart" | "click" | "keyboard";
+type StopDiagnosticPointer = "mouse" | "touch" | "pen" | "unknown";
+type StopDiagnosticResult =
   | "accepted"
   | "rejected"
   | "finished"
   | "lookup_failed"
   | "exception";
 
-export interface StopDiagnosticFields {
+interface StopDiagnosticFields {
   conversationId?: string | null;
   runId?: string | null;
   stopId?: string | null;

@@ -77,6 +77,7 @@ function shape(blocks: Rec[]): Rec[] {
       order: _r,
       call_id: _c,
       artifact_id: _a,
+      thinking_key: _thinkingKey,
       ...b
     }) => {
       const meta = b.meta as Rec | null;
@@ -186,7 +187,10 @@ test("a recorded transcript shows the rows of a Pi session with the same message
     ["assistant:assistant", "aborted"],
   ]);
   expect(durable[2]!.result).toBe("one\ntwo\nthree\n");
-  expect(durable[1]!.has_thinking).toBe(true);
+  expect(durable[1]).toMatchObject({
+    has_thinking: true,
+    thinking_key: "9:1791351946263",
+  });
   expect(durable[1]!.usage).toMatchObject({ input: 2, cacheRead: 1388 });
   expect(String(durable[5]!.text)).toStartWith("## Goal");
   expect(durable[5]!.offset).toBe(27);
@@ -205,6 +209,7 @@ test("live documents show the partial answer, running tool output, and Compactin
     role: "assistant",
     live: true,
     text: "",
+    thinking_key: "9:1791351946263",
   });
   expect(
     (await last(live.thinking!, 9)).thinking_elapsed_ms,

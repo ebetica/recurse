@@ -1,6 +1,5 @@
 // Shared attachment shapes, budgets and name/media helpers; MIME uses
 // media_types.
-// JSON cannot distinguish integral floats, so manifestSize accepts both.
 
 import { createHash } from "node:crypto";
 import { guessType } from "../../../media_types";
@@ -12,7 +11,7 @@ export const VERSION = 1;
 export const MAX_FILE_BYTES = 100 * 1024 * 1024;
 /** Uploads stay smaller: the upload route holds the whole body in memory. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
-export const MAX_NAME_CHARS = 180;
+const MAX_NAME_CHARS = 180;
 export const MAX_MANIFEST_BYTES = 8192;
 export const SOURCE_UPLOAD = "upload";
 export const SOURCE_PUBLICATION = "publication";
@@ -46,22 +45,21 @@ export const INLINE_RASTER_TYPES = Object.freeze({
 });
 
 // Preview media types; serving requires nosniff and a script-free sandbox CSP.
-export const INLINE_MEDIA_TYPES: Readonly<Record<string, string>> =
-  Object.freeze({
-    svg: "image/svg+xml",
-    mp3: "audio/mpeg",
-    m4a: "audio/mp4",
-    wav: "audio/wav",
-    ogg: "audio/ogg",
-    oga: "audio/ogg",
-    opus: "audio/ogg",
-    flac: "audio/flac",
-    mp4: "video/mp4",
-    m4v: "video/mp4",
-    webm: "video/webm",
-    ogv: "video/ogg",
-    mov: "video/quicktime",
-  });
+const INLINE_MEDIA_TYPES: Readonly<Record<string, string>> = Object.freeze({
+  svg: "image/svg+xml",
+  mp3: "audio/mpeg",
+  m4a: "audio/mp4",
+  wav: "audio/wav",
+  ogg: "audio/ogg",
+  oga: "audio/ogg",
+  opus: "audio/ogg",
+  flac: "audio/flac",
+  mp4: "video/mp4",
+  m4v: "video/mp4",
+  webm: "video/webm",
+  ogv: "video/ogg",
+  mov: "video/quicktime",
+});
 
 /** Inline media type for a filename listed in INLINE_MEDIA_TYPES, else null. */
 export function inlineMediaType(name: string): string | null {
@@ -102,17 +100,6 @@ export const PUBLICATION_LIMITS: OwnerLimits = Object.freeze({
   maxFileBytes: MAX_FILE_BYTES,
   publishesPerMinute: 120,
 });
-
-/** Size field from a manifest, with Python's bool-is-an-int behavior. */
-export function manifestSize(manifest: Manifest): number | boolean {
-  const size = manifest.size;
-  if (typeof size !== "number" || !Number.isInteger(size)) {
-    if (typeof size !== "boolean") {
-      throw new AttachmentError("attachment manifest is corrupt");
-    }
-  }
-  return size;
-}
 
 /** Blob leaf name from a manifest. */
 export function manifestBlob(manifest: Manifest): string {

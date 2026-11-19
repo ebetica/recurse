@@ -5,23 +5,23 @@
 import { lstat, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
-import { AgentStore } from "./agent_store";
+import {
+  AgentStore,
+  assertNoUnimportedLegacyState,
+  ConversationStore,
+  SET_MODEL_MARKER,
+} from "./storage";
 import { pruneEmptyOwner } from "../artifacts";
 import { AgentTree } from "./agent_tree";
 import { WorktreeHolders } from "./worktree_holders";
 import { DurableHost } from "./durable/host";
 import { PiSwitchover } from "./supervisor/switchover";
 import { ParkedActions } from "./compaction";
-import {
-  assertNoUnimportedLegacyState,
-  ConversationStore,
-  SET_MODEL_MARKER,
-} from "./conversation_store";
 import { AgentTools } from "./tools";
-import { TreeLifecycle } from "./mutation_guard";
+import { TreeLifecycle } from "./lifecycle";
+import { DeferredReaps, DeferredReapSeed } from "./lifecycle/retry";
 import * as reapHistory from "./reap_history";
 import { Reconciler } from "./reconciler";
-import { DeferredReaps, DeferredReapSeed } from "./retry_schedule";
 import {
   AgentNode,
   type AgentNodeDeps,
@@ -39,7 +39,7 @@ import {
 import { collectionSnapshot } from "./runtime/node_files";
 import { SidebarScript, type TreeSource } from "../sidebar_script";
 import { agent } from "../agent_metadata/index";
-import { agentContext } from "../web/api_v1/context";
+import { agentContext } from "./runtime";
 import { piBinding } from "./runtime/pi/session";
 import {
   ProcessCleanupPending,
@@ -110,7 +110,7 @@ import { abortable, ignoringCancelled, TaskSet } from "../utils/tasks";
 import { WorkdirGit } from "../workdir_git";
 import { finishedNotice, PushNotifications } from "../push_notifications";
 
-export interface InstanceOptions {
+interface InstanceOptions {
   /** The state-plane configuration; its env is the ambient environment. */
   readonly config: Config;
   /** Where every runtime logger writes. */

@@ -12,16 +12,16 @@ import {
   unlink,
 } from "node:fs/promises";
 import { basename, dirname, parse } from "node:path";
-import { slowSpan } from "./slow_span";
+import { slowSpan } from "./slow-span";
 
-export const LOG_MAX_BYTES = 5 * 1024 * 1024;
-export const LOG_BACKUP_COUNT = 4;
-export const LOGGER_NAME = "recurse";
+const LOG_MAX_BYTES = 5 * 1024 * 1024;
+const LOG_BACKUP_COUNT = 4;
+const LOGGER_NAME = "recurse";
 export const DEBUG = 10;
 export const INFO = 20;
 export const WARNING = 30;
 export const ERROR = 40;
-export const UNKNOWN_ROUTE = ":unknown";
+const UNKNOWN_ROUTE = ":unknown";
 
 /** `/api/x/{cid}` and `/static/{path:path}` → log-safe `:param` segments. */
 export function templateRoute(template: string | null): string {
@@ -33,19 +33,10 @@ const EVENT_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const FIELD_RE = /^[a-z][a-z0-9_]{0,63}$/;
 const SAFE_VALUE_RE = /^[A-Za-z0-9_.:@/+,-]{1,200}$/;
 
-export interface ExceptionFrame {
+interface ExceptionFrame {
   readonly filename: string;
   readonly line: number;
   readonly name: string;
-}
-
-export interface ExceptionDiagnostic {
-  readonly type_name: string;
-  readonly message?: unknown;
-  readonly frames?: readonly ExceptionFrame[];
-  readonly cause?: ExceptionDiagnostic | null;
-  readonly context?: ExceptionDiagnostic | null;
-  readonly suppress_context?: boolean;
 }
 
 export interface RuntimeLogRecord {
@@ -63,7 +54,7 @@ export interface LogSink {
 }
 
 /** Python-compatible safe scalar/container rendering for log fields. */
-export function safeValue(value: unknown): string {
+function safeValue(value: unknown): string {
   if (value === null || value === undefined) return "-";
   if (typeof value === "boolean") return value ? "true" : "false";
   if (typeof value === "number") {
@@ -95,7 +86,7 @@ export function recordMessage(
 }
 
 // Python exception type-name policy for serializable diagnostic descriptors.
-export function typeName(error: unknown): string {
+function typeName(error: unknown): string {
   let name = "unknown_exception";
   if (error instanceof Error) name = error.name || error.constructor.name;
   else if (isObject(error) && typeof error.type_name === "string") {

@@ -51,7 +51,7 @@ import {
 } from "./store";
 
 const defaultId = (): string => randomUUID().replaceAll("-", "");
-export interface PublishOptions {
+interface PublishOptions {
   limits?: OwnerLimits;
   now?: number;
   ids?: () => string;
@@ -321,7 +321,7 @@ export async function removeFile(
     throw error;
   }
 }
-export async function removeCommittedLocked(
+async function removeCommittedLocked(
   fd: FileHandle,
   id: string,
   blob: string,
@@ -349,7 +349,7 @@ export async function removeCommittedLocked(
   console.warn("attachment blob persists after unlink");
   return "blob-stuck";
 }
-export interface ImportRequest {
+interface ImportRequest {
   fileId: string;
   name: string;
   size: number;

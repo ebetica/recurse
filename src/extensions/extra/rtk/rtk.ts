@@ -11,7 +11,7 @@ type Scope = { cwd: string; env: Record<string, string> };
 
 /** Whether ./scripts/ensure-rtk.sh found a supported RTK for this checkout. The
  * launcher runs it before the server starts, so one read per process holds. */
-export async function rtkReady(buildDir: string): Promise<boolean> {
+async function rtkReady(buildDir: string): Promise<boolean> {
   try {
     return (await readFile(join(buildDir, ".rtk-status"), "utf8"))
       .trim()
@@ -21,7 +21,7 @@ export async function rtkReady(buildDir: string): Promise<boolean> {
   }
 }
 
-export interface RtkOptions {
+interface RtkOptions {
   scope(): Promise<Scope>;
   buildDir: string;
 }

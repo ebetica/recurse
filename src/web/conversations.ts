@@ -20,13 +20,12 @@ import {
   cleanTitleOrder,
   stripPendingKeys,
   validateExternalKey,
-} from "../agents/conversation_store";
+} from "../agents/storage";
 import { linkedPrList } from "../agents/conversation_prs";
 import type { Tags } from "../agent_metadata/index";
-import { TreeLifecycleBusy } from "../agents/mutation_guard";
+import { TreeLifecycleBusy } from "../agents/lifecycle";
 import { AttachmentError } from "../agents/runtime/attachments/base";
 import { pyTruthy } from "../agents/runtime/turn_prep";
-import { CLIENT_KEY_RE } from "../agents/supervisor/delivery";
 import {
   CompletedReplyCursorError,
   CompletedReplyCursorExpired,
@@ -50,7 +49,7 @@ import { creationTags } from "./tags";
 import { compactConversation } from "./compact";
 import { conversationEvents } from "./conversation_events";
 import { createMessageSender } from "./deliver_message";
-import { jsonObjectBody } from "./request_body";
+import { jsonObjectBody } from "./request";
 import {
   agentMarked,
   authMethod,
@@ -60,14 +59,12 @@ import {
   serviceRequestPolicy,
 } from "./request_auth";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
-
-export const CLIENT_MESSAGE_ID_RE = CLIENT_KEY_RE;
-export const SWITCH_TRACE_RE = /^[0-9a-f]{16,64}$/;
+const SWITCH_TRACE_RE = /^[0-9a-f]{16,64}$/;
 /** config._TEMP_ID_RE. */
 export const TEMP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const SERVICE_CREATE_FIELDS = new Set(["title", "external_key"]);
 /** Seconds a service create waits for a slot before 429. */
-export const SERVICE_CREATE_WAIT_SECONDS = 5;
+const SERVICE_CREATE_WAIT_SECONDS = 5;
 
 type Rec = Record<string, unknown>;
 type Status<T> = readonly [number, T];
@@ -186,7 +183,11 @@ export interface ConversationsRoutesDeps {
       offset: number | null,
     ): Promise<Status<unknown>>;
     readTurnPrompt(cid: string, offset: number): Promise<unknown>;
-    readThinkingText(cid: string, offset: number): Promise<unknown>;
+    readThinkingText(
+      cid: string,
+      offset: number,
+      liveRow?: string,
+    ): Promise<unknown>;
     readContextUsage(cid: string): Promise<unknown>;
     readBasePrompt(
       cid: string,
@@ -273,7 +274,11 @@ export interface ConversationsRoutesDeps {
     clear(cid: string): Promise<Rec | null>;
     compact(cid: string): Promise<Rec | null>;
     effectiveCwd(cid: string): Promise<string | null>;
-    toolDetails?(cid: string, artifactId: string): Promise<Rec | null>;
+    toolDetails?(
+      cid: string,
+      artifactId: string,
+      includeOperatorFailure?: boolean,
+    ): Promise<Rec | null>;
   };
   readonly drafts: {
     recoverTransferredAttachmentDraft(token: unknown): Promise<Rec | null>;
@@ -860,12 +865,16 @@ export function registerConversationRoutes(
     },
   );
 
-  const readToolDetail = async (ex: Exchange): Promise<Rec> => {
+  const readToolDetail = async (
+    ex: Exchange,
+    includeOperatorFailure = false,
+  ): Promise<Rec> => {
     const cid = ex.params.cid!;
     if (!deps.durable?.owns(store.load(cid))) throw new HttpError(404);
     const artifact = await deps.durable.toolDetails?.(
       cid,
       ex.params.artifact_id!,
+      includeOperatorFailure,
     );
     if (!artifact) throw new HttpError(404);
     return artifact;
@@ -876,7 +885,15 @@ export function registerConversationRoutes(
     );
   router.get(
     "/api/conversations/{cid}/tool-details/{artifact_id}",
-    async (ex) => jsonResponse(await readToolDetail(ex), 200, noStore),
+    async (ex) =>
+      jsonResponse(
+        await readToolDetail(
+          ex,
+          isOperator(ex, { allowBackendKey: true }) && !agentMarked(ex),
+        ),
+        200,
+        noStore,
+      ),
   );
   router.get(
     "/api/conversations/{cid}/tool-details/{artifact_id}/raw",
@@ -956,11 +973,17 @@ export function registerConversationRoutes(
       const view = await deps.reads.readThinkingText(
         ex.params.cid!,
         ex.query.offset as number,
+        typeof ex.query.live_row === "string" ? ex.query.live_row : undefined,
       );
       if (view == null) throw new HttpError(404);
       return jsonResponse(view, 200, noStore);
     },
-    { query: { offset: { type: "int", required: true } } },
+    {
+      query: {
+        offset: { type: "int", required: true },
+        live_row: { type: "str" },
+      },
+    },
   );
 
   router.post("/api/conversations/{cid}/model", async (ex) => {
@@ -1593,7 +1616,7 @@ function pyFloatText(text: string): boolean {
 }
 
 /** json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False). */
-export function pySortedJson(value: unknown): string {
+function pySortedJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(pySortedJson).join(",")}]`;
   if (value !== null && typeof value === "object")
     return `{${Object.keys(value)

@@ -20,7 +20,7 @@ const tool = (id: string) =>
     result: "Read complete",
     stat: { kind: "read", lines: 1, from: 1, to: 1 },
   });
-export const normalGroupRows = (parent = false) => [
+const normalGroupRows = (parent = false) => [
   row(
     "assignment",
     "user",
@@ -41,7 +41,7 @@ export const normalGroupRows = (parent = false) => [
 const resizeNote =
   "[Image: original 1008x2244, displayed at 898x2000. Multiply coordinates by 1.12 to map to original image.]";
 
-export const wakeGroupRows = (count: number) => [
+const wakeGroupRows = (count: number) => [
   row("assignment", "user", "Track incoming reports."),
   row("initial", "assistant", "I will track the reports."),
   ...Array.from({ length: count }, (_, index) => {
@@ -65,7 +65,7 @@ export const wakeGroupRows = (count: number) => [
 
 const thought = (id: string, title: string) =>
   row(id, "assistant", "", { has_thinking: true, thinking_title: title });
-export const singleReplyRows = () => [
+const singleReplyRows = () => [
   row("operator", "user", "Please review the sample text."),
   ..."read bash read bash bash bash bash bash bash bash write bash bash bash"
     .split(" ")
@@ -640,7 +640,7 @@ export const turnGroupTests: BrowserTest[] = [
             else await page.mouse.click(x, y);
             await page.waitForFunction(
               ({ node, expanded }) =>
-                node.getAttribute("aria-expanded") !== expanded,
+                node!.getAttribute("aria-expanded") !== expanded,
               { node: await toggle.elementHandle(), expanded },
             );
             await waitForLayout(page);
@@ -1172,7 +1172,7 @@ export const turnGroupTests: BrowserTest[] = [
         await chunks
           .first()
           .locator(":scope > .activity-group-summary .activity-group-toggle")
-          .evaluate((element) => element.click());
+          .evaluate((element) => (element as HTMLElement).click());
         await failedRead;
         await page.evaluate(
           () =>
@@ -1183,12 +1183,12 @@ export const turnGroupTests: BrowserTest[] = [
         await chunks
           .first()
           .locator(".activity-group-toggle")
-          .evaluate((element) => element.click());
+          .evaluate((element) => (element as HTMLElement).click());
         const reopenedRead = olderResponse(200);
         await chunks
           .first()
           .locator(".activity-group-toggle")
-          .evaluate((element) => element.click());
+          .evaluate((element) => (element as HTMLElement).click());
         await reopenedRead;
         await page.waitForFunction(
           "document.querySelectorAll('[data-group^=\"chunk:\"]').length === 10",
@@ -1361,7 +1361,9 @@ export const turnGroupTests: BrowserTest[] = [
             exact: true,
           });
           expect(await assignment.count()).toBe(0);
-          await eyes.first().evaluate((element) => element.click());
+          await eyes
+            .first()
+            .evaluate((element) => (element as HTMLElement).click());
           await assignment.waitFor();
           await page.locator(".turn-series-toggle").first().click();
           await page.waitForFunction(

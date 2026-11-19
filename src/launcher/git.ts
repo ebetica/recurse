@@ -9,7 +9,7 @@ import { gitEnv } from "../workdir_git";
 import { logError, run, say, type RunResult } from "./system";
 
 /** Token for GitHub clone/push; never stored in Git config. */
-export const CRED_HELPER =
+const CRED_HELPER =
   '!f() { echo username=x-access-token; echo "password=${GITHUB_TOKEN}"; }; f';
 
 /** The directory at the launcher's own checkout root. */
@@ -42,21 +42,21 @@ export async function exists(path: string): Promise<boolean> {
 }
 
 /** Full path to git; an actionable error when it is missing. */
-export function gitBin(): string {
+function gitBin(): string {
   const git = Bun.which("git");
   if (git === null) throw new Error("git executable not found on PATH");
   return git;
 }
 
 /** `git -C repo args...` under the scrubbed Git environment. */
-export function git(repoDir: string, ...args: string[]): Promise<RunResult> {
+function git(repoDir: string, ...args: string[]): Promise<RunResult> {
   return run([gitBin(), "-C", repoDir, ...args], {
     env: gitEnv(process.env),
     timeoutSeconds: 120,
   });
 }
 
-export type GitRunner = typeof git;
+type GitRunner = typeof git;
 
 /** The checkout's HEAD commit, or null on any error. */
 export async function headSha(
@@ -181,7 +181,7 @@ export async function prepareWorkingArea(repoDir: string): Promise<void> {
 // working tree and branches are never touched. Existing user config is kept.
 // A plain directory
 // (no .git) needs nothing: agents work in the target itself.
-export async function attachInPlaceWorktree(
+async function attachInPlaceWorktree(
   repoDir: string,
   source: string,
 ): Promise<void> {

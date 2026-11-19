@@ -3,7 +3,7 @@
 import type { BackendKeys } from "../auth/backend_keys";
 import type { HomeCallbacks } from "../backends/home_callbacks";
 import type { LoginDeps } from "./login";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { validBackendKeyName } from "../auth/backend_keys";
 import { keyedLabel } from "../backends/label";
 import {

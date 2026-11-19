@@ -18,7 +18,7 @@ const DAY_MS = 86_400_000;
 const pad = (n: number) => String(n).padStart(2, "0");
 
 /** "14:05" today, "Tue 09:00" within six days, else "Nov 4 09:00". */
-export function usageTime(at: number, now: number): string {
+function usageTime(at: number, now: number): string {
   const date = new Date(at);
   const clock = `${pad(date.getHours())}:${pad(date.getMinutes())}`;
   if (date.toDateString() === new Date(now).toDateString()) return clock;

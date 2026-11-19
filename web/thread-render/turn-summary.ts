@@ -249,11 +249,3 @@ export function summaryLineHtml(
   });
   return rendered.join("");
 }
-
-// A turn shows a bounded number of tool rows; this accounts for the rest so the
-// capped list never reads as the complete record.
-export function hiddenToolNote(totalTools: number, listedRows: number): string {
-  const hidden = Math.floor(totalTools) - Math.floor(listedRows);
-  if (!Number.isFinite(hidden) || hidden <= 0) return "";
-  return `…and ${hidden} more not listed`;
-}

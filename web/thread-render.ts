@@ -16,12 +16,18 @@ import {
   turnGroups,
   type TurnGroupItem,
 } from "./thread-render/turn-groups.js";
-import { userBubble, userBubbleParts } from "./thread-render/index.js";
+import {
+  anchoredPaint,
+  paint,
+  userBubble,
+  userBubbleParts,
+} from "./thread-render/index.js";
 import {
   shouldToggleToolRow,
   toolDetailPanel,
   toolDetailStore,
   toolOpenTimingText,
+  toolReviewFailureText,
   toolRowOpen,
 } from "./tool_details.js";
 import {
@@ -47,7 +53,6 @@ import {
 } from "./icons.js";
 import {
   activityStatusKind,
-  liveActivityState,
   type ActivityStatusKind,
 } from "./thread-render/tool_activity.js";
 import { copyButtonT } from "./conversation/copy-button/index.js";
@@ -101,26 +106,23 @@ import {
   liveToolLabelVisible,
   waitingPanelT,
 } from "./conversation/live-panel.js";
-import {
-  thinkingStore,
-  thinkingT,
-  toolThinkingEntry,
-} from "./conversation/thinking.js";
+import { thinkingT, toolThinkingEntry } from "./conversation/thinking.js";
 import {
   activityGroupOpen,
   toggleActivityGroup,
   syncBlockExpanded,
   toggleBlockExpandAll,
   expandedToolSeries,
-  liveRevealChunks,
-  liveRevealEntry,
-  liveRevealFast,
   toggleToolSeries,
   toolSeriesKey,
 } from "./conversation/disclosure.js";
-import { anchoredPaint, paint } from "./conversation/thread.js";
 import { renderedLogGeneration } from "./row-thread-state.js";
-import { rowThreads } from "./row-thread-state/index.js";
+import {
+  liveRevealChunks,
+  liveRevealEntry,
+  liveRevealFast,
+  rowThreads,
+} from "./row-thread-state/index.js";
 
 /** The one disclosure caret; app.css turns it down while its toggle is open. */
 const disclosureCaret = html`<span class="disclosure-caret" aria-hidden="true"
@@ -132,7 +134,7 @@ function enrichedFor(m: Message): string {
 
 // A durable point where context changed. It is system activity inside the
 // response disclosure; compacted context loads only when that group opens.
-export function disclosureId(
+function disclosureId(
   kind: string,
   cid: string,
   identity: string | number,
@@ -640,7 +642,7 @@ function toolRowT(
   const block =
     rowThreads.get(conv.id)?.rows.find((row) => row.id === entry.call_id) ??
     null;
-  const expansion = toolExpansion(entry, block);
+  const expansion = toolExpansion({ ...entry, artifact_id: undefined }, block);
   const openTiming = toolOpenTimingText(entry.timing, modelTimeMs);
   const scriptLabel =
     entry.name === "codemode"
@@ -651,37 +653,37 @@ function toolRowT(
     view.detail = "";
   }
   const inlineKey = `${conv.id}:${toolRowKey(entry)}`;
-  const inlineOpen =
-    Boolean(expansion.args || expansion.output || expansion.calls) &&
-    toolDetailStore.isInlineOpen(inlineKey);
-  const expanded = open || inlineOpen;
-  const inlineNote = ["read", "edit", "write"].includes(entry.stat?.kind || "");
-  const expandable = Boolean(
-    entry.artifact_id || expansion.args || expansion.output || expansion.calls,
+  const hasInline = Boolean(
+    expansion.args || expansion.output || expansion.calls,
   );
-  const toggleArtifact = () =>
-    entry.artifact_id &&
-    toolDetailStore.toggle(conv.id, entry.artifact_id, repaint);
-  const toggleInline = () =>
-    (expansion.args || expansion.output || expansion.calls) &&
-    toolDetailStore.toggleInline(inlineKey, repaint);
+  const expanded = entry.artifact_id
+    ? open
+    : toolDetailStore.isInlineOpen(inlineKey);
+  const detail =
+    open && entry.artifact_id
+      ? toolReviewFailureText(
+          toolDetailStore.get(conv.id, entry.artifact_id)?.artifact,
+        )
+      : "";
+  const inlineNote = ["read", "edit", "write"].includes(entry.stat?.kind || "");
+  const expandable = hasInline || Boolean(entry.artifact_id);
+  const toggle = () => {
+    if (entry.artifact_id)
+      toolDetailStore.toggle(conv.id, entry.artifact_id, repaint);
+    else if (hasInline) toolDetailStore.toggleInline(inlineKey, repaint);
+  };
   // Invariant: Selecting the revealed command must not collapse it: only an
   // unselected click outside a control toggles, matching the live tool rows.
   const activate = (event: MouseEvent) => {
-    if (entry.artifact_id) {
-      toggleArtifact();
-      return;
-    }
     const selection = window.getSelection()?.toString() || "";
     const target = event.target as Element | null;
     if (shouldToggleToolRow(selection, Boolean(target?.closest("a,button"))))
-      toggleInline();
+      toggle();
   };
   const keyActivate = (event: KeyboardEvent) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      if (entry.artifact_id) toggleArtifact();
-      else toggleInline();
+      toggle();
     }
   };
   if (view.truncated) {
@@ -722,10 +724,10 @@ function toolRowT(
     ${!inlineNote && view.note
       ? html`<div class="turn-tool-note">${view.note}</div>`
       : nothing}
-    ${entry.artifact_id
+    ${entry.artifact_id && !hasInline
       ? toolDetailPanel(conv.id, entry, repaint, modelTimeMs)
       : nothing}
-    ${inlineOpen && (expansion.args || expansion.output || expansion.calls)
+    ${expanded && hasInline
       ? html`<div
           class="tool-detail-body"
           role="region"
@@ -787,9 +789,11 @@ function toolRowT(
                 })}
               </ol>`
             : nothing}
-          ${expansion.output
+          ${expansion.output || detail
             ? html`<section class="tool-payload" aria-label="Output">
-                <pre>${expansion.output}</pre>
+                <pre>
+${[expansion.output, detail].filter(Boolean).join("\n")}</pre
+                >
                 ${expansion.outputTruncated
                   ? html`<div class="tool-note">
                       Output truncated to the served bound.
@@ -874,6 +878,11 @@ function toolSeriesT(
     runningOwner !== undefined && runningOwner !== slice
       ? summaryWithoutRunningCommands(disclosure.visibleLabel)
       : disclosure.visibleLabel;
+  const ariaLabel = visibleLabel
+    ? label
+    : open
+      ? "Hide command details"
+      : "Show command details";
   const bodyId = disclosureId(
     "tool-series",
     conv.id,
@@ -887,7 +896,7 @@ function toolSeriesT(
       class="turn-series-toggle"
       type="button"
       title=${label}
-      aria-label=${label}
+      aria-label=${ariaLabel}
       aria-expanded=${open ? "true" : "false"}
       aria-controls=${bodyId}
       @click=${(event: Event) =>
@@ -900,7 +909,7 @@ function toolSeriesT(
         )}
     >
       ${disclosureCaret}
-      <span>${visibleLabel}</span>
+      <span>${visibleLabel || "Command details"}</span>
     </button>
     ${open
       ? html`<div class="turn-series-body" id=${bodyId}>
@@ -1201,11 +1210,6 @@ export function activityBoundaryT(
   const aggregateUsageLabel = usageLabel
     ? `View activity token usage: ${usageLabel}`
     : "View activity token usage";
-  if ((current || insideChunk) && running) {
-    const rows = rowThreads.get(conv.id)?.rows ?? [];
-    const livePanel = liveActivityState(rows, conv.provider_starting == null);
-    thinkingStore.syncPill(conv, rows, livePanel.kind, boundary);
-  }
   const projected = replyOnly
     ? reply
       ? [{ kind: "assistant" as const, entry: reply }]

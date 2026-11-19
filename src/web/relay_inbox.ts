@@ -7,7 +7,7 @@ import { validBackendKeyName } from "../auth/backend_keys";
 import type { HomeCallbacks, KeyInfo } from "../backends/home_callbacks";
 import { keyedLabel } from "../backends/label";
 import type { RelayQueue } from "./relay_queue";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 
 export interface RelayRequest {
@@ -20,8 +20,8 @@ export interface RelayRequest {
   interrupt: boolean;
 }
 /** Seconds a home waits before polling a sleeping instance again. */
-export const SLEEP_SECONDS = 3600;
-export interface HomeRoute {
+const SLEEP_SECONDS = 3600;
+interface HomeRoute {
   /** Home ids (backend key ids, or `operator:` ids) allowed to claim it. */
   ids: string[];
   /** Key ids registered for callback notices. */

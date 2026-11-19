@@ -190,7 +190,7 @@ export function beginPaneVisit(
   const held = !!paneForTarget(document.activeElement);
   const outgoingOwnerId = paneVisitOwnerId;
   desktopDock.beginVisit(ownerId);
-  for (const id of [...open]) closePane(id);
+  for (const id of Array.from(open)) closePane(id);
   if (outgoingOwnerId) conversationUiState.flush(outgoingOwnerId);
   if (held) restoreAgentFocus();
 
@@ -514,7 +514,8 @@ function usableFocusOrigin(
 export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
   if (id === "chat") {
     if (isMobile() && !guardLeaveComments()) return false;
-    if (isMobile()) for (const paneId of [...open]) closePane(paneId, true);
+    if (isMobile())
+      for (const paneId of Array.from(open)) closePane(paneId, true);
     desktopDock.showChat(true);
     scrollEl.tabIndex = -1;
     desktopDock.focusControl("chat", scrollEl);
@@ -566,7 +567,7 @@ export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
   desktopDock.opening(id, !focusHeading);
   if (isMobile()) {
     open.clear();
-    for (const paneId of [...bodies.keys()]) forgetPaneState(paneId);
+    for (const paneId of Array.from(bodies.keys())) forgetPaneState(paneId);
     panesEl.innerHTML = "";
     mobileActive = id;
   }
@@ -971,7 +972,7 @@ function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
   paneAgents.set(id, ctx.agentId);
   if (!cached) {
     try {
-      p.render && p.render(body, ctx);
+      p.render?.(body, ctx);
     } catch {}
     paneViewState.restoreOnce(
       conversationUiState,
@@ -1309,7 +1310,8 @@ fabEl.addEventListener("click", (e: MouseEvent) => {
   // Spec: Detail-0 keyboard clicks toggle; pointer gestures already handled
   // their own generated clicks and must not activate twice.
   if (e.detail === 0) {
-    menuEl.classList.contains("on") ? closeMenu() : openMenu(true);
+    if (menuEl.classList.contains("on")) closeMenu();
+    else openMenu(true);
     return;
   }
   e.preventDefault();
@@ -1329,7 +1331,7 @@ mq.addEventListener("change", () => {
       selectionCommentOwner()?.closest<HTMLElement>(".pane-col")?.dataset.pane;
     mobileActive =
       commentPane && open.has(commentPane) ? commentPane : activePaneId(true);
-    for (const id of [...open]) if (id !== mobileActive) closePane(id);
+    for (const id of Array.from(open)) if (id !== mobileActive) closePane(id);
   }
   layout();
   syncPanes();
@@ -1390,7 +1392,7 @@ function syncPanesNow(): void {
   const discovering = new Set<string>();
   const avail = availableFor(ctx, discovering);
   const availIds = new Set(avail.map((p) => p.id));
-  for (const id of [...open])
+  for (const id of Array.from(open))
     if (!availIds.has(id)) {
       // Invariant: If the pane being auto-closed currently holds keyboard
       // focus, hand focus back to the canonical tree/menu target so a Pane-mode

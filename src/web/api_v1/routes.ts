@@ -1,12 +1,11 @@
 // Local v1 reads project cached base tree rows, live usage and shell snapshots.
 // Context reads never open stores or scan history; cold/unknown usage is null.
 // Compaction shares the operator lifecycle, not operator-route access.
-import { authMethod } from "../request_auth";
 import { dirname } from "node:path";
 import { brandingFile, readBrand } from "../../branding";
 import { SERVICE_MESSAGE_MAX_CHARS } from "../../auth/service";
 import { pyStrip } from "../../auth/provider_store";
-import { jsonDictBody } from "../login";
+import { authMethod, jsonDictBody } from "../request";
 import type { createMessageSender } from "../deliver_message";
 import type { TreeRow } from "../../agents/tree_view";
 import type { TranscriptQuery } from "../../agents/durable/transcript";

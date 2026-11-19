@@ -1,4 +1,5 @@
 // Immutable ConversationView rows and bounded windows served by /view.
+import type { LiveActivityRow } from "../thread-render/tool_activity.js";
 import type { CodemodeCall } from "../thread-render/turn-view.js";
 import type {
   AgentAttachment,
@@ -20,6 +21,7 @@ export interface ViewBlock {
   /** With `text_from`: hash of the held text it follows (`textHash`). */
   text_hash?: number;
   thinking_title?: string | null;
+  thinking_key?: string;
   has_thinking?: boolean;
   thinking_elapsed_ms?: number;
   live_thinking?: boolean;
@@ -36,6 +38,7 @@ export interface ViewBlock {
   tool_elapsed_ms?: number;
   tool_received_at_ms?: number;
   tool_output_tail?: string;
+  artifact_id?: string;
   input?: string | null;
   usage?: TurnUsage | UsageRow | null;
   meta?: ShellRowState | ShellNoticeState | null;
@@ -66,7 +69,13 @@ export interface ViewPage {
   retry_notice?: string | null;
   turn_status?: string;
   active_run?: string | null;
+  active_run_start?: number | null;
   run_state_clock?: [string, number];
+  latest_thinking?: {
+    run_start: number | null;
+    row: LiveActivityRow | null;
+    recovering?: boolean;
+  };
   blocks: unknown;
   older?: boolean;
   newer?: boolean;
@@ -74,7 +83,7 @@ export interface ViewPage {
   reset?: boolean;
 }
 
-export interface UsageRow {
+interface UsageRow {
   tokens: {
     input: number;
     output: number;
@@ -93,7 +102,7 @@ export interface UsageRow {
   costScopeBase?: number;
 }
 
-export interface ShellRowState {
+interface ShellRowState {
   shellId: string;
   command: string;
   pid: number | null;
@@ -102,6 +111,6 @@ export interface ShellRowState {
   startedAt: number;
 }
 
-export interface ShellNoticeState {
+interface ShellNoticeState {
   body: string;
 }

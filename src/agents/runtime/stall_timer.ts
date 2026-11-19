@@ -8,11 +8,11 @@ import {
 } from "../../observability/runtime_logging";
 
 /** Queue-to-dispatch stall threshold in seconds. */
-export const QUEUE_STALL_SECONDS = 10.0;
+const QUEUE_STALL_SECONDS = 10.0;
 
-export type Intent = Record<string, unknown>;
+type Intent = Record<string, unknown>;
 
-export interface StallOwner {
+interface StallOwner {
   readonly cid: string;
   oldestSendable(): Intent | null;
   claimStall(storeId: string): Intent | null;

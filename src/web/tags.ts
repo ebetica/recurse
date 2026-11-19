@@ -10,7 +10,7 @@ import {
   type TagChange,
 } from "../agent_metadata/index";
 import { requireLocalAgent } from "./backends";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { agentMarked } from "./request_auth";
 import {
   HttpError,
@@ -47,9 +47,9 @@ export function creationTags(ex: Exchange, value: unknown): Tags | undefined {
   }
 }
 
-export const MAX_TAG_IDS = 500;
+const MAX_TAG_IDS = 500;
 
-export interface TagRoutesDeps {
+interface TagRoutesDeps {
   requireActionReady(): void;
   /** Apply the change to each id; returns the ids not found. */
   changeTags(

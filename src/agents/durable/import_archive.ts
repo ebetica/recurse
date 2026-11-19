@@ -14,7 +14,7 @@ import { importPiSession, type PiImportOptions } from "./import_pi_session";
 import { openWorkerSqliteStorage, SqliteWorker } from "./sqlite_worker";
 import type { AgentArchive, ArchivedAgent } from "./archive";
 import { sanitizeImportedProcesses } from "./revive_processes.ts";
-import { retirePath } from "../../utils/trash_sweep";
+import { retirePath } from "../../utils/trash-sweep";
 
 export const MAX_REVIVE_BYTES = 256 * 1024 * 1024;
 const MAX_META_BYTES = 64 * 1024;
@@ -23,7 +23,7 @@ const record = (v: unknown): v is Record<string, unknown> =>
 const text = (v: unknown) => (typeof v === "string" ? v : null);
 
 /** Admission errors are actionable refusals, not an opaque server error. */
-export class ArchiveImportRefused extends Error {
+class ArchiveImportRefused extends Error {
   override name = "ArchiveImportRefused";
 }
 function refuse(message: string): never {
@@ -89,7 +89,7 @@ async function copyFile(
   }
 }
 
-export interface ImportArchiveOptions {
+interface ImportArchiveOptions {
   archive: AgentArchive;
   trashDir: string;
   models: Models;

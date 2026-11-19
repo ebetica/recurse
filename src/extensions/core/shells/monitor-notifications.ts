@@ -1,10 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { REMINDER_MARKER_BYTES, REMINDERS } from "../../../reminder_text.ts";
 
-export const DEFAULT_MONITOR_WAKE_DEBOUNCE_MS = 1000;
-export const DEFAULT_MONITOR_WAKE_COOLDOWN_MS = 60_000;
-export const DEFAULT_MONITOR_WAKE_MAX_BYTES = 16 * 1024;
-export const DEFAULT_MONITOR_HEARTBEAT_PATTERN = /^idle$/i;
+const DEFAULT_MONITOR_WAKE_DEBOUNCE_MS = 1000;
+const DEFAULT_MONITOR_WAKE_COOLDOWN_MS = 60_000;
+const DEFAULT_MONITOR_WAKE_MAX_BYTES = 16 * 1024;
+const DEFAULT_MONITOR_HEARTBEAT_PATTERN = /^idle$/i;
 
 const TRUNCATED =
   "\n… monitor output truncated; read the full log for complete output";
@@ -13,23 +13,23 @@ const MONITOR_NOISE_REMINDER_LINES = 3;
 const NOISE_RESERVE_BYTES =
   byteLength(REMINDERS["chatty-monitor"].text) + REMINDER_MARKER_BYTES + 2;
 // Smallest cap preserving exact reminder plus safely clipped monitor text.
-export const MIN_MONITOR_WAKE_MAX_BYTES = Math.max(
+const MIN_MONITOR_WAKE_MAX_BYTES = Math.max(
   256,
   byteLength(TRUNCATED) + NOISE_RESERVE_BYTES + 1,
 );
 const MAX_PENDING_LINES_PER_MONITOR = 100;
-export interface MonitorBatchDetails {
+interface MonitorBatchDetails {
   monitorBatchId: string;
   /** At least three meaningful lines; the body leaves room for noise advice. */
   chatty: boolean;
 }
 
-export type MonitorWakeDelivery = (
+type MonitorWakeDelivery = (
   message: string,
   triggerTurn: boolean,
   details: MonitorBatchDetails,
 ) => void;
-export type MonitorWakeScheduler = (
+type MonitorWakeScheduler = (
   callback: () => void,
   delayMs: number,
 ) => () => void;

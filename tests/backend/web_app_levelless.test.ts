@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { appWorld } from "./web_app_support";
-import { AgentStore } from "../../src/agents/agent_store";
+import { AgentStore } from "../../src/agents/storage/agent_store";
 
 const chunk = (delta: object, finish: string | null = null) =>
   `data: ${JSON.stringify({ id: "s", object: "chat.completion.chunk", created: 0, model: "scripted", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;

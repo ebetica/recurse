@@ -1,6 +1,6 @@
 {
   "name": "recurse",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "A coding harness for agents that work on their own, and a web app for working with many of them at once.",
   "license": "MIT",
   "repository": {
@@ -16,14 +16,15 @@
     "build": "bun build web/app.ts web/sidebar-worker.ts web/document-preview.worker.ts --splitting --outdir web/dist --target=browser --minify --define process.env.NODE_ENV='\"production\"' && bun run build:assets",
     "build:assets": "bun src/launcher/frontend_assets.ts",
     "dev": "bun build web/app.ts web/sidebar-worker.ts web/document-preview.worker.ts --splitting --outdir web/dist --target=browser --sourcemap=inline --watch & bun run build:assets && wait",
-    "format:check": "prettier --check \"web/*.ts\" \"tests/web/*.ts\"",
+    "format:check": "prettier --check \"web/**/*.ts\" \"!web/vendor/**\" \"!web/dist/**\" \"tests/web/*.ts\"",
     "format:backend": "prettier --write \"tests/checks/*.ts\" \"tests/dev/*.ts\" \"src/**/*.ts\" \"tests/extensions/**/*.ts\" \"tests/backend/**/*.ts\" \"tests/mobile_browser/*.ts\" \"tests/live_e2e*.ts\" \"tests/backend/live_e2e.test.ts\" \"tools/*.ts\" \"scripts/*.ts\" \"tsconfig.backend.json\"",
     "format:backend:check": "prettier --check \"tests/checks/*.ts\" \"tests/dev/*.ts\" \"tests/extensions/**/*.ts\" \"src/**/*.ts\" \"tests/backend/**/*.ts\" \"tests/mobile_browser/*.ts\" \"tests/live_e2e*.ts\" \"tests/backend/live_e2e.test.ts\" \"tools/*.ts\" \"scripts/*.ts\" \"tsconfig.backend.json\"",
-    "lint": "oxlint -c .oxlintrc.json web tests/web src/extensions --ignore-pattern \"web/vendor/**\" --ignore-pattern \"web/dist/**\"",
+    "lint": "bun tests/checks/extension_import_check.ts && oxlint -c .oxlintrc.json --disable-nested-config --deny-warnings web tests/web src/extensions --ignore-pattern \"web/vendor/**\" --ignore-pattern \"web/dist/**\"",
     "test": "bun test tests/web/*.test.ts",
     "test:backend": "bun test --parallel=$(bun tests/dev/test_workers.ts) --timings tests/backend/file-times.json --timeout 30000 tests/backend/*.test.ts tests/extensions",
     "typecheck": "tsc --noEmit",
     "typecheck:backend": "tsc --project tsconfig.backend.json",
+    "typecheck:browser-tests": "tsc --project tsconfig.browser-tests.json",
     "test:browser": "bun tests/mobile_browser/index.ts"
   },
   "dependencies": {

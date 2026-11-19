@@ -17,7 +17,7 @@ export const SESSION_REPAIR_KEY =
   "recurse.conversationUiState.sessionRepair.v1";
 export const MAX_COMPOSER_DRAFT_CHARS = 100_000;
 // Plugin payloads plus metadata must fit the smaller local tier.
-export const MAX_PLUGIN_STATE_CHARS = 3000;
+const MAX_PLUGIN_STATE_CHARS = 3000;
 export const WINDOW_LAYOUT_STATE_KEY = "window-layout";
 export const MAX_WINDOW_LAYOUT_CHARS = 32_000;
 export const MAX_LOCAL_RECORD_CHARS = 64_000;
@@ -80,13 +80,6 @@ export const defaultLocalState = (): LocalState => ({
 export const defaultSessionState = (): SessionState => ({
   composer: defaultComposer(),
   panes: {},
-});
-
-export const defaultConversationUiState = (): ConversationUiState => ({
-  pane: { kind: "default" },
-  composer: defaultComposer(),
-  localPanes: {},
-  sessionPanes: {},
 });
 
 export function validBoundedString(

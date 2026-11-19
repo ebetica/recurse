@@ -16,7 +16,7 @@ export function filesRefreshDue(
   return now - lastRefresh >= 60_000;
 }
 
-export interface FileSource {
+interface FileSource {
   offset: number | null;
   message_id?: string | null;
   pending?: boolean;

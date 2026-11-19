@@ -19,12 +19,6 @@ function visibleFocusable(container: HTMLElement): HTMLElement[] {
   );
 }
 
-export function focusFirst(container: HTMLElement): HTMLElement | null {
-  const first = visibleFocusable(container)[0] || null;
-  (first || container).focus();
-  return first;
-}
-
 export function installFocusTrap(
   container: HTMLElement,
   isActive: () => boolean = () => true,

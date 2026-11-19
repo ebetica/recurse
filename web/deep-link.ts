@@ -4,8 +4,8 @@
 
 import { parseConversationId } from "./backends/conversation-id/index.js";
 
-export const AGENT_LINK_KEY = "agent";
-export const TREE_LINK_KEY = "trees";
+const AGENT_LINK_KEY = "agent";
+const TREE_LINK_KEY = "trees";
 
 // Bounds id shape before DOM/path use; callers decide whether ids may open.
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -47,7 +47,7 @@ export function treeLinkUrl(href: string, roots: string[]): string {
   return url.href;
 }
 
-export interface AgentLinkRead {
+interface AgentLinkRead {
   /** Whether the fragment carries an `agent` parameter at all. */
   present: boolean;
   /** The valid id it carries, or null when absent or rejected. */
@@ -125,7 +125,7 @@ export function historyDisposition(
     : "push";
 }
 
-export interface BootSelection {
+interface BootSelection {
   /** The agent to open, or null to stay on the default view. */
   select: string | null;
   /** The link named an agent this reader cannot be shown. */

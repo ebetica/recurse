@@ -4,7 +4,7 @@
  */
 import { cssView } from "./radius_check.ts";
 
-export type Finding = { line: number; value: string };
+type Finding = { line: number; value: string };
 
 const LAYERS = "raised|chrome|drawer|menu|dialog|toast";
 const OK = new RegExp(

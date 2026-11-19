@@ -10,8 +10,8 @@ import { registerExplorerRoutes } from "./explorer";
 
 import { buildInstance, type Instance } from "../agents/instance";
 import type { TranscriptQuery } from "../agents/durable/transcript";
-import { activeRunId } from "../agents/conversation_store";
-import { fenced, cleanupRetiredToolDetails } from "../agents/mutation_guard";
+import { activeRunId } from "../agents/storage";
+import { fenced, cleanupRetiredToolDetails } from "../agents/lifecycle";
 import * as artifacts from "../artifacts";
 import { ArtifactRevisions } from "../artifacts/revisions";
 import { MuseAuth } from "../auth/muse";
@@ -45,7 +45,7 @@ import {
   type RunningServer,
 } from "../server";
 import { LoopLag } from "../observability/loop_lag";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 import * as startupMetrics from "../observability/startup_metrics";
 import { readRelease } from "../release";
 import { RecurseUpdates } from "../recurse_update";
@@ -53,7 +53,7 @@ import { retireDetached } from "../tool_details";
 import { registerSideRoutes } from "./side_conversations";
 import { registerTagRoutes } from "./tags";
 import { registerSidebarScriptRoutes } from "./sidebar_script";
-import { agentContext } from "./api_v1/context";
+import { agentContext } from "../agents/runtime";
 import { registerApiV1 } from "./api_v1/routes";
 import { compactConversation } from "./compact";
 import { CreateSlots, registerConversationRoutes } from "./conversations";
@@ -123,7 +123,7 @@ export class WebLogSink implements LogSink {
   }
 }
 
-export interface AppOptions {
+interface AppOptions {
   /** The process environment. */
   readonly env: Env;
   /** Where web/index.html and web/dist live (default the checkout). */

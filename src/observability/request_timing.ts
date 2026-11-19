@@ -7,7 +7,7 @@ let sequence = 0;
 const background = new Map<string, number>();
 const failedSteps = new WeakMap<object, string>();
 
-export class RequestTiming {
+class RequestTiming {
   readonly id = String(++sequence);
   private readonly steps = new Map<
     string,

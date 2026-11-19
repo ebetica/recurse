@@ -2,12 +2,12 @@
 // Buttons own actions and accessible meaning; detail-0 keyboard/AT clicks
 // remain native. Holds only reveal, not confirm.
 
-export const HOLD_TO_REVEAL_MS = 600;
-export const HOLD_TIP_TIMEOUT_MS = 3000;
+const HOLD_TO_REVEAL_MS = 600;
+const HOLD_TIP_TIMEOUT_MS = 3000;
 // Suppresses only the click immediately following a hold, never later clicks.
 const HOLD_CONSUME_MS = 1500;
 
-export interface HoldTipClock {
+interface HoldTipClock {
   now(): number;
   /** Schedule fn; the returned callback cancels it. */
   after(ms: number, fn: () => void): () => void;
@@ -21,7 +21,7 @@ const systemClock: HoldTipClock = {
   },
 };
 
-export interface HoldTipOptions {
+interface HoldTipOptions {
   /** Current tip text; null means nothing to show (button not actionable). */
   text: () => string | null;
   /** Gate presses (e.g. the composer button in Send mode tracks nothing). */
@@ -35,7 +35,7 @@ export interface HoldTipOptions {
   tipMs?: number;
 }
 
-export interface HoldTip {
+interface HoldTip {
   // Consumes held-press clicks only; keyboard/AT activation remains native.
   takeHoldConsumed(): boolean;
   /** Show the current text now; auto-hides after the tip timeout. */
@@ -45,61 +45,6 @@ export interface HoldTip {
   hide(): void;
   // Drops stale tips when repaint makes a button unactionable; null never arms.
   sync(): void;
-}
-
-export interface HoldTipConfirmation<T> {
-  // Arms on first activation; second activation returns true and disarms.
-  activate(target: T): boolean;
-  isArmed(target: T): boolean;
-  disarm(): void;
-  /** Disarm when the active target changes or becomes unactionable. */
-  sync(target: T | null): void;
-}
-
-export function createHoldTipConfirmation<T>(
-  tip: HoldTip,
-  opts: {
-    clock?: HoldTipClock;
-    timeoutMs?: number;
-    onArmedChange?: (armed: boolean) => void;
-  } = {},
-): HoldTipConfirmation<T> {
-  const clock = opts.clock ?? systemClock;
-  const timeoutMs = opts.timeoutMs ?? HOLD_TIP_TIMEOUT_MS;
-  let armed = false;
-  let armedTarget: T;
-  let cancelDisarm: (() => void) | null = null;
-
-  const disarm = () => {
-    if (!armed) return;
-    armed = false;
-    cancelDisarm?.();
-    cancelDisarm = null;
-    opts.onArmedChange?.(false);
-    tip.hide();
-  };
-
-  return {
-    activate: (target) => {
-      if (armed && Object.is(armedTarget, target)) {
-        disarm();
-        return true;
-      }
-      disarm();
-      armed = true;
-      armedTarget = target;
-      opts.onArmedChange?.(true);
-      tip.pin();
-      cancelDisarm = clock.after(timeoutMs, disarm);
-      return false;
-    },
-    isArmed: (target) => armed && Object.is(armedTarget, target),
-    disarm,
-    sync: (target) => {
-      if (armed && (target === null || !Object.is(armedTarget, target)))
-        disarm();
-    },
-  };
 }
 
 export function attachHoldTip(

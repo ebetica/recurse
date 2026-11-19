@@ -22,12 +22,13 @@ import {
   ProviderDoc,
 } from "@earendil-works/pi-durable";
 import { accountId } from "../../../auth/codex.ts";
+import { cacheInstructions, usesInputInstructions } from "./instructions.ts";
 import {
   readableCompactionMessages,
   type ProviderCompaction,
 } from "../../core/context/durable-compaction.ts";
 
-export const CODEX_PROVIDER = "openai-codex";
+const CODEX_PROVIDER = "openai-codex";
 const OPEN = "<codex-compaction-item>";
 const CLOSE = "</codex-compaction-item>";
 const REJECTED = /encrypted content for item (\S+) could not be verified/i;
@@ -82,7 +83,7 @@ function summaryHash(text: string): string | undefined {
 }
 
 /** Add the saved item to the head summary message when it applies. */
-export function withCheckpoint(
+function withCheckpoint(
   messages: readonly Message[],
   saved: readonly Checkpoint[] | undefined,
   model: string,
@@ -216,6 +217,10 @@ export async function requestCodexCompaction(
           context,
         )
       : marked;
+  // A cut after a checkpoint may have no leading system message. Do not
+  // insert Pi's fallback instructions into that compaction input.
+  const inline =
+    history[0]?.role === "system" && usesInputInstructions(model.id);
   let reply: Promise<string> | undefined;
   const message: AssistantMessage = await models.completeSimple(
     model,
@@ -241,7 +246,11 @@ export async function requestCodexCompaction(
       onPayload: (payload: unknown) => {
         const body = sendCheckpointItems(payload) as Rec;
         const input = Array.isArray(body.input) ? body.input : [];
-        return { ...body, input: [...input, { type: "compaction_trigger" }] };
+        const request = {
+          ...body,
+          input: [...input, { type: "compaction_trigger" }],
+        };
+        return inline ? cacheInstructions(request) : request;
       },
     } as Parameters<Models["completeSimple"]>[2],
   );
@@ -267,7 +276,7 @@ export async function requestCodexCompaction(
   };
 }
 
-export interface CodexCheckpointHost {
+interface CodexCheckpointHost {
   models: Models;
   conversation(context: Context, id: Conversation["id"]): Promise<Conversation>;
   report(event: string, error: unknown): void;

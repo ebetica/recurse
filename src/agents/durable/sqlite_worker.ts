@@ -15,7 +15,7 @@ import {
   awaitedSpan,
   slowSpan,
   workerReply,
-} from "../../observability/slow_span";
+} from "../../observability/slow-span";
 import type { SearchTarget, SyncStats } from "../../search";
 import type {
   NativeOpenCosts,
@@ -23,7 +23,7 @@ import type {
   ThreadRequest,
 } from "./sqlite_thread.worker.ts";
 
-export type SqliteOpenCosts = Partial<NativeOpenCosts> & {
+type SqliteOpenCosts = Partial<NativeOpenCosts> & {
   migration_ms: number;
   metadata_ms: number;
   queue_ms: number;

@@ -1,7 +1,7 @@
 // Pure ordering helper for manual titles. The origin-issued order is sent to
 // the backend, so later edits win even when HTTP processing reverses; the local
 // revision also fences callbacks that resolve out of order.
-export interface TitleAction {
+interface TitleAction {
   revision: number;
   order: string;
 }

@@ -352,7 +352,8 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
       "auth",
       "invalid",
     ]);
-    expect(logs.join("\n")).not.toContain("no such user");
+    expect(failures[0]).toContain("http_status=401");
+    expect(failures[0]).toContain("error=no_such_user");
     expect(JSON.stringify((await host.view(cid)).blocks)).not.toContain(
       "no such user",
     );

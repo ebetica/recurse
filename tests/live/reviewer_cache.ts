@@ -19,7 +19,7 @@ import type { SafetyReviewAttempt } from "../../src/extensions/core/safety/revie
 let stage = "sign-in check";
 
 export const REVIEWS = 7;
-export const MAX_FOLLOW_UP_MISSES = 2;
+const MAX_FOLLOW_UP_MISSES = 2;
 export const ACTING_REQUEST_CAP = REVIEWS + 3;
 export const UNCACHED_INPUT_CAP = 90_000;
 
@@ -110,7 +110,7 @@ export async function finishReviewCheck(
   return { ...counts, ...(failure ? { failure } : {}) };
 }
 
-export function reviewFailures(
+function reviewFailures(
   call: Record<string, any> | undefined,
   result: Record<string, any>,
   command: string | undefined,
@@ -246,10 +246,10 @@ async function run(): Promise<void> {
     const cid = String(
       (await api("conversations", { parent: null, model, effort: "low" })).id,
     );
-    const target = join(root, "reviewed-write.txt");
+    const target = join(env.CHAT_REPO_URL!, "reviewed-write.txt");
     const commands = Array.from(
       { length: REVIEWS },
-      (_, i) => `printf '${i + 1}\\n' > '${target}'`,
+      (_, i) => `printf '${i + 1}\\n' > 'reviewed-write.txt'`,
     );
     const context =
       "Inert fixture context for the prompt-cache minimum size:\n".padEnd(

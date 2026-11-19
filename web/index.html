@@ -928,12 +928,13 @@
      Thinking / Starting states while no tool runs. One height for every
      state, so streaming updates never move the thread. */
   .live-panel-box { display: flex; flex-direction: column; align-items: stretch;
-    gap: 0; width: 100%; min-width: 0; max-width: 100%; height: 34px;
+    --live-head-height: 32px; --live-dot: 7px;
+    gap: 0; width: 100%; min-width: 0; max-width: 100%;
+    height: calc(var(--live-head-height) + 2px);
     padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: 10px;
-    --live-dot: 7px;
     background: var(--panel-2); overflow: hidden; }
   .live-panel-head { display: flex; align-items: center; gap: var(--space-3);
-    min-width: 0; width: 100%; height: 32px; white-space: nowrap; }
+    flex: none; min-width: 0; width: 100%; height: var(--live-head-height); white-space: nowrap; }
   .live-dot { flex: none; width: var(--live-dot); height: var(--live-dot); border-radius: 50%;
     background: var(--running); animation: pulse 1.6s infinite; }
   .live-panel-box.is-overlay .live-dot { background: var(--warn); animation: none; }
@@ -943,6 +944,9 @@
     min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     color: var(--muted); font-size: 0.78125rem; font-family: inherit;
     border: 0; padding: 0; background: none; text-align: left; }
+  .live-panel-box button.live-label { align-self: stretch; gap: var(--space-3); cursor: pointer; }
+  .live-panel-box button.live-label:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: -2px; }
   .live-panel-box .live-thinking-head { display: flex; align-items: center;
     min-width: 0; width: 100%; overflow: hidden; white-space: nowrap; }
   .live-panel-box .live-thinking-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
@@ -972,9 +976,6 @@
   .live-panel-box:has(.live-thinking-summary) .live-thinking-summary {
     display: block; margin: 0; padding-left: calc(var(--live-dot) + var(--space-3));
     white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.35; }
-  .live-panel-box:has(.live-thinking-summary) .live-thinking-copy { cursor: pointer; }
-  .live-panel-box:has(.live-thinking-summary):focus-visible {
-    outline: 2px solid var(--accent); outline-offset: 2px; }
   /* Inset edges do not change disclosure geometry or scroll anchoring. */
   .activity-group-body, .activity-group-part, .turn-series-body, .agent-message-body,
   .disclosure-body, .turn-thinking-body, .tool-detail-body, .prompt-banner-body pre,
@@ -991,6 +992,7 @@
   .agent-message-row[aria-expanded="true"],
   .agent-message-row[aria-expanded="true"] .agent-message-preview,
   .turn-thinking-toggle[aria-expanded="true"],
+  .live-panel-box button.live-label[aria-expanded="true"],
   .prompt-banner-row[aria-expanded="true"] { color: var(--text); }
   .compacted-head[aria-expanded="true"], .prompt-banner-row[aria-expanded="true"] {
     border-color: var(--expanded-border); }
@@ -1195,7 +1197,8 @@
   #live-bar[hidden], #live-bar.stale { display: none; }
   #live-bar :is(.live-thinking-summary, .live-tool-body) { max-height: 30vh;
     overflow-y: auto; -webkit-user-select: text; user-select: text; }
-  #composer, .composer-box { width: 100%; margin: 0; background: var(--panel-2);
+  #composer, .composer-box { --composer-input-padding: var(--space-3); --composer-button-size: 28px;
+    width: 100%; margin: 0; background: var(--panel-2);
     border: 1px solid var(--border); border-radius: 14px;
     padding: var(--space-2);
     display: flex; align-items: flex-end; gap: var(--space-3); position: relative;
@@ -1203,7 +1206,7 @@
   #composer:focus-within, .composer-box:focus-within { border-color: var(--accent-dim); }
   #composer.dragover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
   #input, .composer-input { flex: 1; border: 0; background: none; resize: none; outline: none;
-    color: var(--text); font: inherit; max-height: 180px; padding: var(--space-3) 0; }
+    color: var(--text); font: inherit; max-height: 180px; padding: var(--composer-input-padding) 0; }
   #input::placeholder, .composer-input::placeholder { color: var(--text-placeholder); }
   /* Skill autocomplete floats directly above the composer. Typing a slash at a
      word boundary filters pi's available skills; each row completes the real
@@ -1250,9 +1253,12 @@
   .agent-option-relation { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
   .agent-option-path { color: var(--muted); font: 0.6875rem/1.35 var(--font-mono); white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; }
-  #composer button, .composer-box button { flex: none; width: 28px; height: 28px; margin-bottom: var(--space-2);
+  #composer button, .composer-box button { flex: none; width: var(--composer-button-size);
+    height: var(--composer-button-size); margin-bottom: var(--space-2);
     border: 0; border-radius: 8px; cursor: pointer;
     display: flex; align-items: center; justify-content: center; }
+  #composer > :is(#attach, #send) { font: inherit;
+    margin-block-end: max(0px, calc(var(--composer-input-padding) + (1lh - var(--composer-button-size)) / 2)); }
   /* Touch targets extend beyond the visible controls without sizing the row. */
   @media (pointer: coarse) {
     #attach, #send { position: relative; }
@@ -1582,7 +1588,7 @@ color: var(--warn); font-size: 0.6875rem; line-height: 1; }
        transparent pseudo-elements provide 44 px targets without changing the
        panel layout; each target stays in its chip's horizontal slot, so the
        adjacent shell and agent targets do not overlap. */
-    .live-panel-box { overflow-x: clip; overflow-y: visible; }
+    .live-panel-box { --live-head-height: 44px; overflow-x: clip; overflow-y: visible; }
     .live-panel-box .shell-chip, .live-panel-box .agent-chip {
       position: relative; z-index: var(--z-raised);
     }

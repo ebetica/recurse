@@ -4,12 +4,10 @@
 import {
   isAgentActivityMessage,
   isAgentMessage,
-  isInternalNoticeOnly,
   isNoticeOnlyAssistant,
   isPlatformInterruption,
   type ListedToolSummary,
   summarizeListedTools,
-  toolSeriesSummary,
   turnOutcomeLabel,
   visibleAssistant,
 } from "./turn-view.js";
@@ -53,7 +51,7 @@ export interface ActivityMarker {
   turn: Turn;
 }
 
-export type ActivityBlock = ActivityBoundary;
+type ActivityBlock = ActivityBoundary;
 
 function entryIdentity(entry: MessageEntry): string {
   return entry.id ? `id:${entry.id}` : `offset:${entry.offset}`;
@@ -300,7 +298,7 @@ function splitCompactionBoundary(boundary: ActivityBoundary): ActivityBlock[] {
   return pieces;
 }
 
-export function boundaryUserEntries(
+function boundaryUserEntries(
   boundary: ActivityBoundary,
   slice: ActivitySlice,
   open: boolean,
@@ -380,52 +378,10 @@ function emptySummary(): TurnSummary {
   };
 }
 
-export interface BoundarySummary {
+interface BoundarySummary {
   summary: TurnSummary | null;
   incomingAgentMessages: number;
   partial: boolean;
-}
-
-function codePointCount(value: unknown): number {
-  return typeof value === "string" ? Array.from(value).length : 0;
-}
-
-// Count only text controlled by the outer response disclosure. Agent-message,
-// platform, and raw tool bodies have their own disclosures; operator input and
-// the final reply are always visible.
-export function activityCharactersLabel(
-  boundary: ActivityBoundary,
-  open: boolean,
-): string {
-  const seen = new Set<string>();
-  let characters = 0;
-  const add = (key: string, value: unknown) => {
-    if (seen.has(key)) return;
-    seen.add(key);
-    characters += codePointCount(value);
-  };
-  for (const slice of boundary.slices) {
-    for (const entry of slice.segment.user) {
-      // Invariant: Notice-only rows fold with their own disclosure; their
-      // backend wording is not response prose.
-      if (
-        isAgentActivityMessage(entry) &&
-        !isAgentMessage(entry) &&
-        !isPlatformInterruption(entry) &&
-        !isInternalNoticeOnly(entry)
-      ) {
-        add(`message:${entry.offset}`, entry.content);
-      }
-    }
-    const assistant = slice.segment.assistant;
-    if (assistant && !slice.assistantVisible && !boundary.failOpen) {
-      add(`message:${assistant.offset}`, assistant.content);
-    }
-  }
-  if (!characters) return "";
-  const partial = boundary.slices.some((slice) => slice.turn.partial);
-  const formatted = new Intl.NumberFormat().format(characters);
-  return `${partial ? "At least " : ""}${formatted} character${characters === 1 ? "" : "s"} ${open ? "shown" : "hidden"}`;
 }
 
 // Whole-turn summaries are cumulative and authoritative. When steering splits a
@@ -539,16 +495,6 @@ export function boundarySummary(boundary: ActivityBoundary): BoundarySummary {
   return { summary: found ? total : null, incomingAgentMessages, partial };
 }
 
-export function seriesRepeatsBoundarySummary(
-  boundary: ActivityBoundary,
-  totals: BoundarySummary,
-): boolean {
-  const series = boundary.slices
-    .filter((slice) => slice.segment.tools.length > 0)
-    .map((slice) => toolSeriesSummary(slice.segment));
-  return series.length === 1 && series[0] === summaryLine(totals.summary, 0);
-}
-
 export function boundaryDisplayedReply(
   boundary: ActivityBoundary,
 ): MessageEntry | null {
@@ -580,20 +526,7 @@ export function boundaryOutcomeLabel(boundary: ActivityBoundary): string {
     : "";
 }
 
-export function boundaryContainsOffset(
-  boundary: ActivityBoundary,
-  offset: number,
-): boolean {
-  return boundary.items.some((item) =>
-    item.kind === "marker"
-      ? item.turn.system?.offset === offset
-      : item.segment.user.some((entry) => entry.offset === offset) ||
-        item.segment.tools.some((entry) => entry.offset === offset) ||
-        item.segment.assistant?.offset === offset,
-  );
-}
-
-export interface VEyePress {
+interface VEyePress {
   key: string;
   open: boolean;
 }
@@ -622,21 +555,21 @@ export function compactedHeadLabel(open: boolean): string {
 // Closed-eye visibility: the one shared decision behind the hidden-chunk
 // projection and the renderer's collapsed slices. Platform pills and the
 // leading agent message stay visible; they delimit chunks, never counted.
-export function closedSliceUsers(
+function closedSliceUsers(
   boundary: ActivityBoundary,
   slice: ActivitySlice,
 ): MessageEntry[] {
   return boundaryUserEntries(boundary, slice, false);
 }
 
-export function isClosedAssistantVisible(
+function isClosedAssistantVisible(
   boundary: ActivityBoundary,
   slice: ActivitySlice,
 ): boolean {
   return slice.assistantVisible || boundary.failOpen;
 }
 
-export function closedSliceAssistant(
+function closedSliceAssistant(
   boundary: ActivityBoundary,
   slice: ActivitySlice,
 ): MessageEntry | null {
@@ -646,7 +579,7 @@ export function closedSliceAssistant(
     : null;
 }
 
-export type ClosedBoundaryItem =
+type ClosedBoundaryItem =
   | { kind: "users"; slice: ActivitySlice; entries: MessageEntry[] }
   | { kind: "assistant"; slice: ActivitySlice; entry: MessageEntry }
   | { kind: "attachments"; slice: ActivitySlice; items: AgentAttachment[] }

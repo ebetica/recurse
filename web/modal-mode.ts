@@ -2,7 +2,7 @@
 // enter/leave a central keyboard mode without adding another global dispatcher.
 import type { KeyboardMode } from "./keymap.js";
 
-export type KeyboardModeSetter = (mode: KeyboardMode) => void;
+type KeyboardModeSetter = (mode: KeyboardMode) => void;
 
 let setter: KeyboardModeSetter | null = null;
 

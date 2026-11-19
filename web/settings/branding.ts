@@ -1,5 +1,5 @@
 // Home-only name and icon editor sheet, applied to the shell after reload.
-import { api, jpost } from "../api.js";
+import { api, apiJson, jpost } from "../api.js";
 import { settingsDetail } from "./layout.js";
 
 export function buildBrandingSection(body: HTMLElement): void {
@@ -23,38 +23,54 @@ export function buildBrandingSection(body: HTMLElement): void {
   const resetIcon = form.querySelector<HTMLButtonElement>(
     '[name="reset-icon"]',
   )!;
-  const detail = settingsDetail(body, "Name and icon", () => name.value);
-  const show = async (response: Response, saved = false) => {
-    const value = (await response.json()) as { name: string; detail?: string };
+  let loading = true;
+  const detail = settingsDetail(body, "Name and icon", () =>
+    loading ? "Checking…" : name.value,
+  );
+  type Branding = { name: string; detail?: string };
+  const show = (response: Response, value: Branding, saved = false) => {
     if (!response.ok)
       throw new Error(value.detail || "Couldn't save name and icon.");
     name.value = value.name;
     detail.refresh();
     if (saved) msg.textContent = "Saved. Reload the page to see changes.";
   };
+  const setDisabled = (disabled: boolean) => {
+    for (const control of form.querySelectorAll<
+      HTMLInputElement | HTMLButtonElement
+    >("input,button"))
+      control.disabled = disabled;
+  };
   const run = async (work: () => Promise<Response>) => {
-    const controls = [
-      ...form.querySelectorAll<HTMLInputElement | HTMLButtonElement>(
-        "input,button",
-      ),
-    ];
-    controls.forEach((control) => (control.disabled = true));
+    setDisabled(true);
     msg.textContent = "";
     try {
-      await show(await work(), true);
+      const response = await work();
+      show(response, (await response.json()) as Branding, true);
     } catch (error) {
       msg.textContent = error instanceof Error ? error.message : String(error);
     } finally {
-      controls.forEach((control) => (control.disabled = false));
+      setDisabled(false);
     }
   };
-  name.disabled = true;
-  void api("/api/settings/branding")
-    .then((response) => show(response))
+  // Invariant: every control waits for the stored name, so neither typing nor
+  // a finished Save or Reset can be replaced by it. The load has a deadline,
+  // so a stalled response unlocks the form with an error.
+  setDisabled(true);
+  void apiJson<Branding>(
+    "/api/settings/branding",
+    {},
+    { availability: "optional", timeoutMs: 10_000 },
+  )
+    .then(({ response, data }) => show(response, data))
     .catch(() => {
       msg.textContent = "Couldn't load name and icon.";
     })
-    .finally(() => (name.disabled = false));
+    .finally(() => {
+      loading = false;
+      detail.refresh();
+      setDisabled(false);
+    });
   form.onsubmit = (event) => {
     event.preventDefault();
     const value = name.value;

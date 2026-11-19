@@ -5,7 +5,7 @@
 import { ConnectionHealth, type RequestOutcome } from "./connection/health.js";
 import { interactionTrace } from "./interaction-timing.js";
 
-export interface ApiHealthOptions {
+interface ApiHealthOptions {
   availability?: "core" | "optional";
   timeoutMs?: number;
   renewsSession?: boolean;

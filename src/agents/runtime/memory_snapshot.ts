@@ -8,10 +8,10 @@ import type { FileHandle } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { entriesAt, lstatAt, mkdirAt, openAt } from "../../utils/dir_fd";
 
-export type MemoryPaths = { local: string; tree: string; global: string };
+type MemoryPaths = { local: string; tree: string; global: string };
 export type MemoryEntry = { path: string; title: string; date: string };
 export type MemoryIndex = { entries: MemoryEntry[]; truncated: boolean };
-export type MemorySnapshot = {
+type MemorySnapshot = {
   paths: MemoryPaths;
   local: MemoryIndex;
   tree: MemoryIndex;
@@ -232,7 +232,7 @@ function frontMatter(
     ? [title, date]
     : null;
 }
-export type ScanHooks = {
+type ScanHooks = {
   beforeRead?: (name: string) => Promise<void>;
   beforeVisibleStat?: (name: string) => Promise<void>;
 };

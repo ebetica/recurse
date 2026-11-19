@@ -1,9 +1,10 @@
 # Turns, prompts and compaction (Pi Durable)
 
-Pi Durable connects one Harness per conversation to the tree for storage,
-admission, captured requests and run reports.
+Pi Durable gives each conversation one Harness for storage, input, request
+capture and run reports.
 
 **Source files:** [host.ts](host.ts) and [host/](host/) own Harness lifecycles;
+[run-state clock](run_state_clock.ts) stamps snapshots;
 [shared refusal](stopping_error/) fences admission;
 [sqlite_worker.ts](sqlite_worker.ts) owns storage execution;
 [prompt_resources.ts](prompt_resources.ts), [prompt_sections.ts](prompt_sections.ts),
@@ -16,7 +17,8 @@ manages context summaries.
 
 ## Harness and turns
 
-[host/open.ts](host/open.ts) opens a Harness on demand or for recovery. Startup
+[host/open.ts](host/open.ts) opens a Harness on demand or for recovery. Side
+forks share its registry. Startup
 [recovery](host/recovery.ts) reads live task indexes, root/side inboxes and the
 report cursor without constructing a Harness. Only unfinished tasks, queued
 input, undelivered reports, pending clears, revivals or promotions reopen;
@@ -166,8 +168,7 @@ path, without creating a run or keeping the instance awake. Durable does not con
 Pi's AgentSession cache warmer, so Pi's idle-warming default does not apply.
 `follow.ts` keeps the latest committed assistant usage and its storage-session
 identity in its live row for API status, clearing it on compaction or close.
-It also caches Pi's active run first-entry boundary for search to exclude the
-caller's current retrieval turn without reading history.
+Pi's first-entry boundary scopes search and the live panel across generations.
 The identity matches `/view` across projection rebuilds and changes on Clear;
 clients must not reuse usage from another session. Status uses the UI's shared
 occupancy projection without opening storage; cold or reopened-but-unsampled

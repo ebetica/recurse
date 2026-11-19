@@ -9,7 +9,7 @@ export type ComposerControlIntent =
   | "arm-stop"
   | "stop";
 
-export interface ComposerControlState {
+interface ComposerControlState {
   hasPayload: boolean;
   sendable: boolean;
   stopAvailable: boolean;
@@ -70,7 +70,7 @@ export function activateComposerControlState(state: ComposerControlState): {
   };
 }
 
-export interface StopProcessesCandidate {
+interface StopProcessesCandidate {
   status?: string | null;
   active_run?: string | null;
   shells?: { active_count?: number | null } | null;

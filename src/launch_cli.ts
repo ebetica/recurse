@@ -56,7 +56,7 @@ function buildStamp(args: string[]): number {
 }
 
 /** Build one checkout generation; 0 when built or already current. */
-export async function build(
+async function build(
   args: string[],
   runBuild: (root: string) => Promise<boolean> = (root) =>
     buildCurrentGeneration(root),

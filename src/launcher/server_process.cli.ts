@@ -10,10 +10,10 @@ import { LOCK_FD_ENV, writeLockOwner } from "./lock.cli";
 import { SERVER_STOP_GRACE_SECONDS } from "../shutdown_budget";
 import { detail, execReplacing, getpgid, logError, run, say } from "./system";
 
-export const GRACE_SECONDS = SERVER_STOP_GRACE_SECONDS;
-export const REEXEC_SHA_ENV = "RECURSE_SELF_DEPLOY_REEXEC_SHA";
+const GRACE_SECONDS = SERVER_STOP_GRACE_SECONDS;
+const REEXEC_SHA_ENV = "RECURSE_SELF_DEPLOY_REEXEC_SHA";
 /** The descriptor number the server child receives the lock on. */
-export const CHILD_LOCK_FD = 3;
+const CHILD_LOCK_FD = 3;
 
 export interface ServerChild {
   readonly pid: number;
@@ -26,7 +26,7 @@ export interface ServerChild {
 }
 
 /** Adapt a Bun subprocess to `ServerChild`. */
-export function serverChild(proc: Subprocess): ServerChild {
+function serverChild(proc: Subprocess): ServerChild {
   return {
     pid: proc.pid,
     poll: () => returncode(proc),
@@ -50,7 +50,7 @@ export function serverChild(proc: Subprocess): ServerChild {
   };
 }
 
-export interface SpawnOptions {
+interface SpawnOptions {
   readonly lockFd: number | null;
   readonly bun?: string;
   readonly spawn?: typeof Bun.spawn;
@@ -104,7 +104,7 @@ export async function spawnServer(
 }
 
 /** Runs the served generation's lifecycle cleanup; argv[1] is the module. */
-export const CLEANUP_SCRIPT = `
+const CLEANUP_SCRIPT = `
 const { ProcessLifecycle } = await import(process.argv[1]);
 const registry = { lifecycleRecords: async () => [[], true] };
 const lifecycle = new ProcessLifecycle({ registry, shellStateDir: "" });
@@ -152,7 +152,7 @@ export interface TerminateDeps {
   readonly reconcile: (codeDir: string) => Promise<boolean>;
 }
 
-export const TERMINATE_DEPS: TerminateDeps = {
+const TERMINATE_DEPS: TerminateDeps = {
   getpgid,
   killpg: (pgid, signal) => process.kill(-pgid, signal),
   reconcile: (codeDir) => reconcileServerProcesses(codeDir),
@@ -202,7 +202,7 @@ export async function terminate(
 }
 
 /** Probe the new supervisor and app before replacing the known-good process. */
-export async function updatedRuntimeStarts(
+async function updatedRuntimeStarts(
   codeDir: string,
   deps: { run?: typeof run; bun?: string } = {},
 ): Promise<boolean> {
@@ -294,7 +294,7 @@ export async function prepareUpdateRuntime(
   return true;
 }
 
-export type Execve = (
+type Execve = (
   executable: string,
   argv: readonly string[],
   env: Readonly<Record<string, string>>,

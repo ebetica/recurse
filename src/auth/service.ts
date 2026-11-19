@@ -10,13 +10,13 @@ import { open } from "node:fs/promises";
 import { pyStrip } from "./provider_store";
 
 export const TOKEN_FILE_MAX_BYTES = 4096;
-export const AUTHORIZATION_MAX_BYTES = 4096;
-export const SERVICE_REGISTRY_MAX_BYTES = 256 * 1024;
+const AUTHORIZATION_MAX_BYTES = 4096;
+const SERVICE_REGISTRY_MAX_BYTES = 256 * 1024;
 export const SERVICE_BODY_MAX_BYTES = 64 * 1024;
 export const SERVICE_MESSAGE_MAX_CHARS = 32 * 1024;
 export const SERVICE_CREATE_MAX_ACTIVE = 2;
-export const CONVERSATION_READ_CAPABILITY = "conversation.read";
-export const SERVICE_TOKEN_PREFIX = "recurse";
+const CONVERSATION_READ_CAPABILITY = "conversation.read";
+const SERVICE_TOKEN_PREFIX = "recurse";
 const SERVICE_KEY_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const SERVICE_CID = "([A-Za-z0-9][A-Za-z0-9_-]{0,127})";
 const SEND_RE = new RegExp(
@@ -25,7 +25,7 @@ const SEND_RE = new RegExp(
 const READ_RE = new RegExp(
   `^/api/service/conversations/${SERVICE_CID}/replies$`,
 );
-export const SERVICE_CAPABILITIES: ReadonlySet<string> = new Set([
+const SERVICE_CAPABILITIES: ReadonlySet<string> = new Set([
   "conversation.create",
   "conversation.send",
   CONVERSATION_READ_CAPABILITY,
@@ -37,7 +37,7 @@ export interface ServicePolicy {
   readonly quotas: Readonly<Record<string, number>>;
 }
 
-export const SERVICE_DEFAULT_POLICY: ServicePolicy = Object.freeze({
+const SERVICE_DEFAULT_POLICY: ServicePolicy = Object.freeze({
   scopes: new Set(SERVICE_CAPABILITIES),
   allowed_models: null,
   quotas: Object.freeze({}),
@@ -45,7 +45,7 @@ export const SERVICE_DEFAULT_POLICY: ServicePolicy = Object.freeze({
 
 const codePoints = (text: string) => [...text].length;
 
-export interface ServiceAuthOptions {
+interface ServiceAuthOptions {
   readonly principalsFile: string | null;
   readonly tokenFile: string | null;
 }
@@ -180,7 +180,7 @@ const REGISTRY_KEYS = new Set([
   "quotas",
 ]);
 
-export function registryPolicy(
+function registryPolicy(
   value: unknown,
 ): readonly [ServicePolicy, string] | null {
   if (
@@ -261,7 +261,7 @@ export function validateServicePolicy(policy: unknown): ServicePolicy | null {
   return policy as ServicePolicy;
 }
 
-export interface ServiceCaller {
+interface ServiceCaller {
   readonly principal: string;
   readonly policy: ServicePolicy;
 }

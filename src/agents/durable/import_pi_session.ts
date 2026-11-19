@@ -53,7 +53,7 @@ import {
 } from "../../extensions/core/environment/managed_tools";
 import { openWorkerSqliteStorage, SqliteWorker } from "./sqlite_worker";
 import { recordReplyTimes } from "./reply_times";
-import { retirePath } from "../../utils/trash_sweep";
+import { retirePath } from "../../utils/trash-sweep";
 
 type Rec = Record<string, unknown>;
 type Draft = { -readonly [K in keyof EntryDraft]: EntryDraft[K] };

@@ -1,8 +1,8 @@
 // Shared operation-spec driver for the TS replay and reverse Python-open check.
 import { Database } from "bun:sqlite";
-import type { AgentStore } from "../../../../src/agents/agent_store";
+import type { AgentStore } from "../../../../src/agents/storage/agent_store";
 
-export interface Operation {
+interface Operation {
   op: string;
   metadata?: Record<string, unknown>;
   body?: Record<string, unknown>;

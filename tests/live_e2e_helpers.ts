@@ -37,7 +37,7 @@ export function liveSecondModel(models: LiveJson[], config = new Config()) {
 
 export type LiveJson = Record<string, any>;
 
-export const LIVE_AUTH_SAFE_WINDOW_MS = 60 * 60 * 1000;
+const LIVE_AUTH_SAFE_WINDOW_MS = 60 * 60 * 1000;
 
 type AuthObject = Record<string, unknown>;
 

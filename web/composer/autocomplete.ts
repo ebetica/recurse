@@ -47,9 +47,6 @@ export function hideComposerAutocomplete(id: string): void {
 export function composerAutocompleteIs(id: string): boolean {
   return owner?.id === id;
 }
-export function composerAutocompleteOpen(): boolean {
-  return owner !== null;
-}
 
 export function composerAutocompleteOwnsKey(
   key: string,

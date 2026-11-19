@@ -78,12 +78,16 @@ export function conditionalBytes(
     : mediaType;
   const bytes: Uint8Array =
     typeof body === "string" ? new TextEncoder().encode(body) : body;
-  const response = new Response(bytes, {
-    headers: {
-      "content-type": contentType,
-      "content-length": String(bytes.byteLength),
-      ...extraHeaders,
+  // Bun accepts byte views backed by any ArrayBufferLike; the DOM type doesn't.
+  const response = new Response(
+    bytes as ConstructorParameters<typeof Response>[0],
+    {
+      headers: {
+        "content-type": contentType,
+        "content-length": String(bytes.byteLength),
+        ...extraHeaders,
+      },
     },
-  });
+  );
   return finish(request, response, bytes, cacheControl);
 }

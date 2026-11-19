@@ -14,17 +14,17 @@ const PI_IMAGE_RESIZE_NOTE =
 const IMAGE_MARKDOWN = /!\[([^\]]*)\]\(([^)\s]+)\)/g;
 const WHOLE_IMAGE_MARKDOWN = /^!\[([^\]]*)\]\(([^)\s]+)\)$/u;
 
-export interface UserBubbleImage {
+interface UserBubbleImage {
   url: string;
   alt: string;
 }
 
-export interface UserBubbleFile {
+interface UserBubbleFile {
   label: string;
   url: string;
 }
 
-export interface UserBubbleParts {
+interface UserBubbleParts {
   text: string;
   images: UserBubbleImage[];
   files: UserBubbleFile[];
@@ -37,7 +37,7 @@ export function hasUserAttachments(entry: { content: string }): boolean {
 }
 
 /** Remove only Pi's exact image coordinate note from operator-visible text. */
-export function stripPiImageResizeNotes(content: string): string {
+function stripPiImageResizeNotes(content: string): string {
   return content
     .split(/\r?\n/u)
     .filter((line) => !PI_IMAGE_RESIZE_NOTE.test(line))
@@ -65,7 +65,7 @@ export function userBubbleParts(content: string): UserBubbleParts {
   let inFence = false;
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index]!;
-    const fence = /^```/.test(line.trim());
+    const fence = line.trim().startsWith("```");
     // Invariant: Fenced code is displayed verbatim by fencedUserText. Do not
     // interpret attachment or image Markdown inside it as a browser control.
     if (inFence || fence) {

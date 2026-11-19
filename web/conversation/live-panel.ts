@@ -1,6 +1,6 @@
 // Renders the live panel outside the thread; owns title/tool-label timers.
-// Invariant: the thread renders before the live bar, so its template marks
-// thinking text already rendered there before workingT reads it.
+// A running turn keeps its latest thought here until a newer one arrives,
+// even when it is also visible in the thread. Waiting and idle clear it.
 import { html, nothing, type TemplateResult } from "lit";
 import {
   containsSecret,
@@ -9,9 +9,7 @@ import {
 import { activeAgentSummary, activeDescendantCount } from "../active-agents.js";
 import { rowThreads } from "../row-thread-state/index.js";
 import { state } from "../state.js";
-import { thinkingStore } from "./thinking.js";
-import { showsCommittedStep } from "./thinking-paint.js";
-import type { ActivityBoundary } from "../thread-render/activity-boundary.js";
+import { disclosureCaret, thinkingStore } from "./thinking.js";
 import {
   shellSummary,
   shouldShowShellUnavailable,
@@ -26,13 +24,13 @@ import {
   holdLiveTitle,
   liveActivityState,
   thinkingSummaryBody,
-  thinkingSummaryTail,
+  type LiveActivityRow,
   type LiveTitleState,
 } from "../thread-render/tool_activity.js";
 import type { Conversation } from "../types.js";
 import { thinkingElapsedT } from "./live-elapsed.js";
 import { activeShells, agentChipT, shellChipT } from "./shell-surface.js";
-import { paint } from "./thread.js";
+import { paint } from "../thread-render/index.js";
 
 // The one thinking banner's shared box: pulsing dot, label slot, and the
 // shell/agent chips on the right. Streaming and waiting states render the
@@ -77,15 +75,47 @@ const liveTitleStates = new Map<string, LiveTitleState>();
 const LIVE_TITLE_STATE_LIMIT = 128;
 let toolLabelTimer: number | null = null;
 let expandedToolsKey: string | null = null;
+let lastThought:
+  | {
+      cid: string;
+      generation: number | undefined;
+      run: Conversation["active_run_start"];
+      row: LiveActivityRow;
+    }
+  | undefined;
+
+function liveActivityFor(conv: Conversation) {
+  const thread = rowThreads.get(conv.id);
+  const latest = thread?.latestThinking;
+  const sameRun = latest?.run_start === (conv.active_run_start ?? null);
+  const held =
+    lastThought?.cid === conv.id &&
+    lastThought.generation === conv.message_log_generation &&
+    lastThought.run === conv.active_run_start
+      ? lastThought.row
+      : null;
+  const row = sameRun
+    ? latest.recovering && held?.thinking_title
+      ? held
+      : latest.row
+    : null;
+  return liveActivityState(
+    thread?.rows ?? [],
+    conv.provider_starting == null,
+    latest ? row : undefined,
+    conv.active_run_start,
+  );
+}
 
 // The bar owns running counts only while its delayed tool label is visible.
 export function liveToolLabelVisible(
   conv: Conversation,
   elapsedMs: number,
+  panel = liveActivityFor(conv),
 ): boolean {
   return (
     elapsedMs >= TOOL_LABEL_DELAY_MS &&
-    !liveActivityState(rowThreads.get(conv.id)?.rows ?? []).hasThinking &&
+    !panel.thinkingRow &&
     conv.status === "running" &&
     state.stopPostInFlightId !== conv.id &&
     !conv.retry_notice
@@ -94,12 +124,15 @@ export function liveToolLabelVisible(
 
 // Long-running tools yield a stable label; quick calls keep the thinking line.
 // Stop overlays and retry notices retain priority.
-export function workingT(
-  conv: Conversation,
-  boundary?: ActivityBoundary,
-): TemplateResult {
+export function workingT(conv: Conversation): TemplateResult {
   const rows = rowThreads.get(conv.id)?.rows ?? [];
-  const panel = liveActivityState(rows, conv.provider_starting == null);
+  const panel = liveActivityFor(conv);
+  lastThought = panel.thinkingRow && {
+    cid: conv.id,
+    generation: conv.message_log_generation,
+    run: conv.active_run_start,
+    row: panel.thinkingRow,
+  };
   const retryNotice = conv.retry_notice;
   const tools = runningTools(rows, performance.now());
   const longest = Math.max(0, ...tools.map((tool) => tool.elapsedMs));
@@ -115,24 +148,33 @@ export function workingT(
   const stopping =
     conv.status === "interrupting" || state.stopPostInFlightId === conv.id;
   const overlay = stopping ? "Interrupting this turn…" : null;
-  const pillKey = thinkingStore.syncPill(
-    conv,
-    rows,
-    overlay || retryNotice ? "" : panel.kind,
-    boundary,
-  );
+  const pillKey = thinkingStore.syncPill(conv, panel.thinkingRow);
   const thinkingEntry =
     pillKey === null ? undefined : thinkingStore.get(pillKey);
   const thinkingFull = thinkingEntry?.text;
-  const thinkingExpanded = !!thinkingEntry?.open;
-  const thinkingText =
-    thinkingExpanded &&
-    !showsCommittedStep(pillKey) &&
+  const thinkingBody =
     typeof thinkingFull === "string"
       ? thinkingSummaryBody(thinkingFull, panel.title)
       : "";
+  const thinkingCanToggle =
+    !overlay &&
+    !retryNotice &&
+    panel.kind === "thinking" &&
+    pillKey !== null &&
+    !!panel.thinkingRow?.thinking_title;
+  const thinkingExpanded = thinkingCanToggle && !!thinkingStore.pill?.expanded;
+  const thinkingText = thinkingExpanded
+    ? thinkingBody ||
+      (thinkingEntry?.loading ||
+      thinkingFull === undefined ||
+      thinkingEntry?.source !== thinkingStore.pill?.entry.offset
+        ? "Loading…"
+        : thinkingFull === null
+          ? "Thinking unavailable."
+          : "No additional thinking.")
+    : "";
   const label = overlay ?? retryNotice ?? panel.label;
-  const showTools = liveToolLabelVisible(conv, longest);
+  const showTools = liveToolLabelVisible(conv, longest, panel);
   const title =
     overlay ??
     retryNotice ??
@@ -159,16 +201,12 @@ export function workingT(
     overlay === null &&
     !retryNotice &&
     panel.kind === "thinking" &&
-    (toolVisible || panel.thinkingElapsedMs !== undefined)
+    (showTools || panel.thinkingElapsedMs !== undefined)
       ? thinkingElapsedT(
-          toolVisible ? longest : panel.thinkingElapsedMs!,
-          toolVisible || titleState.title !== "Thinking",
+          showTools ? longest : panel.thinkingElapsedMs!,
+          showTools || titleState.title !== "Thinking",
         )
       : nothing;
-  const hasSummary =
-    pillKey !== null &&
-    typeof thinkingFull === "string" &&
-    Boolean(thinkingSummaryTail(thinkingFull));
   const toggle = showTools
     ? () => {
         expandedToolsKey = toolsExpanded ? null : toolsKey;
@@ -177,14 +215,7 @@ export function workingT(
     : pillKey !== null
       ? () => thinkingStore.togglePill(pillKey)
       : null;
-  const canToggle =
-    showTools ||
-    (panel.kind === "thinking" &&
-      pillKey !== null &&
-      (thinkingEntry?.text === undefined ||
-        thinkingEntry.source !== thinkingStore.pill?.entry.offset ||
-        hasSummary ||
-        thinkingExpanded));
+  const canToggle = showTools || thinkingCanToggle;
   const thinkingPrefix =
     panel.kind === "thinking" &&
     !showTools &&
@@ -208,7 +239,7 @@ export function workingT(
         aria-expanded=${String(showTools ? toolsExpanded : thinkingExpanded)}
         @click=${() => toggle?.()}
       >
-        ${head}
+        ${disclosureCaret}${head}
       </button>`
     : html`<span
         class="live-label${titleState.changed ? " live-title-changing" : ""}"
@@ -247,6 +278,14 @@ export function workingT(
           : "is-thinking"
         : "";
   return panelBoxT(conv, mood, labelT, label, stopping, summary);
+}
+
+export function clearLivePanel(): void {
+  lastThought = undefined;
+  thinkingStore.clearPill();
+  if (toolLabelTimer !== null) window.clearTimeout(toolLabelTimer);
+  toolLabelTimer = null;
+  expandedToolsKey = null;
 }
 
 // Renders admitted-but-undispatched input as queued, not dead or working. It

@@ -46,6 +46,7 @@ import {
 } from "./artifacts/artifact-state.js";
 import { commentRendering, discardCurrent } from "./artifacts/comment-bar.js";
 import {
+  cancelSelectionComment,
   claimComments,
   commentKey,
   comments,
@@ -193,9 +194,8 @@ function closeImage(): void {
   closeDrawingEditor();
   popout = null;
   body._filesObserver?.disconnect();
+  cancelSelectionComment(body);
   if (commentMount.current === body) commentMount.current = null;
-  const commentPopover = dialog.querySelector(".report-comment-popover");
-  if (commentPopover) document.body.append(commentPopover);
   dialog.close();
   dialog.remove();
   focus?.focus({ preventScroll: true });
@@ -208,6 +208,16 @@ export function closeImageFromKeyboard(): boolean {
   if (!popout) return false;
   closeImage();
   return true;
+}
+
+/** Close the active layer of the image viewer on Escape. */
+export function handleImageEscape(): void {
+  if (!popout) return;
+  if (
+    !closeDrawingFromKeyboard() &&
+    !closeSelectionCommentFromKeyboard(popout.body)
+  )
+    closeImage();
 }
 
 window.addEventListener("popstate", () => {
@@ -240,8 +250,7 @@ function openImage(cid: string, file: SessionFile): void {
     );
     dialog.addEventListener("cancel", (event) => {
       event.preventDefault();
-      if (!closeDrawingFromKeyboard() && !closeSelectionCommentFromKeyboard())
-        closeImage();
+      handleImageEscape();
     });
     let outside: { x: number; y: number } | null = null;
     dialog.addEventListener("pointerdown", (event) => {
@@ -380,9 +389,6 @@ function renderImage(): void {
       </aside>`,
     body,
   );
-  const commentPopover = document.querySelector(".report-comment-popover");
-  if (commentPopover)
-    body.querySelector(".image-comment-sidebar")!.append(commentPopover);
   observePreviews(body, cid);
   syncComments(body, cid, file);
   syncDraw();
@@ -510,6 +516,7 @@ function selectFile(
   cid: string,
   selection: FileSelection | null,
   userInitiated = true,
+  viewer = paneEl,
 ): void {
   const file = selection && selectedFile(allFiles(entry(cid)), selection);
   if (file && !phone.matches && file.id) {
@@ -522,7 +529,7 @@ function selectFile(
         return;
       }
     } else selections.delete(cid);
-    if (userInitiated) closeSelectionCommentFromKeyboard();
+    if (userInitiated && viewer) closeSelectionCommentFromKeyboard(viewer);
     value.notice = file.unavailable
       ? unavailableLabel(file)!
       : openFileTab(
@@ -570,7 +577,7 @@ function stepFile(cid: string, delta: -1 | 1, element?: FilesEl): boolean {
   const index = shown ? groups.findIndex((group) => group.includes(shown)) : -1;
   const next = index < 0 ? null : groups[index + delta]?.[0];
   if (!next) return false;
-  if (held) selectFile(cid, { key: next.key });
+  if (held) selectFile(cid, { key: next.key }, true, element);
   else {
     selections.set(cid, { key: next.key, latest: true });
     repaint();
@@ -1223,7 +1230,7 @@ function versionMenu(
         const key = select.value;
         if (fileViews.has(element)) {
           select.value = file.key;
-          selectFile(cid, { key });
+          selectFile(cid, { key }, true, element);
         } else {
           selections.set(cid, { key, latest: key === versions[0]!.key });
           repaint();

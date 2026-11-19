@@ -11,7 +11,7 @@ import { AgentTree } from "../../src/agents/agent_tree";
 import {
   TreeLifecycle,
   TreeLifecycleBusy,
-} from "../../src/agents/mutation_guard";
+} from "../../src/agents/lifecycle/mutation_guard";
 import { buildConversationsApp } from "./http_conversations_app";
 import {
   RuntimeLogger,

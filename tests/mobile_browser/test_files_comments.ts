@@ -818,7 +818,9 @@ export const tests: BrowserTest[] = [
       await popover.locator("textarea").fill("Check this decision count");
       await popover.getByRole("button", { name: "Comment" }).click();
       expect(
-        await page.locator(".report-comment blockquote").textContent(),
+        await page
+          .locator(".report-comment .report-comment-quote")
+          .textContent(),
       ).toBe("are two decisions");
       expect(
         (await doc.locator("mark.report-cmark").allTextContents()).join(""),

@@ -2,10 +2,10 @@
 // connection.ts; this module makes the one-automatic-navigation bound explicit
 // and independently testable.
 
-export const GENERATION_PARAM = "_recurse_generation";
-export const GENERATION_RETRY_PARAM = "_recurse_retry";
+const GENERATION_PARAM = "_recurse_generation";
+const GENERATION_RETRY_PARAM = "_recurse_retry";
 
-export type GenerationDecision = "match" | "navigate" | "retry";
+type GenerationDecision = "match" | "navigate" | "retry";
 
 export function generationDecision(
   loaded: string,

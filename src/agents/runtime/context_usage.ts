@@ -8,9 +8,9 @@ import { getCurrentTools } from "@earendil-works/pi-ai/utils/transcript";
 import { getSystemMessageText } from "@earendil-works/pi-ai/utils/text";
 import { open, type FileHandle } from "node:fs/promises";
 import type { Config } from "../../config";
-import { parsePythonJson, pyCompactJson } from "../../utils/py_compact_json";
+import { parsePythonJson, pyCompactJson } from "../../utils/python-json";
 
-export type JsonObject = Record<string, unknown>;
+type JsonObject = Record<string, unknown>;
 type Conv = Record<string, unknown>;
 type Bytes = Buffer;
 type Counts = Record<(typeof COUNT_KEYS)[number], number>;
@@ -18,13 +18,13 @@ type Counts = Record<(typeof COUNT_KEYS)[number], number>;
 const TAIL_SCAN_BYTES = 64 * 1024;
 const TAIL_SCAN_LINES = 400;
 /** Largest tail window the usage estimate ever reads from one session. */
-export const ESTIMATE_TAIL_BYTES = 4 << 20;
+const ESTIMATE_TAIL_BYTES = 4 << 20;
 /** Bounded offset-zero read that validates an oversized session's header. */
 const HEADER_PROBE_BYTES = 64 << 10;
 const MAX_SAFE_INTEGER = 2 ** 53 - 1;
-export const MAX_SESSION_BYTES = 128 * 1024 * 1024;
+const MAX_SESSION_BYTES = 128 * 1024 * 1024;
 const MAX_SESSION_LINE_BYTES = 32 * 1024 * 1024;
-export const MAX_SESSION_ENTRIES = 200_000;
+const MAX_SESSION_ENTRIES = 200_000;
 const ESTIMATED_IMAGE_CHARS = 4_800;
 const COUNT_KEYS = [
   "system",
@@ -36,7 +36,7 @@ const COUNT_KEYS = [
 const NL = 0x0a;
 const CLOEXEC = (constants as { O_CLOEXEC?: number }).O_CLOEXEC ?? 0;
 
-export interface ContextUsageDeps {
+interface ContextUsageDeps {
   boundSessionFile(
     sessionId: string,
     recordedFile: string,
@@ -69,7 +69,7 @@ function truthy(value: unknown): boolean {
 }
 
 /** Python `==` over JSON values: bools are ints, containers compare deeply. */
-export function pyEq(a: unknown, b: unknown): boolean {
+function pyEq(a: unknown, b: unknown): boolean {
   const num = (v: unknown) => (typeof v === "boolean" ? Number(v) : v);
   if (a === undefined) a = null;
   if (b === undefined) b = null;
@@ -142,8 +142,28 @@ export function assistantContextUsage(
     : null;
 }
 
+/** Committed live usage for a row, or null when cold or unmeasured. */
+export function agentContext(
+  row: Readonly<Record<string, unknown>>,
+  sample: Record<string, unknown> | null,
+  config: Pick<Config, "chatSettings" | "contextBarWindow">,
+): { tokens: number; window: number | null; session?: string } | null {
+  if (sample === null) return null;
+  const model = typeof row.model === "string" ? row.model : null;
+  const usage = contextOccupancy(sample, config.chatSettings(model)[0], config);
+  return usage.tokens === null
+    ? null
+    : {
+        tokens: usage.tokens,
+        window: usage.window,
+        ...(typeof sample.session === "string"
+          ? { session: sample.session }
+          : {}),
+      };
+}
+
 /** Measured prompt occupancy; the window is unknown for a different model. */
-export function contextOccupancy(
+function contextOccupancy(
   usage: unknown,
   model: string,
   config: Pick<Config, "contextBarWindow">,
@@ -159,7 +179,7 @@ export function contextOccupancy(
   };
 }
 
-export function usageSelector(usage: unknown): string | null {
+function usageSelector(usage: unknown): string | null {
   if (!isDict(usage) || usage.selectorPartial !== false) return null;
   const selectors = usage.selectors;
   if (
@@ -177,7 +197,7 @@ const unusedCapacity = (used: number | null, capacity: number | null) =>
 const UTF8 = new TextDecoder("utf-8", { fatal: true, ignoreBOM: false });
 
 /** One guarded session line (with its newline), or null to fail the read. */
-export function parseEntryLine(raw: Bytes): JsonObject | null {
+function parseEntryLine(raw: Bytes): JsonObject | null {
   if (raw.length > MAX_SESSION_LINE_BYTES || raw.at(-1) !== NL) return null;
   let entry: unknown;
   try {
@@ -523,7 +543,7 @@ export class ContextUsage {
 }
 
 /** Mirror Pi's branch walk and latest-compaction projection. */
-export function activeContextEntries(
+function activeContextEntries(
   entries: readonly JsonObject[],
   danglingRoot = false,
 ): JsonObject[] | null {
@@ -606,7 +626,7 @@ function splitUserText(text: string): [number, number] {
 const getOr = (record: JsonObject, key: string, fallback: unknown) =>
   key in record ? record[key] : fallback;
 
-export function estimateContextChars(
+function estimateContextChars(
   entries: readonly JsonObject[],
   systemChars: number,
 ): Counts | null {
@@ -722,7 +742,7 @@ export function estimateRequestTokens(
   return scaleEstimate(counts, used);
 }
 
-export function scaleEstimate(counts: Counts, used: number): Counts | null {
+function scaleEstimate(counts: Counts, used: number): Counts | null {
   const total = COUNT_KEYS.reduce((sum, key) => sum + BigInt(counts[key]), 0n);
   if (total <= 0n)
     return used === 0
@@ -748,7 +768,7 @@ export function scaleEstimate(counts: Counts, used: number): Counts | null {
 }
 
 /** Only context preceding the uniquely measured assistant response. */
-export function usageContextEntries(
+function usageContextEntries(
   entries: readonly JsonObject[],
   usage: unknown,
 ): JsonObject[] | null {
@@ -775,10 +795,7 @@ export function usageContextEntries(
 }
 
 /** Apply one captured live sample: the single usage projection. */
-export function projectLiveSample(
-  conv: Conv,
-  snapshot: JsonObject | null,
-): void {
+function projectLiveSample(conv: Conv, snapshot: JsonObject | null): void {
   if (snapshot !== null) {
     if (!("usage" in snapshot)) throw new Error("KeyError: 'usage'");
     conv.latest_context_usage = snapshot.usage;

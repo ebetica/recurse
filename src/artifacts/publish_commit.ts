@@ -17,7 +17,7 @@ function emit(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
 }
 
-export async function publishCommit(path: string): Promise<void> {
+async function publishCommit(path: string): Promise<void> {
   const repo = resolve(path);
   const owner = basename(dirname(repo));
   const id = basename(repo);

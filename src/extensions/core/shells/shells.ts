@@ -51,7 +51,7 @@ export const SHELL_TASK = "recurse.shell";
 /** The tool-task memo holding a bash call's launch id. */
 const LAUNCH_MEMO = "recurse.shell";
 // Call launch id inherited by every shell descendant.
-export const LAUNCH_ENV = "RECURSE_SHELL_LAUNCH";
+const LAUNCH_ENV = "RECURSE_SHELL_LAUNCH";
 
 // Call-specific launch and publish ownership ids. The launch's 32 hex digits
 // form a stable, unique run id across resume.
@@ -79,7 +79,7 @@ export type ShellGroup = {
   boot_id: string | null;
 };
 
-export type DurableShellScope = {
+type DurableShellScope = {
   /** Stable per Recurse conversation; one registry per key. */
   key: string;
   cwd: string;
@@ -1016,7 +1016,7 @@ export function createShells(host: ShellsOptions) {
     // Refuse commands and stop all owned groups, independently of Harness join.
     async shutdown(): Promise<void> {
       closing = true;
-      for (const id of [...watches.keys()]) unwatch(id);
+      for (const id of Array.from(watches.keys())) unwatch(id);
       await Promise.all(
         [...registries.values()].map((registry) => registry.shutdown()),
       );

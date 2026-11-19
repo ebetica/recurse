@@ -22,7 +22,7 @@ async function centreHits(target: Locator): Promise<boolean> {
 }
 
 export const tests: BrowserTest[] = [
-  // Feature: #3480 desktop Settings rows open sub-pages with a back link.
+  // Regression: #3538 a phone-width resize keeps focus in the open detail; #3537 typed history days survive the settings load. (also Feature #3480 desktop Settings rows open sub-pages with a back link.)
   async function test_desktop_settings_rows_open_sub_pages(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },
@@ -151,9 +151,24 @@ export const tests: BrowserTest[] = [
       ).toBeVisible();
       await browserExpect(accountNav).toBeFocused();
       await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await browserExpect(row).toHaveAccessibleName(
+        "Deleted agents' history 30 days",
+      );
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => (release = resolve));
+      await page.route(
+        "**/api/settings/deleted-agent-history",
+        async (route) => {
+          if (route.request().method() === "GET") await held;
+          await route.fallback();
+        },
+      );
       await page.reload();
       await openSettingsPanel(page);
       await row.click();
+      await browserExpect(days).toBeDisabled();
+      release();
+      await browserExpect(days).toHaveValue("30");
       await days.fill("45");
       const done = page.getByRole("button", {
         name: "Close Deleted agents' history",

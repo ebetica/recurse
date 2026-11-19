@@ -14,16 +14,25 @@ import {
 } from "./row-thread-state/row-thread.js";
 import type { ViewPage } from "./row-thread-state/view-blocks.js";
 import {
+  cancelRevealTimer,
   rowThreads,
   rowThreadEpoch,
   rowThreadCleared,
 } from "./row-thread-state/index.js";
 import { pruneOptimistic } from "./pending-queue/index.js";
-import { cancelRevealTimer } from "./conversation/disclosure.js";
-import { writeThreadScroll } from "./conversation/scroll-ledger.js";
-import { paint } from "./conversation/thread.js";
-import { invalidateFiles, noteRowsRead, noteTurns } from "./files.js";
+import { writeThreadScroll } from "./thread-scroll/index.js";
+import { paint } from "./thread-render/index.js";
 import type { Conversation, Turn } from "./types.js";
+
+interface RowFileUpdates {
+  invalidateFiles(id: string): void;
+  noteRowsRead(id: string): void;
+  noteTurns(id: string, turns: readonly Turn[]): void;
+}
+let rowFileUpdates: RowFileUpdates;
+export function configureRowFileUpdates(updates: RowFileUpdates): void {
+  rowFileUpdates = updates;
+}
 
 export let loaded: Turn[] = [];
 export let renderedConvId: string | null = null;
@@ -96,37 +105,47 @@ function invalidatePublishedFiles(
       );
     })
   )
-    invalidateFiles(id);
+    rowFileUpdates.invalidateFiles(id);
 }
 
 // One SSE delta folded through the same thread-level rules as the row poll:
 // stale pages keep held rows, instance changes rebuild, and only a changed
 // thread repaints the open conversation.
-export function applyFocusedEventPage(id: string, page: ViewPage): void {
-  if (isDeletingConversation(id)) return;
-  if (isClearedStale(id, page)) return;
-  if (page?.status === "stale") return;
-  if (id !== state.selectedId) return;
+export function applyFocusedEventPage(
+  id: string,
+  page: ViewPage,
+  snapshot: boolean,
+): boolean {
+  if (isDeletingConversation(id)) return false;
+  if (isClearedStale(id, page)) return false;
+  if (page?.status === "stale") return false;
+  if (id !== state.selectedId) return false;
   const previous = rowThreads.get(id);
   if (
     page &&
     previous?.instanceId === page.instance_id &&
     previous.revision > page.revision
   )
-    return;
+    return false;
+  // Invariant: After a text gap, later deltas cannot replace the missing base
+  // or invalidate the full read already in flight.
+  if (previous?.instanceId === page.instance_id && previous.revision === -1) {
+    if (!snapshot && !page.reset) return false;
+    page = { ...page, reset: true };
+  }
   const priorStatus = rowReadStatus.get(id);
   const status = page?.status === "ready" ? "ready" : "unavailable";
   rowReadStatus.set(id, status);
   rowReadVersion.set(id, Symbol());
   pruneRowCaches(id);
-  if (!page) return;
+  if (!page) return false;
   const fold = foldRowThread(previous, page);
   if (fold.gap) {
     if (fold.state) rowThreads.set(id, fold.state);
     catchUpRowThread(id);
-    return;
+    return false;
   }
-  if (!fold.state) return;
+  if (!fold.state) return false;
   rememberRowThread(id, fold.state, fold.reset, page.older === true);
   invalidatePublishedFiles(id, page, previous, fold.changed);
   const conv = state.currentConv;
@@ -136,6 +155,7 @@ export function applyFocusedEventPage(id: string, page: ViewPage): void {
     reconcileRows(conv)
   )
     paint(conv);
+  return status === "ready";
 }
 
 function rememberRowThread(
@@ -145,7 +165,7 @@ function rememberRowThread(
   older: boolean,
 ): void {
   rowThreads.set(id, thread);
-  noteRowsRead(id);
+  rowFileUpdates.noteRowsRead(id);
   if (reset) rowThreadOlder.set(id, older);
 }
 
@@ -395,7 +415,7 @@ function reconcileRows(conv: Conversation): boolean {
   loaded = rowsToTurns(thread.rows, rowThreadOlder.get(conv.id) !== false);
   conv.retry_notice = thread.retryNotice ?? null;
   markRowsOpen(conv, thread.rows);
-  noteTurns(conv.id, loaded);
+  rowFileUpdates.noteTurns(conv.id, loaded);
   // Invariant: Rows page by id: top is "no older rows", not byte offset 0.
   topCursor = rowThreadOlder.get(conv.id) === false ? 0 : 1;
   pruneOptimistic(conv, loaded);

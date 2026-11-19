@@ -9,6 +9,8 @@ import {
   fauxProvider,
   type FauxResponseStep,
   fauxToolCall,
+  getSystemMessageText,
+  type SystemMessage,
 } from "@earendil-works/pi-ai";
 import {
   type Conversation,
@@ -564,6 +566,7 @@ const codexCompaction = (item?: Rec) => ({
   ],
 });
 
+// Regression: #3535 Send GPT-6.2+ instructions as cacheable input after any checkpoint.
 test("Codex compaction skips readable summaries, shows a server marker, chains across restarts and lazily summarizes unusable items", async () => {
   const w = world();
   mkdirSync(join(w.dataDir, "config"), { recursive: true });
@@ -593,10 +596,10 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     id: "cmp_4",
     encrypted_content: "opaque-4",
   };
-  const replay = replayProvider({
+  const recording: Recording = {
     provenance: {
       date: "2026-10-30",
-      model: "gpt-5.6-luna",
+      model: "gpt-6.2-sol",
       pi: "1.3.0",
       scenario: "hand-written Codex compaction protocol",
     },
@@ -650,10 +653,14 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
       codexCompaction(third),
       codexReply("cold two"),
       codexCompaction(fourth),
+      codexReply("Luna reply"),
+      codexReply("GPT-7 reply"),
     ],
-  });
+  };
+  const sseRequestText = new WeakMap<Rec, string>();
+  const replay = replayProvider(recording, { sseRequestText });
   const builtin = builtinProviders().find((p) => p.id === "openai-codex")!;
-  const catalog = builtin.getModels().find((m) => m.id === "gpt-5.6-luna")!;
+  const catalog = builtin.getModels().find((m) => m.id === "gpt-6.1-sol")!;
   const baseUrl = `${replay.baseUrl}/backend-api`;
   const key = (account: string) =>
     `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: account } })).toString("base64url")}.test`;
@@ -688,11 +695,14 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     getModels: () => [
       {
         ...catalog,
+        id: "gpt-6.2-sol",
         baseUrl,
         promptCache: { short: 300, long: 300 },
         cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
       },
-      { ...catalog, id: "gpt-other", baseUrl },
+      { ...catalog, baseUrl },
+      { ...catalog, id: "gpt-7", baseUrl },
+      { ...builtin.getModels().find((m) => m.id === "gpt-5.6-luna")!, baseUrl },
     ],
     streamSimple: (
       m: Parameters<typeof builtin.streamSimple>[0],
@@ -731,7 +741,7 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
   const config = new Config({
     env: { ...process.env, CHAT_DATA_DIR: w.dataDir },
   });
-  let model = "openai-codex/gpt-5.6-luna";
+  let model = "openai-codex/gpt-6.2-sol";
   let effort = "off";
   const logs: string[] = [];
   const start = (state = w) =>
@@ -772,6 +782,23 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
   try {
     await host.send("c1", "the code word is PELICAN", "k0");
     await answered(host, "reply 0");
+    const instructions = async () =>
+      getSystemMessageText(
+        ((await host.prompt("c1")).system_messages as SystemMessage[])[0]!,
+      );
+    const developerItem = (text: string) => ({
+      type: "message",
+      role: "developer",
+      content: [{ type: "input_text", text }],
+    });
+    const body = () => requests().at(-1)!;
+    const expectCachedInstructions = async () => {
+      expect(body()).not.toHaveProperty("instructions");
+      expect((body().input as Rec[])[0]).toEqual(
+        developerItem(await instructions()),
+      );
+    };
+    await expectCachedInstructions();
     await host.send("c1", `go ${tokens(21_000)}`, "k1");
     await answered(host, "reply 1");
     await host.send("c1", `more history ${tokens(21_000)}`, "more");
@@ -784,13 +811,15 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     );
     expect(JSON.stringify(rows)).not.toContain("recurse-server-compaction");
     expect(JSON.stringify(rows)).toContain("PELICAN");
-    expect(inputWithoutTools(2).at(-1)).toEqual({ type: "compaction_trigger" });
+    expect(body()).not.toHaveProperty("instructions");
+    const compactionInput = body().input as Rec[];
     const turn = requests()[2]!.input as Rec[];
-    expect(turn[0]!.type).toBe("additional_tools");
-    expect(inputWithoutTools(2).slice(0, -1)).toEqual(
-      turn.slice(1, inputWithoutTools(2).length),
+    expect(turn[1]!.type).toBe("additional_tools");
+    expect(compactionInput.at(-1)).toEqual({ type: "compaction_trigger" });
+    expect(compactionInput.slice(0, -1)).toEqual(
+      turn.slice(0, compactionInput.length - 1),
     );
-    expect(JSON.stringify(inputWithoutTools(2))).toContain("PELICAN");
+    expect(JSON.stringify(compactionInput)).toContain("PELICAN");
     expect(requests()[3]!.prompt_cache_key).toBe(
       requests()[0]!.prompt_cache_key,
     );
@@ -809,7 +838,11 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
       (await entries(host)).some((entry) => textOf(entry) === "reply 2"),
     );
     await until(() => !host.isRunning("c1"));
-    expect(inputWithoutTools(3)[0]).toEqual(first);
+    expect(body()).not.toHaveProperty("instructions");
+    expect((body().input as Rec[]).slice(0, 2)).toEqual([
+      first,
+      developerItem(await instructions()),
+    ]);
     expect(JSON.stringify(inputWithoutTools(3))).not.toContain("<summary>");
     const request = (await host.prompt("c1")).request as {
       context: { messages: { role: string; content: Rec[] | string }[] };
@@ -838,7 +871,10 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     await until(() => replay.requests.length === beforeWarm + 1);
     warmRequest = replay.requests.at(-1)!;
     const source = requests().at(-1)!;
-    expect(warmRequest.input).toEqual(source.input);
+    const serializedInput = `"input":${JSON.stringify(source.input)}`;
+    expect(sseRequestText.get(source)).toContain(serializedInput);
+    expect(sseRequestText.get(warmRequest)).toContain(serializedInput);
+    expect(warmRequest).not.toHaveProperty("instructions");
     expect(
       (warmRequest.input as Rec[]).find((item) => item.type === "compaction"),
     ).toEqual(first);
@@ -854,10 +890,15 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     await host.send("c1", "again", "k3");
     await answered(host, "reply 3");
     expect(inputWithoutTools(4)[0]).toEqual(first);
-    model = "openai-codex/gpt-other";
+    const expectLegacyInstructions = async () => {
+      expect(body().instructions).toEqual(await instructions());
+      expect((body().input as Rec[])[0]!.type).toBe("additional_tools");
+    };
+    model = "openai-codex/gpt-6.1-sol";
     await host.send("c1", "on another Codex model", "k3b");
     await answered(host, "other model");
-    model = "openai-codex/gpt-5.6-luna";
+    await expectLegacyInstructions();
+    model = "openai-codex/gpt-6.2-sol";
     apiKey = key("other-account");
     await host.send("c1", "from another account", "k3c");
     await answered(host, "other account");
@@ -875,13 +916,19 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     await answered(host, "faux reply");
     expect(fauxRequests.at(-1)).toContain("RECURSE SUMMARY");
     expect(fauxRequests.at(-1)).not.toContain("codex-compaction-item");
-    model = "openai-codex/gpt-5.6-luna";
+    model = "openai-codex/gpt-6.2-sol";
     await host.send("c1", `more ${tokens(21_000)}`, "k5");
     await answered(host, "reply 4");
     await compacted(host, 2);
     expect(summaries).toHaveLength(1);
-    expect(inputWithoutTools(8)[0]).toEqual(first);
-    expect(inputWithoutTools(8).at(-1)).toEqual({ type: "compaction_trigger" });
+    const chainedInput = body().input as Rec[];
+    expect(chainedInput[0]).toEqual(first);
+    expect(chainedInput.at(-1)).toEqual({ type: "compaction_trigger" });
+    expect(
+      chainedInput.some(
+        (item) => item.type === "message" && item.role === "developer",
+      ),
+    ).toBe(false);
     await host.send("c1", "after", "k6");
     await answered(host, "reply 6");
     expect(inputWithoutTools(9)[0]).toEqual(second);
@@ -964,6 +1011,17 @@ test("Codex compaction skips readable summaries, shows a server marker, chains a
     } finally {
       await promoted.close();
     }
+    await host.clear("c1");
+    model = "openai-codex/gpt-5.6-luna";
+    await host.send("c1", "reply in a fresh conversation", "luna");
+    await answered(host, "Luna reply");
+    await expectLegacyInstructions();
+    await host.clear("c1");
+    model = "openai-codex/gpt-7";
+    await host.send("c1", "reply in a fresh conversation", "gpt-7");
+    await answered(host, "GPT-7 reply");
+    expect(body().model).toBe("gpt-7");
+    await expectCachedInstructions();
     replay.assertComplete();
     expect(await Bun.file(legacySetting).json()).toEqual({ enabled: false });
     await Bun.sleep(0);

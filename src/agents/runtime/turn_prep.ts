@@ -1,7 +1,7 @@
 // Upload annotation for Durable turns. Resolve admitted files, then check that
 // their collection and agent lifetime are still current before exposing paths.
 import type { Config } from "../../config";
-import type { ConversationStore } from "../conversation_store";
+import type { ConversationStore } from "../storage";
 import { uploadPromptParts } from "./attachments/published";
 import { collectionSnapshot, type CollectionSnapshot } from "./node_files";
 import { formatHiddenMessages } from "./prompt_stamp";
@@ -17,7 +17,7 @@ export function pyTruthy(value: unknown): boolean {
   return Boolean(value);
 }
 
-export interface TurnPrepDeps {
+interface TurnPrepDeps {
   conversations: Pick<ConversationStore, "metadataSnapshot">;
   existingNode(cid: string): { readonly reaping: boolean } | null;
   config: Pick<Config, "agentTempLeaf" | "paths">;

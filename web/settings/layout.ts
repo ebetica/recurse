@@ -155,11 +155,18 @@ export function settingsDetail(
   };
   const row = settingsRow(label, value(), open);
   row.setAttribute("aria-haspopup", "dialog");
+  let lastFocused: Element | null = null;
+  sheet.addEventListener("focusin", (event) => {
+    lastFocused = event.target as Element;
+  });
   reopen.set(sheet, (force) => {
     const page = !alwaysSheet && !phoneDetails.matches;
     if (!force && page === sheet.classList.contains("settings-subpage"))
       return false;
-    const focused = document.activeElement;
+    // Invariant: a width change can hide this detail and drop its focus to
+    // the page before this runs, so focus on the page restores the last one.
+    const active = document.activeElement;
+    const focused = !active || active === document.body ? lastFocused : active;
     sheet.close();
     open();
     if (focused instanceof HTMLElement && sheet.contains(focused))

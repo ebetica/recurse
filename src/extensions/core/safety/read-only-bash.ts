@@ -285,7 +285,7 @@ function safeAssignments(
       /(?:^|_)(?:PATH|ENV|HOME|SHELL|PAGER|EDITOR|PRELOAD|LIBRARY|OPTIONS|CONFIG)(?:_|$)/.test(
         name,
       ) ||
-      /HOME$/.test(name) ||
+      name.endsWith("HOME") ||
       [
         "IFS",
         "BASHOPTS",

@@ -1,7 +1,7 @@
 // Startup catches up missing/stale projections, without reading current files.
 // Immutable archive files are projection done-markers, not a separate index.
 import { join } from "node:path";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 import type { AgentArchive } from "../agents/durable/archive";
 import type { ProcessLifecycle } from "../process_lifecycle";
 import { BackfillProcess } from "./backfill_process";

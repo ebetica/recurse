@@ -28,7 +28,7 @@ import {
   activeDescendantCount,
 } from "../active-agents.js";
 import { guardLeaveComments } from "../comments.js";
-import { activeAgentRowT, selectAgent } from "../sidebar.js";
+import { openAgent, renderActiveAgentRow } from "../sidebar/index.js";
 import type { Conversation } from "../types.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { CLOSE_ICON, PERSON_ICON, TERMINAL_ICON } from "../icons.js";
@@ -381,7 +381,7 @@ function agentSurfaceT(conv: Conversation): TemplateResult | typeof nothing {
     if (id !== state.selectedId && !guardLeaveComments()) return;
     closeAgentSurface(false);
     state.cursorId = id;
-    selectAgent(id);
+    openAgent(id);
   };
   return html`<section
     class="dialog shell-surface agent-surface"
@@ -407,7 +407,7 @@ function agentSurfaceT(conv: Conversation): TemplateResult | typeof nothing {
     <ul class="active-agent-list">
       ${agents.map(
         ({ node, depth }) =>
-          html`<li>${activeAgentRowT(node, depth - 1, open)}</li>`,
+          html`<li>${renderActiveAgentRow(node, depth - 1, open)}</li>`,
       )}
     </ul>
   </section>`;

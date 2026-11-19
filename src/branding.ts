@@ -4,7 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
-export const MAX_ICON_BYTES = 1024 * 1024;
+const MAX_ICON_BYTES = 1024 * 1024;
 type Icon = { type: "image/png" | "image/svg+xml"; data: string };
 type Brand = { name: string | null; icon: Icon | null };
 const writes = new Map<string, Promise<unknown>>();
@@ -60,7 +60,7 @@ export async function readBrand(path: string): Promise<Brand> {
 }
 
 /** Accept PNG signatures or an SVG root; serve scripts inertly. */
-export function brandIcon(bytes: Uint8Array): Icon {
+function brandIcon(bytes: Uint8Array): Icon {
   if (!bytes.length || bytes.length > MAX_ICON_BYTES)
     throw new Error("Choose a PNG or SVG icon up to 1 MiB.");
   const png = Buffer.from(bytes.subarray(0, 8)).equals(

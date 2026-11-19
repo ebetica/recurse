@@ -28,7 +28,7 @@ export interface Exchange {
   disableTimeout(): void;
 }
 
-export type ParsedUrl = InstanceType<typeof URL>;
+type ParsedUrl = InstanceType<typeof URL>;
 
 export type Handler = (ex: Exchange) => Promise<Response>;
 
@@ -74,21 +74,21 @@ export function errorResponse(error: HttpError): Response {
   return jsonResponse({ detail: error.detail }, error.status, error.headers);
 }
 
-export type QueryType = "int" | "float" | "bool" | "str";
-export interface QueryParam {
+type QueryType = "int" | "float" | "bool" | "str";
+interface QueryParam {
   readonly type: QueryType;
   /** Absent means optional with a null default. */
   readonly required?: boolean;
   readonly default?: string | number | boolean | null;
 }
 
-export interface RouteOptions {
+interface RouteOptions {
   readonly query?: Readonly<Record<string, QueryParam>>;
   /** Requests that may legitimately outlast the idle timeout. */
   readonly longRunning?: boolean;
 }
 
-export interface Route extends RouteOptions {
+interface Route extends RouteOptions {
   readonly methods: readonly string[];
   readonly path: string;
   readonly handler: Handler;
@@ -134,7 +134,7 @@ interface Invalid {
 }
 
 /** Pydantic v2 lax string coercion for the query types routes declare. */
-export function coerceQuery(
+function coerceQuery(
   type: QueryType,
   raw: string,
 ): string | number | boolean | Invalid {

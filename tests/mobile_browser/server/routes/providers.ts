@@ -1,5 +1,5 @@
 import { commitWrites } from "@earendil-works/pi-durable/testing";
-import { SET_MODEL_MARKER } from "../../../../src/agents/conversation_store";
+import { SET_MODEL_MARKER } from "../../../../src/agents/storage/conversation_store";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context";
@@ -211,7 +211,9 @@ export function routes(fx: Fixture): Routes {
         ) {
           if (unavailable) {
             unavailable = false;
-            throw new Error("Reviewer provider error");
+            throw new Error(
+              `503: Mammoth rejected <b>review context</b>\nUse a shorter request. The reviewer could not process the evidence for the tool call. The tool already ran, so use its output to decide what to do next.\nX-API-Key: abc123\n${"Provider response padding. ".repeat(12)}`,
+            );
           }
           return fauxAssistantMessage("OK");
         }

@@ -10,16 +10,16 @@ import {
   type RuntimeLogger,
 } from "../../observability/runtime_logging";
 import { Cancelled, checkAbort, type TaskSet } from "../../utils/tasks";
-import { AgentClosed } from "../agent_store";
 import {
+  AgentClosed,
   validLevel,
   type ConversationRecord,
   type ConversationStore,
-} from "../conversation_store";
-import type { TreeLifecycle } from "../mutation_guard";
+  type ConversationStoreHooks,
+} from "../storage";
+import type { TreeLifecycle } from "../lifecycle";
 import type { AgentNode, NodeStore } from "../runtime/agent_node";
 import type { AgentNodes } from "../runtime/agent_nodes";
-import type { ConversationStoreHooks } from "../conversation_store";
 import type { ConfigActions } from "../runtime/config_actions";
 import { promptTokens } from "../runtime/context_usage";
 import { resolveTurnDelivery } from "../runtime/turn_report";
@@ -40,12 +40,12 @@ import {
 /** Composer idempotency keys, as the HTTP boundary validates them. */
 export const CLIENT_KEY_RE = /^[A-Za-z0-9._-]{1,64}$/;
 /** Cap for the settle report's session-tail read, matching the reply view. */
-export const TURN_REPORT_SESSION_MAX_BYTES = 128 * 1024 * 1024;
-export const TURN_TAIL_WAIT_SECONDS = 15.0;
-export const TURN_TAIL_RETRY_SECONDS = 0.25;
-export const TURN_TAIL_RETRY_MAX_SECONDS = 2.0;
+const TURN_REPORT_SESSION_MAX_BYTES = 128 * 1024 * 1024;
+const TURN_TAIL_WAIT_SECONDS = 15.0;
+const TURN_TAIL_RETRY_SECONDS = 0.25;
+const TURN_TAIL_RETRY_MAX_SECONDS = 2.0;
 
-export interface DurableDelivery {
+interface DurableDelivery {
   owns(conv: JsonObject | null | undefined): boolean;
   /** The request id, or null when the conversation is being deleted. */
   send(
@@ -64,7 +64,7 @@ export interface DurableDelivery {
   readonly reportHolds: Pick<ReportHolds, "holders">;
 }
 
-export interface DeliveryDeps {
+interface DeliveryDeps {
   durable?: DurableDelivery;
   conversations: Pick<
     ConversationStore,
@@ -151,7 +151,7 @@ export interface DeliverOptions {
   clientMessageId?: string | null;
 }
 
-export interface TurnReportArgs {
+interface TurnReportArgs {
   kind: string;
   runId: string;
   trigger?: unknown;

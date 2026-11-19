@@ -23,7 +23,7 @@ import {
   procEntry,
   procText,
 } from "./utils/process_table";
-import { parsePythonJson } from "./utils/py_compact_json";
+import { parsePythonJson } from "./utils/python-json";
 
 export type ShellRecord = Record<string, unknown>;
 type Groups = Map<
@@ -31,7 +31,7 @@ type Groups = Map<
   { count: number; leaderStart: string | null; uncertain: boolean }
 >;
 
-export interface ShellRegistryOptions {
+interface ShellRegistryOptions {
   enabled: boolean;
   stateDir: string;
   procRoot?: string;
@@ -39,7 +39,7 @@ export interface ShellRegistryOptions {
   processStartedMs: number;
 }
 
-export interface ShellLiveness {
+interface ShellLiveness {
   status: "disabled" | "unavailable" | "ready";
   shell_count: number;
   shell_ids?: unknown[];
@@ -47,7 +47,7 @@ export interface ShellLiveness {
 }
 
 const MAX_RECORD_BYTES = 64 * 1024;
-export const MAX_RECORDS = 1000;
+const MAX_RECORDS = 1000;
 const MAX_VIEW_ITEMS = 100;
 const RECORD_CACHE_MAX = 4096;
 const SCAN_CACHE_MAX = 1024;
@@ -76,11 +76,11 @@ function identityMatches(identity: unknown, start: string | null): boolean {
     : false;
 }
 
-export function number(value: unknown): number | null {
+function number(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-export function sessionSegment(sessionId: string): string {
+function sessionSegment(sessionId: string): string {
   const segment =
     String(sessionId)
       .replace(/[^A-Za-z0-9._-]+/gu, "-")
@@ -105,7 +105,7 @@ export function displayCommand(command: string): string {
   return out;
 }
 
-export function middleElide(value: string, limit: number): string {
+function middleElide(value: string, limit: number): string {
   const chars = [...value];
   if (chars.length <= limit) return value;
   const bound = Math.max(3, limit);
@@ -127,7 +127,7 @@ function asciiJson(value: string): string {
 }
 
 /** One-line, bounded, marker-escaped command for model context. */
-export function escapedReminderCommand(command: string): string {
+function escapedReminderCommand(command: string): string {
   let escaped = "";
   for (const ch of command.replace(ANSI_ESCAPE, "")) {
     const point = ch.codePointAt(0)!;

@@ -97,10 +97,7 @@ function textContent(content: unknown): string {
     .join("\n");
 }
 
-export function truncateSerializedAction(
-  text: string,
-  maxChars: number,
-): string {
+function truncateSerializedAction(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   const render = (kept: number) => {
     const prefix = Math.ceil(kept * 0.6);
@@ -137,8 +134,6 @@ function boundedToolOutput(content: unknown): string {
     ? text
     : `${text.slice(0, MAX_TOOL_OUTPUT_CHARS)}… [tool result truncated; ${text.length} original chars]`;
 }
-
-export { boundedToolOutput };
 
 function serializeTranscriptItem(item: TranscriptItem): string {
   // Invariant: JSON-encode each evidence item so body text cannot forge
@@ -379,7 +374,7 @@ export type ReviewToolCall = Readonly<{
   command: string | null;
 }>;
 
-export type ReviewToolResult = Readonly<{
+type ReviewToolResult = Readonly<{
   id: string;
   name: string;
   output: string;
@@ -528,8 +523,6 @@ export function canonicalReviewSourceEntry(
     toolResult,
   });
 }
-
-const MAX_NOTICE_ACTION_CHARS = 800;
 const MAX_REVIEW_PATH_CHARS = 1_000;
 
 // Serialize bounded path display evidence, never filesystem authority
@@ -567,43 +560,6 @@ export function formatPathOnlyProposedAction(
     null,
     2,
   );
-}
-
-// Bounded user-only action notice: bash command or write/edit path. Full input
-// remains in the tool inspector, not this message.
-export function summarizeActionForNotice(
-  toolName: string,
-  input: unknown,
-): string {
-  const record =
-    input && typeof input === "object"
-      ? (input as Record<string, unknown>)
-      : {};
-  const clip = (text: string): string => {
-    const trimmed = text.trim();
-    return trimmed.length > MAX_NOTICE_ACTION_CHARS
-      ? `${trimmed.slice(0, MAX_NOTICE_ACTION_CHARS)}… (truncated)`
-      : trimmed;
-  };
-  if (
-    toolName === "bash" &&
-    typeof record.command === "string" &&
-    record.command.trim()
-  ) {
-    return `$ ${clip(record.command)}`;
-  }
-  const path = record.file_path ?? record.path ?? record.filePath;
-  if (toolName === "write" || toolName === "edit") {
-    return typeof path === "string" && path.trim()
-      ? `${toolName} ${clip(path.normalize("NFC").replace(/[\p{C}\p{Zl}\p{Zp}]/gu, "�"))}`
-      : `${toolName} (missing or invalid path)`;
-  }
-
-  try {
-    return clip(JSON.stringify({ tool: toolName, input }) ?? String(input));
-  } catch {
-    return clip(String(input));
-  }
 }
 
 // `context` holds trusted call facts, such as the calling codemode call of a

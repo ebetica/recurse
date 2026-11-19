@@ -4,7 +4,7 @@
 // Search/expiry use the index; revived metadata stays for provenance.
 import { mkdir, rename, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { retirePath } from "../../utils/trash_sweep";
+import { retirePath } from "../../utils/trash-sweep";
 import type { WorkerSqliteDatabase } from "./sqlite_worker.ts";
 
 export type ArchiveReason = "reap" | "clear" | "import";
@@ -28,7 +28,7 @@ export interface ArchivedAgent {
   origin_path?: string;
 }
 
-export const PAGE_LIMIT = 50;
+const PAGE_LIMIT = 50;
 const MAX_QUERY = 96;
 const STORE_FILES = [
   "session.sqlite",
@@ -59,12 +59,12 @@ const fromRow = ({ data, revived_as }: Row): ArchivedAgent => ({
   revived_as,
 });
 
-export function validArchiveId(id: unknown): id is string {
+function validArchiveId(id: unknown): id is string {
   return typeof id === "string" && ARCHIVE_ID_RE.test(id);
 }
 
 // LIKE pattern matching the query's characters in order, case-insensitively.
-export function subsequencePattern(query: string): string {
+function subsequencePattern(query: string): string {
   const chars = Array.from(query.replace(/\s+/g, "").slice(0, MAX_QUERY));
   return `%${chars.map((c) => (/[%_\\]/.test(c) ? `\\${c}` : c)).join("%")}%`;
 }

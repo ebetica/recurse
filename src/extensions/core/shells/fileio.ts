@@ -13,20 +13,14 @@ import {
 } from "./trim.ts";
 
 /** Read up to `maxBytes` from the end of a file as UTF-8 text. */
-export async function readTail(
-  path: string,
-  maxBytes: number,
-): Promise<string> {
+async function readTail(path: string, maxBytes: number): Promise<string> {
   const size = await fileSize(path);
   const want = Math.min(maxBytes, size);
   return readRange(path, size - want, want);
 }
 
 /** Read up to `maxBytes` from the start of a file as UTF-8 text. */
-export async function readHead(
-  path: string,
-  maxBytes: number,
-): Promise<string> {
+async function readHead(path: string, maxBytes: number): Promise<string> {
   return readRange(path, 0, Math.min(maxBytes, await fileSize(path)));
 }
 

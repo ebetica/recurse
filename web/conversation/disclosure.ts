@@ -1,6 +1,6 @@
-// Owns generation-scoped, bounded response and tool-series expansion state and
-// live-tail reveal buffers. Startup supplies live reads and actions. Folding
-// never clears ToolDetailStore or refetches loaded payloads.
+// Owns generation-scoped, bounded response and tool-series expansion state.
+// Startup supplies live reads and actions. Folding never clears
+// ToolDetailStore or refetches loaded payloads.
 
 import { state } from "../state.js";
 import {
@@ -16,31 +16,13 @@ import {
   type ActivityBoundary,
   type ActivitySlice,
 } from "../thread-render/activity-boundary.js";
-import { pruneCaches, threadHasLive } from "../row-thread-state/row-thread.js";
-import { rowThreads } from "../row-thread-state/index.js";
 import {
   messageDisclosures,
   messageDisclosureIdentity,
 } from "./message-disclosure.js";
-import type { ScrollAnchorRow } from "./scroll-anchor.js";
-import {
-  advanceStreamReveal,
-  createStreamReveal,
-  flushStreamReveal,
-  ingestStreamReveal,
-  pendingRevealChars,
-  planLiveReveal,
-  planSettledReveal,
-  splitRevealChunks,
-  STREAM_REVEAL_MS,
-  type StreamRevealState,
-} from "../stream-reveal.js";
-import {
-  isAgentActivityMessage,
-  isNoticeOnlyAssistant,
-  visibleAssistant,
-} from "../thread-render/turn-view.js";
-import type { Conversation, MessageEntry, Turn } from "../types.js";
+import { anchoredPaint, paint } from "../thread-render/index.js";
+import { isAgentActivityMessage } from "../thread-render/turn-view.js";
+import type { MessageEntry, Turn } from "../types.js";
 
 interface DisclosureReadState {
   readonly loaded: Turn[];
@@ -49,20 +31,15 @@ interface DisclosureReadState {
   readonly renderedLogGeneration: number;
   readonly topCursor: number;
 }
-interface DisclosureActions {
-  paint(conv: Conversation): void;
-  anchoredPaint(conv: Conversation, anchor: ScrollAnchorRow | null): void;
-  loadOlder(fill: boolean): Promise<void>;
-}
 let thread: DisclosureReadState;
-let actions: DisclosureActions;
+let loadOlder: (fill: boolean) => Promise<void>;
 // Keep the read view live: async guards must reread it after a page settles.
 export function configureDisclosure(
   reads: DisclosureReadState,
-  effects: DisclosureActions,
+  older: typeof loadOlder,
 ): void {
   thread = reads;
-  actions = effects;
+  loadOlder = older;
 }
 
 const MAX_EXPANDED_TURNS = 256;
@@ -116,11 +93,9 @@ export function toggleActivityGroup(
 ): void {
   const opening = !activityGroupOpen(cid, boundary, group);
   setActivityGroupOpen(cid, boundary, group, opening);
-  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
   if (opening) void backfillOldestBoundary(cid, boundary.key, group);
 }
-// Range eyes open activity, not the compaction marker's own summary.
-export const compactionSummarySuppressed = new Set<string>();
 function boundedAdd(values: Set<string>, value: string, limit: number): void {
   if (values.has(value)) values.delete(value);
   while (values.size >= limit) {
@@ -136,23 +111,7 @@ export function activityBoundaryKey(
 ): string {
   return boundaryDisclosureKey(cid, thread.renderedLogGeneration, boundary);
 }
-
-function structuralDisclosureKey(cid: string, key: string): string {
-  return `${cid}:${thread.renderedLogGeneration}:${key}`;
-}
-
-export function compactionRangeOpen(
-  cid: string,
-  keys: readonly string[],
-): boolean {
-  return (
-    keys.length > 0 &&
-    keys.every((key) =>
-      expandedActivityBoundaries.has(structuralDisclosureKey(cid, key)),
-    )
-  );
-}
-export function activityBoundaryOpen(
+function activityBoundaryOpen(
   cid: string,
   boundary: ActivityBoundary,
 ): boolean {
@@ -179,27 +138,7 @@ export function toggleToolSeries(
   // Invariant: The clicked control keeps its screen position: expanding or
   // collapsing a series above the viewport would otherwise slide the reader's
   // content.
-  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
-}
-// A hidden-chunk press is the eye plus the chunk's own series: the response
-// disclosure opens and every series the chunk summarizes expands, in one
-// paint. Slices without a rendered toggle take a harmless unused key. The
-// oldest-boundary backfill rides along exactly as on an eye press.
-export function revealHiddenChunk(
-  cid: string,
-  boundary: ActivityBoundary,
-  slices: ActivitySlice[],
-): void {
-  const opening = !activityBoundaryOpen(cid, boundary);
-  if (opening) revealActivityBoundary(cid, boundary);
-  for (const slice of slices)
-    boundedAdd(
-      expandedToolSeries,
-      toolSeriesKey(cid, boundary, slice.turn.turn_id, slice.segmentIndex),
-      MAX_TOOL_SERIES_STATES,
-    );
-  if (state.currentConv) actions.paint(state.currentConv);
-  if (opening) void backfillOldestBoundary(cid, boundary.key);
+  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
 }
 const expandedAllBlocks = new Map<string, Set<string>>();
 export function syncBlockExpanded(
@@ -226,7 +165,7 @@ export function toggleBlockExpandAll(
     expandedAllBlocks.set(identity, new Set());
   }
   applyBlockSections(cid, boundary, opening, expandedAllBlocks.get(identity));
-  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
+  if (state.currentConv) anchoredPaint(state.currentConv, anchor);
   if (opening) void expandOlderPage(cid, boundary);
 }
 // Opening the oldest loaded block pulls one older page, which can re-key the
@@ -250,7 +189,7 @@ async function expandOlderPage(
   if (!next) return;
   expandedAllBlocks.delete(identity);
   expandedAllBlocks.set(activityBoundaryKey(cid, next), covered);
-  actions.paint(conv);
+  paint(conv);
 }
 function applyBlockSections(
   cid: string,
@@ -361,51 +300,6 @@ export function revealRowMessage(cid: string, wanted: string): boolean {
   }
   return true;
 }
-
-export function toggleCompactionRange(
-  cid: string,
-  boundary: ActivityBoundary,
-  keys: readonly string[],
-  anchor: ScrollAnchorRow | null = null,
-): void {
-  const identities = keys.map((key) => structuralDisclosureKey(cid, key));
-  const opening = !compactionRangeOpen(cid, keys);
-  const summaryIdentity = activityBoundaryKey(cid, boundary);
-  if (opening)
-    boundedAdd(
-      compactionSummarySuppressed,
-      summaryIdentity,
-      MAX_EXPANDED_TURNS,
-    );
-  else compactionSummarySuppressed.delete(summaryIdentity);
-  for (const identity of identities) {
-    clearGroupOverrides(identity);
-    if (opening)
-      boundedAdd(expandedActivityBoundaries, identity, MAX_EXPANDED_TURNS);
-    else expandedActivityBoundaries.delete(identity);
-  }
-  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
-  if (opening && keys[0] !== undefined)
-    void backfillOldestBoundary(cid, keys[0]);
-}
-
-export function toggleActivityBoundary(
-  cid: string,
-  boundary: ActivityBoundary,
-  anchor: HTMLElement | null = null,
-): void {
-  const identity = activityBoundaryKey(cid, boundary);
-  clearGroupOverrides(identity);
-  compactionSummarySuppressed.delete(identity);
-  const opening = !expandedActivityBoundaries.has(identity);
-  if (!opening) expandedActivityBoundaries.delete(identity);
-  else revealActivityBoundary(cid, boundary);
-  // Invariant: The clicked eye or compacted head keeps its screen position: the
-  // repaint inserts or removes content above the viewport while scrollTop
-  // stands still, which reads as the viewport jumping away from the click.
-  if (state.currentConv) actions.anchoredPaint(state.currentConv, anchor);
-  if (opening) void backfillOldestBoundary(cid, boundary.key);
-}
 export async function backfillOldestBoundary(
   cid: string,
   boundaryKey: string,
@@ -438,7 +332,7 @@ export async function backfillOldestBoundary(
     ? groupIdentity(cid, oldest, group)
     : activityBoundaryKey(cid, oldest);
   const generation = thread.renderedLogGeneration;
-  await actions.loadOlder(false);
+  await loadOlder(false);
   if (
     state.currentConv?.id !== cid ||
     generation !== thread.renderedLogGeneration
@@ -477,145 +371,5 @@ export async function backfillOldestBoundary(
       if (container) revealActivityBoundary(cid, container);
     }
   } else if (next) revealActivityBoundary(cid, next);
-  if (state.currentConv) actions.paint(state.currentConv);
-}
-interface RevealSlot {
-  state: StreamRevealState;
-  generation: number;
-  instance: string | null;
-  // Retains settled fast-forward chunks across repaints to avoid replay.
-  settledChunks: string[] | null;
-}
-const revealSlots = new Map<string, RevealSlot>();
-const revealTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const MAX_REVEAL_SLOTS = 100;
-export let liveRevealEntry: MessageEntry | null = null;
-export let liveRevealChunks: string[] = [];
-export let liveRevealFast = false;
-let lastRevealConv: string | null = null;
-let revealSwitchInstant = false;
-
-export function cancelRevealTimer(cid: string): void {
-  const timer = revealTimers.get(cid);
-  if (timer === undefined) return;
-  clearTimeout(timer);
-  revealTimers.delete(cid);
-}
-
-function ensureRevealTimer(cid: string): void {
-  if (revealTimers.has(cid)) return;
-  revealTimers.set(
-    cid,
-    setTimeout(() => {
-      revealTimers.delete(cid);
-      const slot = revealSlots.get(cid);
-      const conv = state.currentConv;
-      if (!slot || !conv || conv.id !== cid || cid !== state.selectedId) return;
-      // Invariant: A tick always releases something while text is buffered (one
-      // chunk, else the whole tail), so a quiet stream still paints within a
-      // tick; the next server text re-arms through ingest.
-      if (advanceStreamReveal(slot.state)) {
-        actions.paint(conv);
-        if (pendingRevealChars(slot.state) > 0) ensureRevealTimer(cid);
-      }
-    }, STREAM_REVEAL_MS),
-  );
-}
-
-function revealSlot(cid: string): RevealSlot {
-  let slot = revealSlots.get(cid);
-  if (!slot) {
-    slot = {
-      state: createStreamReveal(),
-      generation: thread.renderedLogGeneration,
-      instance: rowThreads.get(cid)?.instanceId ?? null,
-      settledChunks: null,
-    };
-    revealSlots.set(cid, slot);
-    pruneCaches([revealSlots], MAX_REVEAL_SLOTS, cid);
-  }
-  return slot;
-}
-
-// Decide what this paint shows for the live tail. Runs before every render;
-// ingesting is idempotent, so toggle repaints advance nothing.
-export function prepareLiveReveal(conv: Conversation): void {
-  liveRevealEntry = null;
-  liveRevealChunks = [];
-  liveRevealFast = false;
-  if (conv.id !== lastRevealConv) {
-    if (lastRevealConv !== null) cancelRevealTimer(lastRevealConv);
-    lastRevealConv = conv.id;
-    revealSwitchInstant = true;
-  }
-  const slot = revealSlot(conv.id);
-  const instance = rowThreads.get(conv.id)?.instanceId ?? null;
-  const instant =
-    revealSwitchInstant ||
-    slot.generation !== thread.renderedLogGeneration ||
-    slot.instance !== instance;
-  revealSwitchInstant = false;
-  slot.generation = thread.renderedLogGeneration;
-  slot.instance = instance;
-  const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const last = thread.loaded[thread.loaded.length - 1];
-  const tail =
-    conv.status === "running" && last?.open && !last.system
-      ? (last.segments[last.segments.length - 1]?.assistant ?? null)
-      : null;
-  // Invariant: Only genuinely streaming rows use reveal buffers. Settled text
-  // behind running work renders instantly, never replays.
-  const heldRows = rowThreads.get(conv.id)?.rows;
-  const streaming = heldRows === undefined || threadHasLive(heldRows);
-  const live = !reduced && streaming && tail ? visibleAssistant(tail) : null;
-  if (live && !isNoticeOnlyAssistant(live) && (live.content || "").trim()) {
-    const plan = planLiveReveal(slot.state, live.content, instant);
-    if (plan.pending > 0) ensureRevealTimer(conv.id);
-    else cancelRevealTimer(conv.id);
-    slot.settledChunks = null;
-    // Invariant: A completed message re-ingested while the agent keeps running
-    // (a status flip, a pending row, the next poll) already revealed: render it
-    // instantly instead of replaying the stream animation.
-    if (plan.instant) return;
-    liveRevealEntry = live;
-    liveRevealChunks = splitRevealChunks(plan.display);
-    return;
-  }
-  cancelRevealTimer(conv.id);
-  if (reduced || instant) {
-    if (live) ingestStreamReveal(slot.state, live.content, { instant: true });
-    else flushStreamReveal(slot.state);
-    slot.settledChunks = null;
-    return;
-  }
-  if (
-    !live &&
-    slot.state.received !== "" &&
-    (pendingRevealChars(slot.state) > 0 || slot.settledChunks)
-  ) {
-    const settled =
-      last && !last.system
-        ? visibleAssistant(
-            last.segments[last.segments.length - 1]?.assistant ?? null,
-          )
-        : null;
-    if (settled) {
-      // Invariant: A settle paint can extend buffered text and fast-forward it.
-      // Only transitions or genuine extensions animate; idle repaints never
-      // replay.
-      const full = settled.content || "";
-      const plan = planSettledReveal(slot, full);
-      if (!plan) {
-        flushStreamReveal(slot.state);
-        slot.settledChunks = null;
-      } else if (!plan.instant) {
-        liveRevealEntry = settled;
-        liveRevealChunks = plan.chunks;
-        liveRevealFast = true;
-      }
-    } else {
-      flushStreamReveal(slot.state);
-      slot.settledChunks = null;
-    }
-  }
+  if (state.currentConv) paint(state.currentConv);
 }

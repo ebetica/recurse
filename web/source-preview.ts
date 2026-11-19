@@ -17,7 +17,7 @@ interface Preview {
 const previews = new WeakMap<Element, Preview>();
 const pending = new Map<Element, string>();
 function resumePending(): void {
-  for (const [element, name] of [...pending]) {
+  for (const [element, name] of Array.from(pending)) {
     pending.delete(element);
     if (element.isConnected) highlightSource(element, name);
   }

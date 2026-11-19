@@ -5,7 +5,7 @@ import type {
   OAuthLoginCallbacks,
 } from "@earendil-works/pi-ai";
 
-export const ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
+const ANTHROPIC_TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const CLIENT_ID = atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const CALLBACK_HOST = process.env.PI_OAUTH_CALLBACK_HOST || "127.0.0.1";
@@ -46,7 +46,7 @@ function requestSignal(
 }
 
 /** POST JSON without ever placing the response body in an exception. */
-export async function postAnthropicJson(
+async function postAnthropicJson(
   url: string,
   body: unknown,
   signal: AbortSignal,

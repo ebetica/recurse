@@ -3,7 +3,7 @@
 // archived and retired; a failed or slow close defers retirement to a retry.
 // A side conversation's fork is withdrawn from its parent's Harness.
 import { join } from "node:path";
-import { retirePath } from "../../../utils/trash_sweep";
+import { retirePath } from "../../../utils/trash-sweep";
 import type { DurableHost } from "../host.ts";
 import { closeHarness } from "./close.ts";
 import type { Opened } from "./open.ts";

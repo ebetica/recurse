@@ -10,6 +10,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { logText, lostTasks } from "../../src/agents/durable/failure_log.ts";
+import { redactSecrets } from "../../src/tool_projection/index";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { LiveDoc } from "@earendil-works/pi-durable";
 import { commitWrites } from "@earendil-works/pi-durable/testing";
@@ -168,7 +169,7 @@ test("a tool that throws is a tool error, not a failure warning", async () => {
 });
 
 // test-check-allow: T9 Security: credential-bearing errors redact
-test("error text ends at its first credential, so no part of the value survives", () => {
+test("error text keeps diagnostics before the first credential", () => {
   expect(logText("upstream 401: authorization: Bearer abc.def.ghi")).toBe(
     "upstream_401:_REDACTED",
   );
@@ -176,8 +177,69 @@ test("error text ends at its first credential, so no part of the value survives"
     "bad_config_REDACTED",
   );
   expect(logText("Key SK-ANT-abc123def456 is invalid")).toBe("Key_REDACTED");
-  expect(logText("plain error: 502 bad gateway")).toBe(
-    "plain_error:_502_bad_gateway",
+  expect(logText("Rejected: -Bearer abc123")).toBe("Rejected:_-REDACTED");
+  expect(logText("invalid primary key: account_id is missing")).toBe(
+    "invalid_primary_key:_account_id_is_missing",
+  );
+  const packageError =
+    "Provider rejected https://unpkg.com//lodash@4.17.21/lodash.js";
+  expect(redactSecrets(packageError)).toBe(packageError);
+  for (const start of ["//", "Rejected [//", 'Rejected "//', "(git+ssh://"]) {
+    expect(redactSecrets(`${start}name:short@provider.test/path`)).toBe(
+      `${start}REDACTED`,
+    );
+  }
+  expect(
+    logText(
+      "Headers:\nAuthorization:\nBad response\nAuthorization: Basic value",
+    ),
+  ).toBe("Headers:_Authorization:_Bad_response_REDACTED");
+  for (const field of [
+    "subscription-key",
+    "X-Subscription-Key",
+    "Ocp-Apim-Subscription-Key",
+    "Proxy-Authorization",
+    "X-API-KEY",
+    "X-Auth-Token",
+    "X-Access-Token",
+    "access_token",
+    "auth_token",
+    "refresh_token",
+    "id_token",
+    "session_token",
+    "client_secret",
+    "private_key",
+    "password",
+  ]) {
+    expect(logText(`request rejected ${field}=short afterward`)).toBe(
+      "request_rejected_REDACTED",
+    );
+  }
+  expect(logText("Rejected\nX-API-Key:\r\n abc123\ninternal diagnostic")).toBe(
+    "Rejected_REDACTED",
+  );
+  expect(logText("Rejected \u001b[31mapi_key\u001b[0m=abc123")).toBe(
+    "Rejected_REDACTED",
+  );
+  for (const field of ["key", "SIG", "Signature"]) {
+    expect(
+      redactSecrets(
+        `invalid request https://public.test?${field}=short&mode=brief`,
+      ),
+    ).toBe("invalid request https://public.test?REDACTED");
+  }
+  for (const field of ["key", "x_api_key"]) {
+    expect(
+      redactSecrets(`invalid request {"${field}":"short","reason":"unknown"}`),
+    ).toBe("invalid request {REDACTED");
+  }
+  const hyphenText = "authorization-ø-".repeat(6_400);
+  const jsonBody = `{"details":[${'"//public.test",'.repeat(7_000)}null],`;
+  expect(redactSecrets(`${hyphenText} password=short afterward`)).toBe(
+    `${hyphenText} REDACTED`,
+  );
+  expect(redactSecrets(`${jsonBody}"key":"short","reason":"unknown"}`)).toBe(
+    `${jsonBody}REDACTED`,
   );
 });
 

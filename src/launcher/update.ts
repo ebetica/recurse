@@ -27,7 +27,7 @@ export interface UpdateReport {
 export const NO_CHANNEL_EXIT = 3;
 
 /** Seconds between SIGTERM and SIGKILL when the script's group is stopped. */
-export const STOP_GRACE_SECONDS = 5;
+const STOP_GRACE_SECONDS = 5;
 
 /** Run `install.sh MODE` in `codeDir` with Git prompts off; timeout or
  * `signal` stops its group, and the result waits for its output to close. */

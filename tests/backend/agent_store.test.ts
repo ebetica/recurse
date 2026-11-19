@@ -20,7 +20,7 @@ import {
   MAX_TOTAL_OPS,
   StoreError,
   pyCompactJson,
-} from "../../src/agents/agent_store";
+} from "../../src/agents/storage/agent_store";
 import fixture from "./fixtures/agent_store/cases.json";
 
 function temp(): string {

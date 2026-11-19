@@ -2,16 +2,16 @@
 // Commit before replying; an optional question is the first operator message.
 // Keep at most MAX_SIDES, deleting oldest even if running; refuse during clear.
 // Promotion to a subagent only starts its durable job (202) or says why not.
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { agentMarked } from "./request_auth";
 import { HttpError, jsonResponse, type Router } from "./router";
 
 type Rec = Record<string, unknown>;
 
-export const MAX_SIDES = 20;
-export const SIDE_QUESTION_MAX_CHARS = 20_000;
+const MAX_SIDES = 20;
+const SIDE_QUESTION_MAX_CHARS = 20_000;
 
-export interface SideRoutesDeps {
+interface SideRoutesDeps {
   requireActionReady(): void;
   load(cid: string): Rec | null;
   all(): Rec[];

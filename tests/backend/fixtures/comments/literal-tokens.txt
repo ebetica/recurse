@@ -1,0 +1,12 @@
+#!/usr/bin/env -S bun --title=//not-a-comment
+const punctuation = /[/*]/;
+const pattern = /[/*]//* comment after regex */;
+const quoted = "/* not a comment */"; // Comment after string.
+const template = `// head ${1} /* middle ${
+  2 /* comment inside an interpolation */
+} // tail`;
+const view = <p title="ends in a backslash\">=// JSX text
+  /* more text */
+  { /* comment inside JSX expression */ }
+  // text after expression
+</p>;

@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 
 const defaultRandom = (size: number): Uint8Array =>
   new Uint8Array(randomBytes(size));
-import { parsePythonJson } from "../utils/py_compact_json";
+import { parsePythonJson } from "../utils/python-json";
 import {
   AuthInputError,
   AuthKeyError,
@@ -24,25 +24,25 @@ import {
   truthy,
 } from "./oauth";
 
-export const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-export const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
+const CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 // The API host processes the same grant without per-IP rate limiting.
-export const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
-export const REDIRECT_URI = "http://localhost:53692/callback";
-export const SCOPES =
+const TOKEN_URL = "https://api.anthropic.com/v1/oauth/token";
+const REDIRECT_URI = "http://localhost:53692/callback";
+const SCOPES =
   "org:create_api_key user:profile user:inference " +
   "user:sessions:claude_code user:mcp_servers user:file_upload";
-export const PROVIDER = "anthropic";
+const PROVIDER = "anthropic";
 export const PENDING_FILE_NAME = "oauth_pending.json";
 const RESTART_HINT = "“Sign in with Claude”";
 const NO_LOGIN = "No login in progress. Start over with “Sign in with Claude”.";
 
 type Json = Record<string, unknown>;
-export type AuthStatus =
+type AuthStatus =
   | { configured: false }
   | { configured: true; type: string; label: string };
 
-export interface AnthropicOptions {
+interface AnthropicOptions {
   store: OAuthStore;
   ambient: Readonly<Record<string, string | undefined>>;
   home?: string;

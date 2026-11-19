@@ -475,7 +475,7 @@ export const tests: BrowserTest[] = [
     );
     const cursor = pane.locator(".pane-item-cursor");
     await page.keyboard.press("Shift+G");
-    expect(await cursor.getAttribute("data-tip")).toBe(ids.at(-1));
+    expect(await cursor.getAttribute("data-tip")).toBe(ids.at(-1)!);
     await page.keyboard.press("g");
     await page.keyboard.press("g");
     expect(await cursor.getAttribute("data-tip")).toBe(ids[0]);

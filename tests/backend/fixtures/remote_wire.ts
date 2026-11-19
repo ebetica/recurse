@@ -11,7 +11,7 @@ import { fauxHost, until } from "./durable_host/host";
 
 type App = Awaited<ReturnType<typeof buildApp>>;
 type Server = Awaited<ReturnType<App["serve"]>>;
-export interface WireSide {
+interface WireSide {
   app: App;
   server: Server;
   world: ReturnType<typeof appWorld>;

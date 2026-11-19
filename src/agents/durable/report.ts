@@ -57,7 +57,7 @@ export interface DurableReport {
 
 export type ReportOutcome = "done" | "retry" | "hold";
 
-export interface ReporterDeps {
+interface ReporterDeps {
   child: string;
   harness: Harness;
   conversation: Conversation;

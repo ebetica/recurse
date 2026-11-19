@@ -1,7 +1,7 @@
 // Disclosure state survives row replacement and stays scoped to a conversation.
 import type { MessageEntry } from "../types.js";
 
-export class MessageDisclosureState {
+class MessageDisclosureState {
   private readonly open = new Set<string>();
 
   constructor(private readonly limit = 512) {}

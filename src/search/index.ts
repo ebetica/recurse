@@ -1,7 +1,7 @@
 // Appends and startup catch-up publish derived files behind rotation fences.
 // Durable file/state markers restore readiness; queries never open SQLite.
 import { INFO, WARNING } from "../observability/runtime_logging";
-import { awaitedSpan, slowSpan } from "../observability/slow_span";
+import { awaitedSpan, slowSpan } from "../observability/slow-span";
 import { dirname, join } from "node:path";
 import type { CommitPublication } from "@earendil-works/pi-durable";
 import type { Work } from "./search.worker";

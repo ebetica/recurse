@@ -4,7 +4,7 @@
 // a callback token.
 import { authMethod, isOperator } from "./request_auth";
 import type { ConnectedBackends } from "../backends/connected";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Router, type Exchange } from "./router";
 
 /** Loopback tokens identify the instance; the header names a live agent. */

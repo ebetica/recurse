@@ -8,3 +8,9 @@ Sending and the rest of recovery stay in [`../composer.ts`](../composer.ts).
 [`action.ts`](action.ts) owns the Send/Stop button. The conversation's
 [Stop view](../conversation/stop-view.ts) supplies its availability and target;
 that view doesn't dispatch requests.
+
+The chat composer bottom-aligns Attach and Send as the field grows. Their end
+margin uses the inherited line height, shared field padding and button size
+so they stay centred on the last text line, including the one-line placeholder.
+On touch screens, the hit areas extend past the visible buttons without
+changing the row height.

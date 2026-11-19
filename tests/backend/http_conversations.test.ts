@@ -9,8 +9,8 @@ import { captureFixture } from "./fixture_subprocess";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { ExternalKeyConflict } from "../../src/agents/conversation_store";
-import { TreeLifecycleBusy } from "../../src/agents/mutation_guard";
+import { ExternalKeyConflict } from "../../src/agents/storage/conversation_store";
+import { TreeLifecycleBusy } from "../../src/agents/lifecycle/mutation_guard";
 import { CreateSlots } from "../../src/web/conversations";
 import { logger } from "../../src/observability/runtime_logging";
 import { exchange, normalise, requestBytes } from "./http_corpus";

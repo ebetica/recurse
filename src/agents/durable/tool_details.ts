@@ -26,6 +26,7 @@ export async function toolDetails(
   live: Readonly<LiveState> | undefined,
   artifactId: string,
   context: Context,
+  includeOperatorFailure = false,
 ): Promise<Rec | null> {
   const match = /^d-([a-f0-9]{8})-(r?)(0|[1-9][0-9]*)$/.exec(artifactId);
   if (!match || !Number.isSafeInteger(Number(match[3]))) return null;
@@ -57,6 +58,13 @@ export async function toolDetails(
   ) as Rec | undefined;
   if (!call) return null;
   const result = resultEntry?.model?.[0] as Rec | undefined;
+  const data = includeOperatorFailure
+    ? (resultEntry?.data as Rec | undefined)
+    : undefined;
+  const diagnostic = Array.isArray(data?.diagnostics)
+    ? data.diagnostics.find((item) => item?.code === "safety_review_failed")
+    : undefined;
+  const operatorFailure = diagnostic?.operatorFailure;
   const slot =
     taskId === undefined
       ? undefined
@@ -95,6 +103,7 @@ export async function toolDetails(
         ? "stale"
         : "running",
     input_source: "tool_call_hook",
+    ...(operatorFailure ? { safety_review_failure: operatorFailure } : {}),
     created_at: created,
     updated_at: finished ?? created,
     ...(finished === undefined ? {} : { finished_at: finished }),

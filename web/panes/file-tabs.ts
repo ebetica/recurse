@@ -8,7 +8,7 @@ export interface FileTabDescriptor {
   source: string;
   key: string;
 }
-export interface FileTabPane extends PaneDef {
+interface FileTabPane extends PaneDef {
   guardClose(element: HTMLElement): boolean;
   prepare?(value: unknown): void;
   release?(): void;

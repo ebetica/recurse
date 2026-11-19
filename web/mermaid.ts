@@ -28,7 +28,7 @@ function loadMermaid(): Promise<Mermaid> {
 let queue: Promise<unknown> = Promise.resolve();
 
 // Short one-line summary of a mermaid render failure for the error note.
-export function mermaidErrorMessage(err: unknown): string {
+function mermaidErrorMessage(err: unknown): string {
   const first = String((err as Error)?.message || err)
     .split("\n", 1)[0]
     .trim();

@@ -7,9 +7,9 @@ import type { BigIntStats } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { lstatAt, openAt } from "../utils/dir_fd";
-import { parsePythonJson } from "../utils/py_compact_json";
+import { parsePythonJson } from "../utils/python-json";
 
-export type SessionHeader = Record<string, unknown> & {
+type SessionHeader = Record<string, unknown> & {
   id: string;
   cwd: string;
   _recurse_file_size: number;
@@ -17,9 +17,9 @@ export type SessionHeader = Record<string, unknown> & {
 };
 
 // Pi's character grammar plus a filename-safe bound for this flat store.
-export const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?$/;
-export const SESSION_HEADER_MAX = 16 * 1024;
-export const HEADER_CACHE_MAX = 4096;
+const SESSION_ID = /^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,198}[A-Za-z0-9])?$/;
+const SESSION_HEADER_MAX = 16 * 1024;
+const HEADER_CACHE_MAX = 4096;
 
 const NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const DIR_FLAGS = constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | NOFOLLOW;

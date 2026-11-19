@@ -3,11 +3,11 @@
 // ids, loggers and scheduler for admission/config/registry/supervisor tests.
 import { seedPiModelList } from "../../pi_model_list_fixture";
 import { join } from "node:path";
-import { AgentStore } from "../../../../src/agents/agent_store";
+import { AgentStore } from "../../../../src/agents/storage/agent_store";
 import {
   ConversationStore,
   type ConversationStoreHooks,
-} from "../../../../src/agents/conversation_store";
+} from "../../../../src/agents/storage/conversation_store";
 import {
   AgentNode,
   type AgentNodeDeps,
@@ -16,7 +16,6 @@ import {
 import { AgentNodes } from "../../../../src/agents/runtime/agent_nodes";
 import { ConfigActions } from "../../../../src/agents/runtime/config_actions";
 import { piRuntimeErrors } from "../../../../src/agents/runtime/runtime_factory";
-import type { TimerHandle } from "../../../../src/agents/runtime/stall_timer";
 import { Config } from "../../../../src/config";
 import {
   RuntimeLogger,
@@ -24,12 +23,12 @@ import {
 } from "../../../../src/observability/runtime_logging";
 import { TaskSet } from "../../../../src/utils/tasks";
 
-export interface Clock {
+interface Clock {
   mono: number;
   wall: number;
 }
 
-export interface WorldOptions {
+interface WorldOptions {
   root: string;
   clock?: Clock;
   storeIds?: () => string;
@@ -49,7 +48,7 @@ export function counter(prefix: string, width: number): () => string {
   return () => `${prefix}${(++n).toString(16).padStart(width, "0")}`;
 }
 
-export interface World {
+interface World {
   agentStore: AgentStore;
   conversations: ConversationStore;
   nodes: AgentNodes<AgentNode, NodeStore>;
@@ -158,18 +157,4 @@ export function buildWorld(options: WorldOptions): World {
     deps,
     tasks,
   };
-}
-
-/** A recording call_later over no real timers. */
-export class FakeScheduler {
-  timers: { delay: number; fn: () => void; cancelled: boolean }[] = [];
-  callLater(delay: number, fn: () => void): TimerHandle {
-    const entry = {
-      delay: Math.round(delay * 1e6) / 1e6,
-      fn,
-      cancelled: false,
-    };
-    this.timers.push(entry);
-    return { cancel: () => void (entry.cancelled = true) };
-  }
 }

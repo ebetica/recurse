@@ -1,4 +1,4 @@
-export interface DownloadRequest {
+interface DownloadRequest {
   url: string;
   filename: string;
 }
@@ -15,9 +15,9 @@ interface DownloadLink {
 }
 
 // Files above this size use browser downloads with native progress.
-export const NATIVE_DOWNLOAD_MIN_BYTES = 4 * 1024 * 1024;
+const NATIVE_DOWNLOAD_MIN_BYTES = 4 * 1024 * 1024;
 
-export function downloadRequest(
+function downloadRequest(
   click: ClickIntent,
   link: DownloadLink | null,
   origin: string,
@@ -55,7 +55,7 @@ export function responseFilename(response: Pick<Response, "headers">): string {
   return /filename="([^"]+)"/i.exec(value)?.[1] || "";
 }
 
-export async function performDownload(
+async function performDownload(
   request: DownloadRequest,
   actions: DownloadActions,
 ): Promise<void> {

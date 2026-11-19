@@ -6,7 +6,7 @@ import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { ConnectedBackends } from "../backends/connected";
 import { SYNC_KINDS, stable, type SyncItem } from "../backends/settings_sync";
 import { requireBackendOperator } from "./backends";
-import { jsonDictBody } from "./login";
+import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Router, type Exchange } from "./router";
 
 export function registerSettingsSyncRoutes(

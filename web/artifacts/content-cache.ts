@@ -1,6 +1,6 @@
 import type { ArtifactInfo } from "./model.js";
 
-export interface ArtifactContentSnapshot {
+interface ArtifactContentSnapshot {
   info: ArtifactInfo;
   content: string | null;
 }

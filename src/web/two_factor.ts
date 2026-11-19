@@ -3,12 +3,8 @@
 // Factor changes share the password/key lock and reissue the caller cookie.
 import { sessionFingerprint } from "../auth/session";
 import { requireBackendOperator } from "./backends";
-import {
-  jsonDictBody,
-  secureCookie,
-  sessionCookieHeader,
-  type LoginDeps,
-} from "./login";
+import { secureCookie, sessionCookieHeader, type LoginDeps } from "./login";
+import { jsonDictBody } from "./request";
 import {
   clientIp,
   requireCurrentSession,

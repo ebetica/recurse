@@ -2,7 +2,7 @@
 // opens the sign-in page in a new tab (a direct tap, never pop-up blocked); the
 // user pastes the unreachable redirect page's address (or a code) and submits.
 
-export interface PasteSignIn {
+interface PasteSignIn {
   /** Provider or server name, used in the link and field labels. */
   name: string;
   /** The provider's sign-in page. */

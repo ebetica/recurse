@@ -19,7 +19,7 @@ export function focusedEventsUrl(cid: string, viewing = false): string {
 
 // A served page is one JSON object shaped like a /view window. Malformed
 // payloads keep the held rows and never blank the thread.
-export function parseFocusedEventPage(raw: unknown): ViewPage | null {
+function parseFocusedEventPage(raw: unknown): ViewPage | null {
   if (typeof raw !== "string" || !raw) return null;
   let parsed: unknown;
   try {
@@ -38,7 +38,7 @@ export function parseFocusedEventPage(raw: unknown): ViewPage | null {
   return parsed as ViewPage;
 }
 
-export function parseTerminalStatus(raw: unknown): string | null {
+function parseTerminalStatus(raw: unknown): string | null {
   if (typeof raw !== "string" || !raw) return null;
   try {
     const status = (JSON.parse(raw) as { status?: unknown }).status;
@@ -48,21 +48,21 @@ export function parseTerminalStatus(raw: unknown): string | null {
   }
 }
 
-export interface FocusedEventHandlers {
+interface FocusedEventHandlers {
   onPage: (kind: "snapshot" | "rows", page: ViewPage, at: number) => void;
   onTerminal: (status: string) => void;
   onActivity?: () => void;
   onTransportError: () => void;
 }
 
-export interface FocusedEventOptions {
+interface FocusedEventOptions {
   /** Visible main conversation, not an embedded side conversation. */
   viewing?: boolean;
   /** Held tail cursor ({instance}:{revision}) to resync from on connect. */
   lastEventId?: string | null;
 }
 
-export type FocusedTransportFactory = (
+type FocusedTransportFactory = (
   url: string,
   options: SseConnectionOptions,
   handlers: SseConnectionHandlers,

@@ -18,7 +18,7 @@ export const INLINE_IMAGE_STYLE =
   "border:0;border-radius:0;margin:0;";
 
 /** Wrap a vetted Markdown image with its filename, keeping its size caps. */
-export function captionInlineImage(image: HTMLImageElement): void {
+function captionInlineImage(image: HTMLImageElement): void {
   image.loading = "lazy";
   image.decoding = "async";
   image.referrerPolicy = "no-referrer";

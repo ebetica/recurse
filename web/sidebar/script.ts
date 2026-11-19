@@ -19,7 +19,7 @@ import {
   type Section,
 } from "../../src/sidebar_script/index.js";
 
-export interface ScriptVersion {
+interface ScriptVersion {
   at: number;
   by: string;
   script: string | null;
@@ -122,7 +122,7 @@ export function setScriptState(next: ScriptState): void {
 
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 /** Fetch the script soon; at most one fetch per REFRESH_MS. */
-export function refreshScript(): void {
+function refreshScript(): void {
   if (refreshTimer) return;
   refreshTimer = setTimeout(
     async () => {
@@ -361,8 +361,10 @@ export function lineDiff(before: string, after: string): string[] {
   ];
   if (a.length * b.length > DIFF_CELLS)
     return around([...a.map((l) => `-${l}`), ...b.map((l) => `+${l}`)]);
-  const common = a.map(() => new Array<number>(b.length + 1).fill(0));
-  common.push(new Array<number>(b.length + 1).fill(0));
+  const common = Array.from(
+    { length: a.length + 1 },
+    () => new Uint32Array(b.length + 1),
+  );
   for (let i = a.length - 1; i >= 0; i--)
     for (let j = b.length - 1; j >= 0; j--)
       common[i]![j] =
@@ -372,9 +374,10 @@ export function lineDiff(before: string, after: string): string[] {
   const lines: string[] = [];
   let [i, j] = [0, 0];
   while (i < a.length || j < b.length) {
-    if (i < a.length && j < b.length && a[i] === b[j])
-      (lines.push(` ${a[i++]}`), j++);
-    else if (
+    if (i < a.length && j < b.length && a[i] === b[j]) {
+      lines.push(` ${a[i++]}`);
+      j++;
+    } else if (
       j < b.length &&
       (i >= a.length || common[i]![j + 1]! >= common[i + 1]![j]!)
     )

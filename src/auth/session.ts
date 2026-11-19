@@ -17,7 +17,7 @@ import { promisify } from "node:util";
 import { FONT_SANS } from "../themes/fonts";
 import { brandingFile, brandResponse, readBrand } from "../branding";
 import { readTheme } from "../themes";
-import { parsePythonJson } from "../utils/py_compact_json";
+import { parsePythonJson } from "../utils/python-json";
 
 import { flockExclusive } from "../utils/flock";
 import {
@@ -32,9 +32,9 @@ const pbkdf2 = promisify(pbkdf2Callback);
 
 export const COOKIE_NAME = "chat_auth";
 export const COOKIE_DAYS = 30;
-export const PBKDF2_ITERS = 600_000;
+const PBKDF2_ITERS = 600_000;
 
-export type Creds = readonly [salt: string, hash: string];
+type Creds = readonly [salt: string, hash: string];
 
 interface CredentialRecord {
   salt: string;
@@ -60,7 +60,7 @@ const pyError = (name: string, message: string) =>
 const PY_ASCII_SPACE = new Set([" ", "\t", "\n", "\r", "\x0b", "\x0c"]);
 
 /** Python bytes.fromhex: hex pairs, ASCII whitespace allowed between pairs. */
-export function pyFromHex(text: string): Uint8Array {
+function pyFromHex(text: string): Uint8Array {
   const out: number[] = [];
   let i = 0;
   while (i < text.length) {
@@ -110,7 +110,7 @@ export function htmlEscape(text: string): string {
     .replaceAll("'", "&#x27;");
 }
 
-export interface OperatorAuthOptions {
+interface OperatorAuthOptions {
   /** `DATA_DIR/auth.json`. */
   readonly authFile: string;
   /** Read on every call (CHAT_AUTH_SALT, CHAT_AUTH_HASH). */
@@ -509,7 +509,7 @@ export function sessionFingerprint(
   return createHash("sha256").update(utf8(token)).digest("hex");
 }
 
-export const LOGIN_HTML = `<!doctype html><html><head><meta charset="utf-8">
+const LOGIN_HTML = `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__APP__</title><style>
   :root { color-scheme:light dark; }

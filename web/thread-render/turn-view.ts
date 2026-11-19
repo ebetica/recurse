@@ -2,13 +2,11 @@
 // restore segments in chronological order. Tool wording uses closed labels and
 // redacted details, except the owning conversation's bounded whole commands.
 import type {
-  AgentAttachment,
   MessageEntry,
   ToolEntry,
   ToolStat,
   TreeNode,
   Turn,
-  TurnEntry,
   TurnSegment,
   TurnSummary,
 } from "../types.js";
@@ -64,7 +62,7 @@ const BG_REMINDER_TAIL = /^… and \d+ more\s*$/;
 // Unquoted origin tags mark backend chrome; operator tags preserve mixed rows.
 const CONTENT_ORIGIN =
   /\[recurse-origin: (operator|agent|scheduled|platform|service)\]/;
-export function parsedContentOrigin(content: unknown): string | null {
+function parsedContentOrigin(content: unknown): string | null {
   if (typeof content !== "string" || !content.includes("[recurse-origin:"))
     return null;
   const scan = new RegExp(CONTENT_ORIGIN.source, "g");
@@ -108,7 +106,7 @@ const TURN_REPORT = new RegExp(
   `^(.* ended) ${TURN_TRIGGER.source} (with no final message\\.)`,
   "u",
 );
-export function stripTurnDeliveryChrome(content: string): string {
+function stripTurnDeliveryChrome(content: string): string {
   const leading = content.match(new RegExp(`^${TURN_TRIGGER.source}\\n?`, "u"));
   const withoutLeading = leading ? content.slice(leading[0].length) : content;
   return withoutLeading.replace(TURN_REPORT, "$1 $2");
@@ -234,23 +232,7 @@ export function activityBodyText(entry: MessageEntry): string {
   ).trim();
 }
 
-export function isAgentOnlyTurn(turn: Turn): boolean {
-  // Invariant: A byte-bounded partial view may omit the operator input that
-  // makes a turn mixed. Preserve its final reply rather than hiding it on
-  // incomplete evidence.
-  if (turn.partial) return false;
-  let agentMessages = 0;
-  let humanMessages = 0;
-  for (const segment of turn.segments || []) {
-    for (const entry of segment.user || []) {
-      if (isAgentActivityMessage(entry)) agentMessages += 1;
-      else humanMessages += 1;
-    }
-  }
-  return agentMessages > 0 && humanMessages === 0;
-}
-
-export interface AgentMessageHeaderView {
+interface AgentMessageHeaderView {
   senderId: string;
   senderName: string;
   relationship: string;
@@ -284,7 +266,7 @@ export function agentMessageHeader(
   };
 }
 
-export interface ToolHeaderView {
+interface ToolHeaderView {
   label: string;
   detail: string;
   // Front-truncated read details keep filename ends; tooltips keep full text.
@@ -357,14 +339,14 @@ export function toolRowKey(entry: ToolEntry): string {
     : `row:${entry.offset}:${entry.seq}`;
 }
 
-export interface ServedToolData {
+interface ServedToolData {
   args: string;
   result: string | null;
   result_truncated: boolean;
   calls?: CodemodeCall[] | null;
 }
 
-export interface ToolExpansion {
+interface ToolExpansion {
   args: string | null;
   output: string | null;
   outputTruncated: boolean;
@@ -390,7 +372,7 @@ export function codemodeCallName(name: string): string {
 }
 
 /** The codemode script: the `code` argument, else the raw arguments. */
-export function codemodeScript(args: string): string {
+function codemodeScript(args: string): string {
   try {
     const parsed = JSON.parse(args) as unknown;
     if (parsed && typeof parsed === "object" && "code" in parsed) {
@@ -472,7 +454,7 @@ export function toolExpansion(
 // Long read details retain the filename end; short details stay unchanged.
 const MAX_READ_DETAIL_CHARS = 120;
 
-export function clipReadDetail(
+function clipReadDetail(
   value: string,
   limit: number = MAX_READ_DETAIL_CHARS,
 ): string {
@@ -521,7 +503,7 @@ export function toolHeader(entry: ToolEntry): ToolHeaderView {
   return { label, detail: full, note, stale, truncated: false };
 }
 
-export interface ToolSeriesDisclosure {
+interface ToolSeriesDisclosure {
   open: boolean;
   visibleLabel: string;
   ariaLabel: string;
@@ -538,169 +520,6 @@ export function toolSeriesDisclosure(
     visibleLabel: summary,
     ariaLabel: `${expanded ? "Hide" : "Show"} activity: ${summary}`,
   };
-}
-
-export interface SegmentView {
-  user: MessageEntry[];
-  assistant: MessageEntry | null;
-}
-
-export interface HiddenAssistantOutput {
-  messages: number;
-  characters: number;
-}
-
-export interface HiddenAssistantOutputPlacement {
-  segmentIndex: number;
-  output: HiddenAssistantOutput;
-}
-
-export type CollapsedVisibleAssistants = ReadonlySet<MessageEntry>;
-
-// A steer is a durable user row in the middle of a turn. Its predecessor is
-// the previous logical message in that turn; tool and other structure rows do
-// not participate in the order. Showing that predecessor keeps a collapsed
-// turn anchored to the input the operator was responding to.
-export function collapsedVisibleAssistants(
-  turn: Turn,
-): CollapsedVisibleAssistants {
-  const visible = new Set<MessageEntry>();
-  let previous: MessageEntry | null = null;
-  for (const segment of turn.segments || []) {
-    for (const user of segment.user || []) {
-      if (
-        user.steer === true &&
-        previous?.kind === "assistant" &&
-        visibleAssistant(previous)
-      ) {
-        visible.add(previous);
-      }
-      previous = user;
-    }
-    if (segment.assistant) previous = segment.assistant;
-  }
-  return visible;
-}
-
-function assistantIsVisible(
-  assistant: MessageEntry,
-  visible: MessageEntry | CollapsedVisibleAssistants | null,
-): boolean {
-  if (!visible) return false;
-  return (
-    visible === assistant ||
-    ("has" in visible &&
-      typeof visible.has === "function" &&
-      visible.has(assistant))
-  );
-}
-
-interface AssistantTextStat {
-  message: boolean;
-  characters: number;
-}
-
-// Committed message text is immutable, but each poll can deserialize it into a
-// fresh object. Cache by its durable place in the loaded turn rather than by
-// object identity so large intermediate replies are scanned once. The bounded
-// FIFO means scrolling through old history cannot grow view state forever.
-export class HiddenAssistantOutputCounter {
-  private readonly textStats = new Map<string, AssistantTextStat>();
-
-  constructor(private readonly limit = 4096) {}
-
-  placements(
-    turn: Turn,
-    visible: MessageEntry | CollapsedVisibleAssistants | null,
-    scope = turn.turn_id,
-  ): HiddenAssistantOutputPlacement[] {
-    const placements: HiddenAssistantOutputPlacement[] = [];
-    let segmentIndex = -1;
-    let messages = 0;
-    let characters = 0;
-    const flush = () => {
-      if (messages)
-        placements.push({
-          segmentIndex,
-          output: { messages, characters },
-        });
-      segmentIndex = -1;
-      messages = 0;
-      characters = 0;
-    };
-    (turn.segments || []).forEach((segment, index) => {
-      // Invariant: User entries delimit hidden replies. Combine replies only
-      // across segments that carry no user entry of their own.
-      if ((segment.user || []).length && messages) flush();
-      const assistant = segment.assistant;
-      if (!assistant) return;
-      if (assistantIsVisible(assistant, visible)) {
-        flush();
-        return;
-      }
-      const stat = this.textStat(assistant, scope, index);
-      if (!stat.message) return;
-      if (segmentIndex < 0) segmentIndex = index;
-      messages += 1;
-      characters += stat.characters;
-    });
-    flush();
-    return placements;
-  }
-
-  count(
-    turn: Turn,
-    visible: MessageEntry | CollapsedVisibleAssistants | null,
-    scope = turn.turn_id,
-  ): HiddenAssistantOutput {
-    return this.placements(turn, visible, scope).reduce(
-      (total, placement) => ({
-        messages: total.messages + placement.output.messages,
-        characters: total.characters + placement.output.characters,
-      }),
-      { messages: 0, characters: 0 },
-    );
-  }
-
-  private textStat(
-    assistant: MessageEntry,
-    scope: string,
-    index: number,
-  ): AssistantTextStat {
-    const identity = assistant.id ?? assistant.offset ?? index;
-    const key = `${scope}\0${index}\0${identity}`;
-    let stat = this.textStats.get(key);
-    if (!stat) {
-      stat = assistantTextStat(assistant.content);
-      while (this.textStats.size >= this.limit) {
-        const oldest = this.textStats.keys().next().value;
-        if (oldest === undefined) break;
-        this.textStats.delete(oldest);
-      }
-      this.textStats.set(key, stat);
-    }
-    return stat;
-  }
-}
-
-function assistantTextStat(content: unknown): AssistantTextStat {
-  const text = typeof content === "string" ? content : "";
-  if (!text.trim()) return { message: false, characters: 0 };
-  // Invariant: "Characters" means Unicode code points in the exact stored text:
-  // leading, trailing, and internal whitespace count, while an all-whitespace
-  // record does not become a message. This avoids UTF-16 counting astral
-  // characters twice.
-  let characters = 0;
-  for (const _character of text) characters += 1;
-  return { message: true, characters };
-}
-
-export function hiddenAssistantOutputLabel(
-  output: HiddenAssistantOutput,
-): string {
-  const messages = `${output.messages} message${output.messages === 1 ? "" : "s"}`;
-  const characters = `${output.characters} character${output.characters === 1 ? "" : "s"}`;
-  return `${messages} hidden (${characters})`;
 }
 
 export function isNoticeOnlyAssistant(entry: MessageEntry | null): boolean {
@@ -728,54 +547,6 @@ export function visibleAssistant(
     entry.notices?.length
     ? entry
     : null;
-}
-
-export function finalAssistant(turn: Turn): MessageEntry | null {
-  for (let i = (turn.segments || []).length - 1; i >= 0; i--) {
-    const assistant = visibleAssistant(turn.segments[i].assistant);
-    if (assistant && !isNoticeOnlyAssistant(assistant)) return assistant;
-  }
-  return null;
-}
-
-export function collapsedTurn(turn: Turn): SegmentView[] {
-  if (turn.system || !turn.segments?.length) return [];
-  const agentOnly = isAgentOnlyTurn(turn);
-  const final = agentOnly ? null : finalAssistant(turn);
-  const visible = agentOnly
-    ? new Set<MessageEntry>()
-    : collapsedVisibleAssistants(turn);
-  return turn.segments.map((segment) => {
-    const assistant = segment.assistant;
-    return {
-      user: (segment.user || []).filter(
-        (entry) => !isAgentActivityMessage(entry),
-      ),
-      assistant:
-        assistant &&
-        (isNoticeOnlyAssistant(assistant) ||
-          assistant === final ||
-          visible.has(assistant))
-          ? assistant
-          : null,
-    };
-  });
-}
-
-// Collapsing intermediate prose never hides published file outcomes.
-export function turnAttachments(turn: Turn): AgentAttachment[] {
-  return (turn.segments || []).flatMap(
-    (segment) => segment.assistant?.attachments || [],
-  );
-}
-
-export function expandedTurn(turn: Turn): TurnEntry[] {
-  const entries: TurnEntry[] = [];
-  for (const segment of turn.segments || []) {
-    entries.push(...(segment.user || []), ...(segment.tools || []));
-    if (segment.assistant) entries.push(segment.assistant);
-  }
-  return entries;
 }
 
 export interface ListedToolSummary {
@@ -967,29 +738,4 @@ export function toolSeriesSummary(segment: TurnSegment): string {
           .join("")}`
       : `${total} tool use${total === 1 ? "" : "s"}`;
   return [line, ...extras].join(", ");
-}
-
-export function turnExpandable(turn: Turn, extraTools = 0): boolean {
-  if (
-    (turn.segments || []).some((segment) =>
-      (segment.user || []).some((entry) => isAgentActivityMessage(entry)),
-    )
-  )
-    return true;
-  if (extraTools > 0 || (turn.summary?.tools || 0) > 0) return true;
-  if ((turn.segments || []).some((segment) => toolSeriesSummary(segment)))
-    return true;
-  return (turn.segments || [])
-    .slice(0, -1)
-    .some((segment) => visibleAssistant(segment.assistant));
-}
-
-export function turnSummaryLine(turn: Turn): string {
-  const incoming = (turn.segments || []).reduce(
-    (total, segment) =>
-      total +
-      (segment.user || []).filter((entry) => isAgentMessage(entry)).length,
-    0,
-  );
-  return summaryLine(turn.summary, incoming);
 }

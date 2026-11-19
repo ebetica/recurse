@@ -38,7 +38,7 @@ if (isMainThread && process.env.RECURSE_BLOCKING_TRACE) {
         .filter(
           (line) =>
             !line.includes("blocking_trace_preload.ts") &&
-            !line.includes("/observability/slow_span.ts:") &&
+            !line.includes("/observability/slow-span/span.ts:") &&
             line.includes("/") &&
             !line.includes("node:") &&
             !line.includes("bun:"),

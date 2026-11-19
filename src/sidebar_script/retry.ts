@@ -3,7 +3,7 @@
 // script. The browser's script worker and the server's dry run both use it.
 import type { ScriptResult } from "./engine/index.js";
 
-export const RETRY_MS = 500;
+const RETRY_MS = 500;
 
 /** Run; if it timed out and is still wanted, run once more after `pause`. */
 export async function runRetryingTimeout(

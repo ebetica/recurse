@@ -1,11 +1,11 @@
 export type StopIdGenerator = "random_uuid" | "get_random_values" | "fallback";
 
-export interface StopIdResult {
+interface StopIdResult {
   id: string;
   generator: StopIdGenerator;
 }
 
-export interface StopIdRuntime {
+interface StopIdRuntime {
   // Test crypto override; explicit undefined disables the generator.
   crypto?: unknown;
   now?: () => number;

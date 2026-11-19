@@ -2,7 +2,7 @@
 // Browser wiring lives in connection.ts; keeping this module DOM-free makes
 // threshold, race, retry, and sleep behavior deterministic under a fake clock.
 
-export const CONNECTION_LOST_MS = 60_000;
+const CONNECTION_LOST_MS = 60_000;
 
 export type ConnectionPhase =
   | "connecting"
@@ -28,7 +28,7 @@ export interface ConnectionSnapshot {
   retryAt: number | null;
 }
 
-export interface HealthRequest {
+interface HealthRequest {
   readonly id: number;
   readonly availability: "core" | "optional";
 }
@@ -188,7 +188,7 @@ export class ConnectionHealth {
   }
 }
 
-export interface ProbeOptions {
+interface ProbeOptions {
   force?: boolean;
   suppressStale?: boolean;
 }

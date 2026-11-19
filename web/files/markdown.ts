@@ -18,7 +18,7 @@ import {
   type SessionFile,
 } from "./model.js";
 
-export interface FilesMarkdownSource {
+interface FilesMarkdownSource {
   files: SessionFile[];
   previews: Map<string, FilePreviewState>;
   /** Load an idle or evicted preview; a repaint follows when it settles. */

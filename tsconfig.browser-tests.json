@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.backend.json",
+  "compilerOptions": {
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "DOM.AsyncIterable"]
+  },
+  "include": ["tests/mobile_browser/**/*.ts"]
+}

@@ -1,7 +1,7 @@
 // Reverse parity gate: write TS SQLite files for record.py to open with Python.
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { AgentStore } from "../../../../src/agents/agent_store";
+import { AgentStore } from "../../../../src/agents/storage/agent_store";
 import { applySpec, type StoreCase } from "./spec";
 import fixture from "./cases.json";
 

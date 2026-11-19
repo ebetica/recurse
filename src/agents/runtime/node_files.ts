@@ -51,9 +51,9 @@ const pyTruthy = (value: unknown): boolean =>
       : Boolean(value);
 
 /** File-operation drain bound in seconds; matches the store-close bound. */
-export const FILE_DRAIN_TIMEOUT = 10.0;
+const FILE_DRAIN_TIMEOUT = 10.0;
 
-export interface FileLeasesDeps {
+interface FileLeasesDeps {
   /** conversation_store.load(cid, with_pending=False). */
   load(cid: string): Record<string, unknown> | null;
   log: RuntimeLogger;

@@ -3,22 +3,14 @@
 // Faulted/orphaned tasks and interrupted replies get visible error rows.
 // Errors redact from the first credential-shaped token and cap at 200 chars.
 import type { CommitPublication } from "@earendil-works/pi-durable";
-import { redactSecrets } from "../../tool_projection/redaction";
+import { logText, redactSecrets } from "../../tool_projection/redaction";
 
 const RUN_KINDS = new Set(["pi.generation", "pi.compaction"]);
-const LOG_UNSAFE_RE = /[^A-Za-z0-9_.:@/+,-]/gu;
 const ERROR_MAX = 200;
 
-type Rec = Record<string, unknown>;
+export { logText };
 
-/** Error text folded into the log alphabet: no secrets, bounded. */
-export function logText(text: string): string {
-  return (
-    [...redactSecrets(text).trim().replace(LOG_UNSAFE_RE, "_")]
-      .slice(0, ERROR_MAX)
-      .join("") || "-"
-  );
-}
+type Rec = Record<string, unknown>;
 
 const LOST_TEXT: Readonly<Record<string, string>> = {
   "pi.generation":

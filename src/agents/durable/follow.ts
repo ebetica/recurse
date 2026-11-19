@@ -16,7 +16,7 @@ import {
   type ToolTaskInput,
 } from "@earendil-works/pi-durable";
 import { assistantContextUsage } from "../runtime/context_usage.ts";
-import { createdPrUrls } from "../conversation_prs.ts";
+import { createdPrUrls } from "../../pull_request";
 import { pendingRows } from "./durable_rows.ts";
 import { lostTasks, taskFailures } from "./failure_log.ts";
 import { ReportDoc, type Reporter } from "./report.ts";
@@ -57,7 +57,7 @@ export interface LiveRow {
   modelError?: string;
 }
 
-export interface FollowInput {
+interface FollowInput {
   cid: string;
   harness: Harness;
   conversation: Conversation;

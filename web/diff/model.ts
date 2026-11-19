@@ -20,7 +20,7 @@ export interface DiffTarget {
   includesUncommitted?: boolean;
 }
 
-export function targetHeader(target: DiffTarget | null | undefined): string[] {
+function targetHeader(target: DiffTarget | null | undefined): string[] {
   if (!target) return ["Selected change target: current Changes view"];
   if (target.kind === "pr") {
     const number = target.number == null ? "unknown" : "#" + target.number;
@@ -62,7 +62,7 @@ export function diffContextMarker(kind: "add" | "del" | "ctx"): string {
   return kind === "add" ? "+" : kind === "del" ? "−" : " ";
 }
 
-export interface AnchoredComment {
+interface AnchoredComment {
   group: string;
   path: string;
   side: CommentSide;
@@ -99,7 +99,7 @@ export function commentKey(
 // Human location for the message posted to the agent: path:start-end plus
 // the side, so a removed line's number is never mistaken for a current one.
 // endLine equal to line (or null) reads as a single line.
-export function commentLocation(
+function commentLocation(
   path: string,
   side: CommentSide,
   line: number,
@@ -227,7 +227,7 @@ export function groupPrCandidates(
   ];
 }
 
-export const MAX_FINDER_RESULTS = 10;
+const MAX_FINDER_RESULTS = 10;
 
 /** A base as the pane names it: "main" for origin/main, 7-digit commits. */
 export function baseName(ref: string): string {

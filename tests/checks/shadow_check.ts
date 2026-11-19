@@ -4,7 +4,7 @@
  */
 import { cssView } from "./radius_check.ts";
 
-export type Finding = { line: number; value: string };
+type Finding = { line: number; value: string };
 
 const ALLOW = "shadow-check: allow";
 const SHADOW =

@@ -6,7 +6,7 @@ import fs from "node:fs";
 import { constants as fsConstants } from "node:fs";
 import { basename, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
-import { slowSpan } from "../observability/slow_span";
+import { slowSpan } from "../observability/slow-span";
 import {
   lstatAtSync,
   mkdirAtSync,
@@ -173,7 +173,7 @@ export function retireWithinParent(
 }
 
 /** Retire from one pinned parent into a child of another pinned parent. */
-export function retireAtIntoChild(
+function retireAtIntoChild(
   dirFd: number,
   name: string,
   rootParentFd: number,

@@ -1,7 +1,7 @@
 # Browser app
 
 [index.html](index.html) loads [app.ts](app.ts)/[sidebar-worker.ts](sidebar-worker.ts).
-[Polls](conversation/poll.ts), drafts and view state run in-browser.
+[Polling](polling/) coordinates tree and focused reads across features.
 
 **Source files:**
 
@@ -9,6 +9,7 @@
   [composer](composer/), [uploads](attachments.ts),
   [tags](conversation/draft-tags.ts), [bubbles](thread-render/user-bubble.ts),
   [disclosure state](conversation/disclosure.ts),
+  [live-tail reveal](row-thread-state/live-reveal.ts),
   [reply HTML](thread-render/reply-html.ts), [view cache](conversation/cache/).
 - [Sidebar](sidebar.ts), [links](deep-link.ts), [agent finder](agent-finder.ts):
   tree navigation. [Shared script contracts](../src/sidebar_script/README.md)
@@ -46,15 +47,15 @@ to their owners. Sends to idle agents follow the reply bottom until the sent
 message reaches the viewport top, then hold. Short replies never add scrolling. Repaints keep the reader's row as replies shrink; layout clamps never
 resume following. Disclosure controls stay fixed through delayed layout. Hidden
 threads retain position and following until visible. Following spans paints
-before a scroll frame. [conversation/scroll-ledger.ts](conversation/scroll-ledger.ts)
-owns scrolling and edge controls; other offsets (scrollbar, find-in-page,
+before a scroll frame. [Thread scroll](thread-scroll/index.ts) owns anchoring,
+scrolling and edge controls; other offsets (scrollbar, find-in-page,
 scripts) release holds.
-The [live panel](conversation/live-panel.ts) above the composer retains the
-latest [thinking](conversation/thinking.ts) through tools, model calls and
-reloads. Newer thinking replaces it, even if encrypted or redacted.
-Thinking appears only while live; Waiting shows the last readable title.
-Expanded prose omits the title and bold markers. The panel skips thread text.
-The chips use the panel's repaint on open.
+The [live panel](conversation/live-panel.ts) keeps the latest
+[thought](conversation/thinking.ts) through tools, replies and reloads, even
+if open in the thread. Only newer readable thinking replaces it; explicit
+waiting or idle clears it. Both disclosures can stay open as work continues.
+Expanded panel prose omits the title and bold markers. A command button says
+“Command details” when its running count appears elsewhere.
 Compacted history uses a plain marker; earlier messages and the
 jump-to-first-kept link remain available.
 `publish` counts files. Prompt-cache refresh adds turn usage, not replies.
@@ -64,7 +65,8 @@ Usage names the served model; a downgraded latest reply shows a ! button.
 
 Visible main streams send `viewing=true` to suppress completion pushes. Hidden
 threads close streams; embedded views report no viewers and discover no panes.
-Late fallback reads cannot downgrade newer stream readiness.
+[Focused reads](conversation/fetch.ts) own stream settlement and fallbacks.
+Polling supplies the fallback read and faster cadence after a changed view.
 Every received push shows a notification. Clicking focuses a root app page and
 selects the conversation, preferring a page already showing it; other same-origin
 documents and embedded views are not app windows. Without a focusable app page,
@@ -74,19 +76,21 @@ before worker control; other profiles or discarded tabs may have none to reuse.
 
 Remotes isolate health and enforce their own key policy. Cancellation stays
 active through body reads, so abandoned streams and stalled discovery close.
-[Tree and tag notices](backends/events.ts) multiplex over one visible-tab stream,
+[Tree and tag notices](backends/discovery/events.ts) share one visible-tab stream,
 superseding older reads without waiting for a poll. Remote subscriptions pause
 with the backend and never wake it. [Home tree reads](backends/tree.ts) patch
 only the exact in-memory ETag behind the same generation fence; remotes keep
 array reads. [Shared trees](shared-trees.ts) filter display, not access.
 
 Artifact/image comments persist original crops for background send/retry.
-Startup supplies rendering; panes own actions. [Quote text](comments/selection-text/)
+Startup supplies rendering and connects the comment outbox to the thread.
+Panes own actions. [Quote text](comments/selection-text/)
 bounds quotes. Source highlighting waits while a selection draft owns the viewer.
 Send controls, even later ones, stay outside native selections.
 Earlier queued scrolls do not cancel selection comment offers.
-Adding a comment focuses its card but respects later focus changes. The send bar
-updates as the draft opens or closes, without a pane refresh. Cmd/Ctrl+Enter in
+Adding a comment focuses its card. In Artifacts, the highlight, adjacent edit
+button, and card reopen the editor. Save updates the same comment; Cancel or
+Escape keeps its text. Finish editing before submitting. Cmd/Ctrl+Enter in
 a comment popover stages the draft without opening the list and returns focus
 to the viewer; the next press submits. Startup routes pane keys to this handler.
 Artifact submission keeps its pane/tab open; other viewers close.

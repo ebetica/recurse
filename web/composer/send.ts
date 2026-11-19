@@ -1,6 +1,6 @@
 // DOM-free send-readiness policy shared by the composer and focused tests.
 // A send snapshots then clears staged files, so it must never race an upload.
-export interface PendingComposerAttachment {
+interface PendingComposerAttachment {
   url: string | null;
 }
 

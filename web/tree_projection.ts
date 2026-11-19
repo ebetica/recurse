@@ -7,7 +7,7 @@ export type TreeRelationship =
   | "sibling"
   | "child";
 
-export interface ProjectedTreeEntry {
+interface ProjectedTreeEntry {
   node: TreeNode;
   depth: number;
   relationship: TreeRelationship;
@@ -15,7 +15,7 @@ export interface ProjectedTreeEntry {
   collapsed: boolean;
 }
 
-export type TreeHAction = "collapse" | "ascend";
+type TreeHAction = "collapse" | "ascend";
 export function resolveHAction(
   cursorId: string,
   anchorId: string,
@@ -27,7 +27,7 @@ export function resolveHAction(
   return "ascend";
 }
 
-export type TreeLAction = "expand" | "open";
+type TreeLAction = "expand" | "open";
 export function resolveLAction(
   cursorId: string,
   anchorId: string,
@@ -37,7 +37,7 @@ export function resolveLAction(
   return "open";
 }
 
-export interface ForestProjectionOptions {
+interface ForestProjectionOptions {
   collapsed?: ReadonlySet<string>;
   /** Agents explicitly opened by the operator, even after selection moves. */
   expanded?: ReadonlySet<string>;
@@ -138,7 +138,7 @@ export function projectAgentForest(
   return out;
 }
 
-export function centeredRowScrollTop(
+function centeredRowScrollTop(
   listTop: number,
   listHeight: number,
   currentScrollTop: number,
@@ -168,11 +168,11 @@ export function nearestRowScrollTop(
   return Math.max(0, currentScrollTop + delta);
 }
 
-export interface SelectedRowRevealState {
+interface SelectedRowRevealState {
   pendingId: string | null;
 }
 
-export interface SelectedRowRevealResult {
+interface SelectedRowRevealResult {
   state: SelectedRowRevealState;
   revealId: string | null;
 }
@@ -181,7 +181,7 @@ export function requestSelectedRowReveal(id: string): SelectedRowRevealState {
   return { pendingId: id || null };
 }
 
-export function resolveSelectedRowReveal(
+function resolveSelectedRowReveal(
   state: SelectedRowRevealState,
   visibleIds: readonly string[],
 ): SelectedRowRevealResult {

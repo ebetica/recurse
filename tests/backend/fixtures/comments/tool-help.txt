@@ -19,4 +19,8 @@ export function ordinary() {}
 
 function body() {
   // This body comment must not bypass policy.
+  // Only the extracted tool help is exempt.
+  // Other comments still have a length limit.
+  // Four lines are allowed in a body.
+  // The fifth line exceeds the limit.
 }

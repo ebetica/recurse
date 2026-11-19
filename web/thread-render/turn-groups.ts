@@ -72,7 +72,7 @@ export function activityEntryKeys(items: readonly TurnGroupItem[]): string[] {
 const isShellNotice = (item: TurnGroupItem): item is ActivityMarker =>
   item.kind === "marker" && item.turn.system?.marker === "shell-notice";
 
-export function groupSummary(items: readonly TurnGroupItem[]): string {
+function groupSummary(items: readonly TurnGroupItem[]): string {
   const counts = { agents: 0, platform: 0, replies: 0 };
   let words = 0;
   let shells = 0;
@@ -148,7 +148,7 @@ export function groupSummary(items: readonly TurnGroupItem[]): string {
 }
 
 // Only completed reply content decides whether a question remains visible.
-export function finalLineQuestion(content: string): boolean {
+function finalLineQuestion(content: string): boolean {
   let fence: string | null = null;
   let last = "";
   for (const line of content.split("\n")) {

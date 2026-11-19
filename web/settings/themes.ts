@@ -3,7 +3,7 @@ import { apiJson } from "../api.js";
 import { applyCustomThemeCss } from "./theme-css.js";
 
 /** Version polls must not undo an unsaved local preview. */
-export let themePreviewActive = false;
+let themePreviewActive = false;
 let themeRevision = 0;
 const initialCustomCss = document.getElementById("theme")?.dataset.customCss;
 if (initialCustomCss) applyCustomThemeCss(initialCustomCss);

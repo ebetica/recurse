@@ -38,10 +38,7 @@ const ARGS_PREFIX = /^\s*\{\s*"/;
 const SECRET_RE =
   /\b(?:api[_-]?key|access[_-]?token|token|auth(?:orization)?|bearer|password|passwd|secret|private[_-]?key|client[_-]?secret|oauth)\b\s*(?:=|:|\s)\s*\S+|\b(?:sk|gh[pousr])[-_][A-Za-z0-9_-]{8,}|\bgithub_pat_[A-Za-z0-9_]{8,}|\b(?:AKIA|ASIA)[0-9A-Z]{12,}|\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{8,}/i;
 
-const ANSI_RE =
-  // oxlint-disable-next-line no-control-regex
-  /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
-// oxlint-disable-next-line no-control-regex
+const ANSI_RE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))/g;
 const CONTROL_RE = /[\x00-\x08\x0B\x0C\x0E-\x1F\x7F-\x9F]/g;
 
 // Collapse decoded text the way the backend one-lines summaries, so a

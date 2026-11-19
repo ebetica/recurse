@@ -4,7 +4,6 @@ const systemMessages = systemMessageExample.messages;
 type Element = any;
 type HTMLElement = any;
 type DOMRect = any;
-declare const document: any;
 declare const NodeFilter: any;
 declare const getComputedStyle: any;
 declare const innerWidth: number;
@@ -1039,7 +1038,8 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
           const scope = globalThis as any;
           scope.jumpScrollEnd = undefined;
           const settled = () => {
-            const target = document.querySelector(".file-jump-target");
+            const target =
+              document.querySelector<HTMLElement>(".file-jump-target");
             if (!target) return;
             element.removeEventListener("scrollend", settled);
             scope.jumpScrollEnd = element.scrollTop;

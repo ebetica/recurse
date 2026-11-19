@@ -14,7 +14,7 @@ export function isTakenOver(node: { taken_over?: boolean | null }): boolean {
   return node.taken_over === true;
 }
 
-export interface ActiveDescendant {
+interface ActiveDescendant {
   node: TreeNode;
   depth: number;
 }

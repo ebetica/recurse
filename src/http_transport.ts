@@ -12,19 +12,19 @@ import {
   INFO,
   type RuntimeLogger,
 } from "./observability";
-import { HttpError, type Exchange, type Handler } from "./web/router";
+import { HttpError, type Handler } from "./web/router";
 
-export { UNKNOWN_ROUTE, templateRoute } from "./observability";
+import "./observability";
 
 export const DEFAULT_MAX_ENCODED_BYTES = 32 * 1024 * 1024;
-export const DEFAULT_MAX_DECODED_BYTES = 32 * 1024 * 1024;
-export const DEFAULT_PROBE_BYTES = 1024 * 1024;
-export const DEFAULT_MIN_SIZE = 1024;
-export const DEFAULT_MIN_SAVINGS = 256;
-export const DEFAULT_MIN_SAVINGS_RATIO = 0.05;
-export const DEFAULT_STREAMING_MIN_SAVINGS_RATIO = 0.2;
-export const DEFAULT_MAX_CONCURRENT_JOBS = 4;
-export const DEFAULT_REQUEST_BODY_TIMEOUT = 30.0;
+const DEFAULT_MAX_DECODED_BYTES = 32 * 1024 * 1024;
+const DEFAULT_PROBE_BYTES = 1024 * 1024;
+const DEFAULT_MIN_SIZE = 1024;
+const DEFAULT_MIN_SAVINGS = 256;
+const DEFAULT_MIN_SAVINGS_RATIO = 0.05;
+const DEFAULT_STREAMING_MIN_SAVINGS_RATIO = 0.2;
+const DEFAULT_MAX_CONCURRENT_JOBS = 4;
+const DEFAULT_REQUEST_BODY_TIMEOUT = 30.0;
 
 type ResponseInit_ = NonNullable<ConstructorParameters<typeof Response>[1]>;
 type HeaderInit = ResponseInit_["headers"];
@@ -59,7 +59,7 @@ const STRIP_RE = new RegExp(`^${PY_SPACE}+|${PY_SPACE}+$`, "g");
 const strip = (text: string): string => text.replace(STRIP_RE, "");
 
 /** A small counting semaphore; Python's asyncio.Semaphore. */
-export class Slots {
+class Slots {
   private waiters: (() => void)[] = [];
   constructor(private free: number) {}
   async run<T>(work: () => Promise<T>): Promise<T> {
@@ -75,7 +75,7 @@ export class Slots {
   }
 }
 
-export class RequestCodingError extends HttpError {
+class RequestCodingError extends HttpError {
   constructor(status = 400, detail = "invalid compressed request body") {
     super(status, detail);
   }
@@ -357,7 +357,7 @@ function boundedStream(
   );
 }
 
-export interface Negotiation {
+interface Negotiation {
   readonly gzip: number;
   readonly identity: number;
   readonly explicit: ReadonlyMap<string, number>;
@@ -481,7 +481,7 @@ function beneficial(
 }
 
 /** Bound a probe across 16 evenly spaced regions of the retained parts. */
-export function representativeSample(
+function representativeSample(
   parts: readonly Uint8Array[],
   total: number,
   limit: number,
@@ -617,8 +617,13 @@ function encodedHeaders(response: Response, length: number | null) {
   return headers;
 }
 
-function rebuilt(response: Response, headers: Hdrs, body: BodyInit_): Response {
-  return new Response(body, {
+function rebuilt(
+  response: Response,
+  headers: Hdrs,
+  body: BodyInit_ | Uint8Array,
+): Response {
+  // Bun accepts byte views backed by any ArrayBufferLike; the DOM type doesn't.
+  return new Response(body as BodyInit_, {
     status: response.status,
     statusText: response.statusText,
     headers: headers as unknown as HeaderInit,
@@ -843,11 +848,11 @@ function discard(original: Response, replacement: Response): Response {
   return replacement;
 }
 
-export const SUMMARY_INTERVAL_SECONDS = 300.0;
-export const HEARTBEAT_INTERVAL_SECONDS = 60.0;
-export const SUMMARY_TOP_ROUTES = 10;
-export const SUMMARY_MAX_SAMPLES = 1024;
-export const SUMMARY_MAX_ROUTES = 64;
+const SUMMARY_INTERVAL_SECONDS = 300.0;
+const HEARTBEAT_INTERVAL_SECONDS = 60.0;
+const SUMMARY_TOP_ROUTES = 10;
+const SUMMARY_MAX_SAMPLES = 1024;
+const SUMMARY_MAX_ROUTES = 64;
 
 function percentile(sorted: readonly number[], ratio: number): number {
   if (!sorted.length) return 0;
@@ -874,7 +879,7 @@ class RouteWindow {
 
 const round3 = (value: number) => Math.round(value * 1000) / 1000;
 
-export interface AccountingOptions {
+interface AccountingOptions {
   readonly logger: RuntimeLogger;
   readonly summaryInterval?: number;
   readonly heartbeatInterval?: number;
@@ -1074,5 +1079,3 @@ function countBlankLines(chunk: Uint8Array): number {
     }
   return count;
 }
-
-export type { Exchange };

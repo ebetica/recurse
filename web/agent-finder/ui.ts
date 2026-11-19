@@ -24,7 +24,6 @@ import {
   type MentionNode,
 } from "../agent-finder.js";
 import {
-  composerAutocompleteIs,
   hideComposerAutocomplete,
   showComposerAutocomplete,
   updateComposerAutocomplete,
@@ -80,7 +79,7 @@ let archiveTimer = 0;
 let reviving = false;
 let onRevived: (result: RevivedAgent) => void = () => undefined;
 
-export interface RevivedAgent {
+interface RevivedAgent {
   id: string;
   title: string | null;
   notes: string[];
@@ -154,41 +153,8 @@ export function closeAgentFinder(restoreFocus = true): boolean {
   return wasOpen;
 }
 
-// Compatibility name for the composer's top-layer clear path.
-export function closeAgentAutocomplete(): boolean {
-  return mode === "mention" && closeAgentFinder();
-}
-
 export function agentFinderOpen(): boolean {
   return mode !== null;
-}
-export function agentFinderMode(): AgentFinderMode | null {
-  return mode;
-}
-export function agentAutocompleteOpen(): boolean {
-  return mode === "mention" && composerAutocompleteIs(LIST_ID);
-}
-export function agentFinderOwnsKey(
-  key: string,
-  shiftKey: boolean,
-  eventComposing = false,
-): boolean {
-  return (
-    agentFinderOpen() &&
-    agentFinderKeyAction(
-      mode,
-      !!matches.length,
-      key,
-      shiftKey,
-      eventComposing || composing,
-    ) !== null
-  );
-}
-export function agentAutocompleteOwnsKey(
-  key: string,
-  shiftKey: boolean,
-): boolean {
-  return agentAutocompleteOpen() && ownsKey(key, shiftKey);
 }
 
 function publishActive(id?: string): void {
@@ -459,7 +425,7 @@ export function openFoundAgent(id: string): boolean {
   return navigate(id);
 }
 
-export function refreshAgentAutocomplete(): void {
+function refreshAgentAutocomplete(): void {
   if (!finderReady || mode === "navigate" || mode === "revive") return;
   const token = activeAgentMentionToken(
     inputEl.value,
@@ -514,12 +480,6 @@ export function refreshAgentMentionCache(
   // would make the first trigger appear broken.
   else if (!agentFinderOpen() && document.activeElement === inputEl)
     refreshAgentAutocomplete();
-}
-
-export function clearAgentMentionCache(): void {
-  slices.clear();
-  cache.clear();
-  closeAgentFinder(false);
 }
 
 function handleFinderKey(event: KeyboardEvent): void {

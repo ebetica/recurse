@@ -34,21 +34,19 @@ import {
   logEvent,
   type RuntimeLogger,
 } from "../observability/runtime_logging";
-import { parsePythonJson } from "../utils/py_compact_json";
+import { parsePythonJson } from "../utils/python-json";
 import type { Middleware } from "../server";
+import { authMethod } from "./request";
 import { HttpError, jsonResponse, type Exchange } from "./router";
 import { loopbackAudience } from "./route_audience";
 
 export const LOGIN_MAX_FREE = 5;
-export const LOGIN_LOCK_BASE = 1.0;
+const LOGIN_LOCK_BASE = 1.0;
 export const LOGIN_LOCK_CAP = 300.0;
 export const LOGIN_FORGET = 3600.0;
 export const LOGIN_PASSWORD_MAX_CHARS = 1024;
-export const LOGIN_BODY_MAX_BYTES = 16 * 1024;
-export const LOOPBACK_HOSTS: ReadonlySet<string> = new Set([
-  "127.0.0.1",
-  "::1",
-]);
+const LOGIN_BODY_MAX_BYTES = 16 * 1024;
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "::1"]);
 
 const valueError = (message: string) =>
   Object.assign(new Error(message), { name: "ValueError" });
@@ -350,7 +348,7 @@ export function serviceRequestPolicy(ex: Exchange): ServicePolicy | null {
   return validateServicePolicy(ex.state.service_policy);
 }
 
-export function auditService(
+function auditService(
   logger: RuntimeLogger,
   ex: Exchange,
   action: string,
@@ -379,7 +377,7 @@ export function htmlResponse(
   });
 }
 
-export interface RequestAuthDeps {
+interface RequestAuthDeps {
   readonly operator: OperatorAuth;
   readonly service: ServiceAuth;
   readonly backendKeys?: BackendKeys;
@@ -398,19 +396,7 @@ export interface RequestAuthDeps {
   readonly homeSeen?: () => void;
 }
 
-export type AuthMethod =
-  | "backend-key"
-  | "remote-callback"
-  | "service"
-  | "tailscale"
-  | "cookie"
-  | "loopback"
-  | "local";
-
-/** The request's authentication method; routes read it only through here. */
-export function authMethod(ex: Exchange): AuthMethod | undefined {
-  return ex.state.auth_method as AuthMethod | undefined;
-}
+export { authMethod } from "./request";
 
 /**
  * The operator's browser session (cookie, Tailscale or local). With

@@ -14,7 +14,7 @@ import type { RequestCaptures } from "../request_capture.ts";
 import { BUILD_DIR } from "../../../build_dir.ts";
 import { MCP_FILE_NAME } from "../../../mcp_config.ts";
 import { WARNING } from "../../../observability/runtime_logging";
-import { startSlowSpan } from "../../../observability/slow_span";
+import { startSlowSpan } from "../../../observability/slow-span";
 import { modelRef } from "../model_selection";
 import type { Opening } from "./open.ts";
 import type { Runtime } from "./load.ts";
@@ -375,10 +375,13 @@ export function installHooks(
   });
   const mcpServers = new Map<string, string>();
   const catalog = rt.trustedModelCatalog(target.models);
-  const reviewModels =
-    host.deps.usageLimits && catalog !== target.models
-      ? rt.observeUsageLimits(catalog, host.deps.usageLimits)
-      : catalog;
+  const { models: reviewModels } = rt.createCodex({
+    models:
+      host.deps.usageLimits && catalog !== target.models
+        ? rt.observeUsageLimits(catalog, host.deps.usageLimits)
+        : catalog,
+    reviewer: true,
+  });
   const review = rt.createDurableSafety({
     mcpServer: (name) => mcpServers.get(name),
     models: target.models,

@@ -3,7 +3,7 @@
 // Record GitHub's account locally when available; otherwise leave identity
 // unset so Git refuses commits rather than inventing an author.
 import { gitEnv } from "./workdir_git";
-import { slowSpan } from "./observability/slow_span";
+import { slowSpan } from "./observability/slow-span";
 
 const pending = new Map<string, Promise<boolean>>();
 type Env = Readonly<Record<string, string | undefined>>;

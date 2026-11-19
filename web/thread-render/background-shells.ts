@@ -45,15 +45,6 @@ export function shellSummary(activeCount: number): string {
   return `${activeCount} active shell${activeCount === 1 ? "" : "s"}`;
 }
 
-export function idleShellSummary(
-  status: "ready" | "disabled" | "unavailable" | undefined,
-  activeCount: number,
-): string {
-  if (status === "unavailable")
-    return "Background shell details are unavailable.";
-  return shellSummary(activeCount);
-}
-
 export function shouldShowShellUnavailable(
   status: string | undefined,
   shellCount: number,

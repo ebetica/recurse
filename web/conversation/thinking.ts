@@ -1,21 +1,18 @@
-// Owns lazy thinking disclosures and the live pill; open/text FIFO indexes each
-// hold at most 64 keys, avoiding scans of retained live-refresh metadata.
-// thinkingT marks committed shared text before the live bar reads it.
+// Owns lazy thinking disclosures and the live pill. Tool and reply projections
+// use the original thinking row's identity, so a new offset or series index
+// does not close an open disclosure. The pill keeps its expansion for the run.
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "../backends/backend.js";
 import { DISCLOSURE_ICON } from "../icons.js";
 import { renderedLogGeneration } from "../row-thread-state.js";
 import { state } from "../state.js";
-import type {
-  ActivityBoundary,
-  ActivitySlice,
-} from "../thread-render/activity-boundary.js";
+import type { ActivitySlice } from "../thread-render/activity-boundary.js";
+import { paint } from "../thread-render/index.js";
 import { enrich } from "../thread-render/reply-html.js";
+import type { LiveActivityRow } from "../thread-render/tool_activity.js";
 import type { Conversation, MessageEntry, ToolEntry } from "../types.js";
 import { thinkingElapsedT } from "./live-elapsed.js";
-import { markCommittedStep } from "./thinking-paint.js";
-import { paint } from "./thread.js";
 
 interface ThinkingEntry {
   open?: boolean;
@@ -26,19 +23,7 @@ interface ThinkingEntry {
   timer?: number;
 }
 
-type LiveThinkingRow = {
-  kind?: string;
-  role?: string;
-  text?: string;
-  offset?: number;
-  id?: string;
-  live_thinking?: boolean;
-  has_thinking?: boolean;
-  live?: boolean;
-  running?: boolean;
-};
-
-export class ThinkingStore {
+class ThinkingStore {
   private readonly entries = new Map<string, ThinkingEntry>();
   private readonly bounds: Record<"open" | "text", string[]> = {
     open: [],
@@ -48,12 +33,16 @@ export class ThinkingStore {
     key: string;
     entry: MessageEntry;
     conversation: string;
-    sourceId?: string;
     generation: Conversation["message_log_generation"];
+    run: Conversation["active_run_start"];
+    expanded: boolean;
   } | null = null;
 
   key(conv: Conversation, entry: MessageEntry): string {
-    return `${conv.id}:${conv.message_log_generation ?? "legacy"}:${entry.id ?? entry.offset}`;
+    const source = entry.thinking_key
+      ? `request:${entry.thinking_key}`
+      : (entry.id ?? entry.offset);
+    return `${conv.id}:${conv.message_log_generation ?? "legacy"}:${source}`;
   }
   get(key: string): ThinkingEntry | undefined {
     return this.entries.get(key);
@@ -99,67 +88,49 @@ export class ThinkingStore {
     }
     keys.push(key);
   }
-  private moveKey(from: string, to: string): void {
-    const previous = this.get(from);
-    this.cancelRefresh(from);
-    if (!previous) return;
-    const target = this.get(to);
-    for (const field of ["open", "text"] as const)
-      if (this.forget(field, from)) this.remember(field, to);
-    previous.open ||= target?.open;
-    if (previous.text === undefined) previous.text = target?.text;
-    previous.source ??= target?.source;
-    previous.live ||= target?.live;
-    previous.loading = target?.loading;
-    previous.timer = target?.timer;
-    this.entries.delete(from);
-    this.entries.set(to, previous);
+  private pillFor(conv: Conversation) {
+    const pill = this.pill;
+    return pill?.conversation === conv.id &&
+      pill.generation === conv.message_log_generation &&
+      pill.run === conv.active_run_start
+      ? pill
+      : null;
+  }
+  clearPill(): void {
+    if (this.pill) this.cancelRefresh(this.pill.key);
+    this.pill = null;
   }
   syncPill(
     conv: Conversation,
-    rows: readonly LiveThinkingRow[],
-    panelKind: string,
-    boundary?: ActivityBoundary,
+    row: LiveActivityRow | undefined,
   ): string | null {
-    const source = panelKind === "thinking" ? liveThinkingEntry(rows) : null;
-    const sameSource =
-      source?.id &&
-      source.id === this.pill?.sourceId &&
-      this.pill.conversation === conv.id &&
-      this.pill.generation === conv.message_log_generation;
-    let entry = source;
-    if (source?.id && boundary) {
-      for (const slice of boundary.slices) {
-        const tool = slice.segment.tools.find(
-          (tool) => tool.thinking_entry_id === source.id,
-        );
-        if (tool) {
-          entry = toolThinkingEntry(slice, tool);
-          break;
-        }
-      }
+    if (!row) {
+      this.clearPill();
+      return null;
     }
-    if (sameSource && entry === source) entry = this.pill!.entry;
-    const key = entry ? this.key(conv, entry) : null;
-    if (sameSource && key && this.pill && key !== this.pill.key)
-      this.moveKey(this.pill.key, key);
-    if (
-      this.pill &&
-      (this.pill.key !== key || this.pill.conversation !== conv.id)
-    )
-      this.cancelRefresh(this.pill.key);
-    this.pill =
-      entry && key !== null
-        ? {
-            key,
-            entry,
-            conversation: conv.id,
-            sourceId: source?.id,
-            generation: conv.message_log_generation,
-          }
-        : null;
-    if (entry && key !== null) {
-      if (this.get(key)?.open && this.get(key)?.source !== entry.offset)
+    const entry: MessageEntry = {
+      kind: "assistant",
+      role: "assistant",
+      content: "",
+      offset: row.offset ?? -1,
+      id: row.id ? `row:${row.id}` : undefined,
+      thinking_key: row.thinking_key,
+      live_thinking: row.live_thinking || row.live,
+      has_thinking: row.has_thinking,
+    };
+    const key = this.key(conv, entry);
+    const expanded = this.pillFor(conv)?.expanded ?? false;
+    if (this.pill && this.pill.key !== key) this.cancelRefresh(this.pill.key);
+    this.pill = {
+      key,
+      entry,
+      conversation: conv.id,
+      generation: conv.message_log_generation,
+      run: conv.active_run_start,
+      expanded,
+    };
+    if (this.wantsRefresh(conv.id, key)) {
+      if (this.get(key)?.source !== entry.offset)
         this.load(conv.id, entry, key, true);
       this.scheduleRefresh(conv.id, entry, key);
     }
@@ -167,14 +138,30 @@ export class ThinkingStore {
   }
   togglePill(key: string): void {
     const conv = state.currentConv;
-    if (this.pill?.key === key && conv?.id === this.pill.conversation)
-      this.toggle(conv, this.pill.entry);
+    const pill = this.pill;
+    if (pill?.key !== key || conv?.id !== pill.conversation) return;
+    pill.expanded = !pill.expanded;
+    if (pill.expanded) {
+      const current = this.ensure(key);
+      this.remember("open", key);
+      current.open = true;
+      this.load(conv.id, pill.entry, key);
+    } else if (!this.wantsRefresh(conv.id, key)) {
+      this.cancelRefresh(key);
+    }
+    paint(conv);
+  }
+  private wantsRefresh(cid: string, key: string): boolean {
+    const pill = this.pill;
+    return pill?.key === key && pill.conversation === cid
+      ? pill.expanded
+      : !!this.get(key)?.open;
   }
   private scheduleRefresh(cid: string, entry: MessageEntry, key: string): void {
     const current = this.get(key);
     if (
       !current?.live ||
-      !current.open ||
+      !this.wantsRefresh(cid, key) ||
       typeof window === "undefined" ||
       current.timer !== undefined
     )
@@ -182,7 +169,8 @@ export class ThinkingStore {
     current.timer = window.setTimeout(() => {
       const latest = this.get(key);
       if (latest) latest.timer = undefined;
-      if (latest?.open && latest.live) this.load(cid, entry, key, true);
+      if (latest?.live && this.wantsRefresh(cid, key))
+        this.load(cid, entry, key, true);
     }, 1000);
   }
   private cancelRefresh(key: string): void {
@@ -209,10 +197,11 @@ export class ThinkingStore {
       return;
     current.source = offset;
     current.loading = true;
+    const query = new URLSearchParams({ offset: String(offset) });
+    if (offset < 0 && entry.thinking_key)
+      query.set("live_row", entry.thinking_key);
     void backendFor(cid)
-      .api(
-        `/api/conversations/${encodeURIComponent(cid)}/thinking?offset=${offset}`,
-      )
+      .api(`/api/conversations/${encodeURIComponent(cid)}/thinking?${query}`)
       .then(async (response) => {
         if (!response.ok) return { text: null, live: false };
         const value: unknown = await response.json();
@@ -243,7 +232,7 @@ export class ThinkingStore {
     if (current.open) {
       current.open = undefined;
       this.forget("open", key);
-      this.cancelRefresh(key);
+      if (!this.wantsRefresh(conv.id, key)) this.cancelRefresh(key);
       this.prune(key);
     } else {
       this.remember("open", key);
@@ -256,32 +245,6 @@ export class ThinkingStore {
 
 export const thinkingStore = new ThinkingStore();
 
-function liveThinkingEntry(
-  rows: readonly LiveThinkingRow[],
-): MessageEntry | null {
-  const start =
-    rows.findLastIndex((row) => row.role === "user" || row.role === "custom") +
-    1;
-  const current = rows.slice(start);
-  if (!current.some((row) => row.live || row.running || row.live_thinking))
-    return null;
-  const row = current.findLast(
-    (candidate) =>
-      candidate.kind === "text" &&
-      candidate.role === "assistant" &&
-      (candidate.live_thinking || candidate.has_thinking),
-  );
-  if (!row) return null;
-  return {
-    kind: "assistant",
-    role: "assistant",
-    content: row.text ?? "",
-    offset: row.offset ?? -1,
-    id: row.id ? `row:${row.id}` : undefined,
-    live_thinking: true,
-  };
-}
-
 export function toolThinkingEntry(
   slice: ActivitySlice,
   entry: ToolEntry,
@@ -291,8 +254,10 @@ export function toolThinkingEntry(
     role: "assistant",
     content: "",
     offset: entry.offset,
-    id: `thinking:${slice.turn.turn_id}:${entry.seq}`,
+    id:
+      entry.thinking_entry_id ?? `thinking:${slice.turn.turn_id}:${entry.seq}`,
     thinking: entry.thinking,
+    thinking_key: entry.thinking_key,
     has_thinking: entry.has_thinking,
     model_time_ms: entry.model_time_ms,
     live_thinking: entry.offset < 0,
@@ -300,7 +265,9 @@ export function toolThinkingEntry(
   };
 }
 
-const disclosureCaret = html`<span class="disclosure-caret" aria-hidden="true"
+export const disclosureCaret = html`<span
+  class="disclosure-caret"
+  aria-hidden="true"
   >${unsafeHTML(DISCLOSURE_ICON)}</span
 >`;
 
@@ -311,6 +278,8 @@ export function thinkingT(
   const title = entry?.thinking?.trim() || null;
   if (!entry || (!title && !entry.has_thinking)) return nothing;
   const key = thinkingStore.key(conv, entry);
+  const live = entry.live_thinking === true;
+  if (live && thinkingStore.isPill(key, conv.id)) return nothing;
   const open = !!thinkingStore.get(key)?.open;
   const canLoad =
     entry.offset >= 0 ||
@@ -318,7 +287,6 @@ export function thinkingT(
     (entry.offset < 0 && entry.has_thinking === true);
   if (open && canLoad) thinkingStore.load(conv.id, entry, key);
   const loaded = thinkingStore.get(key)?.text;
-  const live = entry.live_thinking === true;
   const durationMs =
     typeof entry.model_time_ms === "number" &&
     Number.isFinite(entry.model_time_ms)
@@ -352,12 +320,6 @@ export function thinkingT(
         : html`<div class="turn-thinking-body" id=${bodyId}>
             ${unsafeHTML(enrich(loaded))}
           </div>`;
-  // Invariant: Live thinking belongs to the pill. A visible committed step
-  // owns the shared disclosure and text instead, without duplicating prose.
-  if (thinkingStore.isPill(key, conv.id)) {
-    if (live) return nothing;
-    markCommittedStep(key);
-  }
   const line = html`<span class="turn-thinking-line">
     ${label}${durationT}${titleT}
   </span>`;

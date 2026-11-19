@@ -54,6 +54,35 @@ export const tests: BrowserTest[] = [
         await view.reload();
         await browserExpect(warning).toHaveText("Unavailable");
         await browserExpect(warning).toBeVisible();
+        await view
+          .getByRole("button", { name: "Expand all", exact: true })
+          .click();
+        const tool = view.locator(".turn-tool", { hasText: "SAFETY_TOOL_RAN" });
+        const detail = view.waitForResponse((response) =>
+          /\/tool-details\/[^/]+$/.test(new URL(response.url()).pathname),
+        );
+        await tool.locator('.turn-tool-head[role="button"]').click();
+        await browserExpect(
+          tool.getByRole("region", { name: "Output", exact: true }),
+        ).toContainText(
+          "HTTP 503: Mammoth rejected <b>review context</b> Use a shorter request.",
+        );
+        const operatorView = await detail;
+        const { safety_review_failure: failure } = await operatorView.json();
+        expect(failure.status).toBe(503);
+        expect(failure.message).toHaveLength(200);
+        expect(failure.message).not.toMatch(/[\r\n\u0085\u2028\u2029]/u);
+        expect(failure.message).toStartWith(
+          "Mammoth rejected <b>review context</b> Use a shorter request.",
+        );
+        expect(failure.message).toEndWith("decide what to do next. REDACTED");
+        expect(failure.message).not.toContain("abc123");
+        expect(failure.message).not.toContain("Provider response padding");
+        const agentView = await view.request.get(operatorView.url(), {
+          headers: { "x-recurse-agent": agent },
+        });
+        expect(agentView.ok()).toBe(true);
+        expect((await agentView.json()).safety_review_failure).toBeUndefined();
         const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
         if (shots)
           await view.screenshot({

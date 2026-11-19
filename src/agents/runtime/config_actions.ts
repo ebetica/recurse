@@ -10,14 +10,14 @@ import {
   type ConversationGuardToken,
   type ConversationRecord,
   type ConversationStore,
-} from "../conversation_store";
+} from "../storage";
 
-export interface NodeCache {
+interface NodeCache {
   muteDesired: boolean | null;
   safetyDesired: boolean | null;
 }
 
-export interface ConfigActionsDeps {
+interface ConfigActionsDeps {
   store: ConversationStore;
   node(cid: string): NodeCache;
   config: Pick<

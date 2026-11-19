@@ -5,7 +5,7 @@ import * as artifacts from "../../src/artifacts";
 import { KeyError } from "../../src/agents/runtime/agent_node";
 import { removeFile } from "../../src/agents/runtime/attachments/publish";
 import { collectionSnapshot } from "../../src/agents/runtime/node_files";
-import { fenced } from "../../src/agents/mutation_guard";
+import { fenced } from "../../src/agents/lifecycle/mutation_guard";
 import {
   SupervisorReads,
   type ReadsDeps,
@@ -20,7 +20,7 @@ import { publishLoopbackToken, requestAuth } from "../../src/web/request_auth";
 import { HttpError, Router } from "../../src/web/router";
 import { build, layout } from "./fixtures/agent_temp/replay";
 
-export interface HarnessNode {
+interface HarnessNode {
   reaping: boolean;
   fileOps: number;
   tryAdmitFileOp(): boolean;
@@ -43,7 +43,7 @@ export interface RoutesApp {
   readonly loopbackToken: string;
 }
 
-export const tmpKey = (cid: string) => `20260925-${cid}`;
+const tmpKey = (cid: string) => `20260925-${cid}`;
 
 export async function buildRoutesApp(
   root: string,

@@ -5,7 +5,7 @@ import type { EntryId } from "@earendil-works/pi-durable";
 import type { DurableHost } from "../host.ts";
 import { modelResponse } from "../../view/model_response";
 import { runtime } from "./load.ts";
-import { slowSpan } from "../../../observability/slow_span";
+import { slowSpan } from "../../../observability/slow-span";
 
 type Rec = Record<string, unknown>;
 
@@ -65,6 +65,7 @@ export async function toolDetails(
   host: DurableHost,
   cid: string,
   artifactId: string,
+  includeOperatorFailure = false,
 ): Promise<Rec | null> {
   const { harness, conversation } = await host.open(cid);
   const { toolDetails } = await import("../tool_details.ts");
@@ -74,6 +75,7 @@ export async function toolDetails(
     await host.live(cid),
     artifactId,
     context,
+    includeOperatorFailure,
   );
   return artifact === null
     ? null
@@ -129,17 +131,26 @@ export async function thinking(
   host: DurableHost,
   cid: string,
   offset: number,
+  liveRow?: string,
 ): Promise<Rec | null> {
-  const { thinkingText } = await runtime();
+  const { thinkingText, thinkingKey } = await runtime();
+  const live = offset === -1 ? await host.live(cid) : undefined;
   const message =
     offset === -1
-      ? (await host.live(cid))?.generation?.message
+      ? live?.generation?.message
       : (await entry(host, cid, offset))?.model?.[0];
+  if (
+    liveRow !== undefined &&
+    (!message || liveRow !== thinkingKey(live?.run?.taskId, message as Rec))
+  )
+    return null;
   const text =
     (message as Rec | undefined)?.role === "assistant"
       ? thinkingText(message)
       : null;
-  return text === null ? null : { text, live: offset === -1 };
+  return text === null && liveRow === undefined
+    ? null
+    : { text, live: offset === -1 };
 }
 
 /** The stored model input or reply, addressed by Durable entry id. */

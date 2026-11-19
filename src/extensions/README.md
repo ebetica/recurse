@@ -103,6 +103,14 @@ remaps retained-history boundaries and uses a lazy summary in the new session. A
 server compaction uses the normal readable-summary path. Rejections fail the
 current turn without retrying it. Other providers use readable summaries.
 
+For GPT-6.2 and later on ChatGPT (Codex), the main request, cache-warming
+replay, and safety reviewer send their system prompt as a developer message
+in `input` instead of top-level `instructions`, which is billed uncached.
+On main requests, leading encrypted compaction items stay ahead of that message
+so the server does not drop it. Server compaction uses the same placement when
+its selected history contains the initial system message. Earlier Codex models
+and the OpenAI API-key route keep their existing wire format.
+
 ## Subscription usage limits
 
 [usage-limits.ts](extra/usage-limits/usage-limits.ts) wraps the Durable host's
@@ -127,3 +135,10 @@ request is ever made just to read usage, and a login change drops its values.
 - RTK readiness is read asynchronously once per process and awaited before
   rewriting commands; the launcher owns the status file.
 - Keep native and slow work (search, SQL) off the server's event loop.
+- Extra extensions receive host values through creation options rather than
+  importing host modules. The [import check](../../tests/checks/extension_import_check.ts)
+  covers only `extra/`, with exact file-and-import exceptions for the Codex
+  compaction, file-search and MCP adapters.
+- Oxlint prohibits reading `process.env` in extensions except in the host-owned
+  file-search worker, whose standalone callers inherit the host environment.
+  Conversation tools still use the environment supplied by their host.

@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
 
+const capsPath = "tests/checks/test_check_caps.json";
 const recorded = (name: string) =>
   readFileSync(
     new URL(`./fixtures/test-check/${name}.txt`, import.meta.url),
@@ -43,9 +44,12 @@ test("CLI enforces only the selected strict rules", async () => {
 
 // Regression: #3361 positive visibility snapshots must wait for browser state
 test("CLI ratchets positive browser visibility snapshots", async () => {
-  await withRepo(async ({ put, run }) => {
+  await withRepo(async ({ put, read, run, git }) => {
     const reason =
       "positive visibility snapshot; wait with locator.waitFor() or browserExpect(locator).toBeVisible()";
+    const rule = `T6 ${reason}`;
+    const capped = "tests/mobile_browser/test_active_agents.ts";
+    await put(capsPath, JSON.stringify({ [rule]: {} }));
     const positive = [
       "async function first() { expect(await page.locator('button').isVisible()).toBeTrue(); }",
       "async function second() { expect((await (locator.isVisible()))).toBe((true)); }",
@@ -79,9 +83,11 @@ test("CLI ratchets positive browser visibility snapshots", async () => {
     );
     await put("tests/backend/case.ts", positive);
     expect((await run("test_check", "--strict")).exitCode).toBe(0);
-    const capped = "tests/mobile_browser/test_active_agents.ts";
+    await put(capsPath, JSON.stringify({ [rule]: { [capped]: 1 } }));
     await put(capped, positive.split("\n")[0]!);
+    const atCap = read(capsPath);
     expect((await run("test_check", "--strict")).exitCode).toBe(0);
+    expect(read(capsPath)).toEqual(atCap);
     await put(capped, positive);
     const exceeded = await run("test_check", "--strict");
     expect(exceeded.exitCode).toBe(1);
@@ -96,13 +102,21 @@ test("CLI ratchets positive browser visibility snapshots", async () => {
     ]);
     await put(capped, "await locator.waitFor();");
     const lowered = await run("test_check", "--strict");
-    expect(lowered.exitCode).toBe(1);
-    expect(
-      lowered.stdout
-        .toString()
-        .split("\n")
-        .filter((line) => line.includes(" T6 ")),
-    ).toEqual([`${capped}:1 T6 ${reason} cap is 1; lower it to 0`]);
+    expect(lowered.exitCode).toBe(0);
+    expect(lowered.stdout.toString()).toContain(
+      `Shrank ${capsPath}; commit the updated baseline.`,
+    );
+    expect(await git("diff", "--", capsPath)).toContain(
+      `+  ${JSON.stringify(rule)}: {}`,
+    );
+    await git("add", capsPath);
+    await put(capped, positive.split("\n")[0]!);
+    const restored = await run("test_check");
+    expect(restored.exitCode).toBe(1);
+    expect(restored.stdout.toString()).toContain(
+      `${capped}:1 T6 ${reason} (cap 0 here)`,
+    );
+    expect(await git("diff", "--", capsPath)).toBe("");
   });
 });
 
@@ -650,104 +664,119 @@ test("CLI compares PR changes from the merge base unless exact is requested", as
   });
 });
 
-// Feature: #2871 growing large source files require an exact-head simplification review
-test("CLI requires simplification review only when large source files grow", async () => {
+// Feature: #3532 oversized source and Markdown require a recorded architecture sweep
+test("CLI requires a recorded architecture sweep for oversized source and Markdown", async () => {
   await withRepo(async ({ put, run, baseline }) => {
     const file = "src/large.ts";
-    await put(".gitattributes", "src/*.ts binary\n");
-    await put(file, "export {};\n".repeat(1499));
+    const readme = "docs/example/README.md";
+    const ledger = "tests/checks/architecture-sweeps.json";
+    const source = (lines: number) => put(file, "export {};\n".repeat(lines));
+    const docs = (count: number) => put(readme, "🐾".repeat(count));
+    await put("docs/agents/repository-map.md", "# Code map\n");
+    await put(ledger, "[]\n");
+    await source(2399);
+    await docs(14999);
     const base = await baseline();
-    await put(file, "export {};\n".repeat(1500));
+    expect((await run("size_check")).exitCode).toBe(0);
+    expect((await run("docs_check")).exitCode).toBe(0);
+
+    await source(2400);
+    await docs(15000);
     const head = await baseline();
     await put("body.txt", "");
-    const diff = () =>
-      run("test_check", "--diff", base, "--pr-body", "body.txt");
-    const missing = await diff();
-    expect(missing.exitCode).toBe(1);
-    expect(missing.stdout.toString()).toContain(
-      `${file}:1 T8 growing source file`,
-    );
-    expect(missing.stdout.toString()).toContain(
-      "docs/agents/simplify-review.md",
-    );
-    for (const verdict of ["simplified", "none-found", "follow-up #123"]) {
-      await put("body.txt", `Simplify-review: ${file} ${verdict} ${head}`);
-      expect((await diff()).exitCode).toBe(0);
-    }
-    for (const declaration of [
-      `Simplify-review: ${file} none-found ${base}`,
-      `Simplify-review: ${file} none-found ${head.slice(0, 12)}`,
-      `Simplify-review: ${file} follow-up ${head}`,
-      `Simplify-review: ${file} none-found ${head} extra`,
-    ]) {
-      await put("body.txt", declaration);
-      expect((await diff()).exitCode).toBe(1);
-    }
-    await put("body.txt", "");
     expect(
-      (await run("test_check", "--diff", head, "--pr-body", "body.txt"))
-        .exitCode,
+      (
+        await run(
+          "test_check",
+          "--diff",
+          base,
+          "--pr-body",
+          "body.txt",
+          "--strict",
+        )
+      ).exitCode,
     ).toBe(0);
-    await put(file, "export {};\n".repeat(1600));
-    const largeBase = await baseline();
-    await put(file, "export {};\n".repeat(1500));
-    expect(
-      (await run("test_check", "--diff", largeBase, "--pr-body", "body.txt"))
-        .exitCode,
-    ).toBe(0);
-    await put(file, "export {};\n".repeat(2399));
-    const marginBase = await baseline();
-    const sweep = (base = marginBase) =>
-      run("test_check", "--diff", base, "--pr-body", "body.txt", "--strict");
-    await put(file, "export {};\n".repeat(2400));
-    const sweepHead = await baseline();
-    expect((await run("test_check", "--strict")).exitCode).toBe(0);
-    const missingSweep = await sweep();
-    expect(missingSweep.exitCode).toBe(1);
-    expect(missingSweep.stdout.toString()).toContain(
-      "commission a read-only effort-4 subagent",
+    const sourceFailure = await run("size_check");
+    expect(sourceFailure.exitCode).toBe(1);
+    expect(sourceFailure.stderr.toString()).toContain(
+      `${file}: 2400 lines. Stop: do not trim or delete content to fit.`,
     );
-    expect(missingSweep.stdout.toString()).toContain(
-      "Removing lines merely to fit under the limit is not acceptable",
+    expect(sourceFailure.stderr.toString()).toContain(
+      "Report this to the Coordinator for an effort-4 architecture sweep",
     );
-    for (const declaration of [
-      `Simplify-review: ${file} none-found ${sweepHead}`,
-      `Simplify-review: ${file} architecture-sweep ${marginBase}`,
-      `Simplify-review: ${file} architecture-sweep ${sweepHead.slice(0, 12)}`,
-      `Simplify-review: ${file} architecture-sweep ${sweepHead} extra`,
-    ]) {
-      await put("body.txt", declaration);
-      expect((await sweep()).exitCode).toBe(1);
-    }
+    const docsFailure = await run("docs_check");
+    expect(docsFailure.exitCode).toBe(1);
+    expect(docsFailure.stderr.toString()).toContain(
+      `${readme}: 15000 characters. Stop: do not trim or delete content to fit.`,
+    );
+    expect(docsFailure.stderr.toString()).toContain(
+      "Report this to the Coordinator for an effort-4 architecture sweep of the folder docs/example/",
+    );
+
+    const records = [
+      { path: file, head, size: 2400 },
+      { path: readme, head, size: 15000 },
+    ];
+    await put(ledger, JSON.stringify(records));
+    expect((await run("size_check")).exitCode).toBe(0);
+    expect((await run("docs_check")).exitCode).toBe(0);
+
+    await source(2402);
+    await docs(15002);
+    const largerHead = await baseline();
     await put(
-      "body.txt",
-      `Simplify-review: ${file} architecture-sweep ${sweepHead}`,
+      ledger,
+      JSON.stringify([
+        { path: file, head: largerHead, size: 2402 },
+        { path: readme, head: largerHead, size: 15002 },
+      ]),
     );
-    expect((await sweep()).exitCode).toBe(0);
-    await put("body.txt", "");
-    expect((await sweep(sweepHead)).exitCode).toBe(0);
-    const optionalBase = sweepHead;
-    const optional = ["play", "ground"].join("") + "/large.ts";
-    await put(optional, "export {};\n".repeat(1500));
-    const optionalDiff = () =>
-      run("test_check", "--diff", optionalBase, "--pr-body", "body.txt");
-    const missingOptional = await optionalDiff();
-    expect(missingOptional.exitCode).toBe(1);
-    expect(missingOptional.stdout.toString()).toContain(
-      `${optional}:1 T8 growing source file`,
-    );
-    const optionalHead = await baseline();
+    await source(2401);
+    await docs(15001);
+    expect((await run("size_check")).exitCode).toBe(0);
+    expect((await run("docs_check")).exitCode).toBe(0);
+    await source(2403);
+    await docs(15003);
+    expect((await run("size_check")).exitCode).toBe(1);
+    expect((await run("docs_check")).exitCode).toBe(1);
+
+    await source(2500);
+    const capHead = await baseline();
     await put(
-      "body.txt",
-      `Simplify-review: ${optional} none-found ${optionalHead}`,
+      ledger,
+      JSON.stringify([{ path: file, head: capHead, size: 2500 }]),
     );
-    expect((await optionalDiff()).exitCode).toBe(0);
+    expect((await run("size_check")).exitCode).toBe(0);
+    await source(2501);
+    const newGrowth = await run("size_check");
+    expect(newGrowth.exitCode).toBe(1);
+    expect(newGrowth.stderr.toString()).toContain("architecture sweep");
+    expect(newGrowth.stderr.toString()).toContain("2500-line hard cap");
+    const overCapHead = await baseline();
+    await put(
+      ledger,
+      JSON.stringify([{ path: file, head: overCapHead, size: 2501 }]),
+    );
+    const hardCap = await run("size_check");
+    expect(hardCap.exitCode).toBe(1);
+    expect(hardCap.stderr.toString()).toContain(
+      "2501 lines exceeds the 2500-line hard cap",
+    );
+    expect(hardCap.stderr.toString()).not.toContain("architecture sweep");
+
+    await put(ledger, JSON.stringify([...records, records[0]]));
+    const duplicate = await run("docs_check");
+    expect(duplicate.exitCode).toBe(1);
+    expect(duplicate.stderr.toString()).toContain(
+      "invalid or duplicate record",
+    );
   });
 });
 
 async function withRepo(
   body: (repo: {
     put: (file: string, text: string) => Promise<void>;
+    read: (file: string) => Buffer;
     remove: (file: string) => void;
     baseline: () => Promise<string>;
     git: (...args: string[]) => Promise<string>;
@@ -767,6 +796,8 @@ async function withRepo(
     await git("init", "-q");
     await git("config", "user.name", "Checker");
     await git("config", "user.email", "checker@example.invalid");
+    mkdirSync(join(cwd, "tests/checks"), { recursive: true });
+    writeFileSync(join(cwd, capsPath), "{}\n");
     await body({
       git,
       async baseline() {
@@ -775,6 +806,9 @@ async function withRepo(
       },
       remove(file) {
         rmSync(join(cwd, file));
+      },
+      read(file) {
+        return readFileSync(join(cwd, file));
       },
       async put(file, text) {
         mkdirSync(join(cwd, file, ".."), { recursive: true });

@@ -9,12 +9,12 @@ import { lstat, open as openAsync, type FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
 
 export type JsonObject = Record<string, unknown>;
-export type JsonlRange = [start: number, end: number, entry: JsonObject];
+type JsonlRange = [start: number, end: number, entry: JsonObject];
 export type ExpectedIdentity = readonly [dev: bigint, ino: bigint];
-export interface SessionStats extends Stats {
+interface SessionStats extends Stats {
   readonly identity: ExpectedIdentity;
 }
-export interface Assistant {
+interface Assistant {
   entry_id: string;
   content: string;
 }
@@ -28,10 +28,10 @@ export interface PiTurnGroup {
 
 export const LINE_BYTES = 2 << 20;
 export const VIEW_RAW_LINE_BYTES = 128 << 20;
-export const CHUNK_BYTES = 64 << 10;
+const CHUNK_BYTES = 64 << 10;
 export const HEADER_BYTES = 64 << 10;
-export const PI_TURN_SCAN_BYTES = 4 << 20;
-export const PI_TURN_SCAN_LINES = 4000;
+const PI_TURN_SCAN_BYTES = 4 << 20;
+const PI_TURN_SCAN_LINES = 4000;
 
 type Bytes = Uint8Array<ArrayBuffer>;
 const NL = 10;
@@ -118,7 +118,7 @@ interface AsyncOpenSession {
   identity: ExpectedIdentity;
 }
 
-export interface AsyncSessionInfo {
+interface AsyncSessionInfo {
   readonly size: number;
   readonly identity: ExpectedIdentity;
 }
@@ -684,7 +684,7 @@ function pythonJsonBytes(value: unknown, raw?: Uint8Array): number {
 }
 
 /** Parse an ordinary Pi entry; malformed or over-limit rows are absent. */
-export function entry(raw: Uint8Array | string): JsonObject | null {
+function entry(raw: Uint8Array | string): JsonObject | null {
   const bytes = typeof raw === "string" ? encodeUtf8(raw) : copyBytes(raw);
   if (bytes.length > LINE_BYTES) return null;
   const value = decodeJson(bytes);

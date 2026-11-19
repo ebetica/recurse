@@ -572,7 +572,7 @@ export const tests: BrowserTest[] = [
       );
       await page.locator(`.agent[data-id="${target.demo}"]`).click();
       await page.waitForFunction(
-        (image) => !image.hasAttribute("src"),
+        (image) => !image!.hasAttribute("src"),
         outgoing,
       );
       await cancelled;
@@ -603,7 +603,7 @@ export const tests: BrowserTest[] = [
       expect(draftImage).not.toBeNull();
       await page.locator("#new-top").click();
       await page.waitForFunction(
-        (image) => !image.hasAttribute("src"),
+        (image) => !image!.hasAttribute("src"),
         draftImage,
       );
       for (const route of held) await route.abort().catch(() => {});

@@ -23,7 +23,7 @@ interface Crop {
   expires?: number;
   url?: string;
 }
-export interface CommentSend {
+interface CommentSend {
   recipient: string;
   text: string;
   snapshot: string;
@@ -277,7 +277,7 @@ addEventListener("storage", (event: StorageEvent) => {
     scheduleRestore(true);
   if (event.key?.startsWith(PREFIX)) reconcile(event.key);
   else if (event.key === null)
-    for (const send of [...sends]) reconcile(PREFIX + send.data.clientId);
+    for (const send of sends.slice()) reconcile(PREFIX + send.data.clientId);
 });
 /** Whether browser-only comments are still sending or need retry. */
 export function hasCommentSends(): boolean {

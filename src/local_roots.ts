@@ -41,7 +41,7 @@ export const STRICT_ISOLATED_PATH_ENV = {
   RECURSE_AGENT_TMPDIR: "agent-tmp",
 } as const;
 
-export const ISOLATED_FORBIDDEN_ENV: ReadonlySet<string> = new Set([
+const ISOLATED_FORBIDDEN_ENV: ReadonlySet<string> = new Set([
   "RECURSE_READ_ONLY_SIGN_INS",
   "ANTHROPIC_API_KEY",
   "ANTHROPIC_AUTH_TOKEN",
@@ -56,7 +56,7 @@ export const ISOLATED_FORBIDDEN_ENV: ReadonlySet<string> = new Set([
   "RECURSE_TAILSCALE_LOGIN",
 ]);
 
-export const ISOLATED_CHILD_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
+const ISOLATED_CHILD_ENV_ALLOWLIST: ReadonlySet<string> = new Set([
   ...Object.keys(STRICT_ISOLATED_PATH_ENV),
   "COLORTERM",
   "LANG",
@@ -362,10 +362,6 @@ export function piRuntimeEnvironment(roots: Roots): Record<string, string> {
     RTK_TELEMETRY_DISABLED: "1",
     RTK_NO_TOML: "1",
   };
-}
-
-export function stateHome(environ: Environment = process.env): string {
-  return resolveRoots(environ).state;
 }
 
 /** Validate a CLI-supplied path before it is used by an isolated launch. */

@@ -165,7 +165,7 @@ async function retainSession(
   return entries;
 }
 
-export async function waitModels(
+async function waitModels(
   base: string,
   primary: string,
   secondModel: boolean,
@@ -187,7 +187,7 @@ export async function waitModels(
   );
 }
 
-export async function secondModelTurn(
+async function secondModelTurn(
   base: string,
   _privateRoot: string,
   _output: string,
@@ -213,7 +213,7 @@ function argValue(args: string[], name: string): string | undefined {
   return i < 0 ? undefined : args[i + 1];
 }
 
-export async function run(args = process.argv.slice(2)): Promise<void> {
+async function run(args = process.argv.slice(2)): Promise<void> {
   const verifyLive = args.includes("--verify-live");
   const secondModel = args.includes("--second-model");
   const commandArg = argValue(args, "--server-command");

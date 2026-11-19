@@ -2,7 +2,7 @@
 // contents. Configuration and the clock are supplied by callers; retirement is
 // one same-filesystem rename through trash, and EXDEV remains an error rather
 // than a copy. The existing trash Worker owns all blocking filesystem calls.
-import { expirePartitions } from "./trash_sweep";
+import { expirePartitions } from "./trash-sweep";
 
 const DATE_PARTITION = /^[0-9]{8}$/u;
 const fullMatch = (pattern: RegExp, value: string): boolean =>

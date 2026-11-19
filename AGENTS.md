@@ -43,8 +43,8 @@ each other.
 - **Build the simplest thing that works.** Give each folder module one job and a
   thin `index.ts`; imports between files and modules stay acyclic (exceptions need
   operator approval). Keep tools small. Extend an existing lifecycle CLI instead
-  of duplicating it. Simplify large files; do not mechanically split them. A
-  change that grows a file to 1,500+ lines needs a [simplification review](docs/agents/simplify-review.md).
+  of duplicating it. Simplify large files; do not mechanically split them.
+  Report architecture sweep findings to the Coordinator; do not trim to fit.
 - Pi owns sessions, turns, steering, and aborting; Recurse owns the tree and
   inter-agent messages. Never recheck, retry, or repair successful Pi calls
   without a named, reproducible bug.
@@ -114,8 +114,8 @@ are authoritative.
 ## Development and tests
 
 Before changing code or tests, read [the validation and test-writing
-workflow](docs/agents/develop.md#validation). Prettier and TypeScript checks are
-mandatory; Oxlint is advisory. Never commit `web/dist`.
+workflow](docs/agents/develop.md#validation). Prettier, TypeScript, and Oxlint
+are mandatory. Never commit `web/dist`.
 
 Use targeted evidence by default; reserve the full suite for an exact operator
 request or large/high-risk work. Never run tests/check.sh stages concurrently.

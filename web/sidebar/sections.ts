@@ -39,7 +39,7 @@ export const isFolded = (section: Section): boolean =>
     : undefined) ??
   section.collapsed;
 
-export function toggleFold(section: Section): void {
+function toggleFold(section: Section): void {
   folds[sectionKey(section)] = !isFolded(section);
   try {
     localStorage.setItem(FOLDS_KEY, JSON.stringify(folds));

@@ -9,7 +9,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { createConfig } from "../../../../src/config";
-import type { ConversationRecord } from "../../../../src/agents/conversation_store";
+import type { ConversationRecord } from "../../../../src/agents/storage/conversation_store";
 import {
   AgentTemp,
   type AgentTempDeps,
@@ -19,7 +19,7 @@ import { logger } from "../../../../src/observability/runtime_logging";
 import { flockExclusive } from "../../../../src/utils/flock";
 import { treeSnapshot } from "../tree_snapshot";
 
-export const NOW = 1_790_000_000.5;
+const NOW = 1_790_000_000.5;
 type Leaf = {
   json?: unknown;
   hex?: string;
@@ -81,7 +81,7 @@ function setup(root: string, spec: TempSpec): void {
 }
 
 /** Tree rows with random trash entry names collapsed to "T". */
-export function snapshot(root: string): Record<string, unknown>[] {
+function snapshot(root: string): Record<string, unknown>[] {
   type Row = Record<string, unknown>;
   const key = (r: Record<string, unknown>) =>
     [r.path, r.kind, r.sha256 ?? ""].map(String);

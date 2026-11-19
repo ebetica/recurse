@@ -22,7 +22,7 @@ import {
   awaitedSpan,
   slowSpan,
   startOpenPhase,
-} from "../../../observability/slow_span";
+} from "../../../observability/slow-span";
 import { resumeClear, submitHeld, type ClearState } from "./clear.ts";
 import { syncAgent } from "./send.ts";
 import {
@@ -44,6 +44,7 @@ export interface Opened {
   activity: DurableActivity;
   row: LiveRow;
   harness: Harness;
+  registry: Tools["registry"];
   conversation: Conversation;
   compact(target?: Conversation): Promise<string>;
   close(options?: { shellStop?: Promise<void> }): Promise<void>;
@@ -592,6 +593,7 @@ function handle(
     activity,
     row: target.row,
     harness,
+    registry: tools.registry,
     conversation,
     compact: (compacted = conversation) =>
       tools.context.compact(harness, compacted, context),

@@ -1,7 +1,7 @@
 // DOM-free ownership helpers for staged attachments. Upload callers snapshot an
 // owner promise before any network wait, so later navigation cannot retarget a
 // file to a different saved agent or draft.
-export interface ConversationIdLease {
+interface ConversationIdLease {
   convIdReady: Promise<string>;
   resolveConvId: (id: string) => void;
 }
@@ -22,7 +22,7 @@ export function conversationIdLease(
   return { convIdReady, resolveConvId };
 }
 
-export interface AttachmentDraftLease {
+interface AttachmentDraftLease {
   attachmentDraft?: string;
   attachmentDraftPromise?: Promise<string>;
   creator?: { convIdReady?: Promise<string> };
@@ -37,7 +37,7 @@ export interface AttachmentSelection {
   draft: AttachmentDraftLease | null;
 }
 
-export function ensureAttachmentDraft(
+function ensureAttachmentDraft(
   draft: AttachmentDraftLease,
   create: () => Promise<string>,
 ): Promise<string> {
@@ -81,7 +81,7 @@ export function attachmentOwnerForSelection(
   return Promise.resolve({ kind: "owner", id: selectedId });
 }
 
-export interface ConversationDraftSpec {
+interface ConversationDraftSpec {
   parent?: string | null;
   model?: string | null;
   effort?: string | null;

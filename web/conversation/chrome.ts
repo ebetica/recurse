@@ -22,12 +22,11 @@ import { $, inputEl, liveBarEl, msgsEl, titleEl } from "../dom.js";
 import { hideModel, showConversationModel, showDraftModel } from "../models.js";
 import { showModelResponse } from "../model-response.js";
 import { beginPaneVisit, syncPanes } from "../panes.js";
-import { poll, retargetFocusedEvents } from "./poll.js";
 import { resetThreadView } from "../row-thread-state.js";
 import { deriveSafetyView } from "../safety-view.js";
-import { updateScrollBtn } from "./scroll-ledger.js";
+import { updateScrollBtn } from "../thread-scroll/index.js";
 import { closeAgentSurface, closeShellSurface } from "./shell-surface.js";
-import { renderSidebar } from "../sidebar.js";
+import { refreshSidebarTree, renderAgentList } from "../sidebar/index.js";
 import { state } from "../state.js";
 import { resetVEye, takeToolDetailConversation } from "./thread.js";
 import { paintStopControl, selectedCanStop } from "./stop-view.js";
@@ -66,7 +65,7 @@ function activeOff(conv: Conversation): boolean | undefined {
 // Paint the control from the shown conversation. Hidden for a draft.
 // The toggle stays interactive during a running turn — the change just applies
 // next turn.
-export function showConversationSafety(conv: Conversation | null): void {
+function showConversationSafety(conv: Conversation | null): void {
   const eligible = !!conv && conv.id !== DRAFT;
   row.classList.toggle("on", eligible);
   delete row.dataset.themeProtected;
@@ -107,7 +106,7 @@ export function showConversationSafety(conv: Conversation | null): void {
       : "Skip per-action safety review for this conversation";
 }
 
-export function hideSafety(): void {
+function hideSafety(): void {
   showModelResponse(null, []);
   row.classList.remove("on", "off", "pending");
   delete row.dataset.themeProtected;
@@ -182,7 +181,7 @@ btn.onclick = async () => {
   conv.safety_off = desired;
   if (state.nodes[id]) state.nodes[id].safety_off = desired;
   showConversationSafety(conv);
-  renderSidebar();
+  renderAgentList();
   try {
     const r = await backendFor(id).jpost(`/api/conversations/${id}/safety`, {
       off: desired,
@@ -202,12 +201,12 @@ btn.onclick = async () => {
   } catch {
     conv.safety_off = previous;
     if (state.nodes[id]) state.nodes[id].safety_off = previous;
-    poll();
+    refreshSidebarTree();
   } finally {
     busy = false;
     delete state.pendingSafety[id];
     showConversationSafety(state.currentConv);
-    renderSidebar();
+    renderAgentList();
   }
 };
 
@@ -231,7 +230,7 @@ function optimisticTakenOver(id: string): boolean {
   );
 }
 
-export function paintTakeoverControl(conv?: Conversation | null): void {
+function paintTakeoverControl(conv?: Conversation | null): void {
   const id = conv?.id || state.selectedId;
   const eligible = !!conv?.parent && id !== DRAFT;
   const taken = eligible && optimisticTakenOver(id);
@@ -268,7 +267,7 @@ export async function requestTakeoverToggle(
   node.muted = desired;
   node.taken_over = desired;
   paintTakeoverControl(state.currentConv);
-  renderSidebar();
+  renderAgentList();
   try {
     const backend = backendFor(id);
     const url = `/api/conversations/${id}`;
@@ -305,7 +304,7 @@ export async function requestTakeoverToggle(
       state.nodes[id].muted = beforeNodeMuted;
       state.nodes[id].taken_over = beforeNodeTakenOver;
     }
-    poll();
+    refreshSidebarTree();
     return { ok: false, reason: "failed" };
   } finally {
     takeoverBusy = false;
@@ -327,10 +326,7 @@ function clearTitleCopyFeedback(): void {
   titleEl.classList.remove("copied");
   titleCopiedEl.classList.remove("on");
 }
-export function setTitleCopyable(
-  on: boolean,
-  identity: string | null = null,
-): void {
+function setTitleCopyable(on: boolean, identity: string | null = null): void {
   titleEl.classList.toggle("copyable", on);
   if (titleCopyIdentity !== identity) {
     clearTitleCopyFeedback();
@@ -450,9 +446,6 @@ export function noteConversationSwitch(
   if (!paintedFromCache) clearConversationChrome(id);
   applyFreshness();
   if (!paintedFromCache) renderColdOutbox(id);
-  // Invariant: The newly opened agent owns the one SSE subscription; the
-  // previously open one closes here so only the focused conversation streams.
-  retargetFocusedEvents(id);
 }
 
 /** Keep saved sends visible before an offline conversation can be read. */

@@ -32,6 +32,7 @@ export {
   DurableViews,
   pendingRows,
   thinkingText,
+  thinkingKey,
   compactionSummary,
 } from "../durable_rows.ts";
 export { createContext } from "../../../extensions/core/context/context.ts";

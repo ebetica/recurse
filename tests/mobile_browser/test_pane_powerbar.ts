@@ -283,7 +283,9 @@ export const tests: BrowserTest[] = [
             const version = bar.getByRole("combobox", { name: "Version" });
             const versions = await version
               .locator("option")
-              .evaluateAll((options) => options.map((option) => option.value));
+              .evaluateAll((options) =>
+                options.map((option) => (option as HTMLOptionElement).value),
+              );
             await version.selectOption(versions[versions.length - 1]);
             expect(await bar.locator("details[open]").count()).toBe(0);
             if (width === 1280)
@@ -382,7 +384,9 @@ export const tests: BrowserTest[] = [
       "document.querySelector('.pane-powerbar-controls')?.inert",
     );
     expect(
-      await pane.locator(".pane-body").evaluate((node) => node.inert),
+      await pane
+        .locator(".pane-body")
+        .evaluate((node) => (node as HTMLElement).inert),
     ).toBe(true);
     expect(
       await page.evaluate(() =>

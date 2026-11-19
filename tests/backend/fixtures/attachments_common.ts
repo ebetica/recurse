@@ -66,7 +66,7 @@ async function localUsage(fd: Awaited<ReturnType<typeof open>>, owner: string) {
   return [usage, physical];
 }
 
-export function setup(root: string, spec: Spec): void {
+function setup(root: string, spec: Spec): void {
   mkdirSync(join(root, "collection"), { mode: 0o700 });
   for (const [name, entry] of Object.entries(spec.tree ?? {})) {
     const path = join(root, name);
@@ -123,7 +123,7 @@ export function snapshot(root: string): Array<Record<string, unknown>> {
   visit(root);
   return rows;
 }
-export async function observe(
+async function observe(
   root: string,
   spec: Spec,
 ): Promise<{ read: unknown; tree: Array<Record<string, unknown>> }> {

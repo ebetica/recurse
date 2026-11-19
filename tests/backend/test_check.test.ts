@@ -172,6 +172,8 @@ test("CLI warning/strict exits and real git diff regression deletion gate", asyn
     await git("init", "-q");
     await git("config", "user.name", "Test Checker");
     await git("config", "user.email", "checker@example.invalid");
+    const capsPath = "tests/checks/test_check_caps.json";
+    put(capsPath, "{}\n");
     put(
       "tests/backend/case.ts",
       '// Regression: #123 survives restart\ntest.each([1, 2])("restart", () => {});\n',
@@ -218,6 +220,10 @@ test("CLI warning/strict exits and real git diff regression deletion gate", asyn
       1,
     );
     const cast = "const deps = {} as unknown as TreeDeps;\n";
+    const castCaps = {
+      "T3 hand-made deps cast": { "tests/backend/http_tree.test.ts": 1 },
+    };
+    put(capsPath, JSON.stringify(castCaps));
     put("tests/backend/http_tree.test.ts", cast);
     await git("add", "tests/backend/http_tree.test.ts");
     expect((await run("--strict")).exitCode).toBe(0);
@@ -235,25 +241,50 @@ test("CLI warning/strict exits and real git diff regression deletion gate", asyn
       ].join("\n"),
     );
     put("tests/backend/http_tree.test.ts", cast);
-    put("tests/mobile_browser/server/agents.ts", "await Bun.sleep(1000);\n");
-    await git("add", "tests/mobile_browser/server/agents.ts");
+    const browser = "tests/mobile_browser/server/agents.ts";
+    const sleepRule = "T6 sleep of a second or more";
+    const timeoutRule = "T6 explicit browser timeout";
+    const click = "await page.click({ timeout: 5_000 });\n";
+    const browserCaps = JSON.stringify({
+      ...castCaps,
+      [sleepRule]: { [browser]: 1 },
+      [timeoutRule]: {},
+    });
+    put(capsPath, browserCaps);
+    put(browser, "await Bun.sleep(1000);\n");
+    await git("add", browser);
     expect((await run("--strict")).exitCode).toBe(0);
-    put(
-      "tests/mobile_browser/server/agents.ts",
-      "await Bun.sleep(999);\nawait page.click({ timeout: 5_000 });\n",
-    );
+    put(browser, `await Bun.sleep(999);\n${click}`);
     const waits = await run("--strict");
     expect(waits.exitCode).toBe(1);
     expect(waits.stdout.toString()).toBe(
       [
-        "tests/mobile_browser/server/agents.ts:2 T6 explicit browser timeout (cap 0 here)",
-        "tests/mobile_browser/server/agents.ts:1 T6 sleep of a second or more cap is 1; lower it to 0",
-        "Test warnings: 2",
-        "By rule: T6=2",
-        "By area: mobile_browser=2",
+        `${browser}:2 ${timeoutRule} (cap 0 here)`,
+        "Test warnings: 1",
+        "By rule: T6=1",
+        "By area: mobile_browser=1",
         "",
       ].join("\n"),
     );
+    expect(readFileSync(join(cwd, capsPath), "utf8")).toBe(browserCaps);
+    put(browser, "await Bun.sleep(999);\n");
+    expect((await run("--strict")).exitCode).toBe(0);
+    const shrunk = { ...castCaps, [sleepRule]: {}, [timeoutRule]: {} };
+    expect(JSON.parse(readFileSync(join(cwd, capsPath), "utf8"))).toEqual(
+      shrunk,
+    );
+    put(
+      capsPath,
+      JSON.stringify({ ...shrunk, [timeoutRule]: { [browser]: 2 } }),
+    );
+    put(browser, click.repeat(2));
+    expect((await run("--strict")).exitCode).toBe(0);
+    put(browser, click);
+    expect((await run("--strict")).exitCode).toBe(0);
+    expect(JSON.parse(readFileSync(join(cwd, capsPath), "utf8"))).toEqual({
+      ...shrunk,
+      [timeoutRule]: { [browser]: 1 },
+    });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

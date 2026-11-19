@@ -10,7 +10,7 @@ import {
   type DiffTarget,
 } from "./model.js";
 
-export interface Comment {
+interface Comment {
   group: string;
   path: string;
   side: CommentSide;
@@ -34,7 +34,7 @@ export function commentMap(scope: string): Map<string, Comment> {
   return m;
 }
 
-export function setComment(
+function setComment(
   scope: string,
   group: string,
   path: string,
@@ -63,7 +63,7 @@ export function setComment(
   } else m.delete(key);
 }
 
-export function getComment(
+function getComment(
   scope: string,
   group: string,
   path: string,
@@ -87,7 +87,7 @@ export function composeMessage(scope: string): string {
   return commentMessage(comments.get(scope)?.values() || []);
 }
 
-export interface CommentCtx {
+interface CommentCtx {
   agentId: string;
   group: string;
   path: string;

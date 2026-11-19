@@ -4,7 +4,7 @@
 
 export type JsonObject = Record<string, unknown>;
 
-export const TOOL_INPUT_MAX = 240;
+const TOOL_INPUT_MAX = 240;
 export const TOOL_COMMAND_MAX = 2000;
 export const LIVE_TOOL_OUTPUT_MAX = 16_000;
 
@@ -24,13 +24,14 @@ const PY_SPACE_GLOBAL =
   /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/gu;
 const PY_SPACE_CHAR =
   /[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u;
-const CONTROL_CATEGORY = /\p{C}/u;
 const ANSI_ESCAPE_RE =
-  /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))/gu;
+  /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))/gu;
 const WORD = String.raw`\p{L}\p{N}_`;
 const LABEL_COMPONENT = String.raw`\p{L}\p{N}`;
+const SECRET_LABEL = String.raw`api[_-]?key|access[_-]?token|token|auth(?:orization)?|bearer|password|passwd|secret|private[_-]?key|client[_-]?secret|oauth`;
+const SECRET_TOKEN = String.raw`(?<![${WORD}])(?:sk|gh[pousr])[-_][a-z0-9_-]{8,}|(?<![${WORD}])github_pat_[a-z0-9_]{8,}|(?<![${WORD}])(?:akia|asia)[0-9a-z]{12,}|(?<![${WORD}])eyj[a-z0-9_-]{12,}\.[a-z0-9_-]{8,}`;
 const SECRET_RE = new RegExp(
-  String.raw`(?<![${LABEL_COMPONENT}])(?:api[_-]?key|access[_-]?token|token|auth(?:orization)?|bearer|password|passwd|secret|private[_-]?key|client[_-]?secret|oauth)(?:[_-][${LABEL_COMPONENT}]+)*(?![${WORD}])${String.raw`[${PY_SPACE.source.slice(1, -1)}]*`}(?:=|:|${String.raw`[${PY_SPACE.source.slice(1, -1)}]`})[${String.raw`${PY_SPACE.source.slice(1, -1)}`}]*[${String.raw`^${PY_SPACE.source.slice(1, -1)}`}]+|(?<![${WORD}])(?:sk|gh[pousr])[-_][a-z0-9_-]{8,}|(?<![${WORD}])github_pat_[a-z0-9_]{8,}|(?<![${WORD}])(?:akia|asia)[0-9a-z]{12,}|(?<![${WORD}])eyj[a-z0-9_-]{12,}\.[a-z0-9_-]{8,}`,
+  String.raw`(?<![${LABEL_COMPONENT}])(?:${SECRET_LABEL})(?:[_-][${LABEL_COMPONENT}]+)*(?![${WORD}])${String.raw`[${PY_SPACE.source.slice(1, -1)}]*`}(?:=|:|${String.raw`[${PY_SPACE.source.slice(1, -1)}]`})[${String.raw`${PY_SPACE.source.slice(1, -1)}`}]*[${String.raw`^${PY_SPACE.source.slice(1, -1)}`}]+|${SECRET_TOKEN}`,
   "u",
 );
 const SAFE_TOOL_NAME_RE = /^[A-Za-z][A-Za-z0-9_.:-]{0,47}$/u;
@@ -93,15 +94,17 @@ function lowerForPythonIgnoreCase(value: string): string {
     .toLowerCase();
 }
 
+function withoutFormatting(value: string): string {
+  return value
+    .replace(ANSI_ESCAPE_RE, "")
+    .replace(/\p{C}/gu, (ch) => (pythonWhitespace(ch) ? ch : ""));
+}
+
 /** Strip terminal/control sequences and collapse untrusted text to one line. */
 export function oneLine(value: string): string {
-  const normalized = value.normalize("NFC").replace(ANSI_ESCAPE_RE, "");
-  let cleaned = "";
-  for (const ch of normalized) {
-    if (CONTROL_CATEGORY.test(ch)) cleaned += pythonWhitespace(ch) ? " " : "";
-    else cleaned += ch;
-  }
-  return cleaned.replace(PY_SPACE_GLOBAL, " ").replace(/^ | $/gu, "");
+  return withoutFormatting(value.normalize("NFC"))
+    .replace(PY_SPACE_GLOBAL, " ")
+    .replace(/^ | $/gu, "");
 }
 
 // Bound display text without emitting broken ANSI or splitting a grapheme tail.
@@ -157,15 +160,61 @@ export function containsSecret(value: string): boolean {
   return SECRET_RE.test(lowerForPythonIgnoreCase(value));
 }
 
-const SECRET_ANYCASE_RE = new RegExp(SECRET_RE.source, "iu");
+const CREDENTIAL_FIELD = String.raw`(?:(?:x[-_])?(?:${SECRET_LABEL}|subscription[-_]key|(?:auth|refresh|id|session)[-_]?token)|proxy-authorization|ocp-apim-subscription-key)`;
+const FIELD_START = String.raw`(?<![${WORD}.-])`;
+/** Identify a secret component once, then consume the whole joined label. */
+const JOINED_SECRET_FIELD = String.raw`(?=(?:[${LABEL_COMPONENT}]+[_-])*?(?:${SECRET_LABEL})(?![${LABEL_COMPONENT}]))[${LABEL_COMPONENT}]+(?:[_-][${LABEL_COMPONENT}]+)+`;
+/** Probe each scheme at its :// only; the userinfo scan cannot cross another slash. */
+const URL_USERINFO = String.raw`(?<=(?:^|[\s\x85"'()<>{}\[\]])(?:[a-z][a-z0-9+.-]*:)?//)[^/\\?#\s"<>@]+@`;
+/** Match opaque runs before probing for JWT dots, avoiding overlapping scans. */
+const SECRET_ANYCASE_RE = new RegExp(
+  [
+    URL_USERINFO,
+    String.raw`(?<=[?&])(?:key|sig(?:nature)?)[ \t]*=`,
+    String.raw`["'](?:${CREDENTIAL_FIELD}|key)["']\s*:`,
+    String.raw`${FIELD_START}(?:${CREDENTIAL_FIELD}|${JOINED_SECRET_FIELD})[ \t]*(?::[ \t]*(?:\r?\n[ \t]+)?|=[ \t]*)[^\s\x85]`,
+    String.raw`(?<![${WORD}])bearer[ \t]+[^\s\x85]`,
+    String.raw`${FIELD_START}${JOINED_SECRET_FIELD}[ \t]+[^\s\x85:=]`,
+    String.raw`[a-f0-9]{32,}|[a-z0-9+/_-]{48,}={0,2}`,
+    SECRET_TOKEN,
+  ].join("|"),
+  "iu",
+);
 
-/**
- * Cut the text at its first credential-shaped token: REDACTED replaces it
- * and everything after it, so no part of a quoted or header value survives.
- */
-export function redactSecrets(value: string): string {
-  const match = SECRET_ANYCASE_RE.exec(value);
-  return match === null ? value : `${value.slice(0, match.index)}REDACTED`;
+/** Replace the first credential-shaped token and everything after it. */
+export function redactSecrets(
+  text: string,
+  credentials: readonly (string | undefined)[] = [],
+): string {
+  const value = withoutFormatting(text);
+  let end = SECRET_ANYCASE_RE.exec(value)?.index ?? value.length;
+  for (const credential of credentials) {
+    if (!credential) continue;
+    for (const form of [
+      withoutFormatting(credential),
+      JSON.stringify(credential).slice(1, -1),
+      encodeURIComponent(credential.toWellFormed()),
+    ]) {
+      if (!form) continue;
+      const index = value.indexOf(form);
+      if (index !== -1) end = Math.min(end, index);
+    }
+  }
+  return end === value.length ? value : `${value.slice(0, end)}REDACTED`;
+}
+
+/** Bound a raw error to the runtime logger's scalar alphabet after redaction. */
+export function logText(text: string): string {
+  return formatRedactedLogText(redactSecrets(text));
+}
+
+/** Serialize error text that was already scrubbed before its lines were folded. */
+export function formatRedactedLogText(text: string): string {
+  return (
+    oneLine(text)
+      .replace(/[^A-Za-z0-9_.:@/+,-]/gu, "_")
+      .slice(0, 200) || "-"
+  );
 }
 
 function hasEncodedSyntax(value: string): boolean {

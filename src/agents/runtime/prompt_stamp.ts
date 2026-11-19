@@ -19,7 +19,7 @@ const PYTHON_SPACE =
   /^[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\x1c-\x20\x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/gu;
 const strip = (value: string) => value.replace(PYTHON_SPACE, "");
 
-export function escapeMarkers(content: string): string {
+function escapeMarkers(content: string): string {
   return content.replaceAll(DELIVERY, "[recurse-delivery-quoted:");
 }
 export function trailerLine(deliveryId: unknown): string | null {
@@ -30,7 +30,7 @@ export function trailerLine(deliveryId: unknown): string | null {
 export function escapeOriginMarkers(content: string): string {
   return content.replaceAll("[recurse-origin:", "[recurse-origin-quoted:");
 }
-export function escapeSenderMarkers(content: string): string {
+function escapeSenderMarkers(content: string): string {
   return content
     .replaceAll("[recurse-from-name:", "[recurse-from-name-quoted:")
     .replaceAll("[recurse-from:", "[recurse-from-quoted:");

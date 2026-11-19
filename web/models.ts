@@ -27,10 +27,10 @@ import {
 } from "./row-thread-state/index.js";
 import type { Conversation, PendingModel } from "./types.js";
 
-export const EFFORT_LEVELS = [1, 2, 3, 4, 5] as const;
-export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+const EFFORT_LEVELS = [1, 2, 3, 4, 5] as const;
+type EffortLevel = (typeof EFFORT_LEVELS)[number];
 // Fallback until the ladder loads: new agents start capable, not expensive.
-export const DEFAULT_EFFORT_LEVEL: EffortLevel = 3;
+const DEFAULT_EFFORT_LEVEL: EffortLevel = 3;
 
 interface LadderEntry {
   model: string;

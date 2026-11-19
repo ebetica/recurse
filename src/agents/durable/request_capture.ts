@@ -4,15 +4,15 @@
 // Forget on reap; idle captures move to files, which a newer request removes.
 import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import type { Api, Context, Model, Models } from "@earendil-works/pi-ai";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 import { RequestCaptureWorker } from "./request_capture_worker";
 
-export interface RequestCapture {
+interface RequestCapture {
   sessionId: string;
   method: string;
   json: string;
 }
-export interface CaptureFiles {
+interface CaptureFiles {
   /** The file that keeps the conversation's idle latest capture. */
   path(conversationId: string): string;
   /** How long a capture stays in memory after its request. */
@@ -297,7 +297,20 @@ export function captureRequests(
         );
         return completion && reply
           ? Promise.resolve(result).then((response) => {
-              capture(() => reply(response));
+              // Invariant: A failed reviewer reply may echo credentials or
+              // request text. Its operator diagnostic is recorded separately.
+              const stopReason = (
+                response as { stopReason?: string } | undefined
+              )?.stopReason;
+              capture(() =>
+                reply(
+                  conversationId !== undefined &&
+                    stopReason !== undefined &&
+                    stopReason !== "stop"
+                    ? { stopReason }
+                    : response,
+                ),
+              );
               return response;
             })
           : result;

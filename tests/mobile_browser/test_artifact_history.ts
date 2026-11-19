@@ -119,9 +119,11 @@ export const tests: BrowserTest[] = [
         expect(page.url()).toBe(middleUrl);
         expect(dialogs).toBe(2);
       } else expect(dialogs).toBe(1);
-      await browserExpect(pane.locator(".report-comment-input")).toHaveValue(
-        "Keep this linked-document comment",
-      );
+      await browserExpect
+        .poll(() =>
+          pane.locator(".report-comment .report-comment-text").textContent(),
+        )
+        .toBe("Keep this linked-document comment");
       await pane.locator(".report-comment-del").click();
       await browserExpect(pane.locator(".report-comment")).toHaveCount(0);
       page.off("dialog", cancel);

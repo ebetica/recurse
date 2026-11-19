@@ -30,7 +30,7 @@ import {
   searchFile,
   type ProjectionState,
 } from "./projection_state.worker";
-export { SEARCH_FILE, identity, searchFile } from "./projection_state.worker";
+export { SEARCH_FILE, searchFile } from "./projection_state.worker";
 
 const PAGE = 256;
 const DIFFERENT = Symbol("projection differs");

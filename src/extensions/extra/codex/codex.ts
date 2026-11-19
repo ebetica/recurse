@@ -1,32 +1,38 @@
-// Codex request inputs: replay cleanup after stamping, detailed summaries and
-// saved compaction items after any caller transform. Other providers keep Pi's
-// defaults and never receive compaction items. Models also covers compaction.
+// Codex request inputs: replay cleanup after stamping; detailed summaries,
+// saved checkpoints and cacheable instructions after the caller transform.
+// Reviews opt into instruction placement only. Other providers keep Pi's
+// defaults and never receive compaction items.
 import type { Message, Models } from "@earendil-works/pi-ai";
 import { filterCodexReplay } from "./codex-replay.ts";
 import { sendCheckpointItems, withoutCheckpointItems } from "./compaction.ts";
+import { cacheInstructions, usesInputInstructions } from "./instructions.ts";
 import { detailedReasoningSummary } from "./reasoning-summary.ts";
 
-export interface CodexOptions {
+interface CodexOptions {
   models: Models;
+  reviewer?: boolean;
 }
 
-// Apply Codex defaults only after the caller's payload transform.
-export function codexSummaryOptions(
+function codexRequestOptions(
   model: unknown,
-  options?: Record<string, unknown>,
+  options: Record<string, unknown> | undefined,
+  reviewer: boolean,
 ): Record<string, unknown> | undefined {
-  const selected = model as { provider?: string };
+  const selected = model as { provider?: string; id: string };
   if (selected.provider !== "openai-codex") return options;
+  const inline = usesInputInstructions(selected.id);
+  if (reviewer && !inline) return options;
   const prior = options?.onPayload as
     | ((payload: unknown, model: unknown) => unknown | Promise<unknown>)
     | undefined;
   return {
     ...options,
     onPayload: async (payload: unknown, actual: { provider: string }) => {
-      const changed = await prior?.(payload, actual);
-      return sendCheckpointItems(
-        detailedReasoningSummary(changed ?? payload, actual),
-      );
+      const changed = (await prior?.(payload, actual)) ?? payload;
+      const prepared = reviewer
+        ? changed
+        : sendCheckpointItems(detailedReasoningSummary(changed, actual));
+      return inline ? cacheInstructions(prepared) : prepared;
     },
   };
 }
@@ -47,7 +53,7 @@ export const codexReplay = (messages: Message[], provider: string): Message[] =>
     ? filterCodexReplay(messages)
     : messages) as Message[];
 
-export function createCodex(options: CodexOptions) {
+export function createCodex({ models, reviewer = false }: CodexOptions) {
   const methods = new Set([
     "stream",
     "streamSimple",
@@ -60,7 +66,7 @@ export function createCodex(options: CodexOptions) {
     "classify",
   ]);
   return {
-    models: new Proxy(options.models, {
+    models: new Proxy(models, {
       get(target, key) {
         const value: unknown = Reflect.get(target, key, target);
         if (typeof value !== "function") return value;
@@ -73,8 +79,8 @@ export function createCodex(options: CodexOptions) {
           value.call(
             target,
             model,
-            withoutForeignItems(model, context),
-            codexSummaryOptions(model, options),
+            reviewer ? context : withoutForeignItems(model, context),
+            codexRequestOptions(model, options, reviewer),
           );
       },
     }),

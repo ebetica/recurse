@@ -8,7 +8,7 @@ import type { Models } from "@earendil-works/pi-ai";
 export type UsageProvider = "anthropic" | "openai-codex";
 const PROVIDERS: readonly UsageProvider[] = ["anthropic", "openai-codex"];
 
-export interface UsageWindow {
+interface UsageWindow {
   /** The window's length: 300 for five hours, 10080 for a week. */
   minutes: number;
   used_percent: number;
@@ -16,7 +16,7 @@ export interface UsageWindow {
   resets_at: number | null;
 }
 
-export interface UsageSnapshot {
+interface UsageSnapshot {
   /** When the response carrying these limits arrived, in epoch milliseconds. */
   checked_at: number;
   windows: UsageWindow[];
@@ -49,7 +49,7 @@ function usageWindow(
 
 /** Claude's 5-hour and weekly windows; utilization is a fraction, resets are
  * epoch seconds. Responses the limiter did not rate carry no status. */
-export function claudeWindows(headers: Headers): UsageWindow[] {
+function claudeWindows(headers: Headers): UsageWindow[] {
   const field = (name: string) =>
     headers[`anthropic-ratelimit-unified-${name}`];
   if (!field("status")) return [];
@@ -69,7 +69,7 @@ export function claudeWindows(headers: Headers): UsageWindow[] {
 
 /** ChatGPT's primary and secondary windows: used percent, window length in
  * minutes, and reset as epoch seconds or seconds after the response. */
-export function chatGptWindows(headers: Headers, now: number): UsageWindow[] {
+function chatGptWindows(headers: Headers, now: number): UsageWindow[] {
   return ["primary", "secondary"].flatMap((slot) => {
     const field = (name: string) => number(headers[`x-codex-${slot}-${name}`]);
     const after = field("reset-after-seconds");
@@ -84,7 +84,7 @@ export function chatGptWindows(headers: Headers, now: number): UsageWindow[] {
 }
 
 /** The default `codex` limit of a ChatGPT `codex.rate_limits` stream event. */
-export function chatGptEventWindows(event: unknown): UsageWindow[] {
+function chatGptEventWindows(event: unknown): UsageWindow[] {
   const data = event as {
     type?: unknown;
     metered_limit_name?: unknown;

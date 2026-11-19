@@ -16,7 +16,7 @@ import {
   RECURSE_SETTINGS_SKILL,
   skillPathsForWorkdir,
 } from "../../coding_backend/skills";
-import { slowSpan } from "../../observability/slow_span";
+import { slowSpan } from "../../observability/slow-span";
 
 export interface PromptResources {
   contextFiles: Array<{ path: string; content: string }>;

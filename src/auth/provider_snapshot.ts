@@ -3,7 +3,7 @@
 // External edits wait for refresh. Concurrent refreshes share work; a request
 // during a run schedules one more, so the last change wins.
 
-export interface ProviderSnapshotSources {
+interface ProviderSnapshotSources {
   readonly anthropic: { claudeConfigured(): Promise<boolean> };
   readonly codex: { modelProviders(): Promise<Set<string>> };
   readonly muse: { modelProviders(): Promise<Set<string>> };
