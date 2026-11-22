@@ -8,7 +8,6 @@ import {
   validBoundedString,
 } from "../conversation-ui-state/schema.js";
 
-export type WindowLayout = SerializedDockview;
 const MAX_DEPTH = 8;
 const MAX_GROUPS = 32;
 const object = (value: unknown): value is Record<string, unknown> =>
@@ -24,7 +23,7 @@ const dimension = (value: unknown): value is number =>
 export function validWindowLayout(
   value: unknown,
   known: (id: string, parameters?: unknown) => boolean,
-): WindowLayout | null {
+): SerializedDockview | null {
   try {
     value = jsonClone(value, MAX_WINDOW_LAYOUT_CHARS);
     if (!object(value) || !only(value, ["grid", "panels", "activeGroup"]))
@@ -49,7 +48,7 @@ export function validWindowLayout(
       return null;
     const entries = Object.entries(panels);
     if (entries.length > MAX_GROUPS) return null;
-    const files = new Set<string>();
+    let files = 0;
     for (const [id, panel] of entries) {
       if (
         !object(panel) ||
@@ -71,11 +70,7 @@ export function validWindowLayout(
       const descriptor = fileTabDescriptor(id, panel.params);
       if ((id.startsWith("file:") || panel.params !== undefined) && !descriptor)
         return null;
-      if (descriptor) {
-        const key = JSON.stringify(descriptor);
-        if (files.has(key) || files.size >= MAX_OPEN_FILE_TABS) return null;
-        files.add(key);
-      }
+      if (descriptor && ++files > MAX_OPEN_FILE_TABS) return null;
       if (!known(id, panel.params)) return null;
     }
     const seen = new Set<string>();
@@ -160,54 +155,8 @@ export function validWindowLayout(
       }
       if (!object(node) || node.type !== "leaf") return null;
     }
-    return value as unknown as WindowLayout;
+    return value as unknown as SerializedDockview;
   } catch {
     return null;
   }
-}
-
-/** Skip unavailable files for this visit without mutating the saved layout. */
-export function omitWindowPanels(
-  layout: WindowLayout,
-  omitted: ReadonlySet<string>,
-): WindowLayout | null {
-  const next = structuredClone(layout);
-  const grid = next.grid as unknown as Record<string, unknown>;
-  const maximized = grid.maximizedNode as { location: number[] } | undefined;
-  let maximizedNode: unknown = grid.root;
-  for (const index of maximized?.location || []) {
-    if (!object(maximizedNode) || !Array.isArray(maximizedNode.data)) break;
-    maximizedNode = maximizedNode.data[index];
-  }
-  const maximizedId =
-    object(maximizedNode) && object(maximizedNode.data)
-      ? maximizedNode.data.id
-      : undefined;
-  delete grid.maximizedNode;
-  const groups: string[] = [];
-  const prune = (node: unknown, location: number[]): boolean => {
-    if (!object(node)) return false;
-    if (node.type === "branch" && Array.isArray(node.data)) {
-      const children: unknown[] = [];
-      for (const child of node.data)
-        if (prune(child, [...location, children.length])) children.push(child);
-      node.data = children;
-      return children.length > 0 || location.length === 0;
-    }
-    if (!object(node.data) || !Array.isArray(node.data.views)) return false;
-    const views = node.data.views.filter(
-      (id) => typeof id === "string" && !omitted.has(id),
-    );
-    node.data.views = views;
-    if (!views.length) return false;
-    if (!views.includes(node.data.activeView)) node.data.activeView = views[0];
-    groups.push(String(node.data.id));
-    if (node.data.id === maximizedId) grid.maximizedNode = { location };
-    return true;
-  };
-  prune(grid.root, []);
-  for (const id of omitted) delete next.panels[id];
-  if (!Object.keys(next.panels).length) return null;
-  if (!groups.includes(next.activeGroup || "")) next.activeGroup = groups[0];
-  return next;
 }

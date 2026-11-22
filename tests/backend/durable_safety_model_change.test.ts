@@ -129,8 +129,10 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
     });
   try {
     await until(() => app.instance.lifecycle.readinessSnapshot().ready);
-    await until(() => app.instance.config.piModelListState().count !== null);
-    await app.instance.config.setPiModelList([
+    await until(
+      () => app.instance.config.models.piModelListState().count !== null,
+    );
+    await app.instance.config.models.setPiModelList([
       ...faux.models.map((model) => ({
         provider: model.provider,
         id: model.id,
@@ -146,7 +148,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
         file_provider: true,
       },
     ]);
-    const ladder = app.instance.config.effortLevels();
+    const ladder = app.instance.config.levels.effortLevels();
     expect(
       (
         await api("/api/settings/effort-levels", {
@@ -178,7 +180,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
         await api("/api/settings/effort-levels", {
           default_level: 3,
           levels: {
-            ...app.instance.config.effortLevels(),
+            ...app.instance.config.levels.effortLevels(),
             "1": { model: "faux/faux-reviewer", reasoning: "low" },
           },
         })
@@ -195,7 +197,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
             await api("/api/settings/effort-levels", {
               default_level: 3,
               levels: {
-                ...app.instance.config.effortLevels(),
+                ...app.instance.config.levels.effortLevels(),
                 "1": { model: "faux/faux-missing", reasoning: "low" },
               },
             })
@@ -282,7 +284,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
         if (verdict !== "OK") expect(view).toContain("test refusal");
       }
       if (cacheMode === "oversized") {
-        expect(app.instance.config.piModelListState().count).toBe(2_000);
+        expect(app.instance.config.models.piModelListState().count).toBe(2_000);
         const warnings = logs.filter((line) =>
           line.includes("event=pi_model_list_truncated"),
         );
@@ -455,7 +457,9 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
       (await api("/api/pi/openrouter-auth/api-key", { key: "test-key" }))
         .status,
     ).toBe(200);
-    expect(app.instance.config.authedModelProviders().has("openai")).toBe(true);
+    expect(
+      app.instance.config.models.authedModelProviders().has("openai"),
+    ).toBe(true);
     const reviewOptions = async () =>
       (await (await fetch(`${running.url}${endpoint}`)).json()) as {
         models: unknown[];
@@ -509,7 +513,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
     await expectRouteAuth(undefined, subscription.access);
     expect((await saveKey()).status).toBe(200);
     await expectRouteAuth(platformKey, subscription.access);
-    expect([...config.authedModelProviders()]).toEqual(
+    expect([...config.models.authedModelProviders()]).toEqual(
       expect.arrayContaining(["openai-codex", "openai"]),
     );
     expect((await reviewOptions()).models).toEqual(
@@ -522,7 +526,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
     expect(saved.status).toBe(200);
     expect(await saved.json()).toEqual({ model: lunaId });
     const fileOnly = "file-only-reviewer";
-    await config.setPiModelList([
+    await config.models.setPiModelList([
       {
         provider: "faux",
         id: "vendor/model",
@@ -538,7 +542,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
         file_provider: true,
       },
     ]);
-    expect(config.chatModels().map((item) => item.id)).toContain(
+    expect(config.models.chatModels().map((item) => item.id)).toContain(
       `${luna.provider}/${fileOnly}`,
     );
     expect(
@@ -656,7 +660,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
     expect((await api(endpoint, { model: null })).status).toBe(200);
     const setReviewerLevel = async (model: string, levelFour?: string) => {
       const levels = {
-        ...config.effortLevels(),
+        ...config.levels.effortLevels(),
         "1": { model, reasoning: "low" },
         ...(levelFour && { "4": { model: levelFour, reasoning: "off" } }),
       };
@@ -680,7 +684,7 @@ test("model changes rebuild trusted safety policy and apply reviewer verdicts", 
     expect(reviews.at(-1)?.model).toBe("faux/vendor/model");
 
     expect((await saveKey()).status).toBe(200);
-    await config.setPiModelList(
+    await config.models.setPiModelList(
       [openai, luna].map((model) => ({
         provider: model.provider,
         id: model.id,

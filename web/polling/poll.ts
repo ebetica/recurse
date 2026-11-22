@@ -15,6 +15,7 @@ import {
 import { sharedTrees, sharedTreeNodes } from "../shared-trees.js";
 import { refreshAgentMentionCache } from "../agent-finder/index.js";
 import { focusedPathReady } from "../background-work.js";
+import { previewDesktopPanes } from "../panes.js";
 import { conversationUiState } from "../conversation-ui-state/index.js";
 import { readAgentLink, resolveBootSelection } from "../deep-link.js";
 import {
@@ -254,6 +255,7 @@ function prsChangedBelow(
 
 function commitTree(label: string, read: TreeRead | null): boolean {
   if (!read) {
+    if (!label && !homeTreeKnown) previewDesktopPanes(null);
     if (label && homeTreeKnown) {
       runPollUi("Agent tree", renderSidebar);
       runPollUi("Agent search", () => refreshAgentMentionCache(label));
@@ -430,8 +432,11 @@ function commitTree(label: string, read: TreeRead | null): boolean {
     // /api/tree already succeeded.
     const beforeRestoreHash =
       JSON.stringify(arr) + state.selectedId + state.cursorId;
+    // Invariant: A remote's section header shows its tree status, which the
+    // row hash omits, so a changed remote read repaints even if rows match.
     if (
-      beforeRestoreHash !== treeHashes.get(label) &&
+      ((label && read.changed) ||
+        beforeRestoreHash !== treeHashes.get(label)) &&
       runPollUi("Agent tree", renderSidebar)
     )
       treeHashes.set(label, beforeRestoreHash);
@@ -518,6 +523,10 @@ function schedulePoll(delay: number): void {
 /** Starts polling; hidden Side frames skip ticks via `when` and catch up. */
 export function startPolling(when: () => boolean): void {
   pollWhen = when;
+  const link = readAgentLink(location.hash);
+  previewDesktopPanes(
+    sharedTrees === null ? (link.present ? link.id : rememberedAgent()) : null,
+  );
   startTreeEvents((label) => (read) => {
     if (read?.changed) notePollActivity();
     return commitTree(label, read);

@@ -1,6 +1,7 @@
 // Owns lazy thinking disclosures and the live pill. Tool and reply projections
 // use the original thinking row's identity, so a new offset or series index
-// does not close an open disclosure. The pill keeps its expansion for the run.
+// does not close an open disclosure. The pill keeps its expansion choice for
+// the run and fetches enough to know whether there is readable prose to open.
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "../backends/backend.js";
@@ -19,6 +20,7 @@ interface ThinkingEntry {
   text?: string | null;
   source?: number;
   loading?: boolean;
+  retrying?: boolean;
   live?: boolean;
   timer?: number;
 }
@@ -29,9 +31,9 @@ class ThinkingStore {
     open: [],
     text: [],
   };
-  pill: {
-    key: string;
-    entry: MessageEntry;
+  private pill: {
+    key: string | null;
+    text: string;
     conversation: string;
     generation: Conversation["message_log_generation"];
     run: Conversation["active_run_start"];
@@ -83,6 +85,10 @@ class ThinkingStore {
       } else {
         entry.text = undefined;
         entry.source = undefined;
+        entry.loading = undefined;
+        entry.retrying = undefined;
+        entry.live = undefined;
+        this.cancelRefresh(oldest);
       }
       this.prune(oldest);
     }
@@ -97,44 +103,53 @@ class ThinkingStore {
       : null;
   }
   clearPill(): void {
-    if (this.pill) this.cancelRefresh(this.pill.key);
+    if (this.pill?.key) this.cancelRefresh(this.pill.key);
     this.pill = null;
   }
   syncPill(
     conv: Conversation,
     row: LiveActivityRow | undefined,
-  ): string | null {
-    if (!row) {
-      this.clearPill();
-      return null;
-    }
-    const entry: MessageEntry = {
-      kind: "assistant",
-      role: "assistant",
-      content: "",
-      offset: row.offset ?? -1,
-      id: row.id ? `row:${row.id}` : undefined,
-      thinking_key: row.thinking_key,
-      live_thinking: row.live_thinking || row.live,
-      has_thinking: row.has_thinking,
-    };
-    const key = this.key(conv, entry);
-    const expanded = this.pillFor(conv)?.expanded ?? false;
-    if (this.pill && this.pill.key !== key) this.cancelRefresh(this.pill.key);
+    formatBody: (text: string) => string,
+  ) {
+    const entry: MessageEntry | null = row?.thinking_title?.trim()
+      ? {
+          kind: "assistant",
+          role: "assistant",
+          content: "",
+          offset: row.offset ?? -1,
+          id: row.id ? `row:${row.id}` : undefined,
+          thinking_key: row.thinking_key,
+          live_thinking: row.live_thinking || row.live,
+          has_thinking: row.has_thinking,
+        }
+      : null;
+    const previous = this.pillFor(conv);
+    const expanded = previous?.expanded ?? false;
+    const key = entry && this.key(conv, entry);
+    if (this.pill?.key && this.pill.key !== key)
+      this.cancelRefresh(this.pill.key);
+    if (entry && key && this.get(key)?.source !== entry.offset)
+      this.load(conv.id, entry, key, true);
+    const current = key ? this.get(key) : undefined;
+    const body =
+      typeof current?.text === "string" ? formatBody(current.text) : "";
+    // Keep the visible prose while a replacement's details load.
+    const text =
+      body ||
+      (previous?.expanded && (current?.loading || current?.retrying)
+        ? previous.text
+        : "");
     this.pill = {
       key,
-      entry,
+      text,
       conversation: conv.id,
       generation: conv.message_log_generation,
       run: conv.active_run_start,
       expanded,
     };
-    if (this.wantsRefresh(conv.id, key)) {
-      if (this.get(key)?.source !== entry.offset)
-        this.load(conv.id, entry, key, true);
-      this.scheduleRefresh(conv.id, entry, key);
-    }
-    return key;
+    if (!entry || !key) return null;
+    this.scheduleRefresh(conv.id, entry, key);
+    return { key, text, expanded };
   }
   togglePill(key: string): void {
     const conv = state.currentConv;
@@ -145,22 +160,22 @@ class ThinkingStore {
       const current = this.ensure(key);
       this.remember("open", key);
       current.open = true;
-      this.load(conv.id, pill.entry, key);
     } else if (!this.wantsRefresh(conv.id, key)) {
       this.cancelRefresh(key);
     }
     paint(conv);
   }
   private wantsRefresh(cid: string, key: string): boolean {
+    const current = this.get(key);
     const pill = this.pill;
     return pill?.key === key && pill.conversation === cid
-      ? pill.expanded
-      : !!this.get(key)?.open;
+      ? !!(current?.live || current?.retrying) && (pill.expanded || !pill.text)
+      : !!(current?.live && current.open);
   }
   private scheduleRefresh(cid: string, entry: MessageEntry, key: string): void {
     const current = this.get(key);
     if (
-      !current?.live ||
+      !current ||
       !this.wantsRefresh(cid, key) ||
       typeof window === "undefined" ||
       current.timer !== undefined
@@ -169,8 +184,7 @@ class ThinkingStore {
     current.timer = window.setTimeout(() => {
       const latest = this.get(key);
       if (latest) latest.timer = undefined;
-      if (latest?.live && this.wantsRefresh(cid, key))
-        this.load(cid, entry, key, true);
+      if (this.wantsRefresh(cid, key)) this.load(cid, entry, key, true);
     }, 1000);
   }
   private cancelRefresh(key: string): void {
@@ -186,6 +200,7 @@ class ThinkingStore {
       current.source !== undefined && current.source !== offset;
     if (changedSource) {
       current.loading = false;
+      current.retrying = false;
       current.live = false;
       this.cancelRefresh(key);
     }
@@ -203,6 +218,7 @@ class ThinkingStore {
     void backendFor(cid)
       .api(`/api/conversations/${encodeURIComponent(cid)}/thinking?${query}`)
       .then(async (response) => {
+        if (response.status >= 500 || response.status === 429) return null;
         if (!response.ok) return { text: null, live: false };
         const value: unknown = await response.json();
         if (typeof value !== "object" || value === null || Array.isArray(value))
@@ -213,17 +229,18 @@ class ThinkingStore {
           live: body.live === true,
         };
       })
-      .catch(() => ({ text: null, live: false }))
-      .then(({ text, live }) => {
+      .catch(() => null)
+      .then((result) => {
         const latest = this.get(key);
         if (!latest || latest.source !== offset) return;
         latest.loading = false;
         if (latest.text === undefined) this.remember("text", key);
-        latest.text = text;
-        latest.live = live;
-        if (!live) this.cancelRefresh(key);
+        latest.retrying = !result;
+        latest.text = result ? result.text : (latest.text ?? null);
+        latest.live = result?.live ?? false;
+        if (!latest.live) this.cancelRefresh(key);
         if (state.currentConv?.id === cid) paint(state.currentConv);
-        if (live) this.scheduleRefresh(cid, entry, key);
+        this.scheduleRefresh(cid, entry, key);
       });
   }
   toggle(conv: Conversation, entry: MessageEntry): void {
@@ -265,9 +282,7 @@ export function toolThinkingEntry(
   };
 }
 
-export const disclosureCaret = html`<span
-  class="disclosure-caret"
-  aria-hidden="true"
+const disclosureCaret = html`<span class="disclosure-caret" aria-hidden="true"
   >${unsafeHTML(DISCLOSURE_ICON)}</span
 >`;
 
@@ -305,6 +320,9 @@ export function thinkingT(
       ? nothing
       : html` for ${duration}s`;
   const titleT = title ? html` · ${title}` : nothing;
+  const line = html`<span class="turn-thinking-line">
+    ${label}${durationT}${titleT}
+  </span>`;
   const bodyId = `thinking-${conv.id}-${renderedLogGeneration}-${key}`.replace(
     /[^a-zA-Z0-9_-]/g,
     "-",
@@ -320,9 +338,6 @@ export function thinkingT(
         : html`<div class="turn-thinking-body" id=${bodyId}>
             ${unsafeHTML(enrich(loaded))}
           </div>`;
-  const line = html`<span class="turn-thinking-line">
-    ${label}${durationT}${titleT}
-  </span>`;
   return html`<div
     class="turn-thinking"
     role="note"

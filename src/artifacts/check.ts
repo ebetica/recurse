@@ -6,8 +6,11 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import type { Page } from "playwright";
-import { ARTIFACT_ACTIVE_CSP, ArtifactError } from "../artifacts";
+import { ARTIFACT_ACTIVE_CSP } from "../artifact_frame_policy";
+import { ArtifactError } from "./store";
 import { themedHtml } from "./theme";
+import { APP_STATE_SCRIPT } from "./app_state_script";
+import { prependToHead } from "./page/index";
 import { readTheme } from "../themes";
 import { createConfig } from "../config";
 
@@ -216,9 +219,12 @@ export async function checkPage(
   const { chromium } = await import("playwright");
   await mkdir(outDir, { recursive: true });
   const home = await mkdtemp(join(outDir, ".browser-"));
-  const servedHtml = themedHtml(
-    html.toString("utf8"),
-    (await readTheme(createConfig().paths.THEMES_FILE)).css,
+  const servedHtml = prependToHead(
+    themedHtml(
+      html.toString("utf8"),
+      (await readTheme(createConfig().paths.THEMES_FILE)).css,
+    ),
+    APP_STATE_SCRIPT,
   );
   const map = sourceMapper(servedHtml, sourceMap);
   const issues: CheckIssue[] = [];

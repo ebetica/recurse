@@ -10,6 +10,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
 import { buildApp } from "../../src/web/app";
+import { EFFORT_LEVELS } from "../../src/effort_levels";
 import {
   ACTING_REQUEST_CAP,
   REVIEWS,
@@ -73,9 +74,9 @@ describe.skipIf(process.platform !== "linux")("live check budget", () => {
       try {
         await until(() => app.instance.lifecycle.readinessSnapshot().ready);
         await until(
-          () => app.instance.config.piModelListState().count !== null,
+          () => app.instance.config.models.piModelListState().count !== null,
         );
-        await app.instance.config.setPiModelList(
+        await app.instance.config.models.setPiModelList(
           faux.models.map((model) => ({
             provider: model.provider,
             id: model.id,
@@ -87,7 +88,7 @@ describe.skipIf(process.platform !== "linux")("live check budget", () => {
         await api("settings/effort-levels", {
           default_level: 3,
           levels: Object.fromEntries(
-            [1, 2, 3, 4, 5].map((level) => [
+            EFFORT_LEVELS.map((level) => [
               level,
               { model: "faux/faux-1", reasoning: "off" },
             ]),

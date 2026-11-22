@@ -3,21 +3,25 @@ import { dirname, join } from "node:path";
 
 import { KeyError, ValueError } from "../../src/agents/runtime/agent_node";
 import { AttachmentError } from "../../src/agents/runtime/attachments/base";
-import { ExternalKeyConflict } from "../../src/agents/storage/conversation_store";
+import { ExternalKeyConflict } from "../../src/agents/storage";
 import {
   CompletedReplyCursorError,
   CompletedReplyCursorExpired,
   CompletedReplyStorageUnavailable,
-} from "../../src/agents/view/reader";
+} from "../../src/agents/view";
 import { ServiceAuth } from "../../src/auth/service";
 import { OperatorAuth } from "../../src/auth/session";
 import { logger } from "../../src/observability/runtime_logging";
 import { composeApp, startServer, type RunningServer } from "../../src/server";
 import {
-  CreateSlots,
   registerConversationRoutes,
   type ConversationsRoutesDeps,
 } from "../../src/web/conversations";
+import {
+  CreateSlots,
+  registerServiceConversationRoutes,
+  type ServiceConversationRoutesDeps,
+} from "../../src/web/service_conversations";
 import { publishLoopbackToken, requestAuth } from "../../src/web/request_auth";
 import { HttpError, jsonResponse, Router } from "../../src/web/router";
 import { WorkdirGit } from "../../src/workdir_git";
@@ -269,19 +273,21 @@ class ScriptedWorld {
   }
 }
 
+type RouteDeps = ConversationsRoutesDeps & ServiceConversationRoutesDeps;
+
 export interface ConversationsApp {
   readonly running: RunningServer;
   readonly router: Router;
   readonly world: ScriptedWorld;
   readonly state: { ready: boolean };
-  readonly deps: ConversationsRoutesDeps;
+  readonly deps: RouteDeps;
 }
 
 export async function buildConversationsApp(
   root: string,
   options: {
     authEnv?: Record<string, string | undefined>;
-    patch?: (deps: ConversationsRoutesDeps, world: ScriptedWorld) => void;
+    patch?: (deps: RouteDeps, world: ScriptedWorld) => void;
     slots?: CreateSlots;
   } = {},
 ): Promise<ConversationsApp> {
@@ -312,7 +318,7 @@ export async function buildConversationsApp(
     piStatus: () => (cid === "conv-run" ? "running" : null),
   });
   const sink = { write: () => {} };
-  const deps: ConversationsRoutesDeps = {
+  const deps: RouteDeps = {
     requireActionReady() {
       if (!state.ready)
         throw new HttpError(503, "service_storage_unavailable", {
@@ -335,12 +341,12 @@ export async function buildConversationsApp(
         if (typeof conv.workdir !== "string") throw new KeyError("workdir");
         return conv.workdir;
       },
-      lookupExternalKey: (p, k) => world.lookupExternalKey(p, k),
-      serviceOwnedConversationCount: (p) => world.ownedCount(p),
-      bindServiceConversation: (p, c) => world.bindService(p, c),
-      bindExternalKey: (p, k, c) => world.bindExternal(p, k, c),
-      rollbackServiceConversation: (conv) => world.rollback(conv),
     },
+    lookupExternalKey: (p, k) => world.lookupExternalKey(p, k),
+    serviceOwnedConversationCount: (p) => world.ownedCount(p),
+    bindServiceConversation: (p, c) => world.bindService(p, c),
+    bindExternalKey: (p, k, c) => world.bindExternal(p, k, c),
+    rollbackServiceConversation: (conv) => world.rollback(conv),
     async mutateExternalStorage(work, rollback) {
       try {
         return await work();
@@ -541,6 +547,7 @@ export async function buildConversationsApp(
   };
   options.patch?.(deps, world);
   const router = new Router();
+  registerServiceConversationRoutes(router, deps);
   registerConversationRoutes(router, deps);
   const handler = composeApp({
     router,

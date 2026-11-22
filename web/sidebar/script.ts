@@ -5,7 +5,7 @@
 import { html, nothing, render } from "lit";
 import { apiJson, jpost } from "../api.js";
 import { embedded, state as app } from "../state.js";
-import { SIDEBAR_CHANGE } from "./index.js";
+import { SIDEBAR_CHANGE } from "./events.js";
 import {
   checkSections,
   checkNewAgent,

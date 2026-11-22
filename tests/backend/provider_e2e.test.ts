@@ -55,6 +55,15 @@ test("recorded provider turn resumes after restart mid-run", async () => {
     ).toEqual(["RECORDED_PROVIDER_OK"]);
     expect(host.replay.failures).toEqual([]);
     expect(host.replay.requests).toHaveLength(1);
+    expect(host.replay.requests[0]!.thinking).toBeUndefined();
+    expect(host.replay.requestHeaders).toHaveLength(1);
+    expect(host.replay.requestHeaders[0]!["anthropic-beta"]).toBeUndefined();
+    const { request } = (await host.host.prompt("c1")) as {
+      request: {
+        options: { thinkingDisplay?: string };
+      };
+    };
+    expect(request.options.thinkingDisplay).toBeUndefined();
     host.replay.assertComplete();
   } finally {
     child.kill("SIGKILL");

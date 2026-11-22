@@ -1,8 +1,8 @@
-// The Settings footer: the chosen Recurse's release and, for this Recurse,
-// its update status and Update now (GET/POST /api/settings/update, see
-// src/recurse_update.ts); updating reloads the page (web/connection.ts).
-// Showing or hiding the footer cancels the previous one's reads and polling.
-import { api, jpost } from "../api.js";
+// The Settings footer shows the selected Recurse's release and, locally, update
+// status. POST /api/settings/update/check checks now instead of waiting until due;
+// POST /api/settings/update installs. Closing the footer cancels its requests
+// and polling, not background work.
+import { api } from "../api.js";
 import { settingsClient, settingsLabel } from "./target.js";
 
 interface UpdateStatus {
@@ -17,6 +17,7 @@ interface UpdateStatus {
   update: { state: string; detail: string | null } | null;
 }
 
+/** Older servers can serve this bundle before restarting into the update. */
 const IN_PROGRESS = ["updating", "building", "waiting", "restarting"];
 
 /** Show the release of the Recurse being configured, when it reports one. */
@@ -53,27 +54,25 @@ function updateStatusText(status: UpdateStatus): [string, boolean] {
   if (update?.state === "building")
     return ["Building the new version; this one keeps running…", false];
   if (update?.state === "waiting")
+    return ["Update installed. Restart Recurse to apply it now.", false];
+  if (update?.state === "restarting")
     return [
-      `Installed. Recurse restarts into it when ${
-        update.detail ? `${update.detail} running turn(s)` : "running turns"
-      } finish.`,
+      "Restarting; unfinished replies resume when Recurse is back…",
       false,
     ];
-  if (update?.state === "restarting")
-    return ["Restarting; this page reloads when Recurse is back…", false];
   if (update?.state === "failed")
     return [
       "Update failed. Run `recurse update` in a terminal to see why.",
       true,
     ];
   if (status.skipped) return [status.skipped, false];
+  if (status.checking) return ["Checking for updates…", false];
   if (status.error)
     return [
       "Couldn't check for updates. Run `recurse update --check` in a terminal to see why.",
       true,
     ];
-  if (!status.installed)
-    return [status.checking ? "Checking for updates…" : "", false];
+  if (!status.installed) return ["", false];
   const channel = channelLabel(status.channel);
   if (status.available && status.available !== status.installed)
     return [
@@ -105,47 +104,65 @@ export function showVersion(footer: HTMLElement, label: string): void {
   text.setAttribute("role", "status");
   text.setAttribute("aria-busy", String(!label));
   text.tabIndex = -1;
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "btn primary update-now";
-  button.textContent = "Update now";
-  button.hidden = true;
-  footer.replaceChildren(version, text, button);
+  text.addEventListener("blur", () => (text.tabIndex = -1));
+  const check = document.createElement("button");
+  check.type = "button";
+  check.className = "btn";
+  check.textContent = "Check for updates";
+  check.hidden = true;
+  const update = document.createElement("button");
+  update.type = "button";
+  update.className = "btn primary update-now";
+  update.textContent = "Update now";
+  update.hidden = true;
+  footer.replaceChildren(version, text, check, update);
   void showRelease(version, label);
-  if (!label) followUpdates(text, button, reads.signal);
+  if (!label) followUpdates(text, check, update, reads.signal);
 }
 
 function followUpdates(
   text: HTMLElement,
-  button: HTMLButtonElement,
+  check: HTMLButtonElement,
+  update: HTMLButtonElement,
   signal: AbortSignal,
 ): void {
   let polling = false;
-  let starting = false;
   const say = (message: string, error: boolean) => {
     text.textContent = message;
     text.classList.toggle("err", error);
     text.setAttribute("aria-busy", "false");
   };
-  // Invariant: The button stays focusable while unavailable (aria-disabled),
-  // and focus moves to the status line if the button disappears.
-  const enable = (on: boolean) =>
-    button.setAttribute("aria-disabled", String(!on));
+  // Invariant: Unavailable buttons keep focus until hidden; then the status
+  // line takes focus and joins the tab order only until focus leaves it.
+  const showButton = (
+    button: HTMLButtonElement,
+    hidden: boolean,
+    disabled: boolean,
+  ) => {
+    const focused = document.activeElement === button;
+    button.hidden = hidden;
+    if (focused && hidden) {
+      text.tabIndex = 0;
+      text.focus();
+    }
+    button.setAttribute("aria-disabled", String(disabled));
+  };
   const show = (status: UpdateStatus) => {
     say(...updateStatusText(status));
     const state = status.update?.state ?? "";
-    button.textContent = state === "failed" ? "Try again" : "Update now";
-    const focused = document.activeElement === button;
-    button.hidden =
-      Boolean(status.skipped) ||
-      !(
-        state === "failed" ||
-        IN_PROGRESS.includes(state) ||
-        (status.available && status.available !== status.installed)
-      );
-    if (focused && button.hidden) text.focus();
-    enable(!IN_PROGRESS.includes(state));
-    if (status.checking || IN_PROGRESS.includes(state)) void follow();
+    const updating = IN_PROGRESS.includes(state);
+    const offerUpdate =
+      state === "failed" ||
+      updating ||
+      Boolean(status.available && status.available !== status.installed);
+    update.textContent = state === "failed" ? "Try again" : "Update now";
+    showButton(
+      update,
+      Boolean(status.skipped) || !offerUpdate,
+      updating || status.checking,
+    );
+    showButton(check, Boolean(status.skipped) || offerUpdate, status.checking);
+    if (status.checking || updating) void follow();
   };
   const read = async () => {
     const response = await api("/api/settings/update", { signal });
@@ -178,28 +195,41 @@ function followUpdates(
     .catch(
       () => signal.aborted || say("Couldn't read the update status.", true),
     );
-  button.addEventListener("click", async () => {
-    if (starting || button.getAttribute("aria-disabled") === "true") return;
-    starting = true;
-    enable(false);
+  const start = async (kind: "check" | "update") => {
+    const checking = kind === "check";
+    const button = checking ? check : update;
+    if (button.hidden || button.getAttribute("aria-disabled") === "true")
+      return;
+    button.setAttribute("aria-disabled", "true");
+    if (checking) say("Checking for updates…", false);
     try {
-      const response = await jpost("/api/settings/update", {});
+      const path = checking
+        ? "/api/settings/update/check"
+        : "/api/settings/update";
+      const response = await api(path, { method: "POST", signal });
       if (!response.ok) {
-        const detail = (
-          (await response.json().catch(() => ({}))) as {
-            detail?: string;
-          }
-        ).detail;
-        say(detail || "Couldn't start the update.", true);
-        enable(true);
+        const { detail } = (await response.json().catch(() => ({}))) as {
+          detail?: string;
+        };
+        if (signal.aborted) return;
+        say(
+          detail ||
+            (checking
+              ? "Couldn't start the update check."
+              : "Couldn't start the update."),
+          true,
+        );
+      } else {
+        const status = (await response.json()) as UpdateStatus;
+        if (!signal.aborted) show(status);
         return;
       }
-      show((await response.json()) as UpdateStatus);
     } catch {
+      if (signal.aborted) return;
       say("Network error. Try again.", true);
-      enable(true);
-    } finally {
-      starting = false;
     }
-  });
+    button.setAttribute("aria-disabled", "false");
+  };
+  check.addEventListener("click", () => void start("check"));
+  update.addEventListener("click", () => void start("update"));
 }

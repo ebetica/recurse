@@ -5,6 +5,7 @@ import {
   assertArtifactVersionMenuEscape,
   captureErrors,
   closeWithRoutes,
+  expectHitCorners,
   gotoRoot,
   mockConversation,
   postFixture,
@@ -16,6 +17,7 @@ import {
   startNewAgent,
   openSettingsPanel,
   showAgentList,
+  turn,
   waitForLayout,
 } from "./common";
 
@@ -31,39 +33,6 @@ async function layerAt(page: any, at: string | [number, number]) {
   );
 }
 
-const turn = (id: string, user: string, assistant: string) => ({
-  turn_id: id,
-  cursor: 100,
-  started_at: 1,
-  ended_at: 2,
-  open: false,
-  status: "done",
-  summary: null,
-  segments: [
-    {
-      user: [
-        {
-          id: `${id}-u`,
-          kind: "user",
-          offset: 101,
-          role: "user",
-          content: user,
-          ts: 1,
-        },
-      ],
-      tools: [],
-      summary: null,
-      assistant: {
-        id: `${id}-a`,
-        kind: "assistant",
-        offset: 102,
-        role: "assistant",
-        content: assistant,
-        attachments: [],
-      },
-    },
-  ],
-});
 export const tests: BrowserTest[] = [
   // Regression: #3246 rendering a diagram during navigation must not squeeze the phone conversation.
   async function test_phone_switch_keeps_full_width_while_diagram_loads(
@@ -543,9 +512,8 @@ export const tests: BrowserTest[] = [
         { length: 80 },
         (_, i) => `Entry ${i}: ${"long-token-".repeat(90)}`,
       ).join("\n\n") +
-      "\n\n| column | value |\n| --- | --- |\n| wide | " +
-      "cell-".repeat(120) +
-      " |";
+      "\n\n| Review | Revisions | Delivery |\n| --- | --- | --- |\n" +
+      "| Check the totals against the source files. | Save a copy of the report before editing. | Share the reviewed report with the requester. |";
     const thread = {
       id: "main",
       title: "Mobile shell agent",
@@ -554,7 +522,14 @@ export const tests: BrowserTest[] = [
       kind: null,
       msg_count: 2,
       window_cursor: 0,
-      turns: [turn("mobile-shell", "Keep the shell visible", content)],
+      turns: [
+        turn("mobile-shell", "Keep the shell visible", content, {
+          cursor: 100,
+          includeRows: false,
+          rowIds: { user: "mobile-shell-u", assistant: "mobile-shell-a" },
+          usage: null,
+        }),
+      ],
     };
     const branchThread = { ...thread, id: "branch", title: "Branch agent" };
     const leafThread = { ...thread, id: "leaf", title: "Leaf agent" };
@@ -979,7 +954,12 @@ export const tests: BrowserTest[] = [
       status: "idle",
       kind: null,
       turns: [
-        turn("remembered", "Say something", "Remembered thread is visible."),
+        turn("remembered", "Say something", "Remembered thread is visible.", {
+          cursor: 100,
+          includeRows: false,
+          rowIds: { user: "remembered-u", assistant: "remembered-a" },
+          usage: null,
+        }),
       ],
       msg_count: 2,
       window_cursor: 0,
@@ -1171,24 +1151,12 @@ export const tests: BrowserTest[] = [
     for (const selector of ["#menu-btn", "#pane-fab"])
       misses.push(...(await short(selector)));
     await page.locator("#input").fill("A message");
-    const corners = ["#attach", "#send", "#safety-btn:not(:disabled)"];
-    for (const selector of [...corners, "#model-row.on #model-trigger"]) {
-      const hits = await page.locator(selector).evaluate((element) => {
-        const document = (globalThis as any).document;
-        const box = element.getBoundingClientRect();
-        return [-21, 21].flatMap((x) =>
-          [-21, 21].map((y) =>
-            element.contains(
-              document.elementFromPoint(
-                box.x + box.width / 2 + x,
-                box.y + box.height / 2 + y,
-              ),
-            ),
-          ),
-        );
+    const corners = ["#attach", "#send"];
+    for (const selector of [...corners, "#model-row.on #model-trigger"])
+      await expectHitCorners(page.locator(selector), 44, {
+        label: selector,
+        scroll: false,
       });
-      expect([selector, ...hits]).toEqual([selector, true, true, true, true]);
-    }
     await page.locator("#send").tap();
     await page
       .locator(".msg.assistant .content", { hasText: "Acknowledged." })

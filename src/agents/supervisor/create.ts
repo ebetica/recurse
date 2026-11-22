@@ -21,6 +21,7 @@ import {
   type ConversationRecord,
   type ConversationStore,
   type ConversationStoreHooks,
+  type ServiceBindings,
 } from "../storage";
 import { TreeLifecycleBusy, type TreeLifecycle } from "../lifecycle";
 import {
@@ -69,7 +70,6 @@ export interface CreateDeps {
     | "load"
     | "save"
     | "newConversationId"
-    | "lookupExternalKey"
     | "rollbackServiceConversation"
     | "effectiveWorkdir"
     | "withTitleGuard"
@@ -80,6 +80,10 @@ export interface CreateDeps {
     | "invalidateContextUsage"
     | "allConvs"
   >;
+  serviceBindings: Pick<
+    ServiceBindings,
+    "lookupExternalKey" | "unbindExternalKey" | "unbindServiceConversation"
+  >;
   nodes: Pick<
     AgentNodes<AgentNode, NodeStore>,
     "existing" | "node" | "dropNode" | "retiring"
@@ -88,15 +92,7 @@ export interface CreateDeps {
     TreeLifecycle,
     "guard" | "guardAsync" | "mutateExternalStorage"
   >;
-  config: Pick<
-    Config,
-    | "chatModel"
-    | "chatSettings"
-    | "resolveEffortLevel"
-    | "ladderHome"
-    | "defaultEffortLevel"
-    | "isFileProviderModel"
-  >;
+  config: Pick<Config, "models" | "levels">;
   /** store_import.import_finalized(). */
   importFinalized(): boolean | null;
   spawnWorkdir: SpawnWorkdir;
@@ -231,7 +227,7 @@ export class SupervisorCreate {
     signal: AbortSignal = NEVER,
   ): Promise<ConversationRecord> {
     const rejoinServiceCreate = async (principal: string, key: string) => {
-      const current = await this.deps.conversations.lookupExternalKey(
+      const current = await this.deps.serviceBindings.lookupExternalKey(
         principal,
         key,
       );
@@ -285,7 +281,7 @@ export class SupervisorCreate {
     return [
       null,
       modelId,
-      want !== null ? want : this.deps.config.chatSettings(modelId)[1],
+      want !== null ? want : this.deps.config.models.chatSettings(modelId)[1],
     ];
   }
 
@@ -293,8 +289,8 @@ export class SupervisorCreate {
     const parentModel = (parent ?? {}).model;
     if (!parentModel) return null;
     try {
-      const model = this.deps.config.chatModel(parentModel as string).id;
-      return this.deps.config.isFileProviderModel(model) ? null : model;
+      const model = this.deps.config.models.chatModel(parentModel as string).id;
+      return this.deps.config.models.isFileProviderModel(model) ? null : model;
     } catch (error) {
       if ((error as Error)?.name === "ValueError") return null;
       throw error;
@@ -315,7 +311,7 @@ export class SupervisorCreate {
     if (level !== null) {
       if (validLevel(level) === null)
         throw new ValueError(`unsupported effort level: ${pyRepr(level)}`);
-      const [m, r] = config.resolveEffortLevel(level);
+      const [m, r] = config.levels.resolveEffortLevel(level);
       return [level, m, r];
     }
     let want: string | null = null;
@@ -327,12 +323,12 @@ export class SupervisorCreate {
       }
     }
     if (model !== null) {
-      if (config.isFileProviderModel(model) && !operatorSelectedModel)
+      if (config.models.isFileProviderModel(model) && !operatorSelectedModel)
         throw new ValueError(
           "unsupported raw file-defined model selection; choose an effort level saved in Settings",
         );
-      const selected = config.chatModel(model).id;
-      const home = config.ladderHome(selected, want);
+      const selected = config.models.chatModel(model).id;
+      const home = config.levels.ladderHome(selected, want);
       if (home === null) return this.pinLegacy(selected, want);
       return home;
     }
@@ -344,26 +340,28 @@ export class SupervisorCreate {
       try {
         reasoning = this.thinking(parentConv.effort);
       } catch {
-        reasoning = config.chatSettings(inherit)[1];
+        reasoning = config.models.chatSettings(inherit)[1];
       }
       return [null, inherit, reasoning];
     }
     if (parentLevel !== null && want === null) {
-      const [m, r] = config.resolveEffortLevel(parentLevel);
+      const [m, r] = config.levels.resolveEffortLevel(parentLevel);
       return [parentLevel, m, r];
     }
-    const home = config.ladderHome(inherit, want);
+    const home = config.levels.ladderHome(inherit, want);
     if (home !== null) return home;
     if (inherit !== null) return this.pinLegacy(inherit, want);
-    const [m, r] = config.resolveEffortLevel(config.defaultEffortLevel());
-    return [config.defaultEffortLevel(), m, r];
+    const [m, r] = config.levels.resolveEffortLevel(
+      config.levels.defaultEffortLevel(),
+    );
+    return [config.levels.defaultEffortLevel(), m, r];
   }
 
   private async createLocked(
     cidArg: string,
     o: CreateOptions,
   ): Promise<ConversationRecord> {
-    const { conversations, nodes } = this.deps;
+    const { conversations, nodes, serviceBindings } = this.deps;
     let cid = cidArg;
     let externalKey: string | null;
     try {
@@ -377,7 +375,7 @@ export class SupervisorCreate {
     if (externalKey && principal === null)
       throw new ValueError("external_key requires a service principal");
     if (externalKey && !o.externalKeyChecked) {
-      const existing = await conversations.lookupExternalKey(
+      const existing = await serviceBindings.lookupExternalKey(
         principal!,
         externalKey,
       );
@@ -492,7 +490,10 @@ export class SupervisorCreate {
           try {
             await conversations.save(conv, titleToken);
           } catch (error) {
-            await conversations.rollbackServiceConversation(conv);
+            await conversations.rollbackServiceConversation(
+              conv,
+              serviceBindings,
+            );
             throw error;
           }
           if (draftClaim)

@@ -9,9 +9,9 @@ import { captureFixture } from "./fixture_subprocess";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { ExternalKeyConflict } from "../../src/agents/storage/conversation_store";
+import { ExternalKeyConflict } from "../../src/agents/storage";
 import { TreeLifecycleBusy } from "../../src/agents/lifecycle/mutation_guard";
-import { CreateSlots } from "../../src/web/conversations";
+import { CreateSlots } from "../../src/web/service_conversations";
 import { logger } from "../../src/observability/runtime_logging";
 import { exchange, normalise, requestBytes } from "./http_corpus";
 
@@ -323,7 +323,7 @@ describe("service create", () => {
   test("a failed bind rolls the published row back and frees the slot", async () => {
     const built = await app({
       patch: (deps) => {
-        deps.store.bindServiceConversation = async () => {
+        deps.bindServiceConversation = async () => {
           throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
         };
       },
@@ -358,7 +358,7 @@ describe("service create bind phase", () => {
   test("a lost bind race rolls back and rejoins the winner", async () => {
     const built = await app({
       patch: (deps, world) => {
-        deps.store.bindExternalKey = async (p, k) => {
+        deps.bindExternalKey = async (p, k) => {
           world.external.set(`${p}\0${k}`, "svc-winner");
           throw new ExternalKeyConflict("external_key binding is unavailable");
         };
@@ -379,7 +379,7 @@ describe("service create bind phase", () => {
     let calls = 0;
     const built = await app({
       patch: (deps) => {
-        deps.store.serviceOwnedConversationCount = async () =>
+        deps.serviceOwnedConversationCount = async () =>
           calls++ === 0 ? 0 : 5;
       },
     });

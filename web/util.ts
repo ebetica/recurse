@@ -1,6 +1,7 @@
 // Rendering + formatting helpers shared across the message pane, sidebar, and
 // composer. `marked` and `DOMPurify` are bundled from npm (pinned in bun.lock),
 // not pulled from a CDN — the whole app ships as one hash-locked bundle.
+// Markdown tables share a scroll wrapper; long columns wrap at a readable minimum.
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { mathExtension } from "./math.js";
@@ -11,14 +12,30 @@ import { strikethrough } from "./util/strikethrough.js";
 
 marked.setOptions({ gfm: true });
 marked.use(mathExtension, strikethrough);
-function markdownHtml(t: string, message: boolean): string {
-  const html = message
-    ? parseMessageMarkdown(t || "")
-    : (marked.parse(t || "", { async: false }) as string);
-  return html.replace(
-    /(<table\b[\s\S]*?<\/table>)/gi,
-    '<div class="table-scroll">$1</div>',
-  );
+function wrapMarkdownTables(fragment: DocumentFragment): void {
+  for (const table of fragment.querySelectorAll("table")) {
+    const longColumns = new Set<number>();
+    let hasSpans = false;
+    for (const row of table.rows)
+      for (const cell of row.cells) {
+        hasSpans ||= cell.colSpan !== 1 || cell.rowSpan !== 1;
+        // Roughly one 12em line of average-width text, without measuring layout.
+        if ((cell.textContent ?? "").trim().length > 24) {
+          longColumns.add(cell.cellIndex);
+          cell.classList.add("table-wrap-text");
+        }
+      }
+    // Spanning raw HTML cells don't have a stable column index.
+    if (!hasSpans && longColumns.size)
+      for (const row of table.rows)
+        for (const cell of row.cells)
+          if (longColumns.has(cell.cellIndex))
+            cell.classList.add("table-wrap-text");
+    const wrapper = document.createElement("div");
+    wrapper.className = "table-scroll";
+    table.before(wrapper);
+    wrapper.append(table);
+  }
 }
 const MARKDOWN_URI_POLICY = {
   ALLOWED_URI_REGEXP: /^(?!(?:javascript|vbscript|data):)/i,
@@ -29,7 +46,10 @@ function sanitizedMarkdownFragment(
   t: string,
   message: boolean,
 ): DocumentFragment {
-  const fragment = DOMPurify.sanitize(markdownHtml(t, message), {
+  const html = message
+    ? parseMessageMarkdown(t || "")
+    : (marked.parse(t || "", { async: false }) as string);
+  const fragment = DOMPurify.sanitize(html, {
     ...MARKDOWN_URI_POLICY,
     RETURN_DOM_FRAGMENT: true,
   });
@@ -55,6 +75,7 @@ function sanitizedMarkdownFragment(
     link.rel = "noopener noreferrer";
     link.referrerPolicy = "no-referrer";
   }
+  wrapMarkdownTables(fragment);
   return fragment;
 }
 export const documentMarkdownFragment = (t: string): DocumentFragment =>

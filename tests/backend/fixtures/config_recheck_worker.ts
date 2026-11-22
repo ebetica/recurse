@@ -33,7 +33,7 @@ self.onmessage = async (
       value: await config.setMaximumContextWindow(400_000),
     });
   } else if (type === "seed") {
-    await config.upsertCustomProvider("local", {
+    await config.models.upsertCustomProvider("local", {
       base_url: "http://127.0.0.1:1/v1",
       env_key: "LOCAL_KEY",
       wire_api: "completions",
@@ -41,7 +41,7 @@ self.onmessage = async (
     });
     self.postMessage({
       type: "seeded",
-      value: Object.keys(config.customModelProviders()).length,
+      value: Object.keys(config.models.customModelProviders()).length,
     });
   } else if (type === "cached") {
     self.postMessage({ type: "cached", value: config.maximumContextWindow() });

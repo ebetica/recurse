@@ -2,8 +2,9 @@
 
 Run `./recurse` with no target in a Recurse checkout (or `recurse` after
 installing) to develop Recurse itself. The launcher watches the checkout's Git
-HEAD: a new commit rebuilds and restarts the server once no turn is running.
-Uncommitted edits are not watched; restart to try them.
+HEAD: a new commit rebuilds and restarts the server without waiting for turns
+to finish. Unfinished turns resume on startup. Uncommitted edits are not watched;
+restart to try them.
 
 For the agent workflow, evidence tiers, review and test-writing rules, see
 [Develop Recurse for agents](agents/develop.md).
@@ -92,8 +93,9 @@ command reference. The retained temporary directory can be deleted after use.
 existing install the same way. The checkout records its channel, and
 `recurse update` (`install.sh --update`) updates it in place along that
 channel; `recurse update --check` only reports. A running Recurse checks its
-channel at most once a day and offers "Update now" in Settings, which updates,
-rebuilds and restarts it once no turn is running
-([src/recurse_update.ts](../src/recurse_update.ts)). A checkout made from the development history
+channel automatically at most once a day. In Settings, "Check for updates"
+checks immediately, and "Update now" updates, rebuilds and restarts Recurse
+([src/recurse_update.ts](../src/recurse_update.ts)). Unfinished turns resume after
+restart. A checkout made from the development history
 moves to a release tag, but cannot fast-forward to the public `main`; reinstall
 it into a new `RECURSE_INSTALL_DIR` to track that branch.

@@ -99,6 +99,7 @@ function setup(spec: Json, overrides: Partial<ReapDeps> = {}) {
   const deps: ReapDeps = {
     errors: { ProcessCleanupPending, TakenOverReapBlocked },
     conversations: world.conversations,
+    serviceBindings: world.serviceBindings,
     nodes,
     lifecycle: { guardAsync: (_s, _c, fn) => fn({} as never, null) },
     tree: {

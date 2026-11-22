@@ -1008,7 +1008,13 @@ export function rowsToTurns(
           },
         });
       }
-      if (visibleAssistant(active.current.assistant)) {
+      const prose = visibleAssistant(active.current.assistant);
+      if (prose) {
+        if (prose.id && prose.id === active.requestThinkingEntryId) {
+          prose.thinking = undefined;
+          prose.has_thinking = undefined;
+          prose.live_thinking = undefined;
+        }
         active.current = emptySegment();
         active.turn.segments.push(active.current);
       }

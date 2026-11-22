@@ -1,10 +1,8 @@
-// Owns per-agent inline comments, gutter/touch targets and range selection.
+// Owns staged line comments, their editors and the message sent to the agent.
 // Anchors include file, line and side; text stays outside the Git cache.
 // Editors embed by reference so shell repaint cannot steal focus.
 import { el } from "../dom.js";
 import {
-  commentKey,
-  commentMessage,
   diffContextMarker,
   type CommentSide,
   type DiffTarget,
@@ -20,6 +18,126 @@ interface Comment {
   text: string;
   context?: string[];
   target: DiffTarget;
+}
+
+function targetHeader(target: DiffTarget | null | undefined): string[] {
+  if (!target) return ["Selected change target: current Changes view"];
+  if (target.kind === "pr") {
+    const number = target.number == null ? "unknown" : "#" + target.number;
+    return [
+      "Selected change target: GitHub pull request layer " + number,
+      "PR: " + number + (target.url ? " (" + target.url + ")" : ""),
+      "Head: " +
+        (target.headRepo ? target.headRepo + ":" : "") +
+        (target.headBranch || "unknown") +
+        (target.headSha ? " @ " + target.headSha : ""),
+      "Base: " +
+        (target.baseRepo ? target.baseRepo + ":" : "") +
+        (target.baseBranch || "unknown") +
+        (target.baseSha ? " @ " + target.baseSha : ""),
+      ...(target.range
+        ? ["Diff: " + target.range + " (three-dot / merge-base)"]
+        : []),
+    ];
+  }
+  return [
+    "Selected change target: current worktree",
+    "Branch: " +
+      (target.branch || "detached") +
+      (target.headSha ? " @ " + target.headSha : ""),
+    "Base: " +
+      (target.baseBranch || "unknown") +
+      (target.baseSha ? " @ " + target.baseSha : ""),
+    ...(target.includesUncommitted
+      ? ["This view also includes uncommitted changes."]
+      : []),
+  ];
+}
+
+// Storage key for one pending comment. Single lines and ranges are distinct
+// keys, as are the two sides of the same number.
+function commentKey(
+  group: string,
+  path: string,
+  side: CommentSide,
+  line: number,
+  endLine: number | null,
+): string {
+  return (
+    group +
+    "\n" +
+    path +
+    "\n" +
+    side +
+    "\n" +
+    line +
+    (endLine != null ? "-" + endLine : "")
+  );
+}
+
+// Human location for the message posted to the agent: path:start-end plus
+// the side, so a removed line's number is never mistaken for a current one.
+// endLine equal to line (or null) reads as a single line.
+function commentLocation(
+  path: string,
+  side: CommentSide,
+  line: number,
+  endLine: number | null,
+): string {
+  const range =
+    endLine != null && endLine !== line ? line + "-" + endLine : "" + line;
+  return path + ":" + range + " (" + side + " side)";
+}
+
+function commentMessage(comments: Iterable<Comment>): string {
+  const targetKey = (c: Comment) => JSON.stringify(c.target);
+  const cs = [...comments].sort(
+    (a, b) =>
+      targetKey(a).localeCompare(targetKey(b)) ||
+      a.group.localeCompare(b.group) ||
+      a.path.localeCompare(b.path) ||
+      a.side.localeCompare(b.side) ||
+      a.line - b.line ||
+      (a.endLine ?? a.line) - (b.endLine ?? b.line),
+  );
+  if (!cs.length) return "";
+  const out = ["Comments from user:"];
+  let lastTarget = "";
+  for (const c of cs) {
+    const key = targetKey(c);
+    if (key !== lastTarget) {
+      if (lastTarget) out.push("");
+      out.push(...targetHeader(c.target), "");
+      lastTarget = key;
+    }
+    out.push(
+      "> [" +
+        c.group +
+        "] " +
+        commentLocation(c.path, c.side, c.line, c.endLine),
+    );
+    if (c.context?.length) {
+      const rows =
+        c.context.length > 20
+          ? [
+              ...c.context.slice(0, 10),
+              "… " + (c.context.length - 15) + " more lines",
+              ...c.context.slice(-5),
+            ]
+          : c.context;
+      out.push("```diff", ...rows, "```");
+    }
+    out.push(c.text);
+  }
+  return out.join("\n").trim();
+}
+
+export function acknowledgeComments<T extends { text: string }>(
+  live: Map<string, T>,
+  submitted: Map<string, string>,
+): void {
+  for (const [key, text] of submitted)
+    if (live.get(key)?.text === text) live.delete(key);
 }
 
 // Per-agent notes survive Git summary refreshes.
@@ -87,7 +205,7 @@ export function composeMessage(scope: string): string {
   return commentMessage(comments.get(scope)?.values() || []);
 }
 
-interface CommentCtx {
+export interface CommentCtx {
   agentId: string;
   group: string;
   path: string;
@@ -96,7 +214,7 @@ interface CommentCtx {
   selection: LineSelection;
 }
 
-export interface LineSelection {
+interface LineSelection {
   // The shift-click anchor: reset whenever a single editor opens.
   remember(side: CommentSide, line: number): void;
   // Drop the highlight (and any open range box); saved text is untouched.

@@ -8,7 +8,7 @@ import { createStopId, reportStopIdFallback } from "../stop-control/id.js";
 import { reportStopDiagnostic } from "../stop-control/telemetry.js";
 import { requestUiStatus } from "../ui-events.js";
 import { refreshConv } from "./fetch.js";
-import { paintStopControl } from "./stop-view.js";
+import { paintComposerRunState } from "./stop-view.js";
 import { paint } from "./thread.js";
 
 export function stopPublicationPending(): boolean {
@@ -75,7 +75,7 @@ export async function requestStop(
   const stopId = generated.id;
   state.stopPostInFlightId = cid;
   setStopPending(cid, true);
-  paintStopControl(conv);
+  paintComposerRunState(conv);
   if (conv?.id === cid) paint(conv);
   reportStopDiagnostic("request_initiated", {
     conversationId: cid,
@@ -120,7 +120,7 @@ export async function requestStop(
     inputEl.disabled = false;
     if (state.selectedId === cid) {
       await refreshConv();
-      paintStopControl(
+      paintComposerRunState(
         state.currentConv?.id === cid ? state.currentConv : null,
       );
     }

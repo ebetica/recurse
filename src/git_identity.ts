@@ -2,7 +2,7 @@
 // author/committer environment. Remove legacy defaults before inherited config.
 // Record GitHub's account locally when available; otherwise leave identity
 // unset so Git refuses commits rather than inventing an author.
-import { gitEnv } from "./workdir_git";
+import { gitEnv } from "./git";
 import { slowSpan } from "./observability/slow-span";
 
 const pending = new Map<string, Promise<boolean>>();

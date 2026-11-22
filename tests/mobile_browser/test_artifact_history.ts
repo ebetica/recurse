@@ -63,8 +63,20 @@ export const tests: BrowserTest[] = [
             ).id,
           )
         : null;
-      if (previous) await page.goto(`${base}#agent=${previous}`);
-      await page.goto(`${base}#agent=${owner}&artifact=${a!.id}`);
+      const conversationRead = Promise.withResolvers<void>();
+      if (previous) {
+        await page.goto(`${base}#agent=${previous}`);
+        await page.locator(`.agent.selected[data-id="${previous}"]`).waitFor();
+        await page.route(
+          (url) =>
+            url.pathname === `/api/conversations/${owner}` &&
+            url.searchParams.has("focused"),
+          async (route) => {
+            await conversationRead.promise;
+            await route.continue();
+          },
+        );
+      }
       const pane = page.locator('.pane-col[data-pane="report"]');
       const start = pane.getByRole("heading", {
         name: "Trail start",
@@ -75,7 +87,12 @@ export const tests: BrowserTest[] = [
         name: "Middle section",
         exact: true,
       });
-      await start.waitFor();
+      try {
+        await page.goto(`${base}#agent=${owner}&artifact=${a!.id}`);
+        await start.waitFor();
+      } finally {
+        conversationRead.resolve();
+      }
       await pane
         .getByRole("link", { name: "Reading position", exact: true })
         .click();

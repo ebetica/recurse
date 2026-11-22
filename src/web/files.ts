@@ -1,12 +1,13 @@
 // Owner-scoped files and draft uploads: foreign owners are 404; bound bodies.
 // Downloads are inert; image/media/Artifact previews retain sandbox CSP.
-// Operator-only path-image reads bounded, byte-sniffed, no-store snapshots;
-// paths use the conversation cwd or the optional document/Artifact location.
+// Saved app state is operator-only HTTP: raw JSON, owner-scoped, no-store.
+// Operator-only path images: bounded no-store snapshots scoped by conversation.
 
 import { basename, extname, isAbsolute, relative, resolve } from "node:path";
 import { timingDetail, timingFailure } from "../observability/request_timing";
 
 import * as artifacts from "../artifacts";
+import { readAppState, writeAppState } from "../artifact_app_state";
 import { artifactPreview } from "../artifacts/preview";
 import { themedHtml } from "../artifacts/theme";
 import { readTheme } from "../themes";
@@ -28,7 +29,7 @@ import { parsePythonJson } from "../utils/python-json";
 import { parseUrlencoded } from "./login";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 import { rangedResponse, type OpenedFile } from "./static";
-import { conditionalBytes, PRIVATE_REVALIDATE } from "./caching";
+import { conditionalBytes, PRIVATE_REVALIDATE, weakEtag } from "./caching";
 import { resizable, thumbnail } from "./thumbnails";
 import { agentMarked, isOperator } from "./request_auth";
 import { readPathImage } from "./path_image";
@@ -1017,6 +1018,51 @@ export function registerFileRoutes(
         version: { type: "str" },
       },
     },
+  );
+
+  router.add(
+    ["GET", "PUT"],
+    "/api/artifacts/{artifact_id}/app-state",
+    async (ex) => {
+      if (agentMarked(ex) || !isOperator(ex, { allowBackendKey: true }))
+        throw new HttpError(
+          403,
+          "only the operator can access saved app state",
+        );
+      const owner = artifactOwner(ex.query.agent);
+      const id = ex.params.artifact_id!;
+      try {
+        if (ex.request.method === "GET") {
+          return conditionalBytes(
+            ex.request,
+            await readAppState(deps.artifacts, owner, id),
+            "application/json",
+            ARTIFACT_SAFE_HEADERS["cache-control"]!,
+            ARTIFACT_SAFE_HEADERS,
+          );
+        }
+        if (
+          ex.request.headers
+            .get("content-type")
+            ?.split(";", 1)[0]
+            ?.trim()
+            .toLowerCase() !== "application/json"
+        )
+          throw new HttpError(415, "Saved app state requires application/json");
+        deps.requireActionReady();
+        const bytes = new Uint8Array(await ex.request.arrayBuffer());
+        await deps.mutateExternalStorage(() =>
+          writeAppState(deps.artifacts, owner, id, bytes),
+        );
+        return new Response(null, {
+          status: 204,
+          headers: { ...ARTIFACT_SAFE_HEADERS, etag: weakEtag(bytes) },
+        });
+      } catch (error) {
+        artifactFailure(error);
+      }
+    },
+    { query: { agent: { type: "str", required: true } } },
   );
 
   router.get(

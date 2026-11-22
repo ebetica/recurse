@@ -1,28 +1,27 @@
-// Bounded atomic Settings with auth snapshots and Pi-first model catalogs.
-// Unlisted stored ids fail turns; no refusal before the first list.
-// Async server snapshots/committed writes; synchronous zero-window CLI.
+// Instance paths, cached Settings files, and trusted reviewer routing.
+// Server snapshots refresh off-thread; zero-window CLI reads stay synchronous.
 // Endpoint identity and safety eligibility never derive from cached lists.
-import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createHash } from "node:crypto";
-import { ConfigFiles } from "./config_files";
+import {
+  ConfigFiles,
+  isObject,
+  pythonJson,
+  valueError,
+  type Dict,
+} from "./config_files";
+import {
+  EffortLadder,
+  ModelCatalog,
+  PI_MODEL_ROUTES,
+  validModelScopeKey,
+  type Thinking,
+} from "./models";
 import type { StoredModelSignIns } from "./safety_review_models";
 import { recordMessage } from "./observability/runtime_logging";
 import fs from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { readFile, stat } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-export const Thinking = {
-  OFF: "off",
-  MINIMAL: "minimal",
-  LOW: "low",
-  MEDIUM: "medium",
-  HIGH: "high",
-  XHIGH: "xhigh",
-  MAX: "max",
-} as const;
-export const THINKING_LEVELS = Object.values(Thinking);
-export type Thinking = (typeof Thinking)[keyof typeof Thinking];
 export const AGENT_TEMP_KEY_RE = /^\p{Nd}{8}-[A-Za-z0-9][A-Za-z0-9_-]{0,160}$/u;
 export const AGENT_DRAFT_KEY_RE = /^draft-\p{Nd}{8}-[a-f0-9]{32}$/u;
 
@@ -31,21 +30,10 @@ interface ModelRoute {
   model: string;
   effort: Thinking;
 }
-interface ModelPolicy {
-  label: string;
-  catalog_provider: string;
-  conversation_effort: Thinking;
+interface ReviewRoutes {
   reviewer: ModelRoute;
   summary: ModelRoute;
   reviewer_fallbacks: ModelRoute[];
-  context_window: number | null;
-}
-interface ModelOption {
-  id: string;
-  label: string;
-  provider: string;
-  effort: string;
-  context_window?: number;
 }
 type Environment = Readonly<Record<string, string | undefined>>;
 interface ConfigOptions {
@@ -135,149 +123,7 @@ interface StatePaths {
 const DEFAULT_MAXIMUM_CONTEXT_WINDOW = 400_000;
 const MINIMUM_CONTEXT_WINDOW = 64_000;
 const MAXIMUM_CONTEXT_WINDOW = 1_000_000;
-export const EFFORT_MIN_LEVEL = 1;
-export const EFFORT_MAX_LEVEL = 5;
-const DEFAULT_EFFORT_LEVEL = 3;
-const EFFORT_LEVELS_VERSION = 1;
-const AVAILABLE_MODELS_VERSION = 1;
 export const RECURSE_REPO_URL = "https://github.com/ebetica/recurse.git";
-
-type Dict = Record<string, unknown>;
-type Ladder = Record<number, { model: string; reasoning: Thinking }>;
-type JsonPropertyPosition = { key: string; valueStart: number };
-
-// JSON.parse gives correct values but JavaScript reorders integer-like object
-// keys. Keep source order for provider names.
-function skipJsonWhitespace(text: string, start: number): number {
-  let index = start;
-  while (index < text.length && /[\t\n\r ]/u.test(text[index]!)) index++;
-  return index;
-}
-
-function endOfJsonString(text: string, start: number): number {
-  let index = start + 1;
-  while (index < text.length) {
-    if (text[index] === "\\") {
-      index += 2;
-      continue;
-    }
-    if (text[index] === '"') return index + 1;
-    index++;
-  }
-  return text.length;
-}
-
-function endOfJsonValue(text: string, start: number): number {
-  const first = text[start];
-  if (first === '"') return endOfJsonString(text, start);
-  if (first === "{" || first === "[") {
-    const closers = [first === "{" ? "}" : "]"];
-    let index = start + 1;
-    while (index < text.length && closers.length) {
-      const char = text[index]!;
-      if (char === '"') {
-        index = endOfJsonString(text, index);
-        continue;
-      }
-      if (char === "{" || char === "[") {
-        closers.push(char === "{" ? "}" : "]");
-        index++;
-        continue;
-      }
-      if (char === "}" || char === "]") {
-        if (closers.at(-1) === char) closers.pop();
-        index++;
-        continue;
-      }
-      index++;
-    }
-    return index;
-  }
-  let index = start;
-  while (index < text.length && !/[\t\n\r ,}\]]/u.test(text[index]!)) index++;
-  return index;
-}
-
-function jsonObjectProperties(
-  text: string,
-  start: number,
-): JsonPropertyPosition[] {
-  let index = skipJsonWhitespace(text, start);
-  if (text[index] !== "{") return [];
-  index++;
-  const properties: JsonPropertyPosition[] = [];
-  const positions = new Map<string, number>();
-  while (index < text.length) {
-    index = skipJsonWhitespace(text, index);
-    if (text[index] === "}") return properties;
-    if (text[index] !== '"') return properties;
-    const keyEnd = endOfJsonString(text, index);
-    const key = JSON.parse(text.slice(index, keyEnd)) as string;
-    index = skipJsonWhitespace(text, keyEnd);
-    if (text[index] !== ":") return properties;
-    const valueStart = skipJsonWhitespace(text, index + 1);
-    const position = positions.get(key);
-    if (position === undefined) {
-      positions.set(key, properties.length);
-      properties.push({ key, valueStart });
-    } else {
-      properties[position] = { key, valueStart };
-    }
-    index = skipJsonWhitespace(text, endOfJsonValue(text, valueStart));
-    if (text[index] === ",") {
-      index++;
-      continue;
-    }
-    if (text[index] === "}") return properties;
-    return properties;
-  }
-  return properties;
-}
-
-type CatalogInputs = {
-  providers: Record<string, ProviderSpec>;
-  providerEntries: [string, ProviderSpec][];
-  default_raw: string;
-  efforts: Record<string, Thinking>;
-  /** Pi's listed models per route; null until the server first lists them. */
-  pi: Record<string, PiModel[]> | null;
-  /** Epoch seconds of the last Settings update from pi.dev, if any. */
-  piUpdatedAt: number | null;
-  /** Every catalog policy, built lazily once per cache key. */
-  policies?: Record<string, ModelPolicy>;
-  // Lazily cached catalog options; unlisted CHAT_MODEL appears first.
-  options?: ModelOption[];
-  /** The catalog's ids, built with `options`. */
-  ids?: Set<string>;
-  /** Pi's reasoning levels per catalog id, built lazily once per cache key. */
-  reasoningLevels?: Map<string, Thinking[]>;
-};
-
-interface PiModel {
-  id: string;
-  name: string;
-  context_window: number;
-  file_provider?: true;
-  // Supported reasoning; absent worker result offers every level.
-  reasoning_levels?: Thinking[];
-}
-interface ProviderModel {
-  id: string;
-  label?: string;
-  context_window?: number;
-  effort: Thinking | null;
-}
-interface ProviderSpec {
-  base_url: string;
-  env_key: string;
-  wire_api: "responses" | "completions";
-  models: ProviderModel[];
-}
-interface CatalogCache {
-  key: string;
-  value: CatalogInputs;
-  checkedAt: number;
-}
 
 // Server Settings file-read cache window.
 export const SETTINGS_RECHECK_MS = 1000;
@@ -297,81 +143,6 @@ const route = (
   model: string,
   effort: Thinking,
 ): ModelRoute => ({ provider, model, effort });
-const policy = (
-  label: string,
-  catalogProvider: string,
-  conversationEffort: Thinking,
-  reviewer: ModelRoute,
-  summary: ModelRoute,
-  fallbacks: ModelRoute[] = [],
-  contextWindow: number | null = null,
-): ModelPolicy => ({
-  label,
-  catalog_provider: catalogProvider,
-  conversation_effort: conversationEffort,
-  reviewer: { ...reviewer },
-  summary: { ...summary },
-  reviewer_fallbacks: fallbacks.map((entry) => ({ ...entry })),
-  context_window: contextWindow,
-});
-
-// Built-in routes follow Pi's list; custom providers follow them.
-const DEFAULT_CHAT_MODEL = "anthropic/claude-opus-5-5";
-const PI_BUILTIN_PROVIDERS = new Set<string>(getBuiltinProviders());
-export const PI_MODEL_ROUTES: readonly (readonly [string, string])[] = [
-  ["anthropic", "Claude"],
-  ["openai-codex", "ChatGPT subscription"],
-  ["openai", "OpenAI API key"],
-  ["openrouter", "OpenRouter"],
-];
-// Schema version; unknown stored lists permit all until relisted.
-export const PI_MODEL_LIST_VERSION = 1;
-// Bound agent-writable catalogs before validating or grouping their rows.
-const MAX_PI_MODELS = 2_000;
-
-/** Recurse's suggested conversation reasoning for model families. */
-const SUGGESTED_EFFORTS: readonly [RegExp, Thinking][] = [
-  [/.*sonnet.*5$/iu, "xhigh"],
-  [/.*opus.*5$/iu, "medium"],
-  [/.*fable.*5-[12]$/iu, "low"],
-  [/.*fable.*5$/iu, "medium"],
-  [/.*gpt-5\.6-sol$/iu, "high"],
-  [/.*luna$/iu, "xhigh"],
-  [/.*astra$/iu, "low"],
-  [/.*kimi.*k2\.6$/iu, "high"],
-];
-function patternEffort(model: string): Thinking | null {
-  for (const [pattern, effort] of SUGGESTED_EFFORTS)
-    if (pattern.test(model)) return effort;
-  return null;
-}
-
-const MODEL_SCOPE_RE = /^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$/u;
-function validModelScopeKey(value: unknown): value is string {
-  return (
-    typeof value === "string" &&
-    value.length > 0 &&
-    value.length <= 128 &&
-    /^[\x00-\x7f]+$/u.test(value) &&
-    MODEL_SCOPE_RE.test(value)
-  );
-}
-function validEnvironmentKey(value: string): boolean {
-  const alphanumeric = value.replaceAll("_", "");
-  return (
-    /^[\p{L}\p{N}]+$/u.test(alphanumeric) &&
-    /\p{Lu}/u.test(value) &&
-    !/\p{Ll}/u.test(value)
-  );
-}
-function isObject(value: unknown): value is Dict {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function valueError(message: string): Error {
-  const error = new Error(message);
-  error.name = "ValueError";
-  return error;
-}
 const PYTHON_WHITESPACE =
   /[\t-\r\x1c-\x20\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u;
 function pythonStrip(value: string): string {
@@ -381,15 +152,6 @@ function pythonStrip(value: string): string {
   while (start < end && PYTHON_WHITESPACE.test(characters[start]!)) start += 1;
   while (end > start && PYTHON_WHITESPACE.test(characters[end - 1]!)) end -= 1;
   return characters.slice(start, end).join("");
-}
-function parseThinking(value: unknown): Thinking {
-  if (
-    typeof value === "string" &&
-    THINKING_LEVELS.includes(value as Thinking)
-  ) {
-    return value as Thinking;
-  }
-  throw valueError(`'${String(value)}' is not a valid Thinking`);
 }
 function pythonInt(env: Environment, name: string, fallback: string): number {
   const raw = env[name] ?? fallback;
@@ -470,61 +232,8 @@ function defaultOn(env: Environment, name: string): boolean {
   const value = pythonStrip(env[name] ?? "").toLowerCase();
   return !["0", "false", "no", "off"].includes(value);
 }
-function asciiJsonString(value: string): string {
-  return JSON.stringify(value).replace(
-    /[^\x00-\x7f]/g,
-    (character) =>
-      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
-}
-function pythonJson(value: unknown, sortKeys = false, compact = false): string {
-  const encode = (item: unknown): string => {
-    if (typeof item === "string") return asciiJsonString(item);
-    if (
-      item === null ||
-      typeof item === "boolean" ||
-      typeof item === "number"
-    ) {
-      return JSON.stringify(item);
-    }
-    if (Array.isArray(item)) {
-      return `[${item.map(encode).join(compact ? "," : ", ")}]`;
-    }
-    if (isObject(item)) {
-      const separator = compact ? "," : ", ";
-      const colon = compact ? ":" : ": ";
-      const entries = Object.entries(item);
-      if (sortKeys)
-        entries.sort(([left], [right]) =>
-          left < right ? -1 : left > right ? 1 : 0,
-        );
-      return `{${entries
-        .map(
-          ([key, member]) => `${asciiJsonString(key)}${colon}${encode(member)}`,
-        )
-        .join(separator)}}`;
-    }
-    return "null";
-  };
-  return encode(value);
-}
-function pythonJsonIndented(value: unknown): string {
-  return JSON.stringify(value, null, 2).replace(
-    /[^\x00-\x7f]/g,
-    (character) =>
-      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
-}
 function routeKey(value: ModelRoute): string {
   return `${value.provider}\u0000${value.model}`;
-}
-function clonePolicy(value: ModelPolicy): ModelPolicy {
-  return {
-    ...value,
-    reviewer: { ...value.reviewer },
-    summary: { ...value.summary },
-    reviewer_fallbacks: value.reviewer_fallbacks.map((entry) => ({ ...entry })),
-  };
 }
 
 function buildPaths(
@@ -719,60 +428,38 @@ export class Config {
   readonly paths: StatePaths;
   readonly displayName: string;
   readonly repoUrl: string;
-  readonly CHAT_MODEL: string;
-  private readonly chatEffortOverride: string | undefined;
-  private readonly authenticatedProviderSource: () => Iterable<string>;
-  private readonly storedCustomProviderSource: () => Iterable<string>;
+  readonly models: ModelCatalog;
+  readonly levels: EffortLadder;
   private credentialRevisionValue = 0;
   private mcpFileStampValue: string | null = null;
-  private catalogCache: CatalogCache | null = null;
-  private effortLevelsCache: {
-    document: unknown;
-    catalog: CatalogInputs;
-    providers: string;
-    levels: Ladder;
-  } | null = null;
   private readonly settingsFiles: ConfigFiles;
   private safetyReviewRevision = 0;
-  private readonly now: () => number;
-  private readonly settingsRecheckMs: number;
-  private readonly warn: NonNullable<ConfigOptions["warn"]>;
 
   constructor(options: ConfigOptions = {}) {
     this.env = options.env ?? process.env;
-    this.now = options.now ?? (() => performance.now());
-    this.settingsRecheckMs = options.settingsRecheckMs ?? 0;
-    this.warn =
+    const now = options.now ?? (() => performance.now());
+    const settingsRecheckMs = options.settingsRecheckMs ?? 0;
+    const warn: NonNullable<ConfigOptions["warn"]> =
       options.warn ??
       ((event, fields) => console.warn(recordMessage(event, fields)));
     const cwd = resolve(options.cwd ?? process.cwd());
     const resolved = buildPaths(this.env, cwd, options.toolsDir);
     this.paths = resolved.paths;
-    this.settingsFiles = new ConfigFiles(
-      this.settingsRecheckMs,
-      this.now,
-      (path) => {
-        if (path !== this.paths.AVAILABLE_MODELS_FILE) this.catalogCache = null;
-        if (path === join(this.paths.CONFIG_DIR, "safety-review-model.json"))
-          this.safetyReviewRevision += 1;
-      },
-    );
+    this.settingsFiles = new ConfigFiles(settingsRecheckMs, now, (path) => {
+      if (path === join(this.paths.CONFIG_DIR, "safety-review-model.json"))
+        this.safetyReviewRevision += 1;
+    });
     this.displayName = resolved.displayName;
     this.repoUrl = resolved.repoUrl;
-    this.authenticatedProviderSource =
-      options.authenticatedProviders ?? (() => []);
-    this.storedCustomProviderSource =
-      options.storedCustomProviders ?? (() => []);
-    this.CHAT_MODEL = this.canonicalModelId(
-      this.env.CHAT_MODEL ?? DEFAULT_CHAT_MODEL,
+    this.models = new ModelCatalog(
+      this.settingsFiles,
+      this.paths,
+      this.env,
+      options.authenticatedProviders ?? (() => []),
+      options.storedCustomProviders ?? (() => []),
+      warn,
     );
-    this.chatEffortOverride = this.env.CHAT_EFFORT;
-    if (this.chatEffortOverride !== undefined)
-      parseThinking(this.chatEffortOverride);
-  }
-
-  get CHAT_EFFORT(): string {
-    return String(this.defaultEffort(this.CHAT_MODEL));
+    this.levels = new EffortLadder(this.models, this.settingsFiles, this.paths);
   }
 
   /** Load server settings before use, or explicitly await external edits. */
@@ -844,39 +531,8 @@ export class Config {
     return normalized;
   }
 
-  canonicalModelId(model: string): string {
-    const prefix = "claude-bridge/";
-    return model.startsWith(prefix)
-      ? `anthropic/${model.slice(prefix.length)}`
-      : model;
-  }
-
-  private modelParts(model: string, useAlias = true): [string, string] {
-    const id = useAlias ? this.canonicalModelId(model) : model;
-    const slash = id.indexOf("/");
-    return slash < 0 ? ["", id] : [id.slice(0, slash), id.slice(slash + 1)];
-  }
-
-  modelPolicy(model: string): ModelPolicy {
-    const canonical = this.canonicalModelId(model);
-    const policies = this.policies();
-    const known = Object.hasOwn(policies, canonical)
-      ? policies[canonical]
-      : undefined;
-    if (known) return clonePolicy(known);
-    const [provider, modelId] = this.modelParts(canonical);
-    return this.routePolicy(provider, modelId, canonical, "Custom", "high");
-  }
-
   /** Reviewer and summary routes follow the provider, never the model. */
-  private routePolicy(
-    provider: string,
-    modelId: string,
-    label: string,
-    catalogProvider: string,
-    effort: Thinking,
-    contextWindow: number | null = null,
-  ): ModelPolicy {
+  private routePolicy(provider: string, modelId: string): ReviewRoutes {
     const current = route(provider, modelId, "low");
     let reviewer: ModelRoute;
     let fallbacks: ModelRoute[];
@@ -896,15 +552,11 @@ export class Config {
       [reviewer, fallbacks] = this.codexFirstRoute(current);
       summary = current;
     }
-    return policy(
-      label,
-      catalogProvider,
-      effort,
-      reviewer,
-      summary,
-      fallbacks,
-      contextWindow,
-    );
+    return {
+      reviewer: { ...reviewer },
+      summary: { ...summary },
+      reviewer_fallbacks: fallbacks.map((entry) => ({ ...entry })),
+    };
   }
 
   async trustedModelPolicy(
@@ -912,15 +564,15 @@ export class Config {
   ): Promise<string> {
     const [provider, modelId] =
       typeof model === "string"
-        ? this.modelParts(model)
+        ? this.models.modelParts(model)
         : [model.provider, model.id];
     const choice = this.safetyReviewModel();
     if (choice === undefined) return "null";
     const pin = choice
-      ? route(...this.modelParts(choice, false), "low")
+      ? route(...this.models.modelParts(choice, false), "low")
       : await this.ladderReviewer();
     const selected = this.pinLadderReviewer(
-      this.routePolicy(provider, modelId, modelId, provider, "high"),
+      this.routePolicy(provider, modelId),
       pin,
     );
     const routeValue = (value: ModelRoute): Dict => ({
@@ -957,46 +609,34 @@ export class Config {
   }
 
   private async ladderReviewer(): Promise<ModelRoute> {
-    const document = this.readEffortLevelsDoc();
-    const pin = isObject(document.levels) ? document.levels["1"] : undefined;
+    const levelOne = this.levels.levelOneModel();
     let model: string;
-    if (pin !== undefined) {
-      model = isObject(pin) && typeof pin.model === "string" ? pin.model : "";
+    if ("model" in levelOne) {
+      model = levelOne.model;
     } else {
-      const authed = this.authedModelProviders();
-      if (authed.has("anthropic") || authed.has("openai-codex")) {
-        model = this.defaultLadder(authed)[EFFORT_MIN_LEVEL]!.model;
-      } else {
-        const { getBuiltinModels } =
-          await import("@earendil-works/pi-ai/providers/all");
-        const native = PI_MODEL_ROUTES.filter(([provider]) =>
-          authed.has(provider),
+      const { authed } = levelOne;
+      const { getBuiltinModels } =
+        await import("@earendil-works/pi-ai/providers/all");
+      const native = PI_MODEL_ROUTES.filter(([provider]) =>
+        authed.has(provider),
+      )
+        .flatMap(([provider]) =>
+          getBuiltinModels(provider as Parameters<typeof getBuiltinModels>[0]),
         )
-          .flatMap(([provider]) =>
-            getBuiltinModels(
-              provider as Parameters<typeof getBuiltinModels>[0],
-            ),
-          )
-          .find((entry) => validModelScopeKey(`${entry.provider}/${entry.id}`));
-        const custom = this.catalogInputs().providerEntries.flatMap(
-          ([provider, spec]) =>
-            authed.has(provider)
-              ? spec.models.map((entry) => `${provider}/${entry.id}`)
-              : [],
-        )[0];
-        model = native
-          ? `${native.provider}/${native.id}`
-          : (custom ?? this.CHAT_MODEL);
-      }
+        .find((entry) => validModelScopeKey(`${entry.provider}/${entry.id}`));
+      const custom = this.models.firstCustomModel(authed);
+      model = native
+        ? `${native.provider}/${native.id}`
+        : (custom ?? this.models.CHAT_MODEL);
     }
-    const [provider, modelId] = this.modelParts(model);
+    const [provider, modelId] = this.models.modelParts(model);
     return route(provider, modelId, "low");
   }
 
   private pinLadderReviewer(
-    value: ModelPolicy,
+    value: ReviewRoutes,
     reviewer: ModelRoute,
-  ): ModelPolicy {
+  ): ReviewRoutes {
     const seen = new Set([routeKey(reviewer)]);
     const fallbacks: ModelRoute[] = [];
     for (const candidate of [value.reviewer, ...value.reviewer_fallbacks]) {
@@ -1006,513 +646,12 @@ export class Config {
         fallbacks.push({ ...candidate });
       }
     }
-    return { ...clonePolicy(value), reviewer, reviewer_fallbacks: fallbacks };
-  }
-
-  private readDefaultEfforts(): Record<string, Thinking> {
-    const data = this.settingsJson(this.paths.DEFAULT_EFFORTS_FILE);
-    if (!isObject(data)) return {};
-    const parsed: [string, Thinking][] = [];
-    for (const [model, level] of Object.entries(data)) {
-      try {
-        parsed.push([model, parseThinking(level)]);
-      } catch {
-        // Invariant: Fail safe to built-in reasoning.
-      }
-    }
-    const efforts = Object.create(null) as Record<string, Thinking>;
-    for (const [model, effort] of parsed)
-      if (this.canonicalModelId(model) === model) efforts[model] = effort;
-    for (const [model, effort] of parsed) {
-      const canonical = this.canonicalModelId(model);
-      if (canonical !== model && !Object.hasOwn(efforts, canonical))
-        efforts[canonical] = effort;
-    }
-    return efforts;
-  }
-
-  defaultEfforts(): Record<string, string> {
-    return Object.fromEntries(
-      Object.entries(this.catalogInputs().efforts).map(([model, effort]) => [
-        model,
-        effort,
-      ]),
-    );
-  }
-
-  private readProvidersDocument(): [
-    Record<string, ProviderSpec>,
-    string,
-    [string, ProviderSpec][],
-  ] {
-    const text = this.settingsFiles.text(this.paths.MODEL_PROVIDERS_FILE);
-    if (text === undefined) return [{}, "", []];
-    let data: unknown;
-    try {
-      data = JSON.parse(text);
-    } catch {
-      return [{}, "", []];
-    }
-    if (!isObject(data)) return [{}, "", []];
-    const defaultRaw = typeof data.default === "string" ? data.default : "";
-    const providers: Record<string, ProviderSpec> = {};
-    const providerEntries: [string, ProviderSpec][] = [];
-    if (!isObject(data.providers))
-      return [providers, defaultRaw, providerEntries];
-    const providerProperty = jsonObjectProperties(text, 0).find(
-      ({ key }) => key === "providers",
-    );
-    const providerNames =
-      providerProperty === undefined
-        ? Object.keys(data.providers)
-        : jsonObjectProperties(text, providerProperty.valueStart).map(
-            ({ key }) => key,
-          );
-    for (const name of providerNames) {
-      if (!name || !Object.hasOwn(data.providers, name)) continue;
-      const rawProvider = data.providers[name];
-      if (
-        !name ||
-        !validModelScopeKey(name) ||
-        name.startsWith("_") ||
-        !isObject(rawProvider)
-      )
-        continue;
-      const baseUrl = rawProvider.base_url;
-      const envKey = rawProvider.env_key;
-      const wireApi = rawProvider.wire_api;
-      if (
-        typeof baseUrl !== "string" ||
-        !/^https?:\/\//u.test(baseUrl) ||
-        typeof envKey !== "string" ||
-        !validEnvironmentKey(envKey) ||
-        (wireApi !== "responses" && wireApi !== "completions") ||
-        !Array.isArray(rawProvider.models)
-      )
-        continue;
-      const models: ProviderModel[] = [];
-      for (const rawModel of rawProvider.models) {
-        if (!isObject(rawModel)) continue;
-        const modelId = rawModel.id;
-        if (
-          typeof modelId !== "string" ||
-          !modelId ||
-          !validModelScopeKey(`${name}/${modelId}`)
-        )
-          continue;
-        const entry: ProviderModel = { id: modelId, effort: null };
-        if (typeof rawModel.label === "string" && rawModel.label)
-          entry.label = rawModel.label;
-        if (
-          typeof rawModel.context_window === "number" &&
-          Number.isInteger(rawModel.context_window) &&
-          rawModel.context_window > 0
-        )
-          entry.context_window = rawModel.context_window;
-        if (rawModel.effort !== undefined && rawModel.effort !== null) {
-          try {
-            entry.effort = parseThinking(rawModel.effort);
-          } catch {
-            entry.effort = null;
-          }
-        }
-        models.push(entry);
-      }
-      if (models.length) {
-        const provider: ProviderSpec = {
-          base_url: baseUrl,
-          env_key: envKey,
-          wire_api: wireApi,
-          models,
-        };
-        providers[name] = provider;
-        providerEntries.push([name, provider]);
-      }
-    }
-    return [providers, defaultRaw, providerEntries];
-  }
-
-  private catalogInputs(): CatalogInputs {
-    const now = this.now();
-    const cached = this.catalogCache;
-    if (cached !== null && now - cached.checkedAt < this.settingsRecheckMs)
-      return cached.value;
-    const providers = this.settingsFiles.text(this.paths.MODEL_PROVIDERS_FILE);
-    const efforts = this.settingsFiles.text(this.paths.DEFAULT_EFFORTS_FILE);
-    const pi = this.settingsFiles.text(this.paths.PI_MODEL_LIST_FILE);
-    const key = JSON.stringify([providers, efforts, pi]);
-    if (cached?.key === key) {
-      cached.checkedAt = now;
-      return cached.value;
-    }
-    const [parsedProviders, defaultRaw, providerEntries] =
-      this.readProvidersDocument();
-    const value = {
-      providers: parsedProviders,
-      providerEntries,
-      default_raw: defaultRaw,
-      efforts: this.readDefaultEfforts(),
-      ...(pi === undefined
-        ? { pi: null, piUpdatedAt: null }
-        : this.readPiModelList()),
-    };
-    this.catalogCache = { key, value, checkedAt: now };
-    return value;
+    return { ...value, reviewer, reviewer_fallbacks: fallbacks };
   }
 
   /** Parsed Settings snapshot (undefined when unreadable); never mutate it. */
   private settingsJson(path: string): unknown {
     return this.settingsFiles.json(path);
-  }
-
-  /** The stored Pi model list per route (unreadable reads as not listed) and
-   * when Settings last updated Pi's catalogs from pi.dev, if ever. */
-  private readPiModelList(): Pick<CatalogInputs, "pi" | "piUpdatedAt"> {
-    const none = { pi: null, piUpdatedAt: null };
-    const data = this.settingsJson(this.paths.PI_MODEL_LIST_FILE);
-    if (
-      !isObject(data) ||
-      data.version !== PI_MODEL_LIST_VERSION ||
-      !Array.isArray(data.models)
-    )
-      return none;
-    const updatedAt = data.updated_at;
-    try {
-      return {
-        pi: this.checkPiModels(data.models),
-        piUpdatedAt:
-          typeof updatedAt === "number" && Number.isFinite(updatedAt)
-            ? updatedAt
-            : null,
-      };
-    } catch {
-      return none;
-    }
-  }
-
-  private checkPiModels(entries: unknown[]): Record<string, PiModel[]> {
-    const routes = [...PI_BUILTIN_PROVIDERS];
-    const out: Record<string, PiModel[]> = Object.create(null);
-    if (entries.length > MAX_PI_MODELS)
-      this.warn("pi_model_list_truncated", {
-        accepted: MAX_PI_MODELS,
-        ignored: entries.length - MAX_PI_MODELS,
-      });
-    for (const entry of entries.slice(0, MAX_PI_MODELS)) {
-      if (
-        !isObject(entry) ||
-        typeof entry.provider !== "string" ||
-        entry.provider.includes("/") ||
-        !validModelScopeKey(entry.provider) ||
-        (!routes.includes(entry.provider) && entry.file_provider !== true) ||
-        typeof entry.id !== "string" ||
-        typeof entry.name !== "string" ||
-        !entry.name ||
-        typeof entry.context_window !== "number" ||
-        !Number.isSafeInteger(entry.context_window) ||
-        entry.context_window <= 0 ||
-        (entry.reasoning_levels !== undefined &&
-          (!Array.isArray(entry.reasoning_levels) ||
-            !entry.reasoning_levels.length ||
-            entry.reasoning_levels.some(
-              (level) => !THINKING_LEVELS.includes(level as Thinking),
-            )))
-      )
-        throw valueError("invalid Pi model list entry");
-      // Invariant: Ids outside Recurse's model-id charset (OpenRouter's `~`
-      // aliases) cannot be stored in a ladder or conversation, so they are not
-      // offered.
-      if (!validModelScopeKey(`${entry.provider}/${entry.id}`)) continue;
-      (out[entry.provider] ??= []).push({
-        id: entry.id,
-        name: entry.name,
-        context_window: entry.context_window,
-        ...(!routes.includes(entry.provider)
-          ? { file_provider: true as const }
-          : {}),
-        ...(entry.reasoning_levels === undefined
-          ? {}
-          : {
-              reasoning_levels: THINKING_LEVELS.filter((level) =>
-                (entry.reasoning_levels as unknown[]).includes(level),
-              ),
-            }),
-      });
-    }
-    return out;
-  }
-
-  /** Replace the stored Pi model list; returns how many models it holds. */
-  async setPiModelList(entries: unknown, updatedAt?: number): Promise<number> {
-    if (!Array.isArray(entries)) throw valueError("invalid Pi model list");
-    const listed = this.checkPiModels(entries);
-    const models = Object.entries(listed).flatMap(([provider, entries]) =>
-      entries.map((model) => ({ provider, ...model })),
-    );
-    // Invariant: A plain relist keeps the time of the last update from pi.dev.
-    await this.writePrivateJson(
-      this.paths.PI_MODEL_LIST_FILE,
-      () => {
-        const updated = updatedAt ?? this.catalogInputs().piUpdatedAt;
-        return {
-          version: PI_MODEL_LIST_VERSION,
-          ...(updated === null ? {} : { updated_at: updated }),
-          models,
-        };
-      },
-      false,
-    );
-    return models.length;
-  }
-
-  /** How many models Pi's stored list holds (null before the first listing)
-   * and when Settings last updated it from pi.dev (epoch seconds). */
-  piModelListState(): { count: number | null; updated_at: number | null } {
-    const { pi, piUpdatedAt } = this.catalogInputs();
-    return {
-      count:
-        pi === null
-          ? null
-          : Object.values(pi).reduce((sum, models) => sum + models.length, 0),
-      updated_at: piUpdatedAt,
-    };
-  }
-
-  // The actionable sentence for a model Pi's list lacks, else null. Before the
-  // server first lists Pi's models nothing is refused: Pi decides.
-  unlistedModelSentence(model: string, level: number | null): string | null {
-    const ids = this.catalogModelIds();
-    const canonical = this.canonicalModelId(model);
-    if (ids === null || ids.has(canonical)) return null;
-    return level === null
-      ? `Model ${canonical} is not in Pi's model list. Choose an effort level for this conversation.`
-      : `Model ${canonical} is not in Pi's model list. Choose another model for level ${level} in Settings > Effort levels.`;
-  }
-
-  suggestedEffort(model: string): Thinking {
-    return patternEffort(model) ?? this.modelPolicy(model).conversation_effort;
-  }
-
-  defaultEffort(model: string): Thinking {
-    if (this.chatEffortOverride !== undefined)
-      return parseThinking(this.chatEffortOverride);
-    const efforts = this.catalogInputs().efforts;
-    return Object.hasOwn(efforts, model)
-      ? efforts[model]!
-      : this.suggestedEffort(model);
-  }
-
-  customModelProviders(): Record<string, ProviderSpec> {
-    return this.catalogInputs().providers;
-  }
-
-  async upsertCustomProvider(name: string, spec: Dict): Promise<boolean> {
-    if (!name || name.startsWith("_") || !validModelScopeKey(name))
-      throw valueError(`invalid custom provider name: '${name}'`);
-    if (!isObject(spec))
-      throw valueError("custom provider spec must be an object");
-    const baseUrl = spec.base_url;
-    const envKey = spec.env_key;
-    const wireApi = spec.wire_api;
-    const rawModels = spec.models;
-    if (
-      typeof baseUrl !== "string" ||
-      !/^https?:\/\//u.test(baseUrl) ||
-      typeof envKey !== "string" ||
-      !validEnvironmentKey(envKey) ||
-      (wireApi !== "responses" && wireApi !== "completions") ||
-      !Array.isArray(rawModels) ||
-      !rawModels.length
-    ) {
-      throw valueError(`invalid custom provider spec for '${name}'`);
-    }
-    const models: Dict[] = [];
-    for (const model of rawModels) {
-      if (!isObject(model))
-        throw valueError(`invalid custom provider spec for '${name}'`);
-      if (typeof model.id !== "string" || !model.id)
-        throw valueError(`invalid custom provider spec for '${name}'`);
-      const entry: Dict = { id: model.id };
-      if (typeof model.label === "string" && model.label)
-        entry.label = model.label;
-      if (
-        typeof model.context_window === "number" &&
-        Number.isInteger(model.context_window) &&
-        model.context_window > 0
-      )
-        entry.context_window = model.context_window;
-      if (model.effort !== undefined && model.effort !== null) {
-        try {
-          entry.effort = parseThinking(model.effort);
-        } catch {
-          throw valueError(`invalid custom provider spec for '${name}'`);
-        }
-      }
-      models.push(entry);
-    }
-    const path = this.paths.MODEL_PROVIDERS_FILE;
-    return this.settingsFiles.write<boolean>(path, async () => {
-      let document: Dict;
-      try {
-        const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
-        if (!isObject(parsed)) throw new Error("invalid");
-        document = parsed;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") document = {};
-        else throw new Error(`cannot seed '${name}': ${path} is invalid`);
-      }
-      let providers = document.providers;
-      if (providers === undefined || providers === null) {
-        providers = {};
-        document.providers = providers;
-      }
-      if (!isObject(providers))
-        throw new Error(`cannot seed '${name}': ${path} is invalid`);
-      if (Object.hasOwn(providers, name)) return { value: false };
-      providers[name] = {
-        base_url: baseUrl,
-        env_key: envKey,
-        wire_api: wireApi,
-        models,
-      };
-      const mode = await stat(path)
-        .then((info) => info.mode & 0o777)
-        .catch(() => 0o600);
-      return { text: `${pythonJsonIndented(document)}\n`, mode, value: true };
-    });
-  }
-
-  customDefaultModel(): string {
-    const { default_raw: value, providers } = this.catalogInputs();
-    if (!value) return "";
-    const slash = value.indexOf("/");
-    if (slash < 0) return "";
-    const providerName = value.slice(0, slash);
-    const provider = Object.hasOwn(providers, providerName)
-      ? providers[providerName]
-      : undefined;
-    const modelId = value.slice(slash + 1);
-    return provider?.models.some((model) => model.id === modelId) ? value : "";
-  }
-
-  private policies(): Record<string, ModelPolicy> {
-    const inputs = this.catalogInputs();
-    if (inputs.policies) return inputs.policies;
-    const out: Record<string, ModelPolicy> = Object.create(null);
-    const providers = new Set([
-      ...PI_MODEL_ROUTES.map(([id]) => id),
-      ...Object.keys(inputs.pi ?? {}),
-    ]);
-    for (const provider of providers)
-      for (const model of inputs.pi?.[provider] ?? []) {
-        const id = `${provider}/${model.id}`;
-        out[id] = this.routePolicy(
-          provider,
-          model.id,
-          model.name,
-          PI_MODEL_ROUTES.find(([id]) => id === provider)?.[1] ?? provider,
-          patternEffort(id) ?? "high",
-          model.context_window,
-        );
-      }
-    for (const [name, provider] of inputs.providerEntries)
-      for (const model of provider.models) {
-        const id = `${name}/${model.id}`;
-        if (Object.hasOwn(out, id)) continue;
-        out[id] = this.routePolicy(
-          name,
-          model.id,
-          model.label || model.id,
-          name,
-          model.effort ?? "high",
-          model.context_window ?? null,
-        );
-      }
-    inputs.policies = out;
-    return out;
-  }
-
-  /** The catalog for the current settings files, built once per cache key.
-   * CHAT_MODEL is always offered (first) even when Pi does not list it, so
-   * the configured default is never refused as unlisted. */
-  private catalogOptions(): { options: ModelOption[]; ids: Set<string> } {
-    const inputs = this.catalogInputs();
-    if (inputs.options && inputs.ids)
-      return { options: inputs.options, ids: inputs.ids };
-    const policies = this.policies();
-    const effort = (id: string, policy: ModelPolicy | undefined): string =>
-      String(
-        this.chatEffortOverride !== undefined
-          ? parseThinking(this.chatEffortOverride)
-          : Object.hasOwn(inputs.efforts, id)
-            ? inputs.efforts[id]!
-            : (patternEffort(id) ??
-              (policy ?? this.modelPolicy(id)).conversation_effort),
-      );
-    const options: ModelOption[] = Object.entries(policies).map(
-      ([id, value]) => ({
-        id,
-        label: value.label,
-        provider: value.catalog_provider,
-        effort: effort(id, value),
-        ...(value.context_window === null
-          ? {}
-          : { context_window: value.context_window }),
-      }),
-    );
-    const defaults = [this.CHAT_MODEL];
-    if (this.isFileProviderModel(this.CHAT_MODEL))
-      defaults.push(DEFAULT_CHAT_MODEL);
-    for (const model of defaults)
-      if (!Object.hasOwn(policies, model))
-        options.unshift({
-          id: model,
-          label: model,
-          provider: "Custom",
-          effort: effort(model, undefined),
-        });
-    inputs.options = options;
-    inputs.ids = new Set(options.map((option) => option.id));
-    return { options, ids: inputs.ids };
-  }
-
-  chatModels(): ModelOption[] {
-    return this.catalogOptions().options.map((option) => ({ ...option }));
-  }
-
-  /** Pi's reasoning levels for a listed model, or null when Pi's list does
-   * not give them (custom providers, unlisted ids, or a list read without
-   * them): then any level may be chosen and Pi clamps it at run time. */
-  modelReasoningLevels(model: string): Thinking[] | null {
-    const inputs = this.catalogInputs();
-    if (!inputs.reasoningLevels) {
-      const levels = new Map<string, Thinking[]>();
-      for (const [provider, entries] of Object.entries(inputs.pi ?? {}))
-        for (const entry of entries)
-          if (entry.reasoning_levels)
-            levels.set(`${provider}/${entry.id}`, entry.reasoning_levels);
-      inputs.reasoningLevels = levels;
-    }
-    const levels = inputs.reasoningLevels.get(this.canonicalModelId(model));
-    return levels ? [...levels] : null;
-  }
-
-  defaultChatModel(): string {
-    const configured = this.customDefaultModel() || this.CHAT_MODEL;
-    const want = this.isFileProviderModel(configured)
-      ? DEFAULT_CHAT_MODEL
-      : configured;
-    let authedCatalog: string[];
-    try {
-      const providers = this.authedModelProviders();
-      authedCatalog = this.chatModels()
-        .filter((option) => providers.has(this.providerOf(option.id)))
-        .map((option) => option.id);
-    } catch {
-      authedCatalog = [];
-    }
-    if (!authedCatalog.length) return want;
-    return authedCatalog.includes(want) ? want : authedCatalog[0]!;
   }
 
   /** Days deleted history remains available; applied each maintenance pass. */
@@ -1543,7 +682,7 @@ export class Config {
       throw valueError(
         "deleted agents' history must be kept for between 1 and 36500 days",
       );
-    await this.writePrivateJson(this.paths.DELETED_AGENT_HISTORY_FILE, {
+    await this.settingsFiles.writeJson(this.paths.DELETED_AGENT_HISTORY_FILE, {
       days: value,
     });
     return value;
@@ -1579,7 +718,7 @@ export class Config {
         ))
     )
       throw valueError("Choose an available safety review model");
-    await this.writePrivateJson(
+    await this.settingsFiles.writeJson(
       join(this.paths.CONFIG_DIR, "safety-review-model.json"),
       { model: value },
     );
@@ -1596,7 +735,7 @@ export class Config {
   async setKeepPromptCacheWarm(value: unknown): Promise<boolean> {
     if (typeof value !== "boolean")
       throw valueError("Keep prompt cache warm must be a boolean");
-    await this.writePrivateJson(
+    await this.settingsFiles.writeJson(
       join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
       { enabled: value },
     );
@@ -1636,7 +775,7 @@ export class Config {
       throw valueError(
         "Minimum conversation length must be an integer of at least 32000 tokens",
       );
-    await this.writePrivateJson(
+    await this.settingsFiles.writeJson(
       join(this.paths.CONFIG_DIR, "idle-compaction.json"),
       { enabled: value, minimum_tokens: minimum },
     );
@@ -1670,624 +809,17 @@ export class Config {
 
   async setMaximumContextWindow(value: unknown): Promise<number> {
     const checked = this.validateMaximumContextWindow(value);
-    await this.writePrivateJson(this.paths.MAXIMUM_CONTEXT_WINDOW_FILE, {
+    await this.settingsFiles.writeJson(this.paths.MAXIMUM_CONTEXT_WINDOW_FILE, {
       maximum_context_window: checked,
     });
     return checked;
   }
 
-  validateDefaultEfforts(value: unknown): Record<string, string> {
-    if (!isObject(value))
-      throw valueError("default efforts must map models to reasoning levels");
-    const enabled = new Set(this.chatModels().map((option) => option.id));
-    const resolved: Record<string, string> = {};
-    for (const [model, level] of Object.entries(value)) {
-      if (!enabled.has(model))
-        throw valueError(`unsupported chat model: ${model}`);
-      if (level === null) continue;
-      try {
-        resolved[model] = parseThinking(level);
-      } catch {
-        throw valueError(
-          `unsupported reasoning level for ${model}: ${String(level)}`,
-        );
-      }
-    }
-    return resolved;
-  }
-
-  async setDefaultEfforts(value: unknown): Promise<Record<string, string>> {
-    const resolved = this.validateDefaultEfforts(value);
-    const sorted = Object.fromEntries(
-      Object.keys(resolved)
-        .sort()
-        .map((model) => [model, resolved[model]]),
-    );
-    await this.writePrivateJson(this.paths.DEFAULT_EFFORTS_FILE, sorted, false);
-    return this.defaultEfforts();
-  }
-
-  modelContextWindow(modelId: string): number | null {
-    return this.modelPolicy(modelId).context_window;
-  }
-
   contextBarWindow(modelId: string): number | null {
-    const capacity = this.modelContextWindow(modelId);
+    const capacity = this.models.modelContextWindow(modelId);
     return capacity === null
       ? null
       : Math.min(capacity, this.maximumContextWindow());
-  }
-
-  providerOf(modelId: string): string {
-    const slash = this.canonicalModelId(modelId).indexOf("/");
-    return slash < 0 ? "" : this.canonicalModelId(modelId).slice(0, slash);
-  }
-
-  /** File endpoints require a saved choice, never automatic selection. */
-  isFileProviderModel(model: string): boolean {
-    const provider = this.providerOf(model);
-    return (
-      provider !== "" &&
-      !PI_BUILTIN_PROVIDERS.has(provider) &&
-      !Object.hasOwn(this.customModelProviders(), provider)
-    );
-  }
-
-  configuredCustomProviders(): Set<string> {
-    let providers: Record<string, ProviderSpec>;
-    try {
-      providers = this.customModelProviders();
-    } catch {
-      return new Set();
-    }
-    const stored = new Set(this.storedCustomProviderSource());
-    return new Set(
-      Object.entries(providers)
-        .filter(
-          ([name, provider]) =>
-            stored.has(name) || Boolean(this.env[provider.env_key]),
-        )
-        .map(([name]) => name),
-    );
-  }
-
-  authedModelProviders(): Set<string> {
-    try {
-      const custom = this.customModelProviders();
-      return new Set(
-        [
-          ...this.authenticatedProviderSource(),
-          ...this.configuredCustomProviders(),
-        ].filter(
-          (provider) =>
-            PI_BUILTIN_PROVIDERS.has(provider) ||
-            Object.hasOwn(custom, provider),
-        ),
-      );
-    } catch {
-      return new Set();
-    }
-  }
-
-  authedChatModels(): ModelOption[] {
-    const authed = this.authedModelProviders();
-    return this.chatModels().filter(
-      (option) =>
-        authed.has(this.providerOf(option.id)) ||
-        this.isFileProviderModel(option.id),
-    );
-  }
-
-  chatModel(model?: string | null): ModelOption {
-    const selected = model
-      ? this.canonicalModelId(model)
-      : this.defaultChatModel();
-    const option = this.chatModels().find(
-      (candidate) => candidate.id === selected,
-    );
-    if (!option) throw valueError(`unsupported chat model: ${selected}`);
-    return option;
-  }
-
-  chatSettings(model?: string | null): [string, string] {
-    if (model === undefined || model === null) {
-      const selected = this.defaultChatModel();
-      return [selected, String(this.defaultEffort(selected))];
-    }
-    const canonical = this.canonicalModelId(model);
-    try {
-      return [canonical, this.chatModel(canonical).effort];
-    } catch (error) {
-      if (!(error instanceof Error) || error.name !== "ValueError") throw error;
-      return [canonical, String(this.defaultEffort(canonical))];
-    }
-  }
-
-  private defaultLadder(authed: Set<string>): Ladder {
-    const anthro: [string, Thinking][] = [
-      ["anthropic/claude-haiku-5-5", "medium"],
-      ["anthropic/claude-haiku-5-5", "xhigh"],
-      ["anthropic/claude-sonnet-5-5", "medium"],
-      ["anthropic/claude-opus-5-5", "medium"],
-      ["anthropic/claude-fable-5-1", "medium"],
-    ];
-    const codex: [string, Thinking][] = [
-      ["openai-codex/gpt-6-luna", "xhigh"],
-      ["openai-codex/gpt-5.6-terra", "xhigh"],
-      ["openai-codex/gpt-6.1-sol", "medium"],
-      ["openai-codex/gpt-6.1-sol", "xhigh"],
-      ["openai-codex/gpt-6-astra", "high"],
-    ];
-    const mixed: [string, Thinking][] = [
-      ["anthropic/claude-haiku-5-5", "medium"],
-      ["openai-codex/gpt-5.6-terra", "xhigh"],
-      ["openai-codex/gpt-6.1-sol", "high"],
-      ["anthropic/claude-opus-5-5", "medium"],
-      ["anthropic/claude-fable-5-1", "medium"],
-    ];
-    let entries: [string, Thinking][];
-    if (authed.has("anthropic") && authed.has("openai-codex")) entries = mixed;
-    else if (authed.has("anthropic")) entries = anthro;
-    else if (authed.has("openai-codex")) entries = codex;
-    else {
-      let catalog: string[];
-      try {
-        catalog = this.chatModels()
-          .filter((option) => authed.has(this.providerOf(option.id)))
-          .map((option) => option.id);
-      } catch {
-        catalog = [];
-      }
-      const best =
-        catalog[0] ??
-        (this.isFileProviderModel(this.CHAT_MODEL)
-          ? DEFAULT_CHAT_MODEL
-          : this.CHAT_MODEL);
-      entries = [
-        [best, "low"],
-        [best, "medium"],
-        [best, "high"],
-        [best, "max"],
-        [best, "xhigh"],
-      ];
-    }
-    return Object.fromEntries(
-      entries.map(([model, reasoning], index) => [
-        index + 1,
-        { model, reasoning },
-      ]),
-    );
-  }
-
-  /** Listed models, or null before the server first lists Pi's models. */
-  private catalogModelIds(): Set<string> | null {
-    if (this.catalogInputs().pi === null) return null;
-    return this.catalogOptions().ids;
-  }
-
-  private readEffortLevelsDoc(): Dict {
-    const data = this.settingsJson(this.paths.EFFORT_LEVELS_FILE);
-    return isObject(data) ? data : {};
-  }
-
-  effortLevels(): Record<number, { model: string; reasoning: string }> {
-    return Object.fromEntries(
-      Object.entries(this.resolvedEffortLevels()).map(([level, entry]) => [
-        level,
-        { ...entry },
-      ]),
-    );
-  }
-
-  private resolvedEffortLevels(): Ladder {
-    const raw = this.settingsJson(this.paths.EFFORT_LEVELS_FILE);
-    const catalog = this.catalogInputs();
-    let authed: Set<string>;
-    try {
-      authed = this.authedModelProviders();
-    } catch {
-      authed = new Set();
-    }
-    const providers = [...authed].sort().join("\0");
-    const cached = this.effortLevelsCache;
-    if (
-      cached &&
-      cached.document === raw &&
-      cached.catalog === catalog &&
-      cached.providers === providers
-    )
-      return cached.levels;
-    const defaults = this.defaultLadder(authed);
-    const document = isObject(raw) ? raw : {};
-    const rawLevels = isObject(document.levels) ? document.levels : {};
-    const resolved: Ladder = {};
-    for (let level = EFFORT_MIN_LEVEL; level <= EFFORT_MAX_LEVEL; level += 1) {
-      const defaultEntry = defaults[level]!;
-      let model = defaultEntry.model;
-      let reasoning = defaultEntry.reasoning;
-      const entry = rawLevels[String(level)];
-      if (isObject(entry)) {
-        let candidate = entry.model;
-        if (typeof candidate === "string")
-          candidate = this.canonicalModelId(candidate);
-        // Invariant: A stored id Pi no longer lists stays as stored: its turns
-        // fail with unlistedModelSentence rather than quietly running another
-        // model.
-        if (typeof candidate === "string" && validModelScopeKey(candidate))
-          model = candidate;
-        try {
-          reasoning = parseThinking(entry.reasoning ?? reasoning);
-        } catch {
-          reasoning = defaultEntry.reasoning;
-        }
-      }
-      resolved[level] = { model, reasoning };
-    }
-    this.effortLevelsCache = {
-      document: raw,
-      catalog,
-      providers,
-      levels: resolved,
-    };
-    return resolved;
-  }
-
-  defaultEffortLevel(): number {
-    const value = this.readEffortLevelsDoc().default_level;
-    return typeof value === "number" &&
-      Number.isInteger(value) &&
-      value >= 1 &&
-      value <= 5
-      ? value
-      : DEFAULT_EFFORT_LEVEL;
-  }
-
-  resolveEffortLevel(level: unknown): [string, string] {
-    if (
-      typeof level !== "number" ||
-      !Number.isInteger(level) ||
-      level < 1 ||
-      level > 5
-    ) {
-      throw valueError(
-        `effort level must be 1-5, got ${this.pythonRepr(level)}`,
-      );
-    }
-    const resolved = this.resolvedEffortLevels()[level]!;
-    return [resolved.model, resolved.reasoning];
-  }
-
-  private pythonRepr(value: unknown): string {
-    if (typeof value === "string") return `'${value}'`;
-    if (value === undefined || value === null) return "None";
-    if (value === true) return "True";
-    if (value === false) return "False";
-    return String(value);
-  }
-
-  private thinkingOrNone(value: unknown): Thinking | null {
-    if (typeof value !== "string") return null;
-    try {
-      return parseThinking(value);
-    } catch {
-      return null;
-    }
-  }
-
-  private firstLadderLevel(
-    levels: Record<number, { model: string; reasoning: string }>,
-    match: (entry: { model: string; reasoning: string }) => boolean,
-  ): number | null {
-    for (let level = EFFORT_MIN_LEVEL; level <= EFFORT_MAX_LEVEL; level += 1)
-      if (match(levels[level]!)) return level;
-    return null;
-  }
-
-  ladderHome(
-    model: unknown,
-    reasoning: unknown = null,
-  ): [number, string, string] | null {
-    if (typeof model !== "string") return null;
-    const canonical = this.canonicalModelId(model);
-    const level = this.nearestEffortLevel(canonical, reasoning);
-    const [resolvedModel, resolvedReasoning] = this.resolveEffortLevel(level);
-    return resolvedModel === canonical
-      ? [level, resolvedModel, resolvedReasoning]
-      : null;
-  }
-
-  nearestEffortLevel(model: unknown = null, reasoning: unknown = null): number {
-    const levels = this.effortLevels();
-    const want = this.thinkingOrNone(reasoning);
-    if (typeof model === "string") {
-      const canonical = this.canonicalModelId(model);
-      if (want !== null) {
-        const match = this.firstLadderLevel(
-          levels,
-          (entry) => entry.model === canonical && entry.reasoning === want,
-        );
-        if (match !== null) return match;
-      }
-      const exact = this.firstLadderLevel(
-        levels,
-        (entry) => entry.model === canonical,
-      );
-      if (exact !== null) return exact;
-      if (want !== null) {
-        const provider = this.providerOf(canonical);
-        const match = this.firstLadderLevel(
-          levels,
-          (entry) =>
-            this.providerOf(entry.model) === provider &&
-            entry.reasoning === want,
-        );
-        if (match !== null) return match;
-      }
-    } else if (want !== null) {
-      const match = this.firstLadderLevel(
-        levels,
-        (entry) => entry.reasoning === want,
-      );
-      if (match !== null) return match;
-    }
-    return this.defaultEffortLevel();
-  }
-
-  validateEffortLevels(value: unknown): Dict {
-    if (!isObject(value))
-      throw valueError(
-        "effort levels must map levels 1-5 to {model, reasoning}",
-      );
-    if (!isObject(value.levels))
-      throw valueError("effort levels require a 'levels' map for levels 1-5");
-    const ids = this.catalogModelIds();
-    const stored = this.effortLevels();
-    const levels: Record<string, { model: string; reasoning: string }> = {};
-    for (let level = EFFORT_MIN_LEVEL; level <= EFFORT_MAX_LEVEL; level += 1) {
-      const entry = value.levels[String(level)];
-      if (!isObject(entry))
-        throw valueError(`effort level ${level} needs {model, reasoning}`);
-      const model =
-        typeof entry.model === "string"
-          ? this.canonicalModelId(entry.model)
-          : entry.model;
-      if (
-        typeof model !== "string" ||
-        !validModelScopeKey(model) ||
-        (ids !== null && !ids.has(model) && stored[level]!.model !== model)
-      )
-        throw valueError(
-          `unsupported model for effort level ${level}: ${this.pythonRepr(model)}`,
-        );
-      let reasoning: Thinking;
-      try {
-        reasoning = parseThinking(entry.reasoning);
-      } catch {
-        throw valueError(
-          `unsupported reasoning for effort level ${level}: ${this.pythonRepr(entry.reasoning)}`,
-        );
-      }
-      levels[String(level)] = { model, reasoning };
-    }
-    const defaultLevel =
-      value.default_level === undefined
-        ? DEFAULT_EFFORT_LEVEL
-        : value.default_level;
-    if (
-      typeof defaultLevel !== "number" ||
-      !Number.isInteger(defaultLevel) ||
-      defaultLevel < 1 ||
-      defaultLevel > 5
-    )
-      throw valueError("default_level must be 1-5");
-    return {
-      version: EFFORT_LEVELS_VERSION,
-      default_level: defaultLevel,
-      levels,
-    };
-  }
-
-  async setEffortLevels(value: unknown): Promise<Dict> {
-    const resolved = this.validateEffortLevels(value);
-    await this.writePrivateJson(
-      this.paths.EFFORT_LEVELS_FILE,
-      this.sortKeysRecursive(resolved),
-      false,
-    );
-    return resolved;
-  }
-
-  /** Update one ladder entry against the latest committed Settings. */
-  async setEffortLevel(
-    level: unknown,
-    model: unknown,
-    reasoning: unknown,
-  ): Promise<Dict> {
-    if (
-      typeof level !== "number" ||
-      !Number.isInteger(level) ||
-      level < EFFORT_MIN_LEVEL ||
-      level > EFFORT_MAX_LEVEL
-    )
-      throw valueError("level must be 1-5");
-    return this.settingsFiles.write(this.paths.EFFORT_LEVELS_FILE, () => {
-      const value = this.validateEffortLevels({
-        default_level: this.defaultEffortLevel(),
-        levels: {
-          ...this.effortLevels(),
-          [String(level)]: { model, reasoning },
-        },
-      });
-      return { text: pythonJson(this.sortKeysRecursive(value), false), value };
-    });
-  }
-
-  private sortKeysRecursive(value: unknown): unknown {
-    if (Array.isArray(value))
-      return value.map((entry) => this.sortKeysRecursive(entry));
-    if (!isObject(value)) return value;
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, this.sortKeysRecursive(value[key])]),
-    );
-  }
-
-  availableModelsSnapshot(): Dict {
-    let authed: Set<string>;
-    try {
-      authed = this.authedModelProviders();
-    } catch {
-      authed = new Set();
-    }
-    let catalog: ModelOption[];
-    try {
-      catalog = this.chatModels();
-    } catch {
-      catalog = [];
-    }
-    const providers = Object.create(null) as Record<
-      string,
-      { authed: boolean; models: string[] }
-    >;
-    for (const option of catalog) {
-      const provider = this.providerOf(option.id);
-      if (!Object.hasOwn(providers, provider))
-        providers[provider] = { authed: authed.has(provider), models: [] };
-      providers[provider]!.models.push(option.id);
-    }
-    return { version: AVAILABLE_MODELS_VERSION, providers };
-  }
-
-  async writeAvailableModels(): Promise<Dict> {
-    const snapshot = this.availableModelsSnapshot();
-    await this.writePrivateJson(
-      this.paths.AVAILABLE_MODELS_FILE,
-      snapshot,
-      true,
-    );
-    return snapshot;
-  }
-
-  private readTurnMarks(): Record<string, { model: string; reason: string }> {
-    const value = this.settingsFiles.json(this.paths.AVAILABLE_MODELS_FILE);
-    if (!isObject(value) || !isObject(value.turn_marks)) return {};
-    const out: Record<string, { model: string; reason: string }> = {};
-    for (const [level, mark] of Object.entries(value.turn_marks)) {
-      if (!/^[1-5]$/u.test(level) || !isObject(mark)) continue;
-      if (typeof mark.model === "string" && typeof mark.reason === "string")
-        out[level] = {
-          model: this.canonicalModelId(mark.model),
-          reason: mark.reason,
-        };
-    }
-    return out;
-  }
-
-  async noteLevelTurnFailure(
-    level: unknown,
-    reason: unknown,
-    expectedModel?: string,
-  ): Promise<void> {
-    if (
-      typeof level !== "number" ||
-      !Number.isInteger(level) ||
-      level < 1 ||
-      level > 5 ||
-      typeof reason !== "string" ||
-      !reason
-    )
-      return;
-    const model = this.effortLevels()[level]!.model;
-    if (expectedModel !== undefined && expectedModel !== model) return;
-    await this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, () => {
-      const marks = this.readTurnMarks();
-      marks[String(level)] = {
-        model,
-        reason: Array.from(reason).slice(0, 300).join(""),
-      };
-      return { ...this.availableModelsSnapshot(), turn_marks: marks };
-    });
-  }
-
-  async noteLevelTurnSuccess(
-    level: unknown,
-    expectedModel?: string,
-  ): Promise<void> {
-    if (
-      typeof level !== "number" ||
-      !Number.isInteger(level) ||
-      level < 1 ||
-      level > 5
-    )
-      return;
-    await this.writePrivateJson(this.paths.AVAILABLE_MODELS_FILE, () => {
-      const marks = this.readTurnMarks();
-      if (
-        !Object.hasOwn(marks, String(level)) ||
-        (expectedModel !== undefined &&
-          marks[String(level)]?.model !== expectedModel)
-      )
-        return;
-      delete marks[String(level)];
-      return { ...this.availableModelsSnapshot(), turn_marks: marks };
-    });
-  }
-
-  effortLevelReachability(): Record<
-    number,
-    { reachable: boolean; model: string; reasoning: string; reason: string }
-  > {
-    let authed: Set<string>;
-    try {
-      authed = this.authedModelProviders();
-    } catch {
-      authed = new Set();
-    }
-    const ids = this.catalogModelIds();
-    const marks = this.readTurnMarks();
-    const out: Record<
-      number,
-      { reachable: boolean; model: string; reasoning: string; reason: string }
-    > = {};
-    for (const [levelKey, entry] of Object.entries(this.effortLevels())) {
-      const level = Number(levelKey);
-      const model = entry.model;
-      let reachable: boolean;
-      let reason: string;
-      if (ids !== null && !ids.has(model)) {
-        reason = `level ${level} model ${model} is not in Pi's model list`;
-        reachable = false;
-      } else if (
-        !authed.has(this.providerOf(model)) &&
-        !this.isFileProviderModel(model)
-      ) {
-        reason = `level ${level} model ${model} needs provider '${this.providerOf(model)}', which is not logged in`;
-        reachable = false;
-      } else if (marks[String(level)]?.model === model) {
-        reason = `level ${level} model ${model} failed on the last turn: ${marks[String(level)]!.reason}`;
-        reachable = false;
-      } else {
-        reason = "";
-        reachable = true;
-      }
-      out[level] = { reachable, model, reasoning: entry.reasoning, reason };
-    }
-    return out;
-  }
-
-  private writePrivateJson(
-    path: string,
-    value: unknown | (() => unknown),
-    sort = true,
-  ): Promise<void> {
-    return this.settingsFiles.write<void>(path, () => {
-      const next = typeof value === "function" ? value() : value;
-      return {
-        value: undefined,
-        ...(next === undefined ? {} : { text: pythonJson(next, sort) }),
-      };
-    });
   }
 }
 

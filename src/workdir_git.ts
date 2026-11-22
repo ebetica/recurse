@@ -1,17 +1,14 @@
 // Bounded async workdir Git/diff queries; lifecycle stays in tools/worktree.
-// Drain stdout fully, retaining limit+1; timeout kills child without blocking.
 // Fresh summaries; default and HEAD include separately capped untracked names.
-// Scrub Git env; metadata caches belong to one WorkdirGit instance.
-import { lstat, readFile, readlink, stat } from "node:fs/promises";
+// Metadata caches belong to one WorkdirGit instance.
+import { lstat, readFile, stat } from "node:fs/promises";
 import { open } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, join, resolve } from "node:path";
-import { isolatedSubprocessEnvironment } from "./local_roots";
-import * as startupMetrics from "./observability/startup_metrics";
-import { timed } from "./observability/request_timing";
-import { slowSpan } from "./observability/slow-span";
+import { isAbsolute, join, resolve } from "node:path";
+import { gitEnv, gitText, runBounded, type GitText } from "./git";
 import { prIdentity } from "./pull_request";
 import { pullRequestFiles } from "./pull_request/index";
+import { pyResolve } from "./utils";
 import { selectedWork, type SelectedWork } from "./workdir_git_work";
 
 // Python str.isspace() code points (str.strip() and unicode \s).
@@ -34,28 +31,6 @@ interface WorkdirGitInputs {
   now?: () => number;
   /** Log one event, e.g. each `gh` call and why it ran. */
   log?: (event: string, fields: Record<string, unknown>) => void;
-}
-
-/** Scrubbed subprocess environment for Git and its credential helper. */
-export function gitEnv(environ: Env): Record<string, string> {
-  const env = isolatedSubprocessEnvironment(environ);
-  delete env.RECURSE_DATA_DIR_LOCK_FD;
-  if (env.GITHUB_TOKEN) env.GH_TOKEN ??= env.GITHUB_TOKEN;
-  return env;
-}
-
-export function safeGitEnv(environ: Env): Record<string, string> {
-  const env = gitEnv(environ);
-  for (const key of Object.keys(env))
-    if (key.startsWith("GIT_")) delete env[key];
-  Object.assign(env, {
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_TERMINAL_PROMPT: "0",
-  });
-  return env;
 }
 
 export const DIFF_REQUEST_TIMEOUT_MS = 10_000;
@@ -117,52 +92,6 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
-/** Python `Path.resolve()` (non-strict `os.path.realpath`). */
-export async function pyResolve(
-  path: string,
-  cwd = process.cwd(),
-): Promise<string> {
-  const seen = new Map<string, string | null>();
-  async function join1(base: string, rest: string): Promise<string> {
-    let cur = isAbsolute(rest) ? "/" : base;
-    for (const name of rest.split("/")) {
-      if (!name || name === ".") continue;
-      if (name === "..") {
-        cur = dirname(cur);
-        continue;
-      }
-      const next = cur === "/" ? `/${name}` : `${cur}/${name}`;
-      if (seen.has(next)) {
-        const known = seen.get(next);
-        cur = known ?? next;
-        continue;
-      }
-      let target: string;
-      try {
-        if (!(await lstat(next)).isSymbolicLink()) {
-          cur = next;
-          continue;
-        }
-        target = await readlink(next);
-      } catch {
-        cur = next;
-        continue;
-      }
-      seen.set(next, null);
-      cur = await join1(cur, target);
-      seen.set(next, cur);
-    }
-    return cur;
-  }
-  return join1(resolve(cwd), path);
-}
-
-interface GitText {
-  text: string | null;
-  truncated: boolean;
-  code: number;
-}
-
 /** Git -z emits numstat records, then stat\0, then the patch. */
 function diffSections(result: GitText): {
   num: GitText;
@@ -207,86 +136,6 @@ function diffSections(result: GitText): {
       result.truncated,
     ),
   };
-}
-
-/** Run one command with bounded kept stdout and optional stdin bytes. */
-export async function runBounded(
-  argv: string[],
-  cwd: string,
-  env: Record<string, string>,
-  limit: number,
-  timeout: number,
-  signal?: AbortSignal,
-  stdin?: Uint8Array,
-): Promise<{ out: Uint8Array; truncated: boolean; code: number } | null> {
-  if (signal?.aborted) return null;
-  let proc: import("bun").Subprocess<"ignore", "pipe", "ignore">;
-  try {
-    const github = argv[0] === "gh";
-    const found = slowSpan(
-      github ? "gh_executable_lookup" : "git_executable_lookup",
-      undefined,
-      () => Bun.which(argv[0]!, { PATH: env.PATH ?? "" }),
-    );
-    if (found === null) return null;
-    proc = slowSpan(
-      github ? "workdir_gh_spawn" : "workdir_git_spawn",
-      undefined,
-      () =>
-        Bun.spawn([found, ...argv.slice(1)], {
-          cwd,
-          env,
-          stdin: stdin ?? "ignore",
-          stdout: "pipe",
-          stderr: "ignore",
-        }),
-    );
-  } catch {
-    return null;
-  }
-  let timedOut = false;
-  const timer = setTimeout(() => {
-    timedOut = true;
-    proc.kill("SIGKILL");
-  }, timeout * 1000);
-  const abort = (): void => {
-    timedOut = true;
-    proc.kill("SIGKILL");
-  };
-  signal?.addEventListener("abort", abort, { once: true });
-  const kept: Uint8Array[] = [];
-  let size = 0;
-  let total = 0;
-  try {
-    const reader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.length;
-      if (size <= limit) {
-        kept.push(value);
-        size += value.length;
-      }
-    }
-    const code = await proc.exited;
-    if (timedOut) return null;
-    const all = new Uint8Array(size);
-    let at = 0;
-    for (const chunk of kept) {
-      all.set(chunk, at);
-      at += chunk.length;
-    }
-    return {
-      out: all.subarray(0, limit),
-      truncated: total > limit,
-      code,
-    };
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", abort);
-  }
 }
 
 const decoder = new TextDecoder("utf-8");
@@ -466,7 +315,6 @@ async function readBoundedJsonObject(
 export class WorkdirGit {
   private readonly inputs: WorkdirGitInputs;
   private readonly now: () => number;
-  private defaultBranchValue: string | null = null;
   // At most eight 1 MiB patches; concurrent file opens share the same fetch.
   private readonly prPatches = new Map<
     string,
@@ -523,56 +371,14 @@ export class WorkdirGit {
     this.now = inputs.now ?? (() => performance.now() / 1000);
   }
 
-  /** git_env(): a fresh scrubbed copy of the process environment. */
-  gitEnv(): Record<string, string> {
-    return gitEnv(this.inputs.env);
-  }
-
-  private async gitRun(
-    args: string[],
-    cwd: string,
-    timeout = 30.0,
-  ): Promise<{ stdout: string; code: number } | null> {
-    startupMetrics.count("git_subprocesses");
-    const r = await timed(`git.${args[0]}`, () =>
-      runBounded(
-        ["git", "--no-replace-objects", ...args],
-        cwd,
-        safeGitEnv(this.inputs.env),
-        Number.MAX_SAFE_INTEGER,
-        timeout,
-      ),
-    );
-    if (r === null) return null;
-    const stdout = decoder.decode(r.out).replace(/\r\n?/gu, "\n");
-    return { stdout, code: r.code };
-  }
-
-  private async gitText(
+  private gitText(
     args: string[],
     wt: string,
     limit: number,
     timeout = DIFF_TIMEOUT,
     signal?: AbortSignal,
   ): Promise<GitText> {
-    startupMetrics.count("git_subprocesses");
-    if (args[0] === "diff") startupMetrics.count("git_diff_subprocesses");
-    const r = await timed(`git.${args[0]}`, () =>
-      runBounded(
-        ["git", "--no-replace-objects", "--no-optional-locks", ...args],
-        wt,
-        safeGitEnv(this.inputs.env),
-        limit,
-        timeout,
-        signal,
-      ),
-    );
-    if (r === null) return { text: null, truncated: true, code: 1 };
-    return {
-      text: decoder.decode(r.out),
-      truncated: r.truncated,
-      code: r.code,
-    };
+    return gitText(this.inputs.env, args, wt, limit, timeout, signal);
   }
 
   private isLocalSrc(): Promise<boolean> {
@@ -596,45 +402,17 @@ export class WorkdirGit {
   async cloneTargetMismatch(): Promise<boolean> {
     if (await this.isLocalSrc()) return false;
     if (!(await exists(join(this.inputs.repoDir, ".git")))) return false;
-    const current = await this.gitRun(
+    const current = await this.gitText(
       ["remote", "get-url", "origin"],
       this.inputs.repoDir,
+      4096,
+      30.0,
     );
-    if (current === null || current.code !== 0) return false;
-    return pyStrip(current.stdout) !== this.inputs.repoUrl;
-  }
-
-  /** origin/HEAD's branch, else "main"; cached once resolved. */
-  async defaultBranch(): Promise<string> {
-    if (this.defaultBranchValue === null && (await this.ready())) {
-      if (await this.isLocalSrc()) {
-        this.defaultBranchValue = removePrefix(
-          await this.inplaceBase(this.inputs.repoUrl),
-          "origin/",
-        );
-      } else {
-        const r = await this.gitRun(
-          ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-          this.inputs.repoDir,
-        );
-        this.defaultBranchValue =
-          r !== null && r.code === 0 && pyStrip(r.stdout)
-            ? removePrefix(pyStrip(r.stdout), "origin/")
-            : "main";
-      }
-    }
-    return this.defaultBranchValue || "main";
-  }
-
-  private async inplaceBase(src: string): Promise<string> {
-    let r = await this.gitRun(
-      ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-      src,
+    if (current.text === null || current.code !== 0) return false;
+    return (
+      current.truncated ||
+      pyStrip(current.text.replace(/\r\n?/gu, "\n")) !== this.inputs.repoUrl
     );
-    if (r !== null && r.code === 0 && pyStrip(r.stdout))
-      return pyStrip(r.stdout);
-    r = await this.gitRun(["symbolic-ref", "--short", "HEAD"], src);
-    return (r !== null ? pyStrip(r.stdout) : "") || "HEAD";
   }
 
   /** Directory a conversation spawned without an explicit workdir records. */
@@ -1051,7 +829,7 @@ export class WorkdirGit {
     timeout: number,
     queued: number,
   ): ReturnType<typeof runBounded> {
-    const env = this.gitEnv();
+    const env = gitEnv(this.inputs.env);
     env.GH_PAGER ??= "cat";
     env.NO_COLOR ??= "1";
     const started = this.now();
@@ -1628,10 +1406,6 @@ export class WorkdirGit {
     }
     return { branches, commits: deduped, tags };
   }
-}
-
-function removePrefix(text: string, prefix: string): string {
-  return text.startsWith(prefix) ? text.slice(prefix.length) : text;
 }
 
 /** `str(Path(p))`: collapse repeated and trailing slashes and "." parts. */

@@ -271,7 +271,7 @@ test("recorded active branch preserves model context, /view rows, settings and u
     };
     const pi = new ViewEntry(new ConversationView("parity", ""));
     const batch = await readBatch(inputs, pi.feed);
-    applyBatch(pi, pi.instanceId, batch);
+    applyBatch(pi, pi.rows.instance_id, batch);
     const rows = await new DurableRows("parity").page(
       conversation,
       context,
@@ -537,7 +537,7 @@ for (const [name, results, counts, calls] of [
         maxSessionBytes: 1 << 30,
       };
       const pi = new ViewEntry(new ConversationView(cid, ""));
-      applyBatch(pi, pi.instanceId, await readBatch(inputs, pi.feed));
+      applyBatch(pi, pi.rows.instance_id, await readBatch(inputs, pi.feed));
       const rows = await new DurableRows(cid).page(
         conversation,
         context,

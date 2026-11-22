@@ -93,7 +93,7 @@ export function createAgents(instance: Instance, { rootAgentId }: Storage) {
           }
         : faux.provider,
     );
-    agents.set(agent, { model: `${agent}/faux-1`, faux });
+    agents.set(agent, { model: `${agent}/${faux.getModel().id}`, faux });
     return faux;
   }
   const durableOrdinary = fauxProvider({

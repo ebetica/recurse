@@ -8,7 +8,9 @@ import type { Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   LOGIN,
+  addServerCookie,
   ROOT,
+  focusComposer,
   startServer,
   stopServer,
   runBrowserTests,
@@ -99,22 +101,7 @@ export const tests: BrowserTest[] = [
     let legacy: Awaited<ReturnType<typeof startServer>> | undefined;
     let legacySource: string | undefined;
     try {
-      const login = await fetch(remote.base + "login", {
-        method: "POST",
-        redirect: "manual",
-        body: new URLSearchParams({ password: LOGIN }),
-      });
-      expect(login.status).toBe(303);
-      await remoteContext.addCookies([
-        {
-          name: "chat_auth",
-          value: login.headers
-            .get("set-cookie")!
-            .split(";")[0]!
-            .slice("chat_auth=".length),
-          url: remote.base,
-        },
-      ]);
+      await addServerCookie(remoteContext, remote);
       await browserExpect
         .poll(async () =>
           (
@@ -162,12 +149,7 @@ export const tests: BrowserTest[] = [
             ).status,
         )
         .toBe("idle");
-      const tree = await (
-        await remoteContext.request.get(remote.base + "api/tree")
-      ).json();
-      const root = tree.find(
-        (node: { parent: string | null }) => node.parent === null,
-      ).id;
+      const root = remote.root;
       const files = await (
         await remoteContext.request.post(
           remote.base + "__browser-test/seed-files-pane",
@@ -252,7 +234,11 @@ export const tests: BrowserTest[] = [
       expect(remoteLabel).not.toBe(
         labelFor(homeLadder.models, homeLadder.levels["4"].model),
       );
+      const reason =
+        remoteReasoning.charAt(0).toUpperCase() + remoteReasoning.slice(1);
       const pickRemoteLevel4 = async (owner: "draft" | "conversation") => {
+        const saved = owner === "conversation";
+        const description = saved ? `${remoteLabel} · ${reason}` : remoteLabel;
         await browserExpect(page.locator("#model-row")).toHaveClass(/\bon\b/);
         await browserExpect(page.locator("#model-row")).not.toHaveAttribute(
           "aria-disabled",
@@ -260,26 +246,27 @@ export const tests: BrowserTest[] = [
         );
         const trigger = page.locator("#model-trigger");
         const range = page.locator("#effort-range");
+        if (saved) await focusComposer(page);
         await trigger.click();
         await range.focus();
-        for (let level = defaultLevel; level < 4; level++)
-          await page.keyboard.press("ArrowRight");
+        const current = Number(await range.inputValue());
+        for (let step = 0; step < Math.abs(4 - current); step++)
+          await range.press(current < 4 ? "ArrowRight" : "ArrowLeft");
         await browserExpect(range).toHaveValue("4");
         await browserExpect(range).toHaveAttribute(
           "aria-valuetext",
-          `Level 4: ${remoteLabel}`,
+          `Level 4: ${description}`,
         );
         await browserExpect(page.locator("#effort-model")).toHaveText(
-          remoteLabel,
+          saved ? `${remoteLabel} ${reason}` : remoteLabel,
         );
         await browserExpect(trigger.locator(".model-name")).toHaveText(
-          remoteLabel,
+          remoteLabel.replace(/^Claude /, ""),
         );
-        const pending =
-          owner === "conversation" ? "switches on your next message; " : "";
+        const pending = saved ? "switches on your next message; " : "";
         await browserExpect(trigger).toHaveAttribute(
           "aria-label",
-          `Level 4: ${remoteLabel}: ${pending}choose effort level`,
+          `Level 4: ${description}: ${pending}choose effort level`,
         );
       };
       const connected = await context.request.post(base + "api/backends", {
@@ -298,6 +285,43 @@ export const tests: BrowserTest[] = [
       const create = section.getByRole("button", {
         name: "New agent on Laptop",
       });
+      await create.click();
+      const effort = page.locator("#effort-range");
+      await browserExpect(effort).toHaveAttribute("max", "6");
+      await page.locator("#model-trigger").click();
+      await effort.press("End");
+      await page.locator("#input").fill("Reply only REMOTE_SIX_OK");
+      const ladderUrl = `${base}api/backends/Laptop/settings/effort-levels`;
+      const creationUrl = `${base}api/backends/Laptop/conversations`;
+      const firstRequest = page.waitForRequest(
+        (request) =>
+          request.url() === ladderUrl ||
+          (request.url() === creationUrl && request.method() === "POST"),
+      );
+      const atSix = page.waitForResponse(
+        (response) =>
+          response.url() === creationUrl &&
+          response.request().method() === "POST",
+      );
+      await page.locator("#send").click();
+      expect((await firstRequest).url()).toBe(ladderUrl);
+      const createdAtSix = await atSix;
+      expect(createdAtSix.ok()).toBe(true);
+      expect(createdAtSix.request().postDataJSON().level).toBe(6);
+      await browserExpect(
+        page.locator(".msg.assistant").filter({ hasText: "REMOTE_SIX_OK" }),
+      ).toBeVisible();
+      const sixthId = (await createdAtSix.json()).id;
+      expect(
+        (
+          await remoteContext.request.delete(
+            `${remote.base}api/conversations/${sixthId}`,
+          )
+        ).ok(),
+      ).toBe(true);
+      await browserExpect(
+        section.locator(`.agent[data-id="Laptop/${sixthId}"]`),
+      ).toHaveCount(0);
       for (const [size, width, height] of [
         ["desktop", 1280, 800],
         ["mobile", 390, 844],
@@ -363,6 +387,7 @@ export const tests: BrowserTest[] = [
                   backendLabel: "Laptop",
                   tags: ["project"],
                   creatorIndex: -1,
+                  level: 6,
                 },
               }),
             );
@@ -371,6 +396,7 @@ export const tests: BrowserTest[] = [
           await browserExpect(page.locator("#input")).toHaveValue(
             "Recovered remote draft",
           );
+          await browserExpect(page.locator("#effort-range")).toHaveValue("6");
         }
         const level = size === "desktop" ? 4 : remoteDefault;
         if (size === "desktop") await pickRemoteLevel4("draft");
@@ -729,6 +755,8 @@ export const tests: BrowserTest[] = [
             .url()
             .endsWith(`/api/backends/Laptop/conversations/${agent}/safety`),
         );
+        await focusComposer(page);
+        await page.locator("#model-trigger").click();
         await (
           off
             ? page.locator("#safety-btn")
@@ -820,6 +848,10 @@ export const tests: BrowserTest[] = [
       await pickRemoteLevel4("conversation");
       expect((await switched).ok()).toBe(true);
       await page.keyboard.press("Escape");
+      await browserExpect(page.locator("#model-trigger")).toHaveAttribute(
+        "aria-expanded",
+        "false",
+      );
       await page.locator("#input").fill("Reply only REMOTE_TEXT_OK");
       const sent = page.waitForResponse((response) =>
         response.url().endsWith(`/conversations/${writable.id}/deliver`),
@@ -1231,22 +1263,7 @@ export const tests: BrowserTest[] = [
         name: "Revoke access",
         exact: true,
       });
-      await revoke.scrollIntoViewIfNeeded();
-      expect(
-        await revoke.evaluate((button) => {
-          const box = button.getBoundingClientRect();
-          return [-21, 21].every((x) =>
-            [-21, 21].every((y) =>
-              button.contains(
-                button.ownerDocument.elementFromPoint(
-                  box.x + box.width / 2 + x,
-                  box.y + box.height / 2 + y,
-                ),
-              ),
-            ),
-          );
-        }),
-      ).toBe(true);
+      await expectHitCorners(revoke);
       const held: Route[] = [];
       let arrived = () => {};
       await remotePage.route(/\/api\/backend-keys(\/[^/]+)?$/, (route) => {

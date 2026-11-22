@@ -14,25 +14,15 @@ import {
   runBrowserTests,
   type BrowserTest,
   startNewAgent,
+  turn,
   waitForLayout,
 } from "./common";
 
-async function waitValue(
-  page: Page,
-  read: () => Promise<number> | number,
-  ok: (value: number) => boolean,
-  label: string,
-  seconds = 15,
-): Promise<void> {
-  const deadline = Date.now() + seconds * 1000;
-  let value = await read();
-  while (!ok(value) && Date.now() < deadline) {
-    // test-check-allow: T6 Deadline-bounded polling reads actual browser/request state rather than assuming it has settled.
-    await page.waitForTimeout(50);
-    value = await read();
-  }
-  expect(ok(value), `${label}: ${value}`).toBeTrue();
-}
+const commandPoll = (message: string, timeout = 15_000) => ({
+  message,
+  timeout,
+  intervals: [50],
+});
 async function mockConv(
   page: Page,
   base: string,
@@ -46,38 +36,11 @@ async function mockConv(
     parent,
     status: "idle",
     turns: [
-      {
-        turn_id: `${id}-turn`,
-        cursor: 0,
-        started_at: 1,
-        ended_at: 2,
-        open: false,
-        status: "idle",
-        partial: false,
-        segments: [
-          {
-            user: [
-              {
-                id: `${id}-user`,
-                kind: "user",
-                offset: 10,
-                role: "user",
-                content: `Ask ${id}`,
-                ts: 1,
-              },
-            ],
-            tools: [],
-            assistant: {
-              id: `${id}-assistant`,
-              kind: "assistant",
-              offset: 90,
-              role: "assistant",
-              content: `${title} thread body`,
-              usage: {},
-            },
-          },
-        ],
-      },
+      turn(`${id}-turn`, `Ask ${id}`, `${title} thread body`, {
+        includeRows: false,
+        rowIds: { user: `${id}-user`, assistant: `${id}-assistant` },
+        usage: {},
+      }),
     ],
   }));
 }
@@ -858,12 +821,12 @@ export const tests: BrowserTest[] = [
       await page.unroute(base + "api/tree");
       await page.reload({ waitUntil: "domcontentloaded" });
       const stale = page.locator(".msg", { hasText: "STALE CLEARED ROW" });
-      await waitValue(
-        page,
-        () => stale.count(),
-        (v) => v === 1,
-        `${name} stale row after external session replacement`,
-      );
+      await browserExpect
+        .poll(
+          () => stale.count(),
+          commandPoll(`${name} stale row after external session replacement`),
+        )
+        .toBe(1);
       expect(
         await page.locator('.msg.user .bubble a[download="stale.txt"]').count(),
       ).toBe(1);
@@ -962,12 +925,9 @@ export const tests: BrowserTest[] = [
       await finder.waitFor();
       expect(await composer.inputValue()).toBe("");
       const options = page.locator("#agent-menu .agent-option");
-      await waitValue(
-        page,
-        () => options.count(),
-        (v) => v === 2,
-        name,
-      );
+      await browserExpect
+        .poll(() => options.count(), commandPoll(name))
+        .toBe(2);
       expect(
         await page
           .locator("#agent-menu .agent-option-group-label")
@@ -1045,12 +1005,9 @@ export const tests: BrowserTest[] = [
       await afterEmpty.fulfill({
         json: { agents: [rows[1]], next_offset: null },
       });
-      await waitValue(
-        page,
-        () => options.count(),
-        (v) => v === 1,
-        `${name} query`,
-      );
+      await browserExpect
+        .poll(() => options.count(), commandPoll(`${name} query`))
+        .toBe(1);
       expect(queries.at(-1)).toBe("leaf");
       if (mobile) await options.first().tap();
       else await query.press("Enter");
@@ -1154,21 +1111,16 @@ export const tests: BrowserTest[] = [
           await other.click();
           await root.click();
           try {
-            await waitValue(
-              page,
-              () => staleRow(marker).count(),
-              (v) => v === 1,
-              label,
-              8,
-            );
+            await browserExpect
+              .poll(() => staleRow(marker).count(), commandPoll(label, 8_000))
+              .toBe(1);
             if (many)
-              await waitValue(
-                page,
-                () => page.locator(".msg").count(),
-                (v) => v >= 50,
-                `${label} (full snapshot)`,
-                8,
-              );
+              await browserExpect
+                .poll(
+                  () => page.locator(".msg").count(),
+                  commandPoll(`${label} (full snapshot)`, 8_000),
+                )
+                .toBeGreaterThanOrEqual(50);
             return marker;
           } catch {}
         }
@@ -1182,13 +1134,12 @@ export const tests: BrowserTest[] = [
     );
     viewMode = "abort";
     expect((await clear()).ok()).toBeTrue();
-    await waitValue(
-      page,
-      () => staleRow(bulk).count(),
-      (v) => v === 0,
-      "cleared rows gone",
-      8,
-    );
+    await browserExpect
+      .poll(
+        () => staleRow(bulk).count(),
+        commandPoll("cleared rows gone", 8_000),
+      )
+      .toBe(0);
     expect(await staleRow(bulk).count()).toBe(0);
     viewMode = "pass";
     const eventsResponse = page.waitForResponse(
@@ -1224,36 +1175,32 @@ export const tests: BrowserTest[] = [
     await page.evaluate(
       "document.querySelector('#scroll').scrollTop = document.querySelector('#scroll').scrollHeight",
     );
-    await waitValue(
-      page,
-      () => page.evaluate("document.querySelector('#scroll').scrollTop"),
-      (v) => v > 1000,
-      "scrolled to bottom",
-    );
+    await browserExpect
+      .poll(
+        () => page.evaluate("document.querySelector('#scroll').scrollTop"),
+        commandPoll("scrolled to bottom"),
+      )
+      .toBeGreaterThan(1000);
     await page.evaluate("document.querySelector('#scroll').scrollTop = 0");
-    await waitValue(
-      page,
-      () => page.evaluate("document.querySelector('#scroll').scrollTop"),
-      (v) => v < 300,
-      "scrolled to top",
-    );
-    await waitValue(
-      page,
-      () => stalled.length,
-      (v) => v > 0,
-      "held view read",
-    );
+    await browserExpect
+      .poll(
+        () => page.evaluate("document.querySelector('#scroll').scrollTop"),
+        commandPoll("scrolled to top"),
+      )
+      .toBeLessThan(300);
+    await browserExpect
+      .poll(() => stalled.length, commandPoll("held view read"))
+      .toBeGreaterThan(0);
     const oldPage = await (await page.request.get(viewUrl)).json();
     const predrop = [...stalled];
     expect(predrop.length).toBeGreaterThan(0);
     expect((await clear()).ok()).toBeTrue();
-    await waitValue(
-      page,
-      () => staleRow(race).count(),
-      (v) => v === 0,
-      "race cleared before stale response",
-      8,
-    );
+    await browserExpect
+      .poll(
+        () => staleRow(race).count(),
+        commandPoll("race cleared before stale response", 8_000),
+      )
+      .toBe(0);
     for (const route of predrop)
       await route.fulfill({ status: 200, json: oldPage });
     stalled.splice(0, predrop.length);

@@ -87,7 +87,12 @@ describe("text deltas", () => {
           files: "{}",
           maxSessionBytes: 1 << 20,
         },
-        { caughtUp: true, since, instance: view.instanceId, textDeltas: true },
+        {
+          caughtUp: true,
+          since,
+          instance: view.rows.instance_id,
+          textDeltas: true,
+        },
       ) as unknown as ViewPage;
     const textOf = (thread: RowThread | null | undefined) =>
       thread?.rows.find((row) => row.id === "reply")?.text;

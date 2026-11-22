@@ -4,6 +4,7 @@ import { expect as browserExpect } from "playwright/test";
 declare const getComputedStyle: any;
 import {
   captureErrors,
+  expectHitCorners,
   gotoRoot,
   mockConversation,
   waitForLayout,
@@ -94,23 +95,52 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
 
       thread.status = "idle";
       thread.active_run = null;
-      thread.rows = thinking.map((entry) =>
-        row(entry.id, entry.role, entry.text ?? "", entry),
-      );
+      thread.rows = [
+        ...thinking.map((entry) =>
+          row(entry.id, entry.role, entry.text ?? "", entry),
+        ),
+        row("terminal-thought", "assistant", "", {
+          thinking_title: "Checking the final result",
+          model_time_ms: 8000,
+        }),
+      ];
       await page.reload();
       await eye.click();
       expect(await series.count()).toBe(1);
-      expect(await page.locator(".turn-thinking").count()).toBe(0);
-      expect(
-        await page.locator(".turn-thinking-series-title").innerText(),
-      ).toBe("Checking the sample output");
+      const latest = page
+        .locator(".turn-thinking-toggle")
+        .filter({ hasText: "Checking the sample output" });
+      await browserExpect(latest).toHaveText(
+        "Thought for 7s · Checking the sample output",
+      );
+      const terminal = page
+        .locator(".turn-thinking-toggle")
+        .filter({ hasText: "Checking the final result" });
+      await browserExpect(terminal).toHaveText(
+        "Thought for 8s · Checking the final result",
+      );
+      const unreadable = page.getByRole("note", {
+        name: "Thought",
+        exact: true,
+      });
+      await browserExpect(unreadable).toHaveCount(0);
+      if (mobile) {
+        await expectHitCorners(latest);
+        await latest.tap();
+      } else {
+        await latest.press("Enter");
+      }
+      await browserExpect(latest).toHaveAttribute("aria-expanded", "true");
+      await browserExpect(series).toHaveAttribute("aria-expanded", "false");
+      await browserExpect(page.locator(".turn-tool")).toHaveCount(0);
       await series.click();
-      expect(await page.locator(".turn-thinking").count()).toBe(2);
+      await browserExpect(page.locator(".turn-thinking")).toHaveCount(4);
+      await browserExpect(unreadable).toBeVisible();
+      await browserExpect(terminal).toBeVisible();
+      await browserExpect(latest).toHaveAttribute("aria-expanded", "true");
       await series.click();
-      expect(await page.locator(".turn-thinking").count()).toBe(0);
-      expect(
-        await page.locator(".turn-thinking-series-title").innerText(),
-      ).toBe("Checking the sample output");
+      await browserExpect(page.locator(".turn-thinking")).toHaveCount(2);
+      await browserExpect(latest).toHaveAttribute("aria-expanded", "true");
       expect(await footer.count()).toBe(0);
       await series.click();
       expect(await page.locator(".turn-tool-name").allTextContents()).toEqual([
@@ -127,16 +157,18 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
         "sample-output",
       );
       expect(
-        await page.locator(".turn-thinking").evaluateAll((elements: any[]) =>
-          elements.map((element) => ({
-            heading: element
-              .querySelector(".turn-thinking-line")
-              .textContent.trim(),
-            nextTool:
-              element.nextElementSibling.querySelector(".turn-tool-name")
-                .textContent,
-          })),
-        ),
+        await page
+          .locator(".turn-series .turn-thinking")
+          .evaluateAll((elements: any[]) =>
+            elements.map((element) => ({
+              heading: element
+                .querySelector(".turn-thinking-line")
+                .textContent.trim(),
+              nextTool:
+                element.nextElementSibling.querySelector(".turn-tool-name")
+                  .textContent,
+            })),
+          ),
       ).toEqual([
         {
           heading: "Thought for 6s · Planning the sample task",
@@ -146,6 +178,7 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
           heading: "Thought for 7s · Checking the sample output",
           nextTool: "Search",
         },
+        { heading: "Thought for 10s", nextTool: "Update" },
       ]);
       thread.status = "running";
       thread.active_run = "live-run";
@@ -220,9 +253,10 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
         .toBe(liveThinkingText.split("\n").slice(1).join("\n"));
       expect(
         await liveSummary.evaluate(
-          (element) => element.scrollHeight <= element.clientHeight,
+          (element) =>
+            element.scrollHeight - element.clientHeight - element.scrollTop,
         ),
-      ).toBeTrue();
+      ).toBeLessThanOrEqual(1);
       await page.locator(".live-panel-box .live-thinking-copy").click();
       expect(await page.locator(".live-thinking-summary").count()).toBe(0);
       await page.locator(".activity-group-toggle").click();

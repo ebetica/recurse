@@ -9,7 +9,7 @@ const FOCUSABLE = [
   "[tabindex]:not([tabindex='-1'])",
 ].join(",");
 
-function visibleFocusable(container: HTMLElement): HTMLElement[] {
+export function visibleFocusable(container: HTMLElement): HTMLElement[] {
   return [...container.querySelectorAll<HTMLElement>(FOCUSABLE)].filter(
     (element) =>
       !element.hidden &&

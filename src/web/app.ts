@@ -56,7 +56,11 @@ import { registerSidebarScriptRoutes } from "./sidebar_script";
 import { agentContext } from "../agents/runtime";
 import { registerApiV1 } from "./api_v1/routes";
 import { compactConversation } from "./compact";
-import { CreateSlots, registerConversationRoutes } from "./conversations";
+import { registerConversationRoutes } from "./conversations";
+import {
+  CreateSlots,
+  registerServiceConversationRoutes,
+} from "./service_conversations";
 import {
   finishArtifactDeletion,
   registerFileRoutes,
@@ -84,7 +88,7 @@ import { registerBackendRoutes } from "./backends";
 import { registerBackendProxy } from "./backend_proxy";
 import { registerRelayRoutes } from "./relay";
 import { RelayQueue } from "./relay_queue";
-import { listPiModels, PiModelUpdater } from "../pi_model_list";
+import { listPiModels, PiModelUpdater } from "../models";
 import { displayCommand } from "../pi_bg_shell";
 import {
   FrontendCache,
@@ -184,7 +188,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
   );
   const muse = new MuseAuth({
     store: instance.oauth,
-    config,
+    models: config.models,
     env: options.env,
     userAgent: USER_AGENT,
     timeoutMs: HTTP_TIMEOUT_MS,
@@ -194,13 +198,22 @@ export async function buildApp(options: AppOptions): Promise<App> {
     codex: instance.codex,
     muse,
     openrouter: instance.openrouter,
-    customProviderNames: () => Object.keys(config.customModelProviders()),
+    customProviderNames: () =>
+      Object.keys(config.models.customModelProviders()),
     storedApiKey: (provider) => instance.oauth.storedApiKey(provider),
   });
   await snapshot.refresh();
 
   const web = logger("web", sink);
-  const { lease, conversations, lifecycle, nodes, reads, delivery } = instance;
+  const {
+    lease,
+    conversations,
+    lifecycle,
+    nodes,
+    reads,
+    delivery,
+    serviceBindings,
+  } = instance;
   const mutate: Mutate = (work, rollback) =>
     lease.mutateExternalStorage(work, [], rollback ? { rollback } : {});
 
@@ -480,12 +493,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
   const modelUpdates = new PiModelUpdater({
     nativeRequest: (request, opts) =>
       instance.oauth.nativeRequest(request, opts),
-    config,
+    catalog: config.models,
     warn: warnModelList,
     spawn: (name, work) =>
       instance.tasks.spawn(name, work, instance.shutdownController.signal),
     afterUpdate: async () => {
-      await config.writeAvailableModels();
+      await config.levels.writeAvailableModels();
     },
   });
   const send = process.send?.bind(process);
@@ -550,14 +563,48 @@ export async function buildApp(options: AppOptions): Promise<App> {
     promote: (cid) => instance.durable.promotions.request(cid),
     log: (event, fields) => logEvent(web, INFO, event, { fields }),
   });
+  const conversationNodes = {
+    existing: (cid: string) => nodes.existing(cid),
+    node: (cid: string) => {
+      const node = nodes.node(cid);
+      return {
+        setSafety: (off: boolean) => node.setSafety(off),
+        renameTitle: (title: string, order: string) =>
+          node.renameTitle(title, order),
+        piStatus: () => durable.liveStatus(cid)[0],
+      };
+    },
+  };
+  const liveRunId = (cid: string) => durable.liveStatus(cid)[1];
+  registerServiceConversationRoutes(router, {
+    serviceCreateSlots: new CreateSlots(),
+    store: conversations,
+    lookupExternalKey: (principal, key) =>
+      serviceBindings.lookupExternalKey(principal, key),
+    serviceOwnedConversationCount: (principal) =>
+      serviceBindings.serviceOwnedConversationCount(principal),
+    bindServiceConversation: (principal, cid) =>
+      serviceBindings.bindServiceConversation(principal, cid),
+    bindExternalKey: (principal, key, cid) =>
+      serviceBindings.bindExternalKey(principal, key, cid),
+    rollbackServiceConversation: (conv) =>
+      conversations.rollbackServiceConversation(conv, serviceBindings),
+    mutateExternalStorage: mutate,
+    delivery,
+    reads,
+    create: {
+      createOrRejoinServiceConversation: (o) =>
+        instance.create.createOrRejoinServiceConversation(o),
+    },
+    nodes: conversationNodes,
+    liveRunId,
+  });
   const sendMessage = registerConversationRoutes(router, {
     requireActionReady,
-    serviceCreateSlots: new CreateSlots(),
     notifications: instance.notifications,
     log: web,
     monotonicMs: () => performance.now(),
     store: conversations,
-    mutateExternalStorage: mutate,
     delivery,
     reads,
     describeUpload: (collection, owner, aid) =>
@@ -570,8 +617,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
         requireActionReady();
         return instance.create.create(o);
       },
-      createOrRejoinServiceConversation: (o) =>
-        instance.create.createOrRejoinServiceConversation(o),
       setTakenOver: (cid, takenOver) =>
         instance.create.setTakenOver(cid, takenOver),
     },
@@ -581,24 +626,13 @@ export async function buildApp(options: AppOptions): Promise<App> {
     deliverStop: (cid, body) => deliverStop(stopDeps, cid, body),
     configActions: instance.configActions,
     compaction: instance.parked,
-    nodes: {
-      existing: (cid) => nodes.existing(cid),
-      node: (cid) => {
-        const node = nodes.node(cid);
-        return {
-          setSafety: (off) => node.setSafety(off),
-          renameTitle: (title, order) => node.renameTitle(title, order),
-
-          piStatus: () => durable.liveStatus(cid)[0],
-        };
-      },
-    },
-    liveRunId: (cid) => durable.liveStatus(cid)[1],
+    nodes: conversationNodes,
+    liveRunId,
     durable: instance.durable,
     drafts: instance.drafts,
     config: {
-      resolveEffortLevel: (level) => config.resolveEffortLevel(level),
-      isFileProviderModel: (model) => config.isFileProviderModel(model),
+      resolveEffortLevel: (level) => config.levels.resolveEffortLevel(level),
+      isFileProviderModel: (model) => config.models.isFileProviderModel(model),
       piBgShellEnabled: paths.PI_BG_SHELL_ENABLED,
     },
     agentTools: instance.agentTools,
@@ -675,7 +709,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
       loopbackToken,
       tailscaleLogin: paths.RECURSE_TAILSCALE_LOGIN,
       serviceOwns: async (principal, cid) =>
-        conversations.serviceOwnsConversation(principal, cid),
+        serviceBindings.serviceOwnsConversation(principal, cid),
       logger: web,
       remoteEventLabel: (authorization) =>
         connectedBackends.callbackLabel(authorization),
@@ -851,7 +885,9 @@ export async function buildApp(options: AppOptions): Promise<App> {
         );
     });
     track("serve-ready-chain", () =>
-      step("write_available_models", async () => config.writeAvailableModels()),
+      step("write_available_models", async () =>
+        config.levels.writeAvailableModels(),
+      ),
     );
     // Invariant: Local read of Pi's model list; never delays serving or a turn,
     // and a failure keeps the previous list (step logs its duration and
@@ -861,12 +897,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
         listPiModels({
           nativeRequest: (request, opts) =>
             instance.oauth.nativeRequest(request, opts),
-          config,
+          catalog: config.models,
           warn: warnModelList,
         }),
       );
       await step("write_available_models", async () =>
-        config.writeAvailableModels(),
+        config.levels.writeAvailableModels(),
       );
     });
     track("message-search-backfill", (signal) =>

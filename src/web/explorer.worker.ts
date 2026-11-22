@@ -14,7 +14,7 @@ import {
   statAt,
   unlinkAt,
 } from "../utils/dir_fd";
-import { runBounded, safeGitEnv } from "../workdir_git";
+import { runBounded, safeGitEnv } from "../git";
 import { loadPromptContextFiles } from "../agents/durable/prompt_resources";
 import { resolveRoots } from "../local_roots";
 import {

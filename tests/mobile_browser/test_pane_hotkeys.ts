@@ -2,6 +2,7 @@ import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import { mkdir, rename } from "node:fs/promises";
 import {
+  focusComposer,
   gotoRoot,
   postFixture,
   rootAgentId,
@@ -13,6 +14,279 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3553 The saved desktop layout appears before conversation or file responses.
+  async function test_saved_layout_is_ready_on_the_first_frame(browser, base) {
+    const { demo } = await postFixture(base, "seed-published-markdown");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    const target = `${base}#agent=${demo}`;
+    const file = page.getByRole("tab", { name: "report.md", exact: true });
+    await page.goto(target);
+    await waitForLayout(page);
+    await page.locator('.rail-btn[data-pane="explorer"]').click();
+    await page.getByRole("button", { name: "Open report.md in Files" }).click();
+    await browserExpect(file).toHaveAttribute("aria-selected", "true");
+    const saved = [
+      [
+        ["Chat", "false"],
+        ["report.md", "true"],
+      ],
+      [["Explorer", "true"]],
+    ];
+    await page.locator('.agent[data-id="main"]').click();
+    await browserExpect(
+      page.getByRole("tab", { name: "Chat", exact: true }),
+    ).toHaveAttribute("aria-selected", "true");
+
+    let gate = Promise.withResolvers<void>();
+    await page.route(
+      new RegExp(
+        `/api/conversations/${demo}(?:$|\\?|/(?:view|files)(?:\\?|$))`,
+      ),
+      async (route) => {
+        await gate.promise;
+        await route.continue();
+      },
+    );
+    type TabStrip = Array<Array<Array<string | null>>>;
+    type RecordedLayout = Window & { layoutStates?: TabStrip[] };
+    const recordLayout = ({ demo, cold }: { demo: string; cold: boolean }) => {
+      const states: TabStrip[] = [];
+      const selector = `.agent.selected[data-id="${demo}"]`;
+      let started = cold;
+      let scheduled = false;
+      if (!cold)
+        document.addEventListener(
+          "click",
+          (event) => {
+            if ((event.target as Element).closest(`.agent[data-id="${demo}"]`))
+              started = true;
+          },
+          { capture: true },
+        );
+      const observer = new MutationObserver(() => {
+        if (
+          !started ||
+          scheduled ||
+          (!cold && !document.querySelector(selector))
+        )
+          return;
+        scheduled = true;
+        requestAnimationFrame(() => {
+          scheduled = false;
+          const tabs = Array.from(
+            document.querySelectorAll("#dock .dv-tabs-container"),
+            (group) =>
+              Array.from(group.querySelectorAll('[role="tab"]'), (tab) => [
+                tab.getAttribute("aria-label"),
+                tab.getAttribute("aria-selected"),
+              ]),
+          ).filter((group) => group.length);
+          if (
+            (!cold || tabs.length) &&
+            JSON.stringify(tabs) !== JSON.stringify(states.at(-1))
+          )
+            states.push(tabs);
+        });
+      });
+      observer.observe(document, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["aria-selected", "aria-label", "class"],
+      });
+      Object.assign(window, { layoutStates: states });
+    };
+    const states = async () => {
+      await page.waitForFunction(
+        () => (window as RecordedLayout).layoutStates?.length,
+      );
+      return page.evaluate(() => (window as RecordedLayout).layoutStates);
+    };
+    const assertStoredLayout = async (cold: boolean) => {
+      expect(await states()).toEqual([saved]);
+      if (cold) {
+        await browserExpect(
+          page.getByText("Loading file…", { exact: true }),
+        ).toBeVisible();
+        await browserExpect(
+          page.locator("#dock .dv-tabs-and-actions-container").first(),
+        ).toHaveAttribute("inert", "");
+        await page.keyboard.press("g");
+        await page.keyboard.press("1");
+        await page.evaluate(() => new Promise(requestAnimationFrame));
+        expect(await states()).toEqual([saved]);
+      }
+      gate.resolve();
+      await page.locator(".file-tab .files-markdown h1").waitFor();
+      await page.evaluate(() => new Promise(requestAnimationFrame));
+      expect(await states()).toEqual([saved]);
+    };
+    try {
+      await page.evaluate(recordLayout, { demo, cold: false });
+      await page.locator(`.agent[data-id="${demo}"]`).click();
+      await assertStoredLayout(false);
+
+      gate = Promise.withResolvers<void>();
+      let treeUnavailable = false;
+      await page.route(/\/api\/tree(?:\/events)?(?:\?|$)/, async (route) => {
+        await gate.promise;
+        if (treeUnavailable) await route.fulfill({ status: 503, json: {} });
+        else await route.continue();
+      });
+      await page.addInitScript(recordLayout, { demo, cold: true });
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await assertStoredLayout(true);
+
+      treeUnavailable = true;
+      const failedTree = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/tree" &&
+          response.status() === 503,
+      );
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await failedTree;
+      await browserExpect(file).toHaveCount(0);
+      await page.locator("#input").fill("Draft while reconnecting");
+      await browserExpect(page.locator("#input")).toHaveValue(
+        "Draft while reconnecting",
+      );
+
+      treeUnavailable = false;
+      gate = Promise.withResolvers<void>();
+      await page.goto(`${base}?shared#trees=&agent=${demo}`, {
+        waitUntil: "domcontentloaded",
+      });
+      const chat = page.getByRole("tab", { name: "Chat", exact: true });
+      await browserExpect(chat).toHaveAttribute("aria-selected", "true");
+      expect(await states()).toEqual([[[["Chat", "true"]]]]);
+    } finally {
+      gate.resolve();
+    }
+  },
+  // Regression: #3557 Closing a desktop tab focuses its neighbour without stealing focus for inactive tabs.
+  async function test_tab_close_focuses_neighbour(browser, base) {
+    const { demo } = await postFixture(base, "seed-image-navigation");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    try {
+      await page.goto(`${base}#agent=${demo}`);
+      const tab = (title: string) =>
+        page.locator(`.dv-tab[aria-label="${title}"]`);
+      const chat = tab("Chat");
+      const group = page.locator(".dv-groupview").filter({ has: chat });
+      const middle = tab("nav-1.png");
+      const right = tab("nav-2.png");
+      const openImage = async (name: string) => {
+        await chat.click();
+        await page.locator(`#messages img[alt="${name}"]`).click();
+        await page
+          .locator("dialog.image-popout")
+          .getByRole("button", { name: "Open in Files" })
+          .click();
+        await page
+          .locator(`.files-detail[aria-label="${name}"]:visible`)
+          .waitFor();
+      };
+      const closeButton = async (title: string) => {
+        await tab(title).hover();
+        await tab(title)
+          .getByRole("button", { name: `Close ${title}` })
+          .click();
+        await browserExpect(tab(title)).toHaveCount(0);
+      };
+      const result = () =>
+        group.locator(".dv-active-tab").evaluate((tab) => {
+          const doc = tab.ownerDocument;
+          const panel = doc.querySelector(
+            `.dock-panel[data-dock-panel="${tab.getAttribute("data-dock-panel")}"]`,
+          );
+          return {
+            tab: tab.getAttribute("aria-label"),
+            focused: !!panel?.contains(doc.activeElement),
+          };
+        });
+      await openImage("nav-1.png");
+      await openImage("nav-2.png");
+      await browserExpect(group.locator(".dv-tab")).toHaveText([
+        "Chat",
+        "nav-1.png",
+        "nav-2.png",
+      ]);
+
+      await chat.click();
+      await middle.click();
+      await closeButton("nav-1.png");
+      await waitForLayout(page);
+      const middleClosed = await result();
+
+      await right.click();
+      await page.keyboard.press("q");
+      await browserExpect(right).toHaveCount(0);
+      await waitForLayout(page);
+      const lastClosed = await result();
+
+      await openImage("nav-1.png");
+      await openImage("nav-2.png");
+      await closeButton("nav-1.png");
+      await waitForLayout(page);
+      const inactiveClosed = await result();
+      expect({ middleClosed, lastClosed, inactiveClosed }).toEqual({
+        middleClosed: { tab: "nav-2.png", focused: true },
+        lastClosed: { tab: "Chat", focused: true },
+        inactiveClosed: { tab: "nav-2.png", focused: true },
+      });
+
+      await openImage("nav-1.png");
+      await middle.click({ button: "middle" });
+      await browserExpect(middle).toHaveCount(0);
+      await browserExpect
+        .poll(result)
+        .toEqual({ tab: "nav-2.png", focused: true });
+
+      await openImage("nav-1.png");
+      await right.click();
+      const chatRail = page.locator('.rail-btn[data-pane="chat"]');
+      await chatRail.focus();
+      await browserExpect(chatRail).toBeFocused();
+      await closeButton("nav-1.png");
+      await browserExpect(right).toHaveClass(/dv-active-tab/);
+      await browserExpect(chatRail).toBeFocused();
+
+      await openImage("nav-1.png");
+      const focusedRead = Promise.withResolvers<void>();
+      const releaseRead = Promise.withResolvers<void>();
+      await page.route(
+        (url) =>
+          url.pathname === `/api/conversations/${demo}` &&
+          url.searchParams.has("focused"),
+        async (route) => {
+          focusedRead.resolve();
+          await releaseRead.promise;
+          await route.continue();
+        },
+      );
+      try {
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await focusedRead.promise;
+        await browserExpect(middle).toHaveClass(/dv-active-tab/);
+        await closeButton("nav-1.png");
+        await browserExpect(right).toHaveClass(/dv-active-tab/);
+        await browserExpect(
+          page.locator('.files-detail[aria-label="nav-2.png"]'),
+        ).toHaveCount(0);
+      } finally {
+        releaseRead.resolve();
+      }
+      await browserExpect
+        .poll(result)
+        .toEqual({ tab: "nav-2.png", focused: true });
+    } finally {
+      await page.close();
+    }
+  },
   // Regression: #3323 Non-editing controls must not suppress desktop shortcuts.
   async function test_hotkeys_from_image_and_native_controls(browser, base) {
     const { demo } = await postFixture(base, "seed-published-image-navigation");
@@ -62,6 +336,12 @@ export const tests: BrowserTest[] = [
       await image.locator("img").click();
       const viewer = page.locator("dialog.image-popout[open]");
       await viewer.waitFor();
+      const closeImage = viewer.getByRole("button", { name: "Close image" });
+      await browserExpect(closeImage).toBeFocused();
+      for (const key of ["Shift+J", "Shift+K", "PageDown", "PageUp"]) {
+        await page.keyboard.press(key);
+        await browserExpect(closeImage).toBeFocused();
+      }
       await page.keyboard.press("ArrowRight");
       await browserExpect(viewer.locator(".files-name")).not.toHaveText(
         "published-1.png",
@@ -299,6 +579,7 @@ export const tests: BrowserTest[] = [
         ];
       }, badgeNode);
     };
+    await focusComposer(page);
     await page.locator("#model-trigger").click();
     await page.locator("#model-menu").waitFor();
     await focused("#model-menu");
@@ -853,7 +1134,7 @@ export const tests: BrowserTest[] = [
     expect(await pane.isVisible()).toBeTrue();
     await page.keyboard.press("q");
     await pane.waitFor({ state: "detached" });
-    await focused(".agent");
+    await focused("#scroll");
     await page.locator('.rail-btn[data-pane="report"]').click();
     const reportTab = page.locator('#dock .dv-tab[data-dock-panel="report"]');
     const chatTab = page.locator('#dock .dv-tab[data-dock-panel="chat"]');
@@ -1048,11 +1329,12 @@ export const tests: BrowserTest[] = [
     await storedLayout("main", splitLayout);
     await page.reload({ waitUntil: "domcontentloaded" });
     await waitLayout(splitLayout);
+    const liveSash = page
+      .locator("#dock .dv-sash:visible:not([inert])")
+      .first();
+    await liveSash.waitFor();
     const widthBeforeSash = (await windowBox("chat")).width;
-    const sash = (await page
-      .locator("#dock .dv-sash:visible")
-      .first()
-      .boundingBox())!;
+    const sash = (await liveSash.boundingBox())!;
     const sashX = sash.x + sash.width / 2;
     const sashY = sash.y + sash.height / 2;
     await page.mouse.move(sashX, sashY);
@@ -1364,25 +1646,19 @@ export const tests: BrowserTest[] = [
     try {
       await visitFiles("main");
       await visitFiles(fileFixture.demo);
-      const metadata = page
-        .waitForEvent("framenavigated", (frame) => frame === page.mainFrame())
-        .then(() =>
-          page.waitForRequest(
-            `**/api/conversations/${fileFixture.demo}/files?*`,
-          ),
-        )
-        .then((request) => request.response());
-      await page.reload();
-      const response = await metadata;
-      expect(response?.status()).toBe(200);
+      const response = await fetch(
+        `${base}api/conversations/${fileFixture.demo}/files`,
+      );
+      expect(response.status).toBe(200);
       expect(
-        (await response!.json()).files.map(
+        (await response.json()).files.map(
           (file: { name: string }) => file.name,
         ),
       ).toEqual(["diagram.svg"]);
+      await page.reload();
       await page.locator('.rail-btn[data-pane="files"]').waitFor();
-      await waitLayout([["chat"]]);
-      expect(await tab(filePanelId).count()).toBe(0);
+      await waitLayout(fileLayout);
+      await filePane.getByText("File unavailable.", { exact: true }).waitFor();
       await storedLayout(fileFixture.demo, fileLayout);
     } finally {
       await rename(fileFixture.payload + ".missing", fileFixture.payload);

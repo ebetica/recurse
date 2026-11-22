@@ -10,6 +10,7 @@ import {
 import captured from "../backend/fixtures/pull_request_diff.json";
 import {
   closeWithRoutes,
+  focusComposer,
   gotoRoot,
   postFixture,
   reloadConversation,
@@ -457,6 +458,11 @@ export const tests: BrowserTest[] = [
           );
           await page.goto(`${base}#agent=${fixture.agent}`);
           await reloadConversation(page);
+          await focusComposer(page);
+          await page.locator("#model-trigger").click();
+          const returnFocus = page.locator(
+            width === 412 ? "#input" : "#model-trigger",
+          );
           const overlayHit = () =>
             page
               .locator("#safety-btn")
@@ -520,12 +526,15 @@ export const tests: BrowserTest[] = [
             .getByRole("button", { name: "Cancel", exact: true })
             .click();
           await browserExpect(confirmation).toHaveCount(0);
+          await browserExpect(returnFocus).toBeFocused();
+          await page.locator("#model-trigger").click();
           await browserExpect.poll(overlayHit).toBe(true);
           expect(safetyPosts).toEqual([]);
           await page.mouse.click(width - 100, 200);
           await browserExpect(confirmation).toBeVisible();
           await page.keyboard.press("Escape");
           await browserExpect(confirmation).toHaveCount(0);
+          await browserExpect(returnFocus).toBeFocused();
           expect(safetyPosts).toEqual([]);
           expect(await safetyOff()).toBe(false);
           await writeFile(

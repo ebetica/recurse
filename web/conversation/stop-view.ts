@@ -1,5 +1,7 @@
-// Stop visibility and target use the focused read, not dispatch state alone.
+// Paints the composer's turn border and Stop control from the focused read
+// and the browser's in-flight Stop request.
 import { setComposerStopAvailability } from "../composer/index.js";
+import { $ } from "../dom.js";
 import { DRAFT, state } from "../state.js";
 import {
   type StopMode,
@@ -9,6 +11,8 @@ import {
 import type { Conversation } from "../types.js";
 import { focusedRead, phaseFor } from "./freshness.js";
 
+const composerCard = $("#composer-card");
+
 export function selectedCanStop(conv?: Conversation | null): boolean {
   if (conv?.id === state.selectedId)
     return Boolean(conv.active_run) || conv.status === "running";
@@ -17,11 +21,18 @@ export function selectedCanStop(conv?: Conversation | null): boolean {
   );
 }
 
-export function paintStopControl(
+export function paintComposerRunState(
   conv?: Conversation | null,
   eligible = true,
 ): void {
   const posting = state.stopPostInFlightId === state.selectedId;
+  composerCard?.toggleAttribute(
+    "data-turn-running",
+    eligible &&
+      conv?.id === state.selectedId &&
+      conv.status === "running" &&
+      !posting,
+  );
   const authoritative =
     focusedRead.stopReadAuthoritativeId === state.selectedId &&
     phaseFor(focusedRead.freshness, state.selectedId) === "fresh";

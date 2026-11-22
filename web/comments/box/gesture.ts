@@ -1,7 +1,48 @@
-// Draw selection-comment boxes on Files images/PDFs. Image mouse comments
+// Draw selection-comment boxes on Files and Artifact images/PDFs. Image mouse comments
 // require a modifier; touch and pen hold before dragging. PDF mouse drag is
 // unchanged. Touch taps explain the gesture; native cancel abandons it.
-import type { CommentBox } from "../artifacts/artifact-state.js";
+import type { CommentBox } from "../../artifacts/artifact-state.js";
+import { imageCommentHint } from "../../image-preview/index.js";
+
+const inlineSources = new WeakMap<Element, Promise<string | null>>();
+
+/** Register the authored position and the actual immutable source after decode. */
+export function registerInlineBoxFrame(
+  frame: HTMLElement,
+  index: number,
+  source: Promise<string | null>,
+): void {
+  frame.classList.add("report-box-frame");
+  frame.dataset.boxImage = String(index);
+  frame.title = imageCommentHint();
+  inlineSources.set(
+    frame,
+    source.then((value) => {
+      if (!value) return null;
+      const url = new URL(value, location.href);
+      url.searchParams.delete("refresh");
+      return url.href;
+    }),
+  );
+}
+
+/** Mutable or missing images do not have an immutable source for reanchoring. */
+export function inlineBoxSource(
+  frame: Element,
+): Promise<string | null> | undefined {
+  return inlineSources.get(frame);
+}
+
+/** Find the exact source of a box, even when the document was remounted. */
+export function findBoxFrame(root: Element, box: CommentBox): Element | null {
+  const source = box.image
+    ? `[data-box-image="${box.image}"]`
+    : box.page
+      ? `[data-page="${box.page}"]`
+      : ":not([data-box-image], [data-page])";
+  const selector = `.report-box-frame${source}`;
+  return root.matches(selector) ? root : root.querySelector(selector);
+}
 
 type BoxCommentOffer = (
   frame: Element,
@@ -65,9 +106,10 @@ function pointIn(frame: HTMLElement, event: PointerEvent): Point {
 }
 
 function boxOf(frame: HTMLElement, a: Point, b: Point): CommentBox {
-  const page = Number(frame.dataset.page) || undefined;
+  const page = Number(frame.dataset.page);
+  const image = Number(frame.dataset.boxImage);
   return {
-    ...(page ? { page } : {}),
+    ...(page ? { page } : image ? { image } : {}),
     x: Math.min(a.x, b.x),
     y: Math.min(a.y, b.y),
     w: Math.abs(a.x - b.x),
@@ -78,6 +120,7 @@ function boxOf(frame: HTMLElement, a: Point, b: Point): CommentBox {
 /** Let boxes be drawn on every `.report-box-frame` inside `pane`. */
 export function installBoxComments(pane: HTMLElement): void {
   let press: Press | null = null;
+  let drawnImage: HTMLElement | null = null;
   let hint: HTMLElement | null = null;
   let hintTimer: number | undefined;
   const clearHint = () => {
@@ -114,12 +157,15 @@ export function installBoxComments(pane: HTMLElement): void {
   pane.addEventListener("pointerdown", (event) => {
     clearHint();
     touchDrew = false;
+    drawnImage = null;
     cancel();
     const frame = (event.target as Element).closest<HTMLElement>(
       ".report-box-frame",
     );
     if (!event.isPrimary || event.button !== 0 || !frame?.offsetHeight) return;
-    const image = !!frame.closest(".image-zoom-viewport");
+    const inline = !!frame.dataset.boxImage;
+    if (inline && frame.hasAttribute("aria-busy")) return;
+    const image = inline || !!frame.closest(".image-zoom-viewport");
     if (image && event.pointerType === "mouse") {
       const mac = /Mac|iPhone|iPad/.test(navigator.platform);
       if (!(mac ? event.metaKey : event.ctrlKey)) return;
@@ -207,9 +253,27 @@ export function installBoxComments(pane: HTMLElement): void {
       return;
     }
     const box = boxOf(frame, from, pointIn(frame, event));
-    if (box.w < MIN_SIZE || box.h < MIN_SIZE) mark.remove();
-    else offerBoxComment(frame, placeBox(frame, box, mark), box);
+    if (box.w < MIN_SIZE || box.h < MIN_SIZE) {
+      mark.remove();
+      if (box.image && event.pointerType !== "mouse") {
+        drawnImage = frame;
+        showHint(frame, from);
+      }
+    } else {
+      if (box.image) drawnImage = frame;
+      offerBoxComment(frame, placeBox(frame, box, mark), box);
+    }
   });
+  // A drawn area must not also open the image or its wrapping link.
+  pane.addEventListener(
+    "click",
+    (event) => {
+      if (!event.detail || !drawnImage?.contains(event.target as Node)) return;
+      event.preventDefault();
+      event.stopPropagation();
+    },
+    { capture: true },
+  );
   pane.addEventListener("pointercancel", cancel);
   // Invariant: Once a held finger draws, its moves must not scroll the pane.
   pane.addEventListener(

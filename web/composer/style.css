@@ -1,0 +1,598 @@
+/* Composer editor, popups, controls, and the live panel above the input. */
+#composer-wrap { flex: none; min-width: 0; padding: var(--space-2) var(--space-5) var(--space-4);
+  position: relative; }
+/* Fade only while thread content continues beneath the composer. */
+#composer-wrap::before { content: ""; position: absolute; left: 0; right: 0;
+  height: 32px; pointer-events: none; opacity: 0; transition: opacity var(--motion-fast);
+  bottom: 100%; background: linear-gradient(transparent, var(--bg)); }
+#scroll.content-below + #composer-wrap::before { opacity: 1; }
+#composer-wrap { -webkit-user-select: none; user-select: none; }
+#composer-wrap :is(input, textarea) { -webkit-user-select: text; user-select: text; }
+
+/* scroll-to-latest: floats over the messages pane, centered just above the
+   composer, shown whenever the reader is away from the bottom (see updateScrollBtn). */
+#scroll-btn { position: absolute; bottom: 100%; left: 50%; margin-bottom: var(--space-3);
+  transform: translateX(-50%) translateY(6px); width: 36px; height: 36px;
+  border-radius: 50%; border: 1px solid var(--border); background: var(--panel-2);
+  color: var(--muted); cursor: pointer; display: flex; align-items: center;
+  justify-content: center; box-shadow: var(--expanded-lift);
+  opacity: 0; pointer-events: none; transition: opacity var(--motion-fast), transform var(--motion-fast),
+    color var(--motion-fast), border-color var(--motion-fast); }
+#scroll-btn.visible { opacity: 1; pointer-events: auto;
+  transform: translateX(-50%) translateY(0); }
+#scroll-btn:hover { color: var(--text); border-color: var(--accent-dim); }
+#composer-shell { position: relative; }
+/* The running turn's live panel stays above the composer, outside the
+   thread, so it is visible at any scroll position and covers nothing. */
+#live-bar[hidden], #live-bar.stale { display: none; }
+#live-bar .live-tool-body { max-height: 30vh; overflow-y: auto; }
+#live-bar :is(.live-thinking-summary, .live-tool-body) {
+  -webkit-user-select: text; user-select: text; }
+#composer, .composer-box { --composer-input-padding: var(--space-3); --composer-button-size: 28px;
+  width: 100%; margin: 0; background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 14px;
+  padding: var(--space-2);
+  align-items: flex-end; position: relative;
+  transition: border-color var(--motion-fast); }
+.composer-box:where(:not(#composer)) { display: flex; gap: var(--space-3); }
+#composer { display: grid; grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0 var(--space-3); }
+#composer:focus-within, .composer-box:focus-within { border-color: var(--accent-dim); }
+#composer.dragover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, transparent); }
+#input, .composer-input { flex: 1; border: 0; background: none; resize: none; outline: none;
+  color: var(--text); font: inherit; max-height: 180px; padding: var(--composer-input-padding) 0; }
+#input::placeholder, .composer-input::placeholder { color: var(--text-placeholder); }
+#skill-menu, #file-menu:where(.composer-popup) { max-height: 270px; overflow-y: auto; }
+#agent-finder, #pane-finder { max-height: min(390px, 52vh); overflow: hidden; }
+#file-menu:where(.composer-popup) { top: auto; }
+/* Keep the original ID specificity so lighter theme rules cannot change placement. */
+:is(#skill-menu, #agent-finder, #pane-finder, #file-menu):where(.composer-popup) {
+  position: absolute; z-index: var(--z-menu);
+  left: -1px; right: -1px; bottom: calc(100% + 7px);
+  @media (max-width: 700px) {
+    &:where(:is(#skill-menu, #agent-finder)) { position: fixed; top: var(--mobile-shell-height);
+      bottom: auto; left: var(--space-5); right: var(--space-5);
+      max-height: calc(100dvh - var(--mobile-shell-height) - 14px); }
+  }
+}
+#skill-menu, #agent-finder, #pane-finder, #file-menu:where(.composer-popup)[hidden] { display: none; }
+#skill-menu.on { display: block; }
+#file-menu .file-option {
+  width: 100%;
+  height: auto;
+  margin: 0;
+  justify-content: flex-start;
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+}
+#agent-finder.on, #pane-finder.on { display: flex; flex-direction: column; }
+#agent-finder-query, #pane-finder-query { flex: none; width: calc(100% - 2 * var(--space-2));
+  margin: var(--space-2); }
+#agent-menu, #pane-finder-menu { flex: 1; min-height: 0; overflow-y: auto; padding: 0;
+  overscroll-behavior: contain; }
+#agent-finder [hidden], #pane-finder [hidden] { display: none; }
+#pane-finder .pane-option { flex-direction: row; align-items: center; }
+.pane-option-icon { display: flex; flex: none; }
+.pane-option-icon svg { width: 18px; height: 18px; }
+.pane-option .agent-option-name { flex: 1; }
+/* Two-line rows: a name above its description or path. The skill rows also
+   undo the composer's square icon-button size. */
+#skill-menu .skill-option { width: 100%; height: auto; margin: 0; border-radius: 8px;
+  align-items: stretch; }
+.menu-item:is(.skill-option, .agent-option) { flex-direction: column; align-items: stretch;
+  justify-content: center; gap: var(--space-1); }
+.skill-option .skill-name { color: var(--accent);
+  font: 600 0.78125rem/1.35 var(--font-mono); }
+.skill-option.action .skill-name { color: var(--text); }
+.skill-option .skill-description { color: var(--muted); font-size: 0.71875rem;
+  line-height: 1.35; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-option-group + .agent-option-group { border-top: 1px solid var(--border);
+  margin-top: var(--space-2); padding-top: var(--space-2); }
+.agent-option-head { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.agent-option-name { flex: 1; min-width: 0; font-size: 0.84375rem; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.agent-option-relation { flex: none; border-radius: 999px;
+  padding: 1px var(--space-3); font-size: 0.6875rem; line-height: 1.4; }
+.agent-option-relation { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.agent-option-path { color: var(--muted); font: 0.6875rem/1.35 var(--font-mono); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+#composer > :where(#attach, #send) { flex: none; width: var(--composer-button-size);
+  height: var(--composer-button-size); margin-bottom: var(--space-2);
+  border: 0; border-radius: 8px; cursor: pointer;
+  display: flex; align-items: center; justify-content: center; }
+#composer > :where(#attach, #send) { font: inherit; min-height: 0; padding: 0;
+  margin-block-end: max(0px, calc(var(--composer-input-padding) + (1lh - var(--composer-button-size)) / 2)); }
+#send.btn:disabled { opacity: 1; }
+/* Touch targets extend beyond the visible controls without sizing the row. */
+@media (pointer: coarse) {
+  #attach, #send { position: relative; }
+  #attach::after, #send::after { content: ""; position: absolute;
+    width: 44px; height: 44px; left: 50%; top: 50%; transform: translate(-50%, -50%); }
+}
+#send, .composer-send { background: var(--accent); color: var(--text-on-accent); }
+#send:hover, .composer-send:hover { background: var(--accent-hover); }
+#send:disabled, .composer-send:disabled { background: var(--control-disabled); color: var(--text-placeholder); cursor: default; }
+/* Running turns reuse this control for Stop: resting is red; one tap arms a
+   stronger confirmation state. */
+#send.stop { border: 1px solid var(--danger); background: transparent;
+  color: var(--danger); user-select: none; -webkit-touch-callout: none;
+  touch-action: manipulation; }
+#send.stop:hover, #send.stop:focus-visible, #send.stop.stopping {
+  color: var(--danger); border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent); }
+#send.stop.armed { color: var(--danger); border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 18%, transparent); }
+#send.stop.error { outline: 1px solid var(--danger); }
+#send.stop:focus-visible { outline: 2px solid var(--text); outline-offset: 2px; }
+#attach { background: none; color: var(--muted); }
+#attach:hover { color: var(--accent); background: var(--panel); }
+/* The context meter reserves its width while the reading changes. The
+   details button is a sibling so it does not hide the meter from AT. */
+#model-controls { display: flex; flex: 0 1 auto; align-items: center;
+  justify-content: flex-end; gap: var(--space-1); margin-inline-start: auto;
+  min-width: 0; max-width: 100%; color: var(--muted); font-size: 0.78125rem;
+  line-height: 1.4; }
+#model-controls.on { flex: 0 1 auto; }
+#context-control { display: none; position: relative; flex: none; align-items: center;
+  justify-content: center; width: 56px; height: 28px; border-radius: 6px; }
+#context-control:has(#context-indicator.on) { display: flex; }
+#context-control:hover, #context-control:focus-within { background: var(--panel); }
+#context-indicator { position: absolute; inset: 0; width: 100%; padding: 0;
+  border: 0; border-radius: inherit; background: transparent; cursor: pointer; }
+#context-indicator:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: 1px; }
+#context-mini { --context-fill: 0%; display: block; width: calc(100% - 8px); height: 6px; overflow: hidden;
+  border-radius: 999px; background: var(--border); }
+#context-mini[aria-valuenow]::before { content: ""; display: block;
+  width: var(--context-fill); height: 100%; border-radius: inherit; background: var(--accent); }
+#context-mini:not([aria-valuenow]) { background: none; border: 1px dashed var(--muted); }
+#model-row { display: none; min-width: 0; }
+#model-row.on { display: flex; }
+#model-trigger { display: inline-flex; align-items: center; gap: var(--space-3);
+  max-width: 240px; min-height: 32px; padding: var(--space-2) var(--space-3); border: 0;
+  border-radius: 8px; background: transparent; color: var(--muted);
+  font: inherit; font-size: 0.78125rem; cursor: pointer; }
+#model-trigger:hover, #model-trigger:focus-visible { background: var(--panel-2);
+  color: var(--text); }
+#model-trigger:focus-visible { outline: 2px solid var(--accent-dim); }
+#model-trigger.pending .model-name { font-weight: 700; color: var(--text); }
+#model-trigger > svg { flex: none; width: 12px; height: 12px; }
+#model-trigger .model-name { width: 14ch; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#model-menu { position: fixed; inset: auto; margin: 0;
+  width: min(260px, calc(100vw - 24px)); max-height: calc(100dvh - 24px);
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  overflow: auto; font-size: 0.78125rem; }
+#effort-range { appearance: none; -webkit-appearance: none; display: block;
+  width: 100%; --fill: 0%; --effort-ticks: none;
+  --effort-tick-color: color-mix(in srgb, var(--on-media) 40%, transparent);
+  height: 24px; background: transparent; cursor: pointer; margin: 0; }
+@media (any-pointer: coarse) {
+  #model-trigger { min-height: 44px; }
+  #effort-range { height: 44px; }
+}
+#effort-range::-webkit-slider-runnable-track { height: 8px; border-radius: 999px;
+  background: var(--effort-ticks),
+    linear-gradient(to right, var(--accent) var(--fill, 0%), var(--panel-2) var(--fill, 0%));
+  box-shadow: inset 0 0 0 1px var(--border); }
+#effort-range::-webkit-slider-thumb { -webkit-appearance: none; width: 16px;
+  height: 16px; border-radius: 50%; background: var(--text);
+  margin-top: calc(-1 * var(--space-2)); border: 2px solid var(--accent); }
+#effort-range::-moz-range-track { height: 8px; border-radius: 999px;
+  background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--border); }
+#effort-range::-moz-range-progress { height: 8px; border-radius: 999px;
+  background: var(--accent); }
+#effort-range::-moz-range-thumb { width: 12px; height: 12px; border-radius: 50%;
+  background: var(--text); border: 2px solid var(--accent); }
+#effort-range:focus-visible { outline: 2px solid var(--accent-dim);
+  outline-offset: 2px; }
+#effort-range:disabled { opacity: .55; cursor: default; }
+#effort-slider.legacy #effort-range::-moz-range-progress { background: var(--muted); }
+#effort-model { margin: 0; color: var(--text); text-align: center;
+  overflow-wrap: anywhere; }
+#effort-model:empty { display: none; }
+/* The new-agent page keeps a visible, centred trigger and reveals the
+   slider inline instead of putting it in the top layer. */
+.draft-model-host #model-row { width: 100%; flex-direction: column;
+  align-items: center; }
+.draft-model-host #model-trigger { max-width: 100%; }
+.draft-model-host #model-trigger .model-name { width: auto;
+  white-space: normal; overflow-wrap: anywhere; }
+.draft-model-host #model-menu { display: none; position: static;
+  width: min(260px, 100%); max-height: none; margin: var(--space-3) auto 0; }
+.draft-model-host #model-menu.draft-open { display: block; }
+#model-row [hidden] { display: none; }
+#safety-btn:focus-visible {
+  outline: 2px solid var(--accent-dim); outline-offset: 1px; }
+
+/* The composer warns outside the popup; the switch lives below the slider. */
+#safety-warning { flex: none; width: 28px; height: 28px; padding: 0; border: 0;
+  border-radius: 6px; background: transparent; color: var(--danger); cursor: pointer;
+  -webkit-tap-highlight-color: transparent; }
+#safety-warning.unavailable { color: var(--warn); }
+#safety-warning:is(:hover, :focus-visible, :active) { background: var(--panel); }
+#safety-warning:focus-visible { outline: 2px solid var(--accent-dim); }
+#safety-warning > svg { display: block; margin: auto; width: 18px; height: 18px; }
+#safety-row { display: none; margin-top: var(--space-2);
+  border-top: 1px solid var(--border); padding-top: var(--space-1); }
+#safety-row.on { display: block; }
+#safety-reason { margin: 0; color: var(--warn); overflow-wrap: anywhere; }
+#safety-btn { display: inline-flex; align-items: center; gap: var(--space-2);
+  min-height: 32px; background: none; border: 0; padding: var(--space-2) var(--space-1);
+  color: var(--muted); font: inherit; font-size: 0.78125rem; cursor: pointer;
+  border-radius: 6px; white-space: nowrap; transition: color var(--motion-fast); }
+#safety-btn:hover:not(:disabled) { color: var(--text); }
+#safety-btn:disabled { cursor: default; opacity: .5; }
+#safety-btn .track { position: relative; width: 26px; height: 15px;
+  border-radius: 999px; background: var(--switch-track);
+  transition: background var(--motion-fast); flex: none; }
+#safety-btn .knob { position: absolute; top: 2px; left: 2px; width: 11px;
+  height: 11px; border-radius: 50%; background: var(--muted);
+  transition: transform var(--motion-fast), background var(--motion-fast); }
+/* On (reviewing): green track, knob to the right. */
+#safety-row:not(.off) #safety-btn .track { background: var(--running); }
+#safety-row:not(.off) #safety-btn .knob { transform: translateX(11px);
+  background: var(--switch-knob-on); }
+/* Off (skipping): red track to match the warning. Track/label follow the
+   DESIRED position; a queued change is spelled out in the label ("· next
+   turn") and dimmed slightly so it reads as pending, not yet in force. */
+#safety-row.off #safety-btn .track { background: var(--danger); }
+#safety-row.off #safety-btn .lbl { color: var(--danger); }
+#safety-row.pending #safety-btn .lbl { opacity: .8; font-style: italic; }
+#downgrade-chip { display: inline-flex; flex: none; align-items: center; justify-content: center;
+width: 32px; height: 32px; padding: 0; border: 0; background: none;
+color: var(--accent); font: inherit; cursor: pointer; }
+#conv-controls #model-trigger { max-width: 100%; }
+#downgrade-chip[hidden] { display: inline-flex; visibility: hidden; }
+#downgrade-chip.seen { color: var(--muted); }
+#downgrade-chip span { display: grid; place-items: center; width: 16px; height: 16px;
+border: 1.5px solid currentColor; border-radius: 50%; font-size: 12.5px; font-weight: 700; line-height: 1; }
+#downgrade-popover { position: fixed; inset: auto; margin: 0; font-size: 0.78125rem; overflow-wrap: anywhere;
+width: min(300px, calc(100vw - 16px)); }
+#downgrade-popover p { margin: var(--space-2) 0; }
+
+/* send resilience: inline status shown under the composer while a send
+   is retrying or has failed (subway / flaky network) */
+#send-status { width: min(780px, 100%); margin: var(--space-2) auto 0;
+  padding: 0 var(--space-2);
+  border: 0; background: none; text-align: left; font: inherit;
+  font-size: 0.71875rem; line-height: 1.4; color: var(--muted); display: none; }
+#send-status.show { display: block; }
+#send-status.pending { color: var(--accent); opacity: 1; }
+#send-status.command-error { color: var(--error-text); }
+#send-status.error { color: var(--error-text); cursor: pointer; }
+#send-status.error:hover { text-decoration: underline; text-underline-offset: 2px; }
+
+/* pending attachment thumbnails, shown above the composer before send */
+#attachments { max-width: 780px; margin: 0 auto; display: flex; flex-wrap: wrap;
+  gap: var(--space-3); padding: 0 0 var(--space-3); }
+#attachments:empty { display: none; }
+.attach-chip { position: relative; width: 60px; height: 60px; border-radius: 10px;
+  overflow: hidden; border: 1px solid var(--border); background: var(--panel); }
+.attach-chip img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* uploaded image chips wrap their thumbnail in a button that opens the preview */
+.attach-chip .preview { display: block; width: 100%; height: 100%; padding: 0;
+  margin: 0; border: 0; background: none; cursor: zoom-in; }
+.attach-chip .preview:focus-visible { outline: 2px solid var(--accent);
+  outline-offset: 2px; }
+.attach-chip.file { width: auto; max-width: 200px; display: flex; align-items: center;
+  padding: 0 var(--space-6) 0 var(--space-4); color: var(--text); }
+.attach-chip.file .name { font-size: 0.71875rem; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+.attach-chip.uploading { opacity: .55; }
+.attach-chip.failed { border-color: var(--danger); }
+.attach-chip .retry { position: absolute; left: 4px; bottom: 4px; border: 0;
+  border-radius: 6px; padding: var(--space-1) var(--space-2); background: color-mix(in srgb, var(--shadow) 72%, transparent); color: var(--on-media);
+  font-size: 0.6875rem; line-height: 1.4; cursor: pointer; }
+.attach-chip .rm { position: absolute; top: 2px; right: 2px; width: 18px; height: 18px;
+  border: 0; border-radius: 50%; background: color-mix(in srgb, var(--shadow) 60%, transparent); color: var(--on-media);
+  cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; }
+.attach-chip .rm svg { width: 12px; height: 12px; }
+/* Spec: on touch the remove target is 48px. It covers the chip's top band and
+   reaches up into extra row space, so it stays clear of the chip's centre (the
+   preview), the next chip, and the row above; the visible circle stays 18px.
+   The preview clips the thumbnail instead of the chip. */
+@media (pointer: coarse) {
+  #attachments { padding-top: var(--space-6);
+    row-gap: 28px; } /* space-check: allow the 48px remove target clears the row above */
+  .attach-chip { overflow: visible; }
+  .attach-chip .preview { border-radius: inherit; overflow: hidden; }
+  .attach-chip .rm::before { content: ""; position: absolute; left: -22px; top: -26px;
+    width: 48px; height: 48px; }
+}
+.attach-chip .rm:hover { background: var(--danger); }
+
+/* Attachment admission failures stay above the composer until retry. */
+.attachment-error { display: flex; align-items: flex-start; gap: var(--space-2); width: 100%;
+  color: var(--danger); font-size: 0.78125rem; line-height: 1.4; }
+.attachment-error svg { flex: none; width: 16px; height: 16px; margin-top: 1px; }
+
+/* Activity keeps one header height as status and streamed text change. */
+.live-panel-box { display: flex; flex-direction: column; align-items: stretch;
+  --live-head-height: 32px;
+  gap: 0; width: 100%; min-width: 0; max-width: 100%;
+  height: calc(var(--live-head-height) + 2px);
+  padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-2); overflow: hidden; }
+.live-panel-head { display: flex; align-items: center; gap: var(--space-3);
+  flex: none; min-width: 0; width: 100%; height: var(--live-head-height); white-space: nowrap; }
+.live-panel-box:has(.live-tool-status) { --live-head-height: 36px; height: auto; }
+.live-panel-head:has(.live-tool-status) { flex-wrap: wrap; row-gap: 0; height: auto; }
+.live-panel-actions { display: flex; align-items: center; flex: none; gap: var(--space-3);
+  margin-inline-start: auto; min-height: var(--live-head-height); }
+/* Panel words use the body font; only the argument fragment stays monospace
+   (shared with the tool-call rows above). */
+.live-panel-box .live-label { display: flex; align-items: center; flex: 1 1 auto;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 0.78125rem; font-family: inherit;
+  border: 0; padding: 0; background: none; text-align: left; cursor: default; }
+.live-panel-box button.live-label { align-self: stretch; gap: var(--space-3); cursor: pointer; }
+.live-panel-box button.live-thinking-copy { padding-inline: var(--space-2);
+  -webkit-tap-highlight-color: transparent; }
+.live-panel-head:has(.live-tool-status) > .live-label { flex-basis: 24ch; min-height: var(--live-head-height); }
+.live-panel-box button.live-tool-status { flex: none; padding-inline: var(--space-2); }
+.live-panel-box button.live-label:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; }
+.live-panel-box .live-thinking-head { display: flex; align-items: center;
+  min-width: 0; width: 100%; overflow: hidden; white-space: nowrap; }
+.live-panel-box .live-thinking-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.live-panel-box .live-thinking-elapsed { flex: 0 0 8ch; margin-left: auto;
+  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.live-panel-box .live-name { color: var(--text); font-weight: 600; }
+.live-panel-box .live-args { color: var(--muted); font-family: var(--font-mono); }
+.live-panel-box .shell-chip.live, .live-panel-box .agent-chip {
+  flex: none; animation: none; }
+.live-panel-box .live-title-changing { animation: thinking-cross-fade var(--motion-fast) ease-out; }
+.live-panel-box:has(.live-tool-body) { height: auto; min-height: 34px;
+  padding-bottom: var(--space-3); background: var(--expanded-bg); }
+.live-tool-body { margin: 0; user-select: text; }
+.live-tool-row + .live-tool-row { margin-top: var(--space-3); }
+.live-tool-head { display: flex; gap: var(--space-3); align-items: baseline; }
+.live-tool-head code { flex: 1; min-width: 0; white-space: pre-wrap;
+  overflow-wrap: anywhere; font: 0.71875rem/var(--line-height-compact) var(--font-mono);
+  max-height: 3lh; overflow: auto; }
+.live-tool-row pre { margin: var(--space-2) 0 0; white-space: pre-wrap;
+  overflow-wrap: anywhere; font: 0.71875rem/var(--line-height-compact) var(--font-mono);
+  max-height: 5lh; overflow: auto; }
+.live-panel-box:has(.live-thinking-summary) { height: auto; min-height: 34px;
+  padding-bottom: var(--space-3); }
+.live-thinking-summary { flex: none; block-size: 6lh; padding-inline: var(--space-2);
+  overflow-y: auto; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; overflow-anchor: none;
+  white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--line-height-compact); }
+@supports (scrollbar-color: auto) {
+  .live-thinking-summary { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
+}
+@media (pointer: fine) {
+  @supports selector(::-webkit-scrollbar) {
+    .live-thinking-summary { overflow-y: scroll; scrollbar-width: auto; scrollbar-color: auto; }
+    .live-thinking-summary::-webkit-scrollbar { width: 6px; }
+    .live-thinking-summary::-webkit-scrollbar-button { display: none; }
+    .live-thinking-summary::-webkit-scrollbar-thumb { background: var(--muted); border: 0; }
+  }
+}
+.live-thinking-summary:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: -2px; }
+
+.live-panel-box:has(.live-thinking-summary) {
+  background: var(--expanded-bg); border-color: var(--expanded-border);
+  box-shadow: var(--expanded-lift); }
+.live-panel-box button.live-label[aria-expanded="true"] { color: var(--text); }
+
+@keyframes thinking-cross-fade { from { opacity: .2; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .live-panel-box .live-title-changing {
+    animation: none; }
+}
+
+/* Status chips are count badges (app.css .badge): green for shells, amber
+   for agents. Both render only inside the panel (above), which owns their
+   shared pulse. */
+.shell-chip, .agent-chip { max-width: min(38vw, 190px); overflow: visible;
+  cursor: pointer; transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast); }
+.shell-chip .chip-label, .agent-chip .chip-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The panel is 34 px tall, so its chips keep a height that fits the box at
+   every breakpoint. Coarse-pointer hit areas are transparent pseudo-elements
+   below; they must not stretch the chip or let its label escape the pill. */
+.shell-chip:focus-visible, .agent-chip:focus-visible {
+  outline: 2px solid var(--text); outline-offset: 2px; }
+
+@media (max-width: 700px) {
+  #model-trigger { max-width: min(240px, calc(100vw - 120px)); }
+  /* A crowded phone panel shrinks the chip font instead of pushing the
+     label out of the pill. */
+  .live-panel-box .shell-chip, .live-panel-box .agent-chip { font-size: 0.6875rem; }
+  #composer-wrap { padding-top: var(--space-2);
+    padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+  #agent-finder-query { min-height: 44px; }
+}
+@media (pointer: coarse) {
+  /* Panel chips keep their 18 px badge height in the panel. Their
+     transparent pseudo-elements provide 44 px targets without changing the
+     panel layout; each target stays in its chip's horizontal slot, so the
+     adjacent shell and agent targets do not overlap. */
+  .live-panel-box { --live-head-height: 44px; overflow-x: clip; overflow-y: visible; }
+  .live-panel-box:has(.live-tool-status) { --live-head-height: 44px; }
+  .live-panel-box .shell-chip, .live-panel-box .agent-chip {
+    position: relative; z-index: var(--z-raised);
+  }
+  .live-panel-box .shell-chip::before,
+  .live-panel-box .agent-chip::before {
+    content: ""; position: absolute; z-index: 0;
+    top: 50%; left: 50%; width: max(100%, 44px); height: 44px;
+    transform: translate(-50%, -50%);
+  }
+  #safety-btn { min-height: 44px; }
+  #downgrade-chip { width: 44px; height: 44px; }
+  #conv-controls #safety-row { align-self: stretch; }
+}
+
+/* The layouts share the same controls and keep the field first in tab order. */
+#input { grid-area: 1 / 2; width: 100%; min-width: 0; }
+#attach { grid-area: 1 / 1; }
+#send { grid-area: 1 / 3; }
+#conv-controls { grid-area: 2 / 1 / auto / -1; display: flex;
+  align-items: center; gap: var(--space-2); min-width: 0; }
+#composer #downgrade-chip[hidden] { display: none; }
+@media (max-width: 700px) {
+  #composer:not([data-controls-press="open"],
+    :not([data-controls-press="closed"]):is(:focus-within, :has(#input:not(:placeholder-shown))),
+    :has(#conv-controls :popover-open),
+    body:has(#context-overlay.on, [data-theme-protected="safety-confirmation"]) #composer) {
+    & #conv-controls:not(:has(#safety-warning:not([hidden]), #downgrade-chip:not([hidden]), #model-row.on:not(.conversation-effort))),
+    & #conv-controls :is(#context-control, .conversation-effort) { display: none; }
+  }
+  html:not([data-embed]) #composer:is([data-controls-press="open"],
+    :not([data-controls-press="closed"]):is(:focus-within, :has(#input:not(:placeholder-shown))),
+    :has(#conv-controls :popover-open),
+    body:has(#context-overlay.on, [data-theme-protected="safety-confirmation"]) #composer) {
+    row-gap: var(--space-5); padding-bottom: var(--space-3);
+    & #input { grid-column: 1 / -1; padding-inline: var(--space-3); }
+    & > :is(#attach, #send) { grid-row: 2; margin: 0; align-self: center; }
+    & #conv-controls { grid-column: 2; align-self: center; }
+    /* Larger buttons need less room around their extended hit areas. */
+    @media (width >= 360px) {
+      row-gap: var(--space-3);
+      & #input { padding-block-end: 0; }
+      & #conv-controls { margin-inline-end: var(--space-5); }
+    }
+  }
+  /* Phone Attach and Send are larger; Send is the largest, frequent target.
+     Desktop side-conversation frames are narrow but keep desktop controls;
+     below 360 px the row keeps 28 px buttons so the model name stays whole. */
+  @media (width >= 360px) {
+    html:not([data-embed]) #composer {
+      & > :is(#attach, #send) { --composer-button-size: 36px; border-radius: 10px; }
+      & > #send { --composer-button-size: 40px; }
+      & > :is(#attach, #send) > svg { width: 20px; height: 20px; }
+      & > #send > svg { width: 22px; height: 22px; }
+    }
+  }
+}
+@media (width > 700px) {
+  html:not([data-embed]) #composer {
+    --composer-controls-row-gap: var(--space-5);
+    display: flex; flex-wrap: wrap; align-items: center;
+    row-gap: var(--composer-controls-row-gap); padding-bottom: var(--space-3);
+    /* Only wrapped controls need the full row gap. */
+    & #input { flex: 0 0 100%; padding-inline: var(--space-3);
+      padding-block-end: 0;
+      margin-block-end: calc(var(--space-4) - var(--composer-controls-row-gap)); }
+    & > :is(#attach, #send) { margin: 0; }
+    & > #send { margin-inline-start: auto; }
+    & #conv-controls { flex: 1 1 auto; max-width: 100%; flex-wrap: wrap; }
+    & #model-controls { flex-wrap: wrap; }
+  }
+}
+@media (width > 700px) and (pointer: coarse) {
+  html:not([data-embed]) #composer {
+    --composer-controls-row-gap: var(--space-6);
+    column-gap: var(--space-4);
+    & :is(#conv-controls, #model-controls) { row-gap: var(--composer-controls-row-gap); }
+    /* Extend targets toward the card bottom, away from the last text line. */
+    & :is(#attach, #send, #context-indicator, #model-trigger, #downgrade-chip, #safety-warning)::after {
+      translate: 0 var(--space-2);
+    }
+  }
+}
+#conv-controls :is(#model-trigger, #downgrade-chip) { min-height: 28px; }
+#conv-controls #downgrade-chip { height: 28px; }
+@media (max-width: 480px) {
+  #composer-wrap { padding-inline: var(--space-3); }
+  #context-control { width: 44px; }
+}
+/* Touch targets reach 44px without growing the visible controls. */
+@media (pointer: coarse) {
+  #safety-warning { width: 44px; }
+  #conv-controls :is(#safety-warning, #model-trigger, #downgrade-chip) {
+    position: relative; isolation: isolate;
+    & > * { position: relative; z-index: var(--z-raised); }
+    &::after { content: ""; position: absolute; inset: -8px 0; } }
+  #context-indicator::after { content: ""; position: absolute; inset: -8px 0; }
+}
+/* The live panel and editor share one card, with a divider between them. */
+#composer-card { position: relative; max-width: 780px; margin-inline: auto; }
+#composer-card:has(> #live-bar:not([hidden], .stale)) {
+  & #live-bar .live-panel-box { border-radius: 14px 14px 0 0; box-shadow: none;
+    transition: border-color var(--motion-fast); }
+  & #composer { border-top-width: 0; padding-top: calc(var(--space-2) + 1px);
+    border-top-left-radius: 0; border-top-right-radius: 0; }
+  &:has(#composer:focus-within) #live-bar .live-panel-box { border-color: var(--accent-dim);
+    border-bottom-color: var(--border); }
+}
+@property --composer-shimmer-angle {
+  syntax: "<angle>"; inherits: false; initial-value: 0turn;
+}
+@keyframes composer-border-shimmer {
+  from { --composer-shimmer-angle: 0turn; }
+  to { --composer-shimmer-angle: 1turn; }
+}
+@supports (mask-composite: exclude) {
+  #composer-card[data-turn-running]::after {
+    content: ""; position: absolute; inset: 0; border-radius: 14px;
+    padding: 1px; pointer-events: none;
+    mask: linear-gradient(currentColor 0 0) content-box, linear-gradient(currentColor 0 0);
+    mask-composite: exclude;
+    background: conic-gradient(from var(--composer-shimmer-angle), transparent 280deg,
+      color-mix(in srgb, var(--running) 62%, transparent) 320deg, transparent 360deg);
+    animation: composer-border-shimmer 8s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #composer-card[data-turn-running]::after {
+      background: color-mix(in srgb, var(--running) 45%, transparent); animation: none;
+    }
+  }
+}
+
+.effort-stops, .effort-reasoning-text:empty { display: none; }
+.effort-reasoning-text { color: var(--muted); }
+#conv-controls .conversation-effort #model-trigger {
+  width: calc(16ch + 3 * var(--space-2)); max-width: 100%;
+  justify-content: center; gap: var(--space-2); padding: 0 var(--space-2);
+  border-radius: 999px; color: var(--text); white-space: nowrap;
+  background: color-mix(in srgb, var(--text) 7%, var(--panel-2));
+  -webkit-tap-highlight-color: transparent;
+}
+#conv-controls .conversation-effort #model-trigger:is(:hover, :focus-visible, :active, [aria-expanded="true"]) {
+  box-shadow: inset 0 0 0 1px var(--muted);
+}
+.conversation-effort #model-trigger .model-name { width: auto; max-width: 9ch; }
+.conversation-effort #model-trigger .effort-reasoning-text { flex: none; }
+.conversation-effort #model-menu { width: min(340px, calc(100vw - 24px)); padding: var(--space-4); }
+.conversation-effort #model-menu:popover-open { display: flex; flex-direction: column; gap: var(--space-2); }
+.conversation-effort #effort-model { order: -1; font-size: 1.0625rem; font-weight: 600; }
+.conversation-effort #effort-slider { position: relative; --effort-thumb-size: 28px; }
+.conversation-effort .effort-stops {
+  --effort-progress: 0;
+  position: absolute; inset: 50% 0 auto; transform: translateY(-50%);
+  display: flex; align-items: center; justify-content: space-between;
+  height: calc(var(--effort-thumb-size) + 2 * var(--space-2));
+  padding-inline: calc(var(--effort-thumb-size) / 2); border-radius: 999px;
+  background: var(--panel-2); box-shadow: inset 0 0 0 1px var(--border); pointer-events: none;
+}
+.conversation-effort #effort-slider:not(.legacy) .effort-stops::before {
+  content: ""; position: absolute; inset: var(--space-2) auto var(--space-2) var(--space-2);
+  width: calc(var(--effort-thumb-size) + (100% - var(--effort-thumb-size) - 2 * var(--space-2)) * var(--effort-progress));
+  border-radius: 999px; background: var(--accent);
+}
+.conversation-effort .effort-stops > span {
+  position: relative; width: var(--space-3); height: var(--space-3);
+  border-radius: 50%; background: var(--muted);
+}
+.conversation-effort .effort-stops > .filled {
+  background: color-mix(in srgb, var(--on-media) 75%, var(--accent));
+  box-shadow: inset 0 0 0 1px var(--text-on-accent);
+}
+.conversation-effort #effort-range {
+  position: relative; height: 44px; width: calc(100% - 2 * var(--space-2)); margin-inline: var(--space-2);
+}
+.conversation-effort #effort-range::-webkit-slider-runnable-track {
+  height: var(--effort-thumb-size); background: none; box-shadow: none;
+}
+.conversation-effort #effort-range::-moz-range-track { background: none; box-shadow: none; }
+.conversation-effort #effort-slider #effort-range::-moz-range-progress { background: none; }
+.conversation-effort #effort-range::-webkit-slider-thumb {
+  width: var(--effort-thumb-size); height: var(--effort-thumb-size); margin-top: 0;
+}
+.conversation-effort #effort-range::-moz-range-thumb {
+  box-sizing: border-box; width: var(--effort-thumb-size); height: var(--effort-thumb-size);
+}

@@ -3,7 +3,12 @@
 // Provider credentials and instance storage retain separate ownership.
 // Home sync uses only settings_sync's route inventory.
 
-import { PI_MODEL_ROUTES, THINKING_LEVELS, type Config } from "../config";
+import type { Config } from "../config";
+import {
+  PI_MODEL_ROUTES,
+  THINKING_LEVELS,
+  type PiModelUpdater,
+} from "../models";
 import type { StoredModelSignIns } from "../safety_review_models";
 import {
   brandingFile,
@@ -53,7 +58,6 @@ import {
 import { conditionalJson } from "./caching";
 import { jsonDictBody } from "./request";
 import { HttpError, jsonResponse, type Router } from "./router";
-import type { PiModelUpdater } from "../pi_model_list";
 import type { RecurseUpdates } from "../recurse_update";
 import { requireOperator } from "./backend_keys";
 import { McpCheckBusy, type McpChecks } from "../mcp_checks";
@@ -74,7 +78,7 @@ function ladderModels(
   levels: Record<number, { model: string }>,
 ): Rec[] {
   const catalog = new Map(
-    config.chatModels().map((option) => [option.id, option]),
+    config.models.chatModels().map((option) => [option.id, option]),
   );
   const shown: Rec[] = [];
   const seen = new Set<string>();
@@ -85,7 +89,7 @@ function ladderModels(
     if (seen.has(model)) continue;
     seen.add(model);
     const option = catalog.get(model);
-    const policy = option ? null : config.modelPolicy(model);
+    const policy = option ? null : config.models.modelPolicy(model);
     shown.push({
       id: model,
       label: option ? option.label : policy!.label,
@@ -102,12 +106,12 @@ function ladderModels(
  * OpenRouter, then custom, each in Pi's order. `reasoning_levels` is null
  * when Pi's list does not give a model's levels; any level is then allowed. */
 function settingsModelList(config: Config): Rec[] {
-  return config.authedChatModels().map((option) => ({
+  return config.models.authedChatModels().map((option) => ({
     id: option.id,
     label: option.label,
     route: option.provider,
     context_window: option.context_window ?? null,
-    reasoning_levels: config.modelReasoningLevels(option.id),
+    reasoning_levels: config.models.modelReasoningLevels(option.id),
   }));
 }
 
@@ -436,7 +440,7 @@ export function registerSettingsRoutes(
     // Invariant: A login change re-checks reachability; never fatal to the
     // login.
     try {
-      await config.writeAvailableModels();
+      await config.levels.writeAvailableModels();
     } catch {}
     return value;
   }
@@ -454,23 +458,23 @@ export function registerSettingsRoutes(
   router.get("/api/models", async (ex) => {
     // Invariant: Only models whose provider is logged in are offered;
     // `providers` reports each login state so the UI can prompt a first login.
-    const authed = config.authedModelProviders();
+    const authed = config.models.authedModelProviders();
     const providers: Rec[] = PI_PROVIDER_LABELS.map(([id, label]) => ({
       id,
       label,
       authed: logicalProviderAuthed(id, authed),
     }));
-    const catalog = config
+    const catalog = config.models
       .chatModels()
-      .filter((option) => authed.has(config.providerOf(option.id)));
-    for (const name of Object.keys(config.customModelProviders()))
+      .filter((option) => authed.has(config.models.providerOf(option.id)));
+    for (const name of Object.keys(config.models.customModelProviders()))
       providers.push({
         id: name,
         label: name,
         custom: true,
         authed: authed.has(name),
       });
-    const want = config.defaultChatModel();
+    const want = config.models.defaultChatModel();
     const fallback = catalog.length ? catalog[0]!.id : null;
     return conditionalJson(ex.request, {
       default: catalog.some((option) => option.id === want) ? want : fallback,
@@ -493,8 +497,14 @@ export function registerSettingsRoutes(
   router.get("/api/settings/update", async () =>
     json(await deps.recurseUpdates.status()),
   );
-  // Invariant: Only an operator session updates Recurse; agents, service
-  // principals, backend keys and the loopback token never do.
+  // Invariant: Only an operator session checks on demand or updates Recurse;
+  // agents, service principals, backend keys and loopback tokens never do.
+  router.post("/api/settings/update/check", async (ex) => {
+    requireOperator(ex);
+    const status = await deps.recurseUpdates.status({ checkNow: true });
+    if (status.skipped) throw new HttpError(409, status.skipped);
+    return jsonResponse(status, 202);
+  });
   router.post("/api/settings/update", async (ex) => {
     requireOperator(ex);
     const refused = deps.recurseUpdates.apply();
@@ -577,15 +587,15 @@ export function registerSettingsRoutes(
   );
 
   router.get("/api/settings/default-efforts", async () => {
-    const overrides = config.defaultEfforts();
+    const overrides = config.models.defaultEfforts();
     return json({
       levels: [...THINKING_LEVELS],
       efforts: overrides,
-      models: config.authedChatModels().map((option) => ({
+      models: config.models.authedChatModels().map((option) => ({
         id: option.id,
         label: option.label,
         effort: option.effort,
-        suggested: String(config.suggestedEffort(option.id)),
+        suggested: String(config.models.suggestedEffort(option.id)),
         override: overrides[option.id] ?? null,
         context_window: option.context_window ?? null,
       })),
@@ -603,8 +613,8 @@ export function registerSettingsRoutes(
     // Invariant: Content-derived validator: reachability flips on login without
     // touching the ladder file, so an unchanged ladder is a cheap 304 only
     // while the payload is identical.
-    const levels = config.effortLevels();
-    const reachability = config.effortLevelReachability();
+    const levels = config.levels.effortLevels();
+    const reachability = config.levels.effortLevelReachability();
     const byLevel = <T>(record: Record<number, T>) =>
       Object.fromEntries(
         Object.keys(record)
@@ -613,7 +623,7 @@ export function registerSettingsRoutes(
           .map((level) => [String(level), record[level]]),
       );
     return conditionalJson(ex.request, {
-      default_level: config.defaultEffortLevel(),
+      default_level: config.levels.defaultEffortLevel(),
       levels: byLevel(levels),
       reachability: byLevel(reachability),
       models: ladderModels(config, levels),
@@ -623,14 +633,16 @@ export function registerSettingsRoutes(
 
   router.post("/api/settings/effort-levels", async (ex) => {
     const body = await jsonDictBody(ex);
-    return json({ levels: await mutate(() => config.setEffortLevels(body)) });
+    return json({
+      levels: await mutate(() => config.levels.setEffortLevels(body)),
+    });
   });
 
   router.post("/api/settings/default-efforts", async (ex) => {
     const body = await jsonDictBody(ex);
     return json({
       efforts: await mutate(() =>
-        config.setDefaultEfforts(field(body, "efforts")),
+        config.models.setDefaultEfforts(field(body, "efforts")),
       ),
     });
   });
@@ -882,10 +894,10 @@ export function registerSettingsRoutes(
   );
 
   router.get("/api/pi/custom-provider-auth", async () => {
-    const configured = config.configuredCustomProviders();
+    const configured = config.models.configuredCustomProviders();
     return json(
       Object.fromEntries(
-        Object.keys(config.customModelProviders()).map((name) => [
+        Object.keys(config.models.customModelProviders()).map((name) => [
           name,
           { configured: configured.has(name) },
         ]),
@@ -898,7 +910,7 @@ export function registerSettingsRoutes(
     async (ex) => {
       const name = ex.params.name!;
       const body = await jsonDictBody(ex);
-      if (!Object.hasOwn(config.customModelProviders(), name))
+      if (!Object.hasOwn(config.models.customModelProviders(), name))
         throw new HttpError(404, "no such custom provider");
       const raw = field(body, "key");
       const key = truthy(raw) ? raw : "";
@@ -919,14 +931,16 @@ export function registerSettingsRoutes(
     "/api/pi/custom-provider-auth/{name}/logout",
     async (ex) => {
       const name = ex.params.name!;
-      if (!Object.hasOwn(config.customModelProviders(), name))
+      if (!Object.hasOwn(config.models.customModelProviders(), name))
         throw new HttpError(404, "no such custom provider");
       await deps.credentials.removeCredentials([name]);
       // Invariant: An ambient env key survives the removal and still
       // authenticates: recompute after the snapshot refresh.
       await providerAuthUpdated(null);
       return json({
-        [name]: { configured: config.configuredCustomProviders().has(name) },
+        [name]: {
+          configured: config.models.configuredCustomProviders().has(name),
+        },
       });
     },
     long,

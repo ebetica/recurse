@@ -32,6 +32,7 @@ import {
   type ConversationRecord,
   type ConversationStore,
   type ConversationStoreHooks,
+  type ServiceBindings,
 } from "../storage";
 import { TreeLifecycleBusy, type TreeLifecycle } from "../lifecycle";
 import {
@@ -104,9 +105,11 @@ export interface ReapDeps {
     | "save"
     | "convRowExists"
     | "discardConvProjection"
-    | "unbindExternalKey"
-    | "unbindServiceConversation"
     | "withPermanentDeleteStateGuard"
+  >;
+  serviceBindings: Pick<
+    ServiceBindings,
+    "unbindExternalKey" | "unbindServiceConversation"
   >;
   nodes: Pick<
     AgentNodes<AgentNode, NodeStore>,
@@ -426,7 +429,7 @@ export class SupervisorReap {
     await this.deps.retireToolDetails(d);
     await this.deps.pruneArtifactOwner?.(d);
     await this.retireReviewerJournal(d);
-    await this.deps.conversations.unbindServiceConversation(d);
+    await this.deps.serviceBindings.unbindServiceConversation(d);
     await this.retireLedgerResidue(d);
     await this.unlinkLockFiles(d);
   }
@@ -441,7 +444,7 @@ export class SupervisorReap {
     const key = conv.external_key;
     if (typeof principal === "string" && typeof key === "string") {
       try {
-        await this.deps.conversations.unbindExternalKey(principal, key, d);
+        await this.deps.serviceBindings.unbindExternalKey(principal, key, d);
       } catch (exc) {
         if (exc instanceof ServiceStorageUnavailable || isSystemError(exc))
           return `external key unbind failed: ${(exc as Error).message}`;
@@ -449,7 +452,7 @@ export class SupervisorReap {
       }
     }
     try {
-      await this.deps.conversations.unbindServiceConversation(d);
+      await this.deps.serviceBindings.unbindServiceConversation(d);
     } catch (exc) {
       if (isSystemError(exc))
         return `service unbind failed: ${(exc as Error).message}`;

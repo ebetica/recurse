@@ -1,5 +1,7 @@
 // The complete non-secret settings-sync inventory. Each kind owns its public
 // projection and existing POST body; credentials and MCP are never included.
+import { OPTIONAL_EFFORT_LEVELS } from "../../effort_levels";
+
 type Data = Record<string, any>;
 interface Kind {
   path: string;
@@ -7,21 +9,30 @@ interface Kind {
   body(key: string, after: unknown, current: any): unknown;
   title(key: string): string;
   model?(key: string, value: any): string | undefined;
+  unavailable?(key: string, value: unknown, remote: Data): string | undefined;
 }
 export const SYNC_KINDS: readonly Kind[] = [
   {
     path: "/api/settings/effort-levels",
     values: (data) => ({ ...data.levels, default_level: data.default_level }),
-    body: (key, after, current) => ({
-      levels:
-        key === "default_level"
-          ? current.levels
-          : { ...current.levels, [key]: after },
-      default_level: key === "default_level" ? after : current.default_level,
-    }),
+    body: (key, after, current) => {
+      const levels = { ...current.levels };
+      for (const level of OPTIONAL_EFFORT_LEVELS) delete levels[level];
+      if (key !== "default_level") levels[key] = after;
+      return {
+        levels,
+        default_level: key === "default_level" ? after : current.default_level,
+      };
+    },
     title: (key) =>
       key === "default_level" ? "Default effort level" : `Effort ${key}`,
     model: (key, value) => (key === "default_level" ? undefined : value.model),
+    unavailable: (key, value, remote) => {
+      const level = key === "default_level" ? String(value) : key;
+      return Object.hasOwn(remote, level)
+        ? undefined
+        : `Update the backend to use effort level ${level}`;
+    },
   },
   {
     path: "/api/settings/default-efforts",

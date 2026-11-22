@@ -21,6 +21,7 @@ import { linkDependencies } from "./linked_dependencies";
 import * as buildStamp from "../../src/build_stamp.cli";
 import { STRICT_ISOLATED_PATH_ENV } from "../../src/local_roots";
 import { buildFrontend } from "../../src/launcher/build.cli";
+import { APP_CSS_SOURCES } from "../../src/launcher/frontend_assets";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { appWorld, PASSWORD } from "./web_app_support";
 import {
@@ -41,14 +42,13 @@ import {
   type TerminateDeps,
 } from "../../src/launcher/server_process.cli";
 import {
-  queryAppStatus,
   sleepInterruptible,
   Supervisor,
   finishSupervisorShutdown,
   type SupervisorDeps,
 } from "../../src/launcher/supervisor.cli";
 import { closeOnExec, run, TimeoutExpired } from "../../src/launcher/system";
-import { gitEnv } from "../../src/workdir_git";
+import { gitEnv } from "../../src/git";
 import * as local from "../../src/local";
 
 const ROOT = resolve(import.meta.dir, "../..");
@@ -513,11 +513,9 @@ test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
   fakeVendorAssets(root);
   mkdirSync(join(root, "web/dist"), { recursive: true });
   writeFileSync(join(root, "web/app.ts"), "source");
-  const styles = ["theme.css", "panes/powerbar.css", "app.css"].map((name) => {
-    const text = readFileSync(join(ROOT, "web", name), "utf8");
-    writeFileSync(join(root, "web", name), text);
-    return text;
-  });
+  const styles = APP_CSS_SOURCES.map((source) =>
+    readFileSync(join(ROOT, source), "utf8"),
+  );
   const bundle = join(root, "web/dist/app.js");
   writeFileSync(bundle, "last-good");
   let fail = true;
@@ -883,140 +881,6 @@ test("test_terminate_refuses_overlap_when_sigkill_does_not_reap", async () => {
   ]);
 });
 
-function serveStatus(raw: unknown, token: string) {
-  return Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request) {
-      const url = new URL(request.url);
-      if (
-        url.pathname !== "/api/status" ||
-        request.headers.get("x-loopback-token") !== token
-      )
-        return new Response("{}", { status: 401 });
-      return new Response(typeof raw === "string" ? raw : JSON.stringify(raw));
-    },
-  });
-}
-
-function writeToken(dataDir: string, token: string): void {
-  mkdirSync(dataDir, { recursive: true });
-  writeFileSync(
-    join(dataDir, "server.json"),
-    JSON.stringify({ port: 0, token }),
-  );
-}
-
-test("test_query_app_status_reports_snapshot_and_unknown", async () => {
-  const token = `tok-${"s".repeat(8)}`;
-  const data = temp("recurse-status-");
-  writeToken(data, token);
-  let server = serveStatus({ ready: true, active_agents: 2 }, token);
-  try {
-    expect(await queryAppStatus(server.port!, data)).toEqual([true, 2]);
-  } finally {
-    server.stop(true);
-  }
-  server = serveStatus({ ready: false, active_agents: null }, token);
-  try {
-    expect(await queryAppStatus(server.port!, data)).toEqual([false, null]);
-  } finally {
-    server.stop(true);
-  }
-});
-
-test("test_query_app_status_unknown_is_never_idle", async () => {
-  const token = `tok-${"u".repeat(8)}`;
-  const data = temp("recurse-status-unknown-");
-  writeToken(data, token);
-  let server = serveStatus({ ready: true, active_agents: 0 }, "other-token");
-  try {
-    expect(await queryAppStatus(server.port!, data)).toEqual([null, null]);
-  } finally {
-    server.stop(true);
-  }
-  expect(await queryAppStatus(1, data)).toEqual([null, null]);
-  expect(await queryAppStatus(1, join(data, "nope"))).toEqual([null, null]);
-  server = serveStatus({ ready: true }, token);
-  try {
-    expect(await queryAppStatus(server.port!, data)).toEqual([true, null]);
-  } finally {
-    server.stop(true);
-  }
-  for (const raw of [
-    "not json",
-    [1, 2],
-    { ready: "yes", active_agents: 1 },
-    { ready: true, active_agents: true },
-    { ready: true, active_agents: -1 },
-  ]) {
-    server = serveStatus(raw, token);
-    try {
-      expect([raw, await queryAppStatus(server.port!, data)]).toEqual([
-        raw,
-        [null, null],
-      ]);
-    } finally {
-      server.stop(true);
-    }
-  }
-});
-
-test("test_query_app_status_redirect_is_unknown_and_token_stays", async () => {
-  const token = `tok-${"r".repeat(8)}`;
-  const data = temp("recurse-status-redirect-");
-  writeToken(data, token);
-  const hits: [string, string | null][] = [];
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch(request) {
-      const url = new URL(request.url);
-      if (url.pathname === "/api/status")
-        return new Response('{"ready": true, "active_agents": 0}', {
-          status: 302,
-          headers: { location: "/capture" },
-        });
-      hits.push([url.pathname, request.headers.get("x-loopback-token")]);
-      return new Response("{}");
-    },
-  });
-  try {
-    expect(await queryAppStatus(server.port!, data)).toEqual([null, null]);
-  } finally {
-    server.stop(true);
-  }
-  expect(hits).toEqual([]);
-});
-
-test("test_query_app_status_ignores_proxy_environment", async () => {
-  const token = `tok-${"p".repeat(8)}`;
-  const data = temp("recurse-status-proxy-");
-  writeToken(data, token);
-  const server = serveStatus({ ready: true, active_agents: 0 }, token);
-  const probe = await listening("127.0.0.1");
-  const dead = portOf(probe);
-  await closeServer(probe);
-  const proxy = `http://127.0.0.1:${dead}`;
-  try {
-    await withEnv(
-      {
-        HTTP_PROXY: proxy,
-        HTTPS_PROXY: proxy,
-        http_proxy: proxy,
-        https_proxy: proxy,
-        NO_PROXY: undefined,
-        no_proxy: "example.com",
-      },
-      async () => {
-        expect(await queryAppStatus(server.port!, data)).toEqual([true, 0]);
-      },
-    );
-  } finally {
-    server.stop(true);
-  }
-});
-
 test("test_build_stamp_clean_match_and_dirty_rebuild", async () => {
   const root = temp("recurse-build-stamp-");
   await git(root, "init", "-b", "main");
@@ -1246,7 +1110,6 @@ test("a generation restart starts the new server only after the old one exited",
   const actions: string[] = [];
   let exit!: (stopped: boolean) => void;
   const supervisor = bareSupervisor({
-    reloadGate: async () => [true, 0],
     terminate: () =>
       new Promise<boolean>((resolve) => {
         actions.push("stop requested");
@@ -1262,21 +1125,18 @@ test("a generation restart starts the new server only after the old one exited",
   });
   const arm = () => {
     supervisor.pendingReexecSha = "b".repeat(40);
-    supervisor.pendingSince = 1;
     supervisor.child = new Child();
     supervisor.codeDir = "/served";
   };
   arm();
-  const refused = supervisor.fireUpdateIfReady(2);
-  await Bun.sleep(10);
+  const refused = supervisor.restartForUpdate();
   expect(actions).toEqual(["stop requested"]);
   exit(false);
   await refused;
   expect(actions).toEqual(["stop requested", "old server exited"]);
   actions.length = 0;
   arm();
-  const fired = supervisor.fireUpdateIfReady(3);
-  await Bun.sleep(10);
+  const fired = supervisor.restartForUpdate();
   expect(actions).toEqual(["stop requested"]);
   exit(true);
   await fired;

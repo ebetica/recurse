@@ -376,15 +376,20 @@ async function editArtifactComment(
   const input = popover.getByRole("textbox");
   const save = popover.getByRole("button", { name: "Save", exact: true });
   const cancel = popover.getByRole("button", { name: "Cancel", exact: true });
-  const mark = paragraph.locator("mark.report-cmark").first();
-  const inline = paragraph.getByRole("button", {
-    name: "Edit highlighted comment",
+  const link = paragraph.getByRole("link", { name: "Read the first section" });
+  const mark = paragraph.getByRole("button", {
+    name: "Edit comment: Read the first section before editing.",
   });
   const submit = page.getByRole("button", {
     name: "Submit comments",
     exact: true,
   });
-  if (mobile) await expectHitCorners(inline);
+  await browserExpect(paragraph.locator(".report-comment-anchor")).toHaveCount(
+    0,
+  );
+  await browserExpect(link.locator("mark.report-cmark")).toHaveText(
+    "Read the first section",
+  );
   await activate(mark);
   await browserExpect(popover).toBeVisible();
   await browserExpect(input).toHaveValue(original);
@@ -398,7 +403,15 @@ async function editArtifactComment(
   await activate(save);
   await browserExpect(popover).toBeHidden();
   await browserExpect(mark).toBeFocused();
-  await inline.press("Enter");
+  await link.focus();
+  await page.keyboard.press("Tab");
+  await browserExpect(mark).toBeFocused();
+  await browserExpect(mark).toHaveCSS("outline-style", "solid");
+  await shot(
+    page,
+    mobile ? "artifact-highlight-phone.png" : "artifact-highlight-desktop.png",
+  );
+  await page.keyboard.press("Enter");
   await browserExpect(input).toHaveValue(edited);
   await input.fill("");
   await browserExpect(
@@ -406,8 +419,12 @@ async function editArtifactComment(
   ).toBeDisabled();
   await browserExpect(save).toBeDisabled();
   await input.press("Escape");
-  await browserExpect(inline).toBeFocused();
+  await browserExpect(mark).toBeFocused();
   await browserExpect(submit).toBeEnabled();
+  await page.keyboard.press("Space");
+  await browserExpect(input).toHaveValue(edited);
+  await input.press("Escape");
+  await browserExpect(mark).toBeFocused();
   const entry = page.getByRole("button", { name: `Edit comment: ${edited}` });
   await browserExpect(entry).toContainText(edited);
   if (mobile) await expectHitCorners(entry);
@@ -423,10 +440,75 @@ async function editArtifactComment(
   await input.press("Escape");
   await browserExpect(popover).toBeHidden();
   await browserExpect(entry).toBeFocused();
+  if (!mobile) {
+    const stageOverlap = async (note: string, word: string) => {
+      await mark.scrollIntoViewIfNeeded();
+      const part = await mark.evaluate((element, word) => {
+        const text = element.firstChild as Text;
+        const offset = text.data.indexOf(word);
+        const range = document.createRange();
+        range.setStart(text, offset);
+        range.setEnd(text, offset + word.length);
+        const { left, right, top, height } = range.getBoundingClientRect();
+        return { left, right, y: top + height / 2 };
+      }, word);
+      await page.mouse.move(part.left + 1, part.y);
+      await page.mouse.down();
+      await page.mouse.move(part.right + 1, part.y, { steps: 5 });
+      await page.mouse.up();
+      await browserExpect(popover).toBeVisible();
+      await input.fill(note);
+      await popover
+        .getByRole("button", { name: "Comment", exact: true })
+        .click();
+    };
+    const wordNote = "Edit this word too";
+    const leadInNote = "Clarify the lead-in";
+    await stageOverlap(wordNote, "editing.");
+    await stageOverlap(leadInNote, "before");
+    const cards = page.locator(".report-comment");
+    await browserExpect(cards).toHaveCount(3);
+    await browserExpect(paragraph.getByRole("button")).toHaveCount(1);
+    await link.focus();
+    await page.keyboard.press("Tab");
+    await browserExpect(mark).toBeFocused();
+    await page.keyboard.press("Enter");
+    await browserExpect(input).toHaveValue(edited);
+    await input.press("Escape");
+    const removeFor = (note: string) =>
+      cards
+        .filter({ hasText: note })
+        .getByRole("button", { name: /^Remove comment on/ });
+    for (const note of [edited, wordNote, leadInNote]) {
+      const cardEditor = page.getByRole("button", {
+        name: `Edit comment: ${note}`,
+        exact: true,
+      });
+      await removeFor(note).focus();
+      await page.keyboard.press("Shift+Tab");
+      await browserExpect(cardEditor).toBeFocused();
+      await page.keyboard.press("Enter");
+      await browserExpect(input).toHaveValue(note);
+      await input.press("Escape");
+      await browserExpect(cardEditor).toBeFocused();
+    }
+    await removeFor(wordNote).click();
+    await removeFor(leadInNote).click();
+  }
   await browserExpect(page.locator(".report-comment")).toHaveCount(1);
   await browserExpect(page.locator(".report-sendbar-label")).toHaveText(
     "1 comment",
   );
+  await paragraph.scrollIntoViewIfNeeded();
+  const destination = page.getByRole("heading", {
+    name: "Section 1",
+    exact: true,
+  });
+  await browserExpect(destination).not.toBeInViewport();
+  if (mobile) await link.tap();
+  else await link.press("Enter");
+  await browserExpect(destination).toBeInViewport();
+  await browserExpect(popover).toBeHidden();
 }
 
 async function checkArtifactCommentSend(
@@ -436,7 +518,15 @@ async function checkArtifactCommentSend(
   for (const mobile of [false, true]) {
     for (const moves of [true, false]) {
       for (const submit of ["button", "Control+Enter", "Meta+Enter"]) {
-        const item = await postFixture(base, "seed-pane-reading");
+        const edit = moves && submit === "button";
+        const markdown = edit
+          ? Array.from(
+              { length: 100 },
+              (_, i) =>
+                `## Section ${i + 1}\n\n${i === 50 ? "[Read the first section](#section-1) before editing." : `Document paragraph ${i + 1}.`}`,
+            ).join("\n\n")
+          : undefined;
+        const item = await postFixture(base, "seed-pane-reading", { markdown });
         const context = await browser.newContext({
           viewport: { width: mobile ? 412 : 1280, height: 844 },
           isMobile: mobile,
@@ -494,7 +584,6 @@ async function checkArtifactCommentSend(
           await popover.waitFor();
           const reply = `Preserved ${mobile} ${moves} ${submit}`;
           const note = `Reply only ${reply}`;
-          const edit = moves && submit === "button";
           const initial = edit ? "This note needs editing" : note;
           await popover.locator("textarea").fill(initial);
           const secondNote = `Also preserve ${mobile} ${moves} ${submit}`;

@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { expect as browserExpect } from "playwright/test";
 import {
   dispatchArtifactSelection,
   postFixture,
@@ -54,7 +55,7 @@ export const tests: BrowserTest[] = [
           .waitFor();
         await page.locator('.rail-btn[data-pane="files"]').click();
       }
-      const pane = filesSurface(page);
+      let pane = filesSurface(page);
       await openListedFile(page, "browser-notes.txt");
       const text = pane.locator(".files-detail pre", {
         hasText: "bounded browser text preview",
@@ -158,8 +159,9 @@ export const tests: BrowserTest[] = [
         const range = await text.evaluate((pre: any) => {
           const node = pre.ownerDocument.createTreeWalker(pre, 4).nextNode();
           const range = pre.ownerDocument.createRange();
-          range.setStart(node, 0);
-          range.setEnd(node, "bounded".length);
+          const start = node.textContent.lastIndexOf("bounded");
+          range.setStart(node, start);
+          range.setEnd(node, start + "bounded".length);
           const rect = range.getBoundingClientRect();
           return {
             left: rect.left,
@@ -183,18 +185,62 @@ export const tests: BrowserTest[] = [
         "bounded",
       );
       await fileShot(page, `files-text-comment-${width}.png`);
+      let originalTabId: string | null = null;
+      let longLine: string | undefined;
+      if (!mobile) {
+        originalTabId = await page
+          .locator(".pane-col.file-tab")
+          .filter({
+            has: page.getByRole("article", {
+              name: "browser-notes.txt",
+              exact: true,
+            }),
+          })
+          .getAttribute("data-pane");
+        longLine = (await text.textContent())!.split("\n")[2]!;
+        await dispatchArtifactSelection(page, "mouse", longLine, text);
+        await popover.locator("textarea").fill("Explain this whole line");
+        await popover.getByRole("button", { name: "Comment" }).click();
+        await showFilesList(page);
+        await openListedFile(page, "browser-image.png");
+        const imageTab = page.locator(".pane-col.file-tab").filter({
+          has: page.getByRole("article", { name: "browser-image.png" }),
+        });
+        const id = await imageTab.getAttribute("data-pane");
+        pane = page.locator(`.pane-col[data-pane="${id}"]`);
+        await pane.getByRole("button", { name: "Previous file" }).click();
+        await browserExpect(pane.locator("mark.report-cmark")).toHaveText([
+          "bounded",
+          longLine,
+        ]);
+      }
       const delivered = page.waitForRequest((request) =>
         request.url().endsWith(`/api/conversations/${fixture.demo}/deliver`),
       );
       await pane.getByRole("button", { name: "Submit comments" }).click();
       const content = (await delivered).postDataJSON().content as string;
-      expect(content).toMatch(
-        new RegExp(
-          `^Comments on file "browser-notes\\.txt" \\(id: [^)\\s]+\\):\n\n- line 1, chars 0-7:\n> bounded\nExplain this at ${width}$`,
-        ),
+      const [heading, ...notes] = content.split("\n\n");
+      expect(heading).toMatch(
+        /^Comments on file "browser-notes\.txt" \(id: [^)\s]+\):$/,
       );
-      await card.waitFor({ state: "detached" });
-      expect(await pane.locator("mark.report-cmark").count()).toBe(0);
+      const location = mobile ? "line 1, chars 0-7" : "line 2, chars 29-36";
+      const expectedNotes = [
+        `- ${location}:\n> bounded\nExplain this at ${width}`,
+      ];
+      if (longLine)
+        expectedNotes.push(
+          `- line 3, chars 43-${43 + longLine.length}:\n> ${longLine.slice(0, 600)}\nExplain this whole line`,
+        );
+      expect(notes).toEqual(expectedNotes);
+      if (!mobile) {
+        await page
+          .locator(`.dv-tab[data-dock-panel="${originalTabId}"]`)
+          .click();
+        pane = page.locator(`.pane-col[data-pane="${originalTabId}"]`);
+        await browserExpect(pane).toBeVisible();
+      }
+      await browserExpect(pane.locator(".report-comment")).toHaveCount(0);
+      await browserExpect(pane.locator("mark.report-cmark")).toHaveCount(0);
       expect(errors).toEqual([]);
       await context.close();
     }
@@ -509,7 +555,15 @@ export const tests: BrowserTest[] = [
     expect(await pane.locator(".report-comment-input").inputValue()).toBe(
       "Unsent draft",
     );
+    const originalId = await pane.getAttribute("data-pane");
+    await showFilesList(page);
+    await openListedFile(page, "browser-notes.txt");
+    await pane.getByRole("button", { name: "Next file" }).click();
+    await browserExpect(pane.locator("mark.report-cbox")).toHaveCount(1);
     await pane.locator(".report-comment-del").click();
+    await page.locator(`.dv-tab[data-dock-panel="${originalId}"]`).click();
+    await browserExpect(pane).toHaveAttribute("data-pane", originalId!);
+    await browserExpect(pane.locator("mark.report-cbox")).toHaveCount(0);
     await drawImageBox();
     await popover.waitFor();
     await popover.locator("textarea").fill("Crop this");
@@ -517,16 +571,27 @@ export const tests: BrowserTest[] = [
     expect(await pane.locator(".report-comment blockquote").textContent()).toBe(
       "Box on image",
     );
-    page.once("dialog", (dialog) => void dialog.dismiss());
-    await page.locator(`.agent[data-id="${fixture.empty}"]`).click();
-    expect(page.url()).toBe(`${base}#agent=${fixture.demo}`);
     await pane.getByRole("button", { name: "Previous file" }).click();
     await pane
       .locator('.files-detail[aria-label="browser-notes.txt"]')
       .waitFor();
     expect(await pane.locator("mark.report-cbox").count()).toBe(0);
+    let dismissed: string | undefined;
+    page.once("dialog", async (dialog) => {
+      const message = dialog.message();
+      await dialog.dismiss();
+      dismissed = message;
+    });
+    await page.locator(`.agent[data-id="${fixture.empty}"]`).click();
+    await browserExpect
+      .poll(() => dismissed)
+      .toContain("You have 1 unsent comment.");
+    await browserExpect(page).toHaveURL(`${base}#agent=${fixture.demo}`);
     await pane.getByRole("button", { name: "Next file" }).click();
     await pane.locator(".files-image-frame mark.report-cbox").waitFor();
+    await browserExpect(pane.locator(".report-comment-input")).toHaveValue(
+      "Crop this",
+    );
     await drawImageBox();
     await popover.locator("textarea").fill("Another region");
     await popover.getByRole("button", { name: "Comment" }).click();

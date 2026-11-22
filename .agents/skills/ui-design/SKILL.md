@@ -67,7 +67,7 @@ areas by interacting, not from screenshots.
   that each mean something different (a model, a mode) are not slider
   material; show them as options. A slider's value label sits above or beside
   the thumb, never under the finger. **Recurse exception:** the composer's
-  five-stop effort-level slider.
+  effort-level slider.
   [NN/g](https://www.nngroup.com/articles/gui-slider-controls/)
 - **C4 A switch is never two opposing options or an action.** List-or-grid is
   a segmented control; "do it now" is a button.

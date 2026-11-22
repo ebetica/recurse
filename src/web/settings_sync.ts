@@ -72,21 +72,23 @@ export function registerSettingsSyncRoutes(
       }
       for (const [key, value] of Object.entries(after)) {
         const model = kind.model?.(key, value);
-        const missing = model !== undefined && !available.has(model);
+        const reason =
+          kind.unavailable?.(key, value, before) ??
+          (model !== undefined && !available.has(model)
+            ? `Model ${model} is not available on ${ex.params.label}`
+            : "");
         items.push({
           item: kind.title(key),
           path,
           key,
           before: before[key] ?? null,
           after: value,
-          status: missing
+          status: reason
             ? "unusable"
             : stable(before[key]) === stable(value)
               ? "same"
               : "change",
-          reason: missing
-            ? `Model ${model} is not available on ${ex.params.label}`
-            : "",
+          reason,
         });
       }
     }
@@ -138,10 +140,10 @@ export function registerSettingsSyncRoutes(
         else {
           const kind = SYNC_KINDS.find((kind) => kind.path === item.path)!;
           const current = await call(ex, signal, item.path);
-          if (
-            stable(kind.values(current)[item.key!] ?? null) !==
-            stable(item.before)
-          )
+          const values = kind.values(current);
+          const reason = kind.unavailable?.(item.key!, item.after, values);
+          if (reason) status = `refused: ${reason}`;
+          else if (stable(values[item.key!] ?? null) !== stable(item.before))
             status = `refused: changed on ${ex.params.label} since preview`;
           else if (item.status === "same") status = "unchanged";
           else {

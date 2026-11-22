@@ -4,6 +4,7 @@
 // script is default_sidebar.js.
 import type { SidebarRow, Tags } from "./rows.js";
 import { OPERATOR_TAGS } from "../agent_metadata/index.js";
+import { EFFORT_LEVEL_RANGE, isEffortLevel } from "../effort_levels.js";
 import "./rows.js";
 
 export interface NewAgent {
@@ -35,12 +36,10 @@ export function checkNewAgent(value: unknown): NewAgent | undefined {
         !defaults ||
         typeof defaults !== "object" ||
         Object.keys(defaults).some((key) => key !== "effort") ||
-        !Number.isInteger(defaults.effort) ||
-        defaults.effort < 1 ||
-        defaults.effort > 5
+        !isEffortLevel(defaults.effort)
       )
         throw new ArrangementError(
-          "newAgent defaults need a custom tag and effort 1-5",
+          `newAgent defaults need a custom tag and effort ${EFFORT_LEVEL_RANGE}`,
         );
     }
   }

@@ -308,7 +308,7 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
     const settings = new Config({
       env: { ...process.env, CHAT_DATA_DIR: root },
     });
-    expect(settings.effortLevels()[3]).toEqual({
+    expect(settings.levels.effortLevels()[3]).toEqual({
       model: "faux/faux-1",
       reasoning: "off",
     });

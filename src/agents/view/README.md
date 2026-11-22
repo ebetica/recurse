@@ -4,9 +4,10 @@ A **view** is the list of rows the browser shows for one conversation: messages,
 tool calls and status lines. This directory builds views from stored history and
 live updates, one bounded page at a time.
 
-**Source files:** [index.ts](index.ts) (shared failure guidance) ·
-[reader.ts](reader.ts) (reads pages) ·
-[conversation.ts](conversation.ts) (turns entries into rows) ·
+**Source files:** [index.ts](index.ts) (shared display helpers) ·
+[reader.ts](reader.ts) (reads pages and owns the resident view cache) ·
+[entry_rows.ts](entry_rows.ts) (projects one entry without changing the view) ·
+[conversation.ts](conversation.ts) (reconciles rows and tracks changes) ·
 [session_entries.ts](session_entries.ts) (legacy Pi JSONL pages) ·
 [failure_sentences.ts](failure_sentences.ts) (failure text for the operator) ·
 [../durable/durable_rows.ts](../durable/durable_rows.ts) (Durable entries to rows) ·
@@ -19,8 +20,10 @@ with stored pages by entry identity, so each entry shows once whether it arrived
 live, from storage, or both. Old Pi JSONL sessions can still be read, but there
 is no second live transcript. Thinking rows retain a presence flag even when
 the provider supplies only encrypted or redacted thinking. Readable thinking
-shows a bounded heading or opening line in the thread. The live panel selects
-the latest readable thought within the active run; an empty, redacted or
+shows a bounded heading or opening line in the thread. The latest readable tool
+thought stays visible when command details are folded, even if a later tool has
+an unreadable thought. The live panel shows the latest readable thought in the
+run; an empty, redacted or
 encrypted block cannot displace it. Script calls beyond the display cap retain
 grouped names and statistics without their arguments.
 

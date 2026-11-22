@@ -1,6 +1,12 @@
 // Argument parsing and per-command help for the subagent CLI.
+import {
+  EFFORT_LEVEL_RANGE,
+  EFFORT_LEVELS,
+  isEffortLevel,
+} from "../src/effort_levels";
+
 const SUBCOMMAND_HELP: Record<string, string> = {
-  create: `usage: subagent.py create [-h] --title TITLE [--effort 1-5] [--sibling] [--taken-over]
+  create: `usage: subagent.py create [-h] --title TITLE [--effort ${EFFORT_LEVEL_RANGE}] [--sibling] [--taken-over]
                           [--worktree name [--worktree-source path] [--commit ref]]
                           prompt
 
@@ -13,7 +19,7 @@ options:
   -h, --help       show this help message and exit
   --title TITLE    short kebab-case sidebar label (e.g. sidebar-design);
                    detail goes in the task prompt
-  --effort 1-5     effort level 1-5 (local defaults to yours; remote uses its own)
+  --effort ${EFFORT_LEVEL_RANGE}     effort level ${EFFORT_LEVEL_RANGE} (local defaults to yours; remote uses its own)
   --remote LABEL   create on a connected backend using its defaults; returns
                    cid@label, without a parent report; offline calls queue nothing.
                    Requires a backend key; reconnect open-mode remotes with authentication
@@ -168,8 +174,7 @@ const USAGE: Record<string, string> = {
   root: "usage: subagent.py [-h] {create,send,compact,interrupt,read,search,status,idle,tail,wait,move,tag,rm,revive} ...",
   status: "usage: subagent.py status [-h] [--subtree] [--json] [cid ...]",
   idle: "usage: subagent.py idle [-h] [--wait S] [cid]",
-  create:
-    "usage: subagent.py create [-h] --title TITLE [--effort 1-5] [--sibling] [--taken-over]\n                          [--worktree name [--worktree-source path] [--commit ref]]\n                          prompt",
+  create: `usage: subagent.py create [-h] --title TITLE [--effort ${EFFORT_LEVEL_RANGE}] [--sibling] [--taken-over]\n                          [--worktree name [--worktree-source path] [--commit ref]]\n                          prompt`,
   send: "usage: subagent.py send [-h] [--interrupt] cid message",
   compact: "usage: subagent compact <cid|id@label>",
   interrupt: "usage: subagent.py interrupt [-h] cid",
@@ -481,10 +486,10 @@ export function parseArguments(args: string[], moduleHelp: string): Parsed {
         command,
         `argument --effort: invalid int value: '${effort}'`,
       );
-    if (effort !== undefined && ![1, 2, 3, 4, 5].includes(Number(effort))) {
+    if (effort !== undefined && !isEffortLevel(Number(effort))) {
       parserFailure(
         command,
-        `argument --effort: invalid choice: '${effort}' (choose from 1, 2, 3, 4, 5)`,
+        `argument --effort: invalid choice: '${effort}' (choose from ${EFFORT_LEVELS.join(", ")})`,
       );
     }
   }

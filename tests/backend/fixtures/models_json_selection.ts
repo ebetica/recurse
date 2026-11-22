@@ -39,11 +39,11 @@ export async function run(input: { root: string; endpoint: string }) {
   };
   const pending = new Config({ env });
   const beforeListing = {
-    listed: pending.piModelListState().count !== null,
-    fileModel: pending.isFileProviderModel("file-provider/file-model"),
-    defaultModel: pending.defaultChatModel(),
-    defaultOption: pending.chatModel().id,
-    defaultLevels: pending.effortLevels(),
+    listed: pending.models.piModelListState().count !== null,
+    fileModel: pending.models.isFileProviderModel("file-provider/file-model"),
+    defaultModel: pending.models.defaultChatModel(),
+    defaultOption: pending.models.chatModel().id,
+    defaultLevels: pending.levels.effortLevels(),
   };
   const logs: string[] = [];
   const app = await buildApp({
@@ -68,9 +68,11 @@ export async function run(input: { root: string; endpoint: string }) {
   };
   try {
     await until(() => app.instance.lifecycle.readinessSnapshot().ready);
-    await until(() => app.instance.config.piModelListState().count !== null);
-    const defaultModel = app.instance.config.defaultChatModel();
-    const defaultLevels = app.instance.config.effortLevels();
+    await until(
+      () => app.instance.config.models.piModelListState().count !== null,
+    );
+    const defaultModel = app.instance.config.models.defaultChatModel();
+    const defaultLevels = app.instance.config.levels.effortLevels();
     const caller = await request("/api/conversations", {});
     const callerId = String(caller.body.id);
     const token = await publishLoopbackToken(join(root, "data"), server.port);
@@ -171,35 +173,36 @@ export async function run(input: { root: string; endpoint: string }) {
       logs.some((line) => line.includes("conversation_title_failed")),
     );
     const prompt = await app.instance.durable.prompt(cid);
-    console.log(
-      "MODELS_JSON_RESULT=" +
-        JSON.stringify({
-          selection: {
-            beforeListing,
-            defaultModel,
-            defaultLevels,
-            responses: {
-              rawSpawn,
-              rawCreate,
-              rawChange,
-              pin,
-              levelSpawn,
-              inheritedSpawn,
-              siblingSpawn,
-              explicit,
-              sent,
-            },
-            levelRecord,
-            inherited,
-            naming: prompt.naming,
-            namingFailed: logs.some((line) =>
-              line.includes("conversation_title_failed"),
-            ),
-            authenticated: [...app.instance.config.authedModelProviders()],
-          },
-        }),
-    );
+    const result = {
+      selection: {
+        beforeListing,
+        defaultModel,
+        defaultLevels,
+        responses: {
+          rawSpawn,
+          rawCreate,
+          rawChange,
+          pin,
+          levelSpawn,
+          inheritedSpawn,
+          siblingSpawn,
+          explicit,
+          sent,
+        },
+        levelRecord,
+        inherited,
+        naming: prompt.naming,
+        namingFailed: logs.some((line) =>
+          line.includes("conversation_title_failed"),
+        ),
+        authenticated: [...app.instance.config.models.authedModelProviders()],
+      },
+    };
+    console.log("MODELS_JSON_RESULT=" + JSON.stringify(result));
+    return result;
   } finally {
     await server.close();
   }
 }
+
+export type SelectionResult = Awaited<ReturnType<typeof run>>;

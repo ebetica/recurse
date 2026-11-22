@@ -1,4 +1,4 @@
-// Lazy aggregate context viewer for the exact selected conversation.
+// The composer's context control and shortcut open usage for the selected conversation.
 import { backendFor } from "./backends/backend.js";
 import { backgroundWork } from "./background-work.js";
 import { $, el } from "./dom.js";
@@ -6,7 +6,6 @@ import { conversationContextTokens } from "./context/tokens.js";
 import {
   CONTEXT_SPLIT,
   contextBarSegments,
-  contextMiniBarCollapsed,
   contextOverviewLabel,
   ContextRequestFence,
   contextPercent,
@@ -18,17 +17,14 @@ import type { ContextUsageDetail, Conversation } from "./types.js";
 
 const indicator = $<HTMLButtonElement>("#context-indicator");
 const mini = $("#context-mini");
-const tokenLabel = $("#context-token-label");
 const overlay = $("#context-overlay");
 const closeButton = $<HTMLButtonElement>("#context-close");
 const body = $("#context-body");
-const controls = $("#conv-controls");
 const fence = new ContextRequestFence();
 
 interface SelectedContext {
   id: string;
   key: string;
-  label: string;
   used: number;
   max: number | null;
 }
@@ -53,29 +49,56 @@ function coarseDetail(context: SelectedContext): ContextUsageDetail {
   };
 }
 
-function renderStackedBar(
-  host: HTMLElement,
-  detail: ContextUsageDetail,
-  aggregateFallback = false,
-): void {
+function renderStackedBar(host: HTMLElement, detail: ContextUsageDetail): void {
   host.replaceChildren();
-  const segments = contextBarSegments(detail, aggregateFallback);
+  const segments = contextBarSegments(detail);
   host.classList.toggle("empty", segments.length === 0);
   for (const segment of segments) {
     if (segment.basisPoints <= 0) continue;
     const part = el("span", `turn-usage-segment turn-usage-${segment.color}`);
     part.style.width = `${segment.basisPoints / 100}%`;
-    const qualifier = segment.id === "used" ? "" : " (estimated)";
-    part.title = `${segment.label}${qualifier}: ${formatContextInteger(segment.tokens)} tokens`;
+    part.title = `${segment.label} (estimated): ${formatContextInteger(segment.tokens)} tokens`;
     part.setAttribute("aria-hidden", "true");
     host.appendChild(part);
   }
 }
 
 function renderMini(detail = selected ? coarseDetail(selected) : null): void {
-  if (!mini) return;
-  if (detail) renderStackedBar(mini, detail, true);
-  else mini.replaceChildren();
+  if (!mini || !indicator || !detail) return;
+  const { used_tokens: used, context_window: max } = detail;
+  if (used === null) return;
+  const count = formatContextInteger(used);
+  const text =
+    max === null
+      ? `${count} tokens used; context limit unavailable`
+      : `${count} of ${formatContextInteger(max)} tokens used`;
+  mini.setAttribute("aria-label", `Context usage: ${text}`);
+  indicator.title = `Context usage: ${text}. Open context details (Shift+C).`;
+  indicator.setAttribute(
+    "aria-label",
+    `Latest provider context: ${text}. Open context details.`,
+  );
+  // An unknown window cannot express a bounded measurement. Keep its exact
+  // token count available as an image description instead of inventing a max.
+  mini.setAttribute("role", max === null ? "img" : "meter");
+  if (max === null) {
+    for (const attr of [
+      "aria-valuemin",
+      "aria-valuemax",
+      "aria-valuenow",
+      "aria-valuetext",
+    ])
+      mini.removeAttribute(attr);
+  } else {
+    mini.setAttribute("aria-valuemin", "0");
+    mini.setAttribute("aria-valuemax", String(max));
+    mini.setAttribute("aria-valuenow", String(Math.min(used, max)));
+    mini.setAttribute("aria-valuetext", text);
+    mini.style.setProperty(
+      "--context-fill",
+      `${Math.min(used / max, 1) * 100}%`,
+    );
+  }
 }
 
 function backgroundKey(context: SelectedContext): string {
@@ -125,17 +148,12 @@ function closeContextViewer({
 } = {}): void {
   fence.cancel();
   openedFor = null;
+  const target = restore ? restoreFocus : focusTarget;
+  restoreFocus = null;
+  if (target?.isConnected) target.focus({ preventScroll: true });
   overlay?.classList.remove("on");
   if (overlay) overlay.hidden = true;
   indicator?.setAttribute("aria-expanded", "false");
-  if (restore) {
-    const target = restoreFocus;
-    restoreFocus = null;
-    if (target?.isConnected) target.focus();
-  } else {
-    restoreFocus = null;
-    if (focusTarget?.isConnected) focusTarget.focus();
-  }
 }
 
 function legend(): HTMLElement {
@@ -182,7 +200,7 @@ function renderDetail(detail: ContextUsageDetail): void {
   );
 }
 
-async function openContextViewer(): Promise<void> {
+export async function openContextViewer(): Promise<void> {
   if (!selected || !indicator || !overlay || !body) return;
   openedFor = selected.id;
   restoreFocus =
@@ -224,7 +242,7 @@ function applyConversationContext(
   contextWindow: number | null,
   warm = true,
 ): void {
-  if (!indicator || !tokenLabel) return;
+  if (!indicator) return;
   const max =
     Number.isSafeInteger(contextWindow) && (contextWindow as number) > 0
       ? contextWindow
@@ -241,7 +259,6 @@ function applyConversationContext(
             conv.message_log_generation,
             conv.thread_generation,
           ]),
-          label,
           used,
           max,
         }
@@ -256,15 +273,8 @@ function applyConversationContext(
       });
   }
   selected = next;
-  tokenLabel.textContent = next?.label || "";
   indicator.classList.toggle("on", next !== null);
   indicator.disabled = next === null;
-  if (next)
-    indicator.setAttribute(
-      "aria-label",
-      `Latest provider context: ${next.label}. Open context details.`,
-    );
-  else indicator.removeAttribute("aria-label");
   renderMini(cached && cached.key === next?.key ? cached.detail : undefined);
   if (next && warm) warmContextDetail(next);
 }
@@ -315,13 +325,3 @@ document.addEventListener(
   },
   { capture: true },
 );
-if (typeof ResizeObserver !== "undefined" && controls) {
-  new ResizeObserver(([entry]) => {
-    // Invariant: Controls have padding but no border or scrollbar, so the
-    // rounded border box matches clientWidth without forcing a layout read.
-    indicator?.classList.toggle(
-      "mini-hidden",
-      contextMiniBarCollapsed(Math.round(entry.borderBoxSize[0].inlineSize)),
-    );
-  }).observe(controls, { box: "border-box" });
-}

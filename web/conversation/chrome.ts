@@ -1,5 +1,5 @@
-// Conversation header controls, chrome and freshness: title/copy, take over,
-// safety confirmation, chips/working dot, and selection's freshness promise.
+// Conversation header and composer chrome: title/copy, take over, safety
+// and warning states, chips/working dot, and selection's freshness promise.
 // Empty-list/draft renders share these controls. Focused reads own freshness
 // state; stop-view.ts decides Stop availability.
 import { queuedDescription } from "../agent-status.js";
@@ -19,7 +19,12 @@ import {
 } from "./freshness.js";
 import { conversationStatusCopy } from "./chrome/status.js";
 import { $, inputEl, liveBarEl, msgsEl, titleEl } from "../dom.js";
-import { hideModel, showConversationModel, showDraftModel } from "../models.js";
+import {
+  effortMenuInvoker,
+  hideModel,
+  showConversationModel,
+  showDraftModel,
+} from "../models.js";
 import { showModelResponse } from "../model-response.js";
 import { beginPaneVisit, syncPanes } from "../panes.js";
 import { resetThreadView } from "../row-thread-state.js";
@@ -29,7 +34,7 @@ import { closeAgentSurface, closeShellSurface } from "./shell-surface.js";
 import { refreshSidebarTree, renderAgentList } from "../sidebar/index.js";
 import { state } from "../state.js";
 import { resetVEye, takeToolDetailConversation } from "./thread.js";
-import { paintStopControl, selectedCanStop } from "./stop-view.js";
+import { paintComposerRunState, selectedCanStop } from "./stop-view.js";
 import { userBubble } from "../thread-render/index.js";
 import { copyText, toolDetailStore } from "../tool_details.js";
 import { type Conversation } from "../types.js";
@@ -41,7 +46,9 @@ const DRAFT = "__draft__";
 const row = $("#safety-row")!;
 const btn = $<HTMLButtonElement>("#safety-btn")!;
 const label = btn.querySelector(".lbl") as HTMLElement;
-const unavailable = $("#safety-unavailable")!;
+const warning = $<HTMLButtonElement>("#safety-warning")!;
+warning.dataset.themeProtected = "safety-warning";
+const unavailable = $("#safety-reason")!;
 // Serializes absolute-state POSTs so slow replies cannot reverse the choice.
 let busy = false;
 
@@ -68,23 +75,31 @@ function activeOff(conv: Conversation): boolean | undefined {
 function showConversationSafety(conv: Conversation | null): void {
   const eligible = !!conv && conv.id !== DRAFT;
   row.classList.toggle("on", eligible);
-  delete row.dataset.themeProtected;
-  unavailable.hidden = true;
   if (!conv || !eligible) {
+    warning.hidden = true;
     showModelResponse(null, []);
     btn.disabled = true;
     return;
   }
   const {
     desired,
+    effective,
     pending,
     label: text,
   } = deriveSafetyView(desiredOff(conv), activeOff(conv));
   row.classList.toggle("off", desired);
   row.classList.toggle("pending", pending);
   const reason = !desired ? conv.safety_unavailable : null;
-  if (desired || activeOff(conv) === true || reason)
-    row.dataset.themeProtected = "safety-warning";
+  const status = reason
+    ? `Safety review unavailable: ${reason}`
+    : "Safety review off" +
+      (pending ? (desired ? " · next turn" : " · this turn") : "");
+  warning.classList.toggle("unavailable", Boolean(reason));
+  warning.title = status;
+  warning.setAttribute("aria-label", status);
+  warning.hidden = !(desired || effective || reason);
+  unavailable.hidden = !reason;
+  unavailable.textContent = reason ? status : "";
   btn.setAttribute("aria-checked", String(!desired));
   btn.setAttribute(
     "aria-label",
@@ -94,23 +109,22 @@ function showConversationSafety(conv: Conversation | null): void {
   );
   btn.disabled = busy;
   label.textContent = text;
-  unavailable.hidden = !reason;
-  unavailable.title = reason ? `Safety review unavailable: ${reason}` : "";
   btn.classList.toggle("unavailable", Boolean(reason));
-  btn.title = pending
-    ? desired
-      ? "This turn is still reviewed; review turns off from the next turn"
-      : "This turn still skips review; review turns back on from the next turn"
-    : desired
-      ? "Turn per-action safety review back on"
-      : "Skip per-action safety review for this conversation";
+  btn.title =
+    (reason ? `Safety review unavailable: ${reason}. ` : "") +
+    (pending
+      ? desired
+        ? "This turn is still reviewed; review turns off from the next turn"
+        : "This turn still skips review; review turns back on from the next turn"
+      : desired
+        ? "Turn per-action safety review back on"
+        : "Skip per-action safety review for this conversation");
 }
 
 function hideSafety(): void {
   showModelResponse(null, []);
   row.classList.remove("on", "off", "pending");
-  delete row.dataset.themeProtected;
-  unavailable.hidden = true;
+  warning.hidden = true;
   btn.disabled = true;
 }
 
@@ -131,6 +145,8 @@ export function closeSafetyConfirmation(): boolean {
 
 /** Require a separate operator click outside the themeable safety switch. */
 function confirmSafetyOff(): Promise<boolean> {
+  const returnFocus =
+    document.activeElement === inputEl ? inputEl : effortMenuInvoker();
   const dialog = document.createElement("dialog");
   dialog.className = "settings-sheet";
   dialog.dataset.themeProtected = "safety-confirmation";
@@ -155,6 +171,10 @@ function confirmSafetyOff(): Promise<boolean> {
       { once: true },
     );
     document.body.append(dialog);
+    // Native modal focus restoration needs an invoker that survives closing
+    // the popover. A touch action may already be keeping the draft focused.
+    btn.closest<HTMLElement>(":popover-open")?.hidePopover();
+    returnFocus.focus({ preventScroll: true });
     dialog.showModal();
     // Invariant: Theme suspension precedes focus, even when CSS hid the dialog.
     queueMicrotask(() => {
@@ -409,7 +429,7 @@ export function applyFreshness(): void {
   msgsEl.classList.toggle("stale", loading);
   msgsEl.toggleAttribute("inert", loading);
   liveBarEl.classList.toggle("stale", phase === "loading");
-  paintStopControl(state.currentConv);
+  paintComposerRunState(state.currentConv);
 }
 
 // Drop every conversation-scoped control until the selected agent's own view
@@ -428,7 +448,7 @@ function clearConversationChrome(id: string): void {
   $("#chip-queued")!.classList.remove("on");
   $("#chip-state")!.classList.remove("on");
   state.selectedRunning = selectedCanStop();
-  paintStopControl(null, false);
+  paintComposerRunState(null, false);
   inputEl.disabled = false;
   inputEl.placeholder = "Message this agent…";
 }
@@ -506,7 +526,7 @@ export function updateChrome(conv: Conversation): void {
     st.removeAttribute("aria-label");
   }
   state.selectedRunning = selectedCanStop(conv);
-  paintStopControl(conv);
+  paintComposerRunState(conv);
   inputEl.disabled = false;
   // Invariant: The composer stays available while working and interrupting.
   // Messages accepted during the abort are queued for the next run.
@@ -546,7 +566,7 @@ export function renderEmptyAgentList(): void {
   $("#chip-queued")!.classList.remove("on");
   $("#chip-state")!.classList.remove("on");
   state.selectedRunning = false;
-  paintStopControl(null, false);
+  paintComposerRunState(null, false);
   inputEl.disabled = true;
   inputEl.placeholder = "Create an agent to start";
   resetThreadView();
@@ -585,7 +605,7 @@ export function renderDraft(): void {
   paintTakeoverControl(null);
 
   state.selectedRunning = false;
-  paintStopControl(null);
+  paintComposerRunState(null);
   resetThreadView();
   const d = draft || { parent: null };
   const pending = d.pending || [];

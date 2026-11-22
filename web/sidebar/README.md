@@ -13,8 +13,8 @@ migration. Recurse updates may require editing a custom script.
   fields retain their contract; sidebar extras remain experimental.
 - [The worker engine](../../src/sidebar_script/engine/README.md) runs the pure,
   stateless `sidebar(rows, now)` in a fresh sandbox.
-- `index.ts` exposes `events.ts`'s shared change signal, tag views and dialog entry
-  points without loading scripts, mutation actions or the tree renderer.
+- `index.ts` exposes the shared change signal, tag views, dialogs and tree
+  helpers without importing the tree renderer.
 - `tag-state.ts` owns optimistic tags until a tree read begun after the answer
   confirms them. `dialogs.ts` shares one tag, snooze or confirmation popover
   between sidebar actions and the optional draft control.
@@ -23,7 +23,9 @@ migration. Recurse updates may require editing a custom script.
   supplies `action-handlers.ts` with the tree refresh shared by link lookup
   and sidebar mutations, the draft action for sections and remote headers, and
   the row and selection actions used by the active-agent dialog.
-- `drag.ts` owns desktop agent drop targets and feedback.
+- `drag.ts` owns desktop agent drop targets and feedback. `row-touch.ts` owns
+  phone row and section holds and left-swipe deletion. The renderer supplies
+  actions and pauses repaint during an active swipe.
 - Sidebar history completes boot links by correcting the URL before opening the
   linked artifact or reporting an unavailable agent.
 - `focus.ts` refreshes the list before focusing its cursor, with the phone menu
@@ -36,8 +38,10 @@ migration. Recurse updates may require editing a custom script.
   agent ids, discarding the oldest opens first and deleted home agents after
   an authoritative tree read. Selection reveals the agent's children and
   ancestors only while selected; opening another row with l/Right does not save
-  that reveal. Pressing l/Right on the selected agent keeps its children open
-  after leaving. A selected agent's h/Left fold lasts until selection changes.
+  that reveal. The ancestors of taken-over agents stay open unless manually
+  folded or limited by the tree's size caps. Pressing l/Right on the selected
+  agent keeps its children open after leaving. A selected agent's h/Left fold
+  lasts until selection changes.
   `sections.ts` remembers section folds separately.
 
 Side conversations are excluded from both script inputs and stay in the Side
@@ -53,8 +57,10 @@ devices over tree events; watching it finish keeps it cleared. This applies to
 custom layouts and remote rows whose backend supplies `unread`, without extra
 polling. Older remotes default to false.
 The same arrangement is shown under each backend label, with independent folds.
-Section labels sit close above their first row. On phones, fold targets extend
-upward to keep 44px tap targets without adding space below the label.
+Section labels sit close above their first row. Hovered or focused section
+headers show compact actions without moving rows. Actions scroll sideways if
+their labels do not fit. Phones use the hold menu; fold targets extend upward
+to keep 44px tap targets without adding space below the label.
 Sections may set the optional boolean `hideWhenEmpty` to hide their header,
 actions and empty text when no checked rows remain for that backend. It defaults
 to false. Hidden sections leave no space and keep their fold preference when rows
@@ -136,7 +142,7 @@ or clearable in the tag control.
 sections use this action (hold the header on phones).
 
 Optional per-tag defaults use `newAgent.defaults = { recurse: { effort: 3 } }`
-in the exported object. Effort is 1–5 and remains editable in the draft; choosing
+in the exported object. Effort is 1–6 and remains editable in the draft; choosing
 a tag applies its default. For preselected tags, the first match in `set` order supplies it. Working directory is not a New agent
 input, so scripts cannot default it.
 
@@ -148,6 +154,7 @@ creation request; older backends must be updated to support initial tags.
 ## Rules for changes
 
 Keep browser and server dry-run rows identical. Keep scripts stateless and
-preserve the built-in root-only arrangement. Shared change signals, tag reads and
-input dialogs stay independent of mutation requests and the renderer; the module
-entry uses only named exports.
+preserve the built-in root-only arrangement. Keep imports from `web/conversation/`,
+`web/artifacts/`, `web/panes.ts`, `web/dock/` and `web/comments.ts` in the root
+`web/sidebar.ts`, not in this folder. The module entry uses only named exports;
+in this folder, import directly from the file that owns the code.

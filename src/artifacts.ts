@@ -1,7 +1,7 @@
 // Owner-scoped Git Artifacts publish immutable versions via a CAS ref update.
 // Git work is bounded/async; tree polls read revision markers, never history.
 // Create/publish require document/app trees; older shapes remain readable.
-// See artifacts/README.md for publication and metadata cache boundaries.
+// Saved app state lives outside the refs; see artifacts/README.md.
 
 import { createHash, randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
@@ -16,150 +16,98 @@ import {
   stat,
   unlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { constants as fsConstants, type Stats } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { APP_ENTRY, buildPage } from "./artifacts/page/index";
-import * as startupMetrics from "./observability/startup_metrics";
-import { slowSpan } from "./observability/slow-span";
-import { timed, timingDetail, timingId } from "./observability/request_timing";
+import {
+  ArtifactBuild,
+  ArtifactConflict,
+  ArtifactCorrupt,
+  ArtifactError,
+  ArtifactInvalid,
+  ArtifactLimit,
+  ArtifactNotFound,
+  DIRECTORY_FLAGS,
+  FULL_SHA_RE,
+  GIT_BUILDS,
+  GIT_REF,
+  HISTORY_MAX,
+  ID_RE,
+  MAX_MARKER_BYTES,
+  OWNER_RE,
+  TITLE_CONFIG_KEY,
+  blob,
+  changed,
+  commit,
+  commitDate,
+  context,
+  createRef,
+  decode,
+  errorCode,
+  expectVersion,
+  git,
+  head,
+  initRepo,
+  isMissing,
+  isObject,
+  markerPath,
+  normalizedId,
+  normalizedOwner,
+  normalizedTitle,
+  oldestVersionDate,
+  ownedBytes,
+  ownerRoot,
+  pathExists,
+  publishRef,
+  published,
+  readFileBounded,
+  readMarker,
+  repoTitle,
+  resolveVersion,
+  safeRel,
+  tree,
+  type RecordValue,
+  type ResolvedContext,
+  type TreeRow,
+  versionMetadata,
+  writeFileAtomic,
+  type ArtifactContext,
+} from "./artifacts/store";
+import { timed, timingDetail, timingId } from "./observability";
 import { CHECKOUT_ROOT } from "./build_dir";
-import { flockExclusive } from "./utils/flock";
-import { procStat } from "./utils/proc_stat";
+import { flockExclusive, lstatAt, openAt, procStat } from "./utils";
+import { retirePath } from "./utils/trash-sweep";
+import { pyCompactJson } from "./utils/python-json";
 
 export const DOCUMENT_ENTRY = "index.md";
 
 export type AppPage = { html: Buffer; sourceMap: string | null };
-import { retirePath } from "./utils/trash-sweep";
-import { pyCompactJson } from "./utils/python-json";
 
 export const SVG_MEDIA_TYPE = "image/svg+xml";
-export const GIT_REF = "refs/recurse/published";
-const GIT_VERSIONS = "refs/recurse/versions/";
-/** refs/recurse/builds/<version> names the built app page blob of a version. */
-const GIT_BUILDS = "refs/recurse/builds/";
-const CREATE_REF_ATTEMPTS = 20;
-const GIT_TIMEOUT = 30;
-export const GIT_OUTPUT_MAX = 2 * 1024 * 1024;
-const GIT_TREE_MAX = 4 * 1024 * 1024;
-const GIT_NAME = "recurse-artifacts";
-const GIT_EMAIL = "recurse-artifacts@localhost";
 const WIRE_MAX_BYTES = 100 * 1024 * 1024;
 const LIST_MAX = 100;
-const HISTORY_MAX = 100;
-const TITLE_MAX = 200;
-const MAX_ENTRIES = 10_000;
-const MAX_DEPTH = 16;
-const NULL_SHA = "0".repeat(40);
-export const TITLE_CONFIG_KEY = "recurse.title";
-
-const FULL_SHA_RE = /^[0-9a-f]{40}$/u;
-const OWNER_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
-const ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,159}$/u;
-const PYTHON_WHITESPACE =
-  /[\u0009-\u000d\u001c-\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]/u;
-const DIRECTORY = fsConstants.O_DIRECTORY ?? 0;
-const DIRECTORY_FLAGS = fsConstants.O_RDONLY | DIRECTORY;
-const MAX_MARKER_BYTES = 4 * 1024;
-
-export interface ArtifactContext {
-  readonly artifactsDir: string;
-  readonly trashDir: string;
-  // Return one 32-character hexadecimal id; defaults to a cryptographic UUID.
-  readonly ids?: () => string;
-  /** Supply the UTC clock used for marker dates and Git commit dates. */
-  readonly now?: () => Date;
-  // Shorten the Git deadline only; never extend it.
-  readonly gitTimeoutMs?: number;
-  // Permit legacy tree shapes for replay tests.
-  readonly anyKind?: boolean;
-}
-
-type ResolvedContext = ArtifactContext & {
-  ids: () => string;
-  now: () => Date;
-  gitTimeoutMs: number;
-};
-type RecordValue = Record<string, unknown>;
-type GitResult = {
-  readonly returncode: number;
-  readonly stdout: Uint8Array;
-  readonly stderr: Uint8Array;
-};
-type TreeRow = readonly [name: string, sha: string, mode: string, kind: string];
-type SystemError = Error & { code?: string; path?: string };
-type FileBytes = Uint8Array<ArrayBuffer>;
-
-function ownedBytes(value: ArrayLike<number>): FileBytes {
-  return Uint8Array.from(value);
-}
 
 export { ARTIFACT_ACTIVE_CSP } from "./artifact_frame_policy.js";
-
-/** Base class for safe, user-presentable artifact failures. */
-export class ArtifactError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = new.target.name;
-  }
-}
-export class ArtifactNotFound extends ArtifactError {}
-export class ArtifactConflict extends ArtifactError {}
-export class ArtifactLimit extends ArtifactError {}
-export class ArtifactInvalid extends ArtifactError {}
-export class ArtifactCorrupt extends ArtifactError {}
-/** An app failed to build; the message carries the end of Bun's output. */
-export class ArtifactBuild extends ArtifactError {}
-
-function context(value: ArtifactContext): ResolvedContext {
-  const gitTimeoutMs = value.gitTimeoutMs ?? GIT_TIMEOUT * 1000;
-  if (
-    !Number.isSafeInteger(gitTimeoutMs) ||
-    gitTimeoutMs < 1 ||
-    gitTimeoutMs > GIT_TIMEOUT * 1000
-  ) {
-    throw new ArtifactInvalid("invalid artifact Git timeout");
-  }
-  return {
-    ...value,
-    ids: value.ids ?? (() => randomUUID().replaceAll("-", "")),
-    now: value.now ?? (() => new Date()),
-    gitTimeoutMs,
-  };
-}
-
-function errorCode(error: unknown): string | undefined {
-  if (typeof error !== "object" || error === null || !("code" in error)) {
-    return undefined;
-  }
-  const code = (error as SystemError).code;
-  return typeof code === "string" ? code : undefined;
-}
-
-function isMissing(error: unknown): boolean {
-  return errorCode(error) === "ENOENT";
-}
-
-function isObject(value: unknown): value is RecordValue {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function pythonStrip(value: string): string {
-  const points = Array.from(value);
-  let start = 0;
-  let end = points.length;
-  while (start < end && PYTHON_WHITESPACE.test(points[start]!)) start += 1;
-  while (end > start && PYTHON_WHITESPACE.test(points[end - 1]!)) end -= 1;
-  return points.slice(start, end).join("");
-}
+export {
+  ArtifactBuild,
+  ArtifactConflict,
+  type ArtifactContext,
+  ArtifactCorrupt,
+  ArtifactError,
+  ArtifactInvalid,
+  ArtifactLimit,
+  ArtifactNotFound,
+  GIT_OUTPUT_MAX,
+  GIT_REF,
+  TITLE_CONFIG_KEY,
+  revision,
+} from "./artifacts/store";
 
 function pythonInt(value: unknown): number | null {
   if (typeof value === "boolean") return Number(value);
   return typeof value === "number" && Number.isInteger(value) ? value : null;
-}
-
-function pythonCasefold(value: string): string {
-  return value.replaceAll("ı", "i").replaceAll("ſ", "s").toLowerCase();
 }
 
 function codePointCompare(left: string, right: string): number {
@@ -170,325 +118,6 @@ function codePointCompare(left: string, right: string): number {
     if (a[index] !== b[index]) return a[index]! - b[index]!;
   }
   return a.length - b.length;
-}
-
-function normalizedOwner(value: string | null | undefined): string {
-  const owner = String(value || "");
-  if (!OWNER_RE.test(owner))
-    throw new ArtifactInvalid("invalid artifact owner");
-  return owner;
-}
-
-function normalizedId(value: string): string {
-  const id = String(value || "");
-  if (!ID_RE.test(id) || id.startsWith(".") || id.includes("..")) {
-    throw new ArtifactInvalid("invalid artifact id");
-  }
-  return id;
-}
-
-function normalizedTitle(value: string): string {
-  const title = pythonStrip(String(value || ""));
-  if (
-    !title ||
-    Array.from(title).length > TITLE_MAX ||
-    Array.from(title).some((char) => char.codePointAt(0)! < 32)
-  ) {
-    throw new ArtifactInvalid(
-      `title must be 1-${TITLE_MAX} printable characters`,
-    );
-  }
-  return title;
-}
-
-/** Normalize a displayable, non-hidden POSIX file path. */
-function safeRel(value: string): string {
-  if (
-    typeof value !== "string" ||
-    !value ||
-    value.includes("\0") ||
-    value.includes("\\") ||
-    Array.from(value).some((char) => char.codePointAt(0)! < 32)
-  ) {
-    throw new ArtifactInvalid("invalid artifact path");
-  }
-  const parts = value.split("/").filter((part) => part !== "" && part !== ".");
-  if (
-    value.startsWith("/") ||
-    parts.some((part) => part === "..") ||
-    parts.length > MAX_DEPTH ||
-    Buffer.byteLength(value, "utf8") > 240
-  ) {
-    throw new ArtifactInvalid(
-      parts.length > MAX_DEPTH || Buffer.byteLength(value, "utf8") > 240
-        ? "artifact path is too deep"
-        : "invalid artifact path",
-    );
-  }
-  for (const part of parts) {
-    if (part.startsWith(".") || pythonCasefold(part).startsWith(".git")) {
-      throw new ArtifactInvalid("hidden and .git paths are not allowed");
-    }
-  }
-  return parts.length ? parts.join("/") : ".";
-}
-
-function gitDate(ctx: ResolvedContext): string {
-  return ctx
-    .now()
-    .toISOString()
-    .replace(/\.\d{3}Z$/u, "Z");
-}
-
-function gitEnv(ctx: ResolvedContext): Record<string, string> {
-  const date = gitDate(ctx);
-  return {
-    PATH: "/usr/bin:/bin",
-    HOME: "/nonexistent",
-    LANG: "C",
-    LC_ALL: "C",
-    TZ: "UTC",
-    GIT_CONFIG_NOSYSTEM: "1",
-    GIT_CONFIG_NOGLOBAL: "1",
-    GIT_CONFIG_GLOBAL: "/dev/null",
-    GIT_CONFIG_SYSTEM: "/dev/null",
-    GIT_ATTR_NOSYSTEM: "1",
-    GIT_OPTIONAL_LOCKS: "0",
-    GIT_NO_REPLACE_OBJECTS: "1",
-    GIT_TERMINAL_PROMPT: "0",
-    GIT_ALLOW_PROTOCOL: "file",
-    GIT_AUTHOR_NAME: GIT_NAME,
-    GIT_AUTHOR_EMAIL: GIT_EMAIL,
-    GIT_COMMITTER_NAME: GIT_NAME,
-    GIT_COMMITTER_EMAIL: GIT_EMAIL,
-    GIT_AUTHOR_DATE: date,
-    GIT_COMMITTER_DATE: date,
-  };
-}
-
-function killProcessGroup(pid: number): void {
-  try {
-    // Invariant: Bun's detached child is the group leader. A negative pid kills
-    // Git and any helper it started, not just the immediate Git process.
-    process.kill(-pid, "SIGKILL");
-  } catch (error) {
-    if (errorCode(error) !== "ESRCH") return;
-  }
-}
-
-async function readBounded(
-  stream: ReadableStream<Uint8Array>,
-  limit: number,
-  onLimit: () => void,
-): Promise<Uint8Array> {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (length + value.byteLength > limit) {
-        onLimit();
-        throw new ArtifactLimit("artifact Git output exceeds the limit");
-      }
-      chunks.push(value);
-      length += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-  const output = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output;
-}
-
-async function spawnGit(
-  ctx: ResolvedContext,
-  argv: readonly string[],
-  limit = GIT_OUTPUT_MAX,
-  env: Readonly<Record<string, string>> = {},
-): Promise<GitResult> {
-  const controller = new AbortController();
-  let timedOut = false;
-  let tooLarge = false;
-  startupMetrics.count("artifact_git_subprocesses");
-  const child = slowSpan("artifact_git_spawn", undefined, () =>
-    Bun.spawn(["git", ...argv], {
-      cwd: "/",
-      env: { ...gitEnv(ctx), ...env },
-      stdin: "ignore",
-      stdout: "pipe",
-      stderr: "pipe",
-      detached: true,
-      signal: controller.signal,
-    }),
-  );
-  const timer = setTimeout(() => {
-    timedOut = true;
-    controller.abort();
-    killProcessGroup(child.pid);
-  }, ctx.gitTimeoutMs);
-  const cancel = () => {
-    tooLarge = true;
-    controller.abort();
-    killProcessGroup(child.pid);
-  };
-  try {
-    const stdout = child.stdout;
-    const stderr = child.stderr;
-    if (!stdout || !stderr)
-      throw new ArtifactCorrupt("artifact Git operation failed");
-    const [out, err, returncode] = await Promise.all([
-      readBounded(stdout, limit, cancel),
-      readBounded(stderr, limit, cancel),
-      child.exited,
-    ]);
-    if (timedOut) throw new ArtifactCorrupt("artifact Git operation timed out");
-    return { returncode, stdout: out, stderr: err };
-  } catch (error) {
-    killProcessGroup(child.pid);
-    controller.abort();
-    try {
-      await child.exited;
-    } catch {
-      // Invariant: The bounded runner's public errors do not depend on the
-      // child status.
-    }
-    if (error instanceof ArtifactError) throw error;
-    if (timedOut) throw new ArtifactCorrupt("artifact Git operation timed out");
-    if (tooLarge)
-      throw new ArtifactLimit("artifact Git output exceeds the limit");
-    throw new ArtifactCorrupt("artifact Git operation failed");
-  } finally {
-    clearTimeout(timer);
-    // Invariant: A Git command that leaves a descendant behind is not allowed
-    // to leak it.
-    if (child.exitCode === null) killProcessGroup(child.pid);
-  }
-}
-
-function decode(bytes: Uint8Array): string {
-  // Invariant: Python UTF-8 decoding preserves a leading U+FEFF instead of
-  // stripping it.
-  return new TextDecoder("utf-8", { fatal: false, ignoreBOM: true }).decode(
-    bytes,
-  );
-}
-
-function decodeStrict(bytes: Uint8Array): string {
-  return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
-    bytes,
-  );
-}
-
-function git(...args: Parameters<typeof runGit>): Promise<GitResult> {
-  return timed("artifact_git", () => runGit(...args));
-}
-
-async function runGit(
-  ctx: ResolvedContext,
-  repo: string,
-  args: readonly string[],
-  options: {
-    check?: boolean;
-    limit?: number;
-    env?: Readonly<Record<string, string>>;
-  } = {},
-): Promise<GitResult> {
-  try {
-    const info = await lstat(repo);
-    if (!info.isDirectory() || info.isSymbolicLink()) {
-      throw new ArtifactCorrupt("artifact repository is unavailable");
-    }
-    const gitDir = await stat(join(repo, ".git"));
-    if (!gitDir.isDirectory()) {
-      throw new ArtifactCorrupt("artifact repository is unavailable");
-    }
-  } catch (error) {
-    if (error instanceof ArtifactError) throw error;
-    throw new ArtifactCorrupt("artifact repository is unavailable");
-  }
-  let result: GitResult;
-  try {
-    result = await timed(`artifact_git_${args[0]!.replaceAll("-", "_")}`, () =>
-      spawnGit(
-        ctx,
-        ["-C", repo, "--no-pager", ...args],
-        options.limit ?? GIT_OUTPUT_MAX,
-        options.env,
-      ),
-    );
-  } catch (error) {
-    if (error instanceof ArtifactError) throw error;
-    throw new ArtifactCorrupt("artifact Git operation failed");
-  }
-  if ((options.check ?? true) && result.returncode !== 0) {
-    throw new ArtifactCorrupt("artifact Git operation failed");
-  }
-  return result;
-}
-
-async function regular(path: string, limit?: number): Promise<Stats> {
-  let info;
-  try {
-    info = await lstat(path);
-  } catch (error) {
-    if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
-    throw new ArtifactInvalid("artifact file is unavailable");
-  }
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) {
-    throw new ArtifactInvalid("artifact file is unsafe");
-  }
-  if (limit !== undefined && info.size > limit) {
-    throw new ArtifactLimit("artifact file is too large");
-  }
-  return info;
-}
-
-function readFileBounded(path: string, limit: number): Promise<Buffer> {
-  return timed("artifact_read_file", () => readStoredFile(path, limit));
-}
-
-async function readStoredFile(path: string, limit: number): Promise<Buffer> {
-  const before = await regular(path, limit);
-  let handle;
-  try {
-    handle = await open(path, fsConstants.O_RDONLY);
-    const data = new Uint8Array(new ArrayBuffer(before.size));
-    let offset = 0;
-    while (offset < data.length) {
-      const { bytesRead } = await handle.read(
-        data,
-        offset,
-        data.length - offset,
-        offset,
-      );
-      if (bytesRead === 0) break;
-      offset += bytesRead;
-    }
-    return Buffer.from(
-      offset === data.length ? data : data.subarray(0, offset),
-    );
-  } catch (error) {
-    if (error instanceof ArtifactError) throw error;
-    if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
-    throw new ArtifactInvalid("artifact file is unavailable");
-  } finally {
-    await handle?.close();
-  }
-}
-
-async function ensureParent(path: string): Promise<void> {
-  try {
-    await mkdir(dirname(path), { mode: 0o700, recursive: true });
-  } catch {
-    throw new ArtifactCorrupt("artifact directory cannot be created");
-  }
 }
 
 function sortKeys(value: unknown): unknown {
@@ -515,321 +144,6 @@ function pythonJson(value: unknown): string {
     else if (character === "," || character === ":") spaced += " ";
   }
   return spaced;
-}
-
-async function writeFileAtomic(
-  ctx: ResolvedContext,
-  path: string,
-  data: FileBytes,
-): Promise<void> {
-  await ensureParent(path);
-  try {
-    await lstat(path);
-    await regular(path);
-  } catch (error) {
-    if (!isMissing(error) && !(error instanceof ArtifactNotFound)) throw error;
-  }
-  const temp = join(dirname(path), `.${basename(path)}.${ctx.ids()}.tmp`);
-  let handle;
-  try {
-    handle = await open(temp, "wx", 0o666);
-    await handle.writeFile(data);
-    await handle.sync();
-    await handle.close();
-    handle = undefined;
-    await renamePath(temp, path);
-    // Invariant: A best-effort parent-directory fsync follows the rename.
-    try {
-      const directory = await open(dirname(path), DIRECTORY_FLAGS);
-      try {
-        await directory.sync();
-      } finally {
-        await directory.close();
-      }
-    } catch {
-      // Invariant: Directory durability is best effort; failure is ignored.
-    }
-  } catch (error) {
-    await handle?.close().catch(() => undefined);
-    await unlink(temp).catch(() => undefined);
-    if (error instanceof ArtifactError) throw error;
-    throw new ArtifactCorrupt("artifact file cannot be written");
-  }
-}
-
-function ownerRoot(
-  ctx: ResolvedContext,
-  ownerValue: string,
-  create = false,
-): Promise<string> {
-  return timed("artifact_owner_root", () =>
-    resolveOwnerRoot(ctx, ownerValue, create),
-  );
-}
-
-async function resolveOwnerRoot(
-  ctx: ResolvedContext,
-  ownerValue: string,
-  create = false,
-): Promise<string> {
-  const owner = normalizedOwner(ownerValue);
-  const root = join(ctx.artifactsDir, owner);
-  if (create) {
-    try {
-      await mkdir(ctx.artifactsDir, { recursive: true, mode: 0o777 });
-      await mkdir(root, { mode: 0o700, recursive: true });
-    } catch {
-      throw new ArtifactCorrupt("artifact owner root is invalid");
-    }
-  }
-  let info;
-  try {
-    info = await lstat(root);
-  } catch (error) {
-    if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
-    throw new ArtifactCorrupt("artifact owner root is invalid");
-  }
-  if (!info.isDirectory() || info.isSymbolicLink()) {
-    throw new ArtifactCorrupt("artifact owner root is invalid");
-  }
-  return root;
-}
-
-/** Best-effort mutation stamp; malformed storage remains the pane's error. */
-export async function revision(
-  value: ArtifactContext,
-  owner: string,
-): Promise<string | null> {
-  const ctx = context(value);
-  try {
-    const root = await ownerRoot(ctx, owner);
-    return (await readFileBounded(join(root, ".revision"), 64)).toString(
-      "utf8",
-    );
-  } catch (error) {
-    if (error instanceof ArtifactError) return null;
-    throw error;
-  }
-}
-
-async function changed(ctx: ResolvedContext, owner: string): Promise<void> {
-  await writeFileAtomic(
-    { ...ctx, ids: () => randomUUID() },
-    join(await ownerRoot(ctx, owner), ".revision"),
-    ownedBytes(Buffer.from(randomUUID(), "utf8")),
-  );
-}
-
-async function markerPath(
-  ctx: ResolvedContext,
-  owner: string,
-  artifactId: string,
-): Promise<string> {
-  return join(
-    await ownerRoot(ctx, owner),
-    `.deleted-${normalizedId(artifactId)}.json`,
-  );
-}
-
-async function readMarker(
-  path: string,
-  owner: string,
-  artifactId: string,
-): Promise<RecordValue | null> {
-  try {
-    await lstat(path);
-  } catch (error) {
-    if (isMissing(error)) return null;
-    throw new ArtifactCorrupt("artifact deletion marker is unsafe");
-  }
-  let loaded: unknown;
-  try {
-    loaded = JSON.parse(
-      (await readFileBounded(path, MAX_MARKER_BYTES)).toString("utf8"),
-    );
-  } catch {
-    throw new ArtifactCorrupt("artifact deletion marker is unsafe");
-  }
-  if (!isObject(loaded))
-    throw new ArtifactCorrupt("artifact deletion marker is invalid");
-  if (
-    loaded.owner_agent_id !== owner ||
-    loaded.id !== artifactId ||
-    !FULL_SHA_RE.test(String(loaded.version ?? "")) ||
-    typeof loaded.deletion_id !== "string"
-  ) {
-    throw new ArtifactCorrupt("artifact deletion marker is invalid");
-  }
-  return loaded;
-}
-
-async function initRepo(ctx: ResolvedContext, repo: string): Promise<void> {
-  try {
-    await mkdir(repo, { mode: 0o700, recursive: true });
-  } catch {
-    throw new ArtifactCorrupt("artifact repository could not be created");
-  }
-  let result: GitResult;
-  try {
-    result = await spawnGit(ctx, ["init", "--quiet", repo]);
-  } catch {
-    throw new ArtifactCorrupt("artifact repository could not be created");
-  }
-  if (result.returncode !== 0) {
-    throw new ArtifactCorrupt("artifact repository could not be created");
-  }
-  for (const [key, value] of [
-    ["user.name", GIT_NAME],
-    ["user.email", GIT_EMAIL],
-    ["core.logAllRefUpdates", "true"],
-  ] as const) {
-    await git(ctx, repo, ["config", key, value]);
-  }
-  await chmod(repo, 0o700);
-}
-
-async function head(
-  ctx: ResolvedContext,
-  repo: string,
-): Promise<string | null> {
-  const result = await git(ctx, repo, ["rev-parse", "--verify", "HEAD"], {
-    check: false,
-  });
-  const value = decode(result.stdout).trim();
-  if (result.returncode !== 0 || !FULL_SHA_RE.test(value)) return null;
-  return value;
-}
-
-async function published(
-  ctx: ResolvedContext,
-  repo: string,
-  required = true,
-): Promise<string | null> {
-  try {
-    const gitInfo = await stat(join(repo, ".git"));
-    if (!gitInfo.isDirectory()) throw new Error("not a Git directory");
-  } catch {
-    if (required)
-      throw new ArtifactCorrupt("artifact repository has no Git metadata");
-    return null;
-  }
-  const result = await git(
-    ctx,
-    repo,
-    ["rev-parse", "--verify", `${GIT_REF}^{commit}`],
-    { check: false },
-  );
-  const value = decode(result.stdout).trim();
-  if (result.returncode !== 0) {
-    if (required)
-      throw new ArtifactCorrupt("artifact has no published version");
-    return null;
-  }
-  if (!FULL_SHA_RE.test(value))
-    throw new ArtifactCorrupt("artifact published ref is invalid");
-  return value;
-}
-
-async function commit(
-  ctx: ResolvedContext,
-  repo: string,
-  message: string,
-): Promise<string | null> {
-  const status = await git(
-    ctx,
-    repo,
-    ["status", "--porcelain=v1", "--untracked-files=all"],
-    { limit: GIT_TREE_MAX },
-  );
-  if (!status.stdout.byteLength) return head(ctx, repo);
-  try {
-    await git(ctx, repo, ["add", "--all"]);
-    const result = await git(ctx, repo, ["commit", "--quiet", "-m", message], {
-      check: false,
-      env: { RECURSE_ARTIFACT_COMMIT: "1" },
-    });
-    if (result.returncode !== 0) {
-      if (decode(result.stderr).includes("index.lock")) {
-        throw new ArtifactConflict(
-          "artifact is being modified; refresh and retry",
-        );
-      }
-      throw new ArtifactCorrupt("artifact workspace commit failed");
-    }
-  } catch (error) {
-    if (error instanceof ArtifactCorrupt) {
-      try {
-        await lstat(join(repo, ".git", "index.lock"));
-        throw new ArtifactConflict(
-          "artifact is being modified; refresh and retry",
-        );
-      } catch (inner) {
-        if (inner instanceof ArtifactConflict) throw inner;
-      }
-    }
-    throw error;
-  }
-  return head(ctx, repo);
-}
-
-async function tree(
-  ctx: ResolvedContext,
-  repo: string,
-  sha: string,
-): Promise<TreeRow[]> {
-  const result = await git(
-    ctx,
-    repo,
-    ["ls-tree", "-r", "-z", "--full-tree", sha],
-    { limit: GIT_TREE_MAX },
-  );
-  const rows: TreeRow[] = [];
-  let output: string;
-  try {
-    output = decodeStrict(result.stdout);
-  } catch {
-    throw new ArtifactCorrupt("artifact Git tree is invalid");
-  }
-  for (const record of output.split("\0")) {
-    if (!record) continue;
-    const separator = record.indexOf("\t");
-    if (separator < 0)
-      throw new ArtifactCorrupt("artifact Git tree is invalid");
-    const headText = record.slice(0, separator);
-    const name = record.slice(separator + 1);
-    const [mode, kind, shaValue] = headText.split(" ");
-    if (
-      !mode ||
-      !kind ||
-      !shaValue ||
-      !["100644", "100755"].includes(mode) ||
-      kind !== "blob" ||
-      !FULL_SHA_RE.test(shaValue)
-    ) {
-      throw new ArtifactInvalid(
-        "artifact tree contains a symlink or submodule",
-      );
-    }
-    if (name !== ".artifact.json") safeRel(name);
-    rows.push([name, shaValue, mode, kind]);
-    if (rows.length > MAX_ENTRIES)
-      throw new ArtifactLimit("artifact contains too many files");
-  }
-  return rows;
-}
-
-async function blob(
-  ctx: ResolvedContext,
-  repo: string,
-  sha: string,
-  limit: number,
-): Promise<Buffer> {
-  const result = await git(ctx, repo, ["cat-file", "blob", sha], {
-    limit: limit + 1,
-  });
-  if (result.stdout.byteLength > limit)
-    throw new ArtifactLimit("artifact file is too large");
-  return Buffer.from(result.stdout);
 }
 
 /** A document (index.md) or an app (index.html, which wins), or neither. */
@@ -933,172 +247,6 @@ function formatFor(name: string): string {
   if (mapped) return mapped;
   if (mediaForName(name, true).startsWith("image/")) return "image";
   return suffix ? "code" : "file";
-}
-
-async function resolveVersion(
-  ctx: ResolvedContext,
-  repo: string,
-  version: string,
-): Promise<string> {
-  if (typeof version !== "string" || !FULL_SHA_RE.test(version)) {
-    throw new ArtifactInvalid("version must be a full immutable SHA");
-  }
-  const result = await git(
-    ctx,
-    repo,
-    ["rev-parse", "--verify", `${GIT_VERSIONS}${version}^{commit}`],
-    { check: false },
-  );
-  if (result.returncode !== 0 || decode(result.stdout).trim() !== version) {
-    throw new ArtifactInvalid("unknown artifact version");
-  }
-  return version;
-}
-
-function expectVersion(
-  actual: string | null,
-  expected: string | null | undefined,
-): void {
-  if (expected === null || expected === undefined) return;
-  if (typeof expected !== "string" || !FULL_SHA_RE.test(expected)) {
-    throw new ArtifactInvalid("expected version must be a full immutable SHA");
-  }
-  if (actual !== expected) {
-    throw new ArtifactConflict(
-      "artifact changed; refresh and retry with the current version",
-    );
-  }
-}
-
-async function markChanged(ctx: ResolvedContext): Promise<void> {
-  const marker = join(ctx.artifactsDir, ".changed");
-  try {
-    await mkdir(ctx.artifactsDir, { recursive: true, mode: 0o777 });
-    try {
-      const info = await lstat(marker);
-      if (!info.isFile() || info.nlink !== 1) {
-        throw new ArtifactCorrupt("artifact change marker is invalid");
-      }
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-    await writeFile(marker, nowIsoInternal(ctx), "utf8");
-  } catch (error) {
-    if (error instanceof ArtifactError) throw error;
-    throw new ArtifactCorrupt("artifact change marker cannot be written");
-  }
-}
-
-// Create an immutable ref; a race refusal succeeds if the ref appears
-// after a brief bounded retry while the other publisher finishes.
-async function createRef(
-  ctx: ResolvedContext,
-  repo: string,
-  ref: string,
-  sha: string,
-  recorded: () => Promise<boolean>,
-): Promise<boolean> {
-  for (let attempt = 0; attempt < CREATE_REF_ATTEMPTS; attempt += 1) {
-    if (attempt) await Bun.sleep(50);
-    const created = await git(
-      ctx,
-      repo,
-      ["update-ref", "--no-deref", ref, sha, NULL_SHA],
-      { check: false },
-    );
-    if (created.returncode === 0 || (await recorded())) return true;
-  }
-  return false;
-}
-
-async function publishRef(
-  ctx: ResolvedContext,
-  repo: string,
-  sha: string,
-  expected?: string | null,
-): Promise<void> {
-  const old = await published(ctx, repo, false);
-  if (expected !== undefined) expectVersion(old, expected);
-  if (old === sha) return;
-  const versionRef = `${GIT_VERSIONS}${sha}`;
-  const recorded = () =>
-    git(ctx, repo, ["rev-parse", "--verify", `${versionRef}^{commit}`], {
-      check: false,
-    }).then((result) => result.returncode === 0);
-  if (
-    !(await recorded()) &&
-    !(await createRef(ctx, repo, versionRef, sha, recorded))
-  )
-    throw new ArtifactCorrupt("artifact version ref could not be recorded");
-  const result = await git(
-    ctx,
-    repo,
-    ["update-ref", "--no-deref", GIT_REF, sha, old ?? NULL_SHA],
-    { check: false },
-  );
-  if (result.returncode !== 0) {
-    throw new ArtifactConflict(
-      "artifact changed; refresh and retry with the current version",
-    );
-  }
-  await markChanged(ctx);
-}
-
-// Git runs with TZ=UTC. Git 2.55 prints that zero offset as "Z" in strict ISO
-// dates and Git 2.39 as "+00:00"; always report "+00:00".
-function isoStrictDate(date: string): string {
-  return date.endsWith("Z") ? `${date.slice(0, -1)}+00:00` : date;
-}
-
-async function commitDate(
-  ctx: ResolvedContext,
-  repo: string,
-  sha: string,
-): Promise<string> {
-  const result = await git(ctx, repo, ["show", "-s", "--format=%cI", sha], {
-    check: false,
-  });
-  return result.returncode === 0
-    ? isoStrictDate(decode(result.stdout).trim())
-    : "";
-}
-
-async function oldestVersionDate(
-  ctx: ResolvedContext,
-  repo: string,
-): Promise<string> {
-  startupMetrics.count("artifact_history_lookups");
-  const result = await git(
-    ctx,
-    repo,
-    [
-      "for-each-ref",
-      "--sort=creatordate",
-      "--count=1",
-      "--format=%(creatordate:iso-strict)",
-      GIT_VERSIONS,
-    ],
-    { check: false },
-  );
-  return result.returncode === 0
-    ? isoStrictDate(decode(result.stdout).trim())
-    : "";
-}
-
-async function repoTitle(
-  ctx: ResolvedContext,
-  repo: string,
-  artifactId: string,
-): Promise<string> {
-  const result = await git(ctx, repo, ["config", "--get", TITLE_CONFIG_KEY], {
-    check: false,
-  });
-  const value = decode(result.stdout);
-  try {
-    return normalizedTitle(value);
-  } catch {
-    return artifactId;
-  }
 }
 
 async function info(
@@ -1380,6 +528,42 @@ async function ensureRepository(
     if (error instanceof ArtifactError) throw error;
     if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
     throw new ArtifactCorrupt("artifact repository is invalid");
+  }
+}
+
+/** Pin each directory so app state cannot follow links or resurrect a deleted repo. */
+export async function withArtifactGitDirectory<T>(
+  value: ArtifactContext,
+  ownerValue: string,
+  idValue: string,
+  work: (gitDir: FileHandle) => Promise<T>,
+): Promise<T> {
+  const owner = normalizedOwner(ownerValue);
+  const id = normalizedId(idValue);
+  const flags = DIRECTORY_FLAGS | fsConstants.O_NOFOLLOW;
+  const handles: FileHandle[] = [];
+  try {
+    const root = await open(value.artifactsDir, flags);
+    handles.push(root);
+    const parent = await openAt(root.fd, owner, flags);
+    handles.push(parent);
+    const deleted = await lstatAt(parent.fd, `.deleted-${id}.json`).catch(
+      (error) => {
+        if (!isMissing(error)) throw error;
+      },
+    );
+    if (deleted) throw new ArtifactNotFound("artifact not found");
+    const repo = await openAt(parent.fd, id, flags);
+    handles.push(repo);
+    const gitDir = await openAt(repo.fd, ".git", flags);
+    handles.push(gitDir);
+    return await work(gitDir);
+  } catch (error) {
+    if (error instanceof ArtifactError) throw error;
+    if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
+    throw new ArtifactCorrupt("saved app state is unavailable");
+  } finally {
+    for (const handle of handles.reverse()) await handle.close();
   }
 }
 
@@ -1944,7 +1128,7 @@ export async function resolveOwner(
       const repo = join(candidate, artifactId);
       const repoInfo = await stat(repo);
       if (!repoInfo.isDirectory()) continue;
-      await ensure(ctx, name, artifactId);
+      await ensureRepository(ctx, name, artifactId, false);
       return name;
     } catch (error) {
       if (error instanceof ArtifactError) throw error;
@@ -2100,36 +1284,6 @@ export async function versions(
   };
 }
 
-async function versionMetadata(
-  ctx: ResolvedContext,
-  repo: string,
-): Promise<Record<string, readonly [string, string]>> {
-  const result = await git(
-    ctx,
-    repo,
-    [
-      "for-each-ref",
-      "--format=%(refname)%00%(committerdate:iso-strict)%00%(subject)%00",
-      "--sort=-creatordate",
-      `--count=${HISTORY_MAX}`,
-      GIT_VERSIONS,
-    ],
-    { limit: GIT_OUTPUT_MAX },
-  );
-  const fields = decode(result.stdout).split("\0");
-  const metadata: Record<string, readonly [string, string]> = {};
-  for (let index = 0; index < fields.length - 2; index += 3) {
-    const version = fields[index]!.trim().split("/").at(-1) ?? "";
-    if (FULL_SHA_RE.test(version)) {
-      metadata[version] = [
-        isoStrictDate(fields[index + 1]!),
-        fields[index + 2]!,
-      ];
-    }
-  }
-  return metadata;
-}
-
 export async function restore(
   value: ArtifactContext,
   ownerValue: string,
@@ -2160,16 +1314,6 @@ function deletionResult(value: RecordValue, already: boolean): RecordValue {
     already_deleted: already,
     notification_pending: Boolean(value.notification_pending ?? true),
   };
-}
-
-async function pathExists(path: string): Promise<boolean> {
-  try {
-    await stat(path);
-    return true;
-  } catch (error) {
-    if (isMissing(error)) return false;
-    throw error;
-  }
 }
 
 export async function deleteArtifact(
@@ -2323,11 +1467,4 @@ export function mediaType(meta: RecordValue, download = false): string {
   if (download)
     return mediaForName(String(meta.filename || meta.name || "file"));
   return String(meta.media_type || "application/octet-stream");
-}
-
-function nowIsoInternal(ctx: ResolvedContext): string {
-  return ctx
-    .now()
-    .toISOString()
-    .replace(/\.(\d{3})Z$/u, (_match, millis: string) => `.${millis}000Z`);
 }

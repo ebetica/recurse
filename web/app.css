@@ -1,8 +1,7 @@
 
-/* Side panels: feature views that open to the right of the chat, plus the rail
-   of toggle buttons that opens them. The main app styling lives inline in the
-   shell; this file adds the shared button rules and the panel framework,
-   served as a static asset. */
+/* Shared controls and the pane framework. Keep the shell for markup and
+   place always-loaded feature rules in each feature's style.css. The asset
+   build joins them before this file so shared rules still win ties. */
 
 /* ---------- buttons ----------
    Every text button: .btn is the bordered default, .primary fills with the
@@ -34,11 +33,6 @@
 
 .pane-item-cursor { background: var(--panel-2); }
 .pane-item-cursor:focus { outline: none; }
-
-/* Attachment admission failures stay above the composer until retry. */
-.attachment-error { display: flex; align-items: flex-start; gap: var(--space-2); width: 100%;
-  color: var(--danger); font-size: 0.78125rem; line-height: 1.4; }
-.attachment-error svg { flex: none; width: 16px; height: 16px; margin-top: 1px; }
 
 /* ---------- badges ----------
    One badge: a count, an icon or both, in a pill. The header's
@@ -221,7 +215,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-menu-item:focus-visible, #pane-fab:focus-visible, .artifact-icon-btn:focus-visible,
 .artifact-delete-btn:focus-visible, .artifact-title-select:focus-visible,
 .artifact-version-item:focus-visible, .artifact-version-restore:focus-visible,
-.report-comment-popover button:focus-visible,
+.report-comment-popover button:focus-visible, mark.report-cmark[role="button"]:focus-visible,
 .report-comment-del:focus-visible, .report-sendbar button:focus-visible {
   outline: 2px solid var(--accent); outline-offset: 2px; }
 .pane-body { flex: 1; overflow-y: auto; padding: var(--space-5);
@@ -416,6 +410,8 @@ html[data-embed] :is(#sidebar, #topbar, #panes, #pane-rail, #pane-menu, #pane-ba
 .artifact-version-btn.off-current { color: var(--accent); }
 .artifact-version-dot { position: absolute; top: 5px; right: 5px; width: 6px; height: 6px;
   border-radius: 50%; background: var(--accent); }
+.artifact-copy-status { position: absolute; inset-block-start: 100%; inset-inline-end: var(--space-3);
+  font-weight: 400; pointer-events: none; }
 .artifact-version-menu { position: absolute; top: calc(100% + 4px); right: 0; z-index: var(--z-menu);
   min-width: 240px; max-width: min(340px, 92vw); max-height: 320px; overflow-y: auto;
   display: flex; flex-direction: column; gap: var(--space-1); }
@@ -442,9 +438,8 @@ html[data-embed] :is(#sidebar, #topbar, #panes, #pane-rail, #pane-menu, #pane-ba
 .artifact-notice.error { color: var(--danger); }
 .artifact-view, .artifact-doc { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .artifact-doc .content { min-width: 0; max-width: 100%; }
-.artifact-doc .content pre, .artifact-doc .content table, .artifact-plain { display: block;
+.artifact-doc .content pre, .artifact-plain { display: block;
   max-width: 100%; overflow-x: auto; }
-.artifact-doc .content table { border-collapse: collapse; }
 .artifact-doc .content img, .artifact-image { max-width: 100%; max-height: none; height: auto;
   border: 0; margin: 0; }
 /* What is new since the last reviewed version: new words get a green fill,
@@ -550,16 +545,10 @@ ins.doc-diff-added { color: inherit; text-decoration: none;
 mark.report-cmark { background: color-mix(in srgb, var(--highlight) 28%, transparent); color: inherit;
   border-radius: 2px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--highlight) 35%, transparent); } /* radius-check: allow a highlight mark */
 mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, transparent); }
-.pane-body[data-pane="report"] mark.report-cmark[data-cid]:not(.report-cbox, :is(a[href], button, summary, [role="button"]) *) {
+.artifact-image-frame[data-box-image] { cursor: zoom-in; }
+.report-comment-crop { display: block; max-width: 100%; max-height: 96px; }
+.pane-body[data-pane="report"] mark.report-cmark[data-cid]:not(.report-cbox, :is(a[href], button, summary, [role="button"]:not(.report-cmark)) *) {
   cursor: pointer;
-}
-.btn.report-comment-anchor {
-  width: 36px;
-  padding: 0;
-  vertical-align: middle;
-  border-radius: 8px;
-  user-select: none;
-  color: var(--accent);
 }
 
 .report-comment-popover { position: fixed; z-index: calc(var(--z-dialog) + 2); width: min(300px, calc(100vw - 16px)); }
@@ -640,12 +629,31 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
       0 max(var(--space-4), env(safe-area-inset-left)); }
   .pane-body { min-height: 0; padding: 0 max(var(--space-5), env(safe-area-inset-right))
     max(var(--space-5), env(safe-area-inset-bottom)) max(var(--space-5), env(safe-area-inset-left)); }
-  /* A frame gets no safe-area inset of its own: the pane keeps the embedded
-     composer above the gesture bar, at the main composer's height. */
   .side-picker-box { --side-chevron-box: 44px; }
-  #panes.overlay .pane-body[data-pane="side"] {
-    height: calc(100dvh - var(--mobile-shell-height) - var(--pane-powerbar-height));
-    padding-bottom: max(0px, calc(env(safe-area-inset-bottom) - var(--space-3))); }
+  /* A side conversation pops out as a bordered card over the lower four
+     fifths of the visible area below the header, so its parent conversation
+     stays visible above it. The pane backdrop dims the parent lightly, and
+     tapping it closes the card. Sizing against --visible-height keeps the
+     embedded composer above an open keyboard; the gap above the card shrinks
+     so the card keeps 280px, and the bottom inset clears the gesture bar. */
+  #panes.on.overlay:has(.pane-col.mobile-active[data-pane="side"]) {
+    --side-card-room: calc(var(--visible-height) - var(--mobile-shell-height));
+    --side-card-top: calc(var(--mobile-shell-height)
+      + clamp(0px, var(--side-card-room) - 280px, var(--side-card-room) / 5));
+    --side-card-bottom: max(var(--space-2), env(safe-area-inset-bottom));
+    inset: var(--side-card-top) max(var(--space-2), env(safe-area-inset-right))
+      auto max(var(--space-2), env(safe-area-inset-left));
+    height: calc(var(--visible-height) - var(--side-card-top) - var(--side-card-bottom));
+    width: auto; box-sizing: border-box; overflow: hidden;
+    border: 2px solid color-mix(in srgb, var(--accent) 60%, var(--border)); border-radius: 14px;
+    background: var(--bg); box-shadow: var(--menu-shadow); }
+  #panes.overlay .pane-col.mobile-active[data-pane="side"] { display: flex; flex-direction: column;
+    height: 100%; overflow: hidden; }
+  #panes.overlay .pane-col[data-pane="side"] .pane-head { position: static; margin-top: 0; }
+  #panes.overlay .pane-body[data-pane="side"] { flex: 1; height: auto; min-height: 0;
+    padding-bottom: 0; }
+  body:has(#panes.overlay .pane-col.mobile-active[data-pane="side"]) #pane-backdrop.on {
+    background: color-mix(in srgb, var(--shadow) 25%, transparent); }
   #panes.overlay .artifact-view { min-height: 0; }
   #panes.overlay .artifact-shell { display: contents; }
   body.pane-chrome-hidden #topbar { transform: translateY(-100%); }
@@ -688,10 +696,7 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
 }
 
 @media (pointer: coarse) {
-  .btn.report-comment-anchor {
-    width: 48px;
-    min-height: 48px;
-  }
+  .artifact-copy-btn { border-radius: 0; }
   .report-comment-popover.editing .btn {
     min-width: 72px;
     min-height: 48px;
@@ -702,18 +707,32 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
     min-width: 44px; min-height: 44px; }
 }
 
+@media (max-width: 340px) {
+  .pane-col > .pane-powerbar:has(.artifact-copy-btn) {
+    padding-inline: max(var(--space-1), env(safe-area-inset-left));
+  }
+}
+
 @media (max-width: 320px) {
   .pane-body { padding-left: var(--space-4); padding-right: var(--space-4); }
   .artifact-header { min-width: 0; }
-  .artifact-doc .content pre, .artifact-doc .content table, .artifact-plain {
+  .artifact-doc .content pre, .artifact-plain {
     width: 100%; box-sizing: border-box;
   }
 }
 
 /* Rendered mermaid diagrams (chat pane and artifacts). The host replaces the
    code fence; mermaid injects its own SVG inside. */
-.mermaid-host { margin: var(--space-3) 0; overflow-x: auto; max-width: 100%; min-width: 0; color: var(--text); }
-.mermaid-host svg { max-width: 100%; height: auto; display: block; }
+.mermaid-host { margin: var(--space-3) 0; max-width: 100%; min-width: 0; color: var(--text); }
+.mermaid-render { overflow-x: auto; }
+.mermaid-render > svg { max-width: 100%; height: auto; display: block; }
+.mermaid-actions { display: flex; justify-content: flex-end; gap: var(--space-3); margin-bottom: var(--space-2); }
+.mermaid-host:not(.mermaid-done) .mermaid-open,
+.mermaid-host:not(.mermaid-done) .mermaid-actions:not(:has(.copy-btn)) { display: none; }
+.code-wrap .mermaid-actions .copy-btn { position: static; opacity: 1; }
+@media (pointer: coarse) {
+  .mermaid-actions button { min-width: 76px; }
+}
 .mermaid-host.mermaid-error { color: var(--danger); font-size: 0.78125rem; }
 .mermaid-host.mermaid-error pre { overflow-x: auto; max-width: 100%; color: var(--text); }
 
@@ -774,10 +793,10 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
 #settings-release { margin-top: auto; padding: 0 var(--space-3); display: flex; flex-direction: column;
   align-items: flex-start; color: var(--muted); font-size: 0.71875rem; overflow-wrap: anywhere; }
 #settings-release .update-status { margin: 0; }
-#settings-release .update-status:not(:empty), #settings-release .update-now { margin-top: var(--space-2); }
-#settings-release .update-now[aria-disabled="true"] { opacity: .5; cursor: default; }
+#settings-release .update-status:not(:empty), #settings-release .btn { margin-top: var(--space-2); }
+#settings-release .btn[aria-disabled="true"] { opacity: .5; cursor: default; }
 #settings-release .update-status.err { color: var(--danger); }
-#settings-release .update-now { min-height: 44px; }
+#settings-release .btn { min-height: 44px; }
 #settings-nav { display: flex; flex-direction: column; gap: var(--space-1); }
 #settings-nav button { display: flex; align-items: center; gap: var(--space-4); min-height: 48px;
   padding: 0 var(--space-3); border: 0; border-radius: 8px; background: none; color: var(--text);
@@ -971,13 +990,27 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
 .settings-section .efforts + .msg:not(:empty) { margin: var(--space-3) var(--space-4) 0; }
 .efforts ~ .model-list-update { margin-top: var(--space-3); }
 .settings-section .efforts-failed[hidden] { display: none; }
-.model-route { flex: none; padding: 0 var(--space-2); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+.efforts .settings-row:has(> .model-route), .effort-model > .settings-row {
+  display: grid; grid-template-columns: max-content fit-content(7.5rem) minmax(0, 1fr) auto;
+  column-gap: var(--space-3); }
+.efforts .effort-model > .settings-row { grid-template-columns: 3.25rem 7.5rem minmax(0, 1fr) auto; }
+.efforts .settings-row:has(> .model-route) > .settings-row-value,
+.effort-model > .settings-row > .settings-row-value {
+  grid-area: 1 / 3; max-width: none; text-align: start; white-space: normal; overflow-wrap: anywhere; }
+.effort-model > .settings-row:not(:has(> .model-route)) > .settings-row-value { grid-column: 2 / 4; }
+.model-route {
+  /* Lead visually without changing the accessible name. */
+  grid-area: 1 / 2; justify-self: start; min-width: 0; max-width: 100%; box-sizing: border-box;
+  padding: 0 var(--space-2); border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
   border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--text);
-  font-size: 0.6875rem; line-height: 1.6; white-space: nowrap; }
+  font-size: 0.6875rem; line-height: 1.6; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .effort-reasoning { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .effort-reasoning input[type="range"] { flex: 1; min-width: 0; margin: 0; accent-color: var(--accent); }
 .effort-reasoning-label { flex: none; color: var(--muted); font-size: 0.78125rem; }
 .effort-reasoning-value { flex: none; width: 3.5em; color: var(--text); font-size: 0.84375rem; }
+@media (max-width: 920px) { .settings-section .group > .row.effort {
+    grid-template-columns: minmax(0, 1fr); padding: 0; }
+  .effort-reasoning { padding: 0 var(--space-5) var(--space-2); } }
 /* The model box lists results inline below its field (never floating, so a
    phone keyboard cannot cover the list), one group per route. */
 .settings-section .model-box { min-width: 0; display: flex; flex-direction: column; gap: var(--space-2); }
@@ -1073,8 +1106,6 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
   .settings-section .actions > button { min-width: 88px; }
   .settings-section .model-box-list { max-height: 300px; }
   .settings-section .model-box-option { min-height: 44px; box-sizing: border-box; }
-  .settings-section .group > .row.effort { grid-template-columns: minmax(0, 1fr); padding: 0; }
-  .effort-reasoning { padding: 0 var(--space-5) var(--space-2); }
   .effort-reasoning input[type="range"] { height: 44px; }
   .settings-section .context-window-controls input[type="number"] { width: 104px; }
   .remote-entry > .row { flex-wrap: wrap; }
@@ -1121,6 +1152,10 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
   z-index: var(--z-raised); align-items: center; gap: var(--space-1);
   padding-inline: var(--space-5) var(--space-3); border-radius: inherit;
   background: linear-gradient(to right, transparent, var(--row-bg, var(--panel)) var(--space-5)); }
+.section-actions { max-width: 100%; overflow: auto hidden; scrollbar-width: none; }
+.section-actions .btn { flex: none; min-height: 0; padding-inline: var(--space-2);
+  font-size: 0.6875rem; white-space: nowrap; }
+.section-actions .btn:focus-visible { outline-offset: -2px; }
 .row-actions { inset-block: 2px; right: 2px; }
 .row-actions .icon-btn { width: 24px; height: 24px; }
 @media (hover: hover) {

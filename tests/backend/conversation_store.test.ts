@@ -17,18 +17,21 @@ import { rm } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import {
   ConversationStore,
-  ExternalKeyConflict,
-  ServiceStorageUnavailable,
   SET_PENDING_MODEL_MARKER,
   assertNoUnimportedLegacyState,
   TITLE_ORDER_RE,
   cleanTitleOrder,
   freshTakenOverOrder,
-  validateExternalKey,
   LEGACY_BACKEND,
 } from "../../src/agents/storage/conversation_store";
 import {
+  ExternalKeyConflict,
+  ServiceStorageUnavailable,
+  validateExternalKey,
+} from "../../src/agents/storage";
+import {
   fixtureStore,
+  fixtureBindings,
   fixtureHooks,
   paths,
   type ConversationCase,
@@ -53,7 +56,7 @@ function instance(root: string) {
       service_principal: "service",
     },
   });
-  return { store };
+  return { store, serviceBindings: fixtureBindings(root, store) };
 }
 
 test("external keys and title orders enforce current input policy", () => {
@@ -153,32 +156,32 @@ test("refresh refuses legacy JSON even for an invalid conversation id", async ()
 
 test("external-key conflicts fail closed on malformed, symlink, dangling and occupied leaves", async () => {
   const root = await temp();
-  const { store } = instance(root);
-  await store.bindExternalKey("service", "slack:C1", "agent1");
+  const { store, serviceBindings } = instance(root);
+  await serviceBindings.bindExternalKey("service", "slack:C1", "agent1");
   const digest = createHash("sha256")
     .update("recurse-external-key-v1\0service\0slack:C1")
     .digest("hex");
   const leaf = join(root, "external-keys", `${digest}.json`);
   const original = await readFile(leaf);
   await expect(
-    store.bindExternalKey("service", "slack:C1", "agent2"),
+    serviceBindings.bindExternalKey("service", "slack:C1", "agent2"),
   ).rejects.toBeInstanceOf(ExternalKeyConflict);
   expect(await readFile(leaf)).toEqual(original);
   store.discardConvProjection("agent1");
   await expect(
-    store.lookupExternalKey("service", "slack:C1"),
+    serviceBindings.lookupExternalKey("service", "slack:C1"),
   ).rejects.toBeInstanceOf(ExternalKeyConflict);
   await writeFile(leaf, "{bad");
   await expect(
-    store.lookupExternalKey("service", "slack:C1"),
+    serviceBindings.lookupExternalKey("service", "slack:C1"),
   ).rejects.toBeInstanceOf(ExternalKeyConflict);
-  await store.unbindExternalKey("service", "slack:C1", "agent1");
+  await serviceBindings.unbindExternalKey("service", "slack:C1", "agent1");
   await symlink("missing.json", leaf);
   await expect(
-    store.lookupExternalKey("service", "slack:C1"),
+    serviceBindings.lookupExternalKey("service", "slack:C1"),
   ).rejects.toBeInstanceOf(ExternalKeyConflict);
   await expect(
-    store.unbindExternalKey("service", "slack:C1", "agent1"),
+    serviceBindings.unbindExternalKey("service", "slack:C1", "agent1"),
   ).rejects.toBeInstanceOf(ServiceStorageUnavailable);
 });
 
@@ -232,19 +235,19 @@ test("a detached task cannot reuse a guard context after release", async () => {
 
 test("identifiers with a final newline cannot reach a binding or lock path", async () => {
   const root = await temp();
-  const { store } = instance(root);
+  const { store, serviceBindings } = instance(root);
   await expect(
-    store.bindExternalKey("service", "x\n", "agent1"),
+    serviceBindings.bindExternalKey("service", "x\n", "agent1"),
   ).rejects.toThrow();
   await expect(
-    store.bindServiceConversation("service\n", "agent1"),
+    serviceBindings.bindServiceConversation("service\n", "agent1"),
   ).rejects.toThrow();
   await expect(
     store.withTitleGuard("agent1\n", async () => {}),
   ).rejects.toThrow();
-  expect(await store.serviceOwnsConversation("service", "agent1\n")).toBe(
-    false,
-  );
+  expect(
+    await serviceBindings.serviceOwnsConversation("service", "agent1\n"),
+  ).toBe(false);
 });
 
 test("lock-file symlinks are refused rather than followed", async () => {
@@ -260,14 +263,18 @@ test("lock-file symlinks are refused rather than followed", async () => {
 
 test("service ownership counts only live rows for direct reads, refuses malformed leaves on scans", async () => {
   const root = await temp();
-  const { store } = instance(root);
-  await store.bindServiceConversation("service", "agent1");
-  expect(await store.serviceOwnedConversationCount("service")).toBe(1);
+  const { store, serviceBindings } = instance(root);
+  await serviceBindings.bindServiceConversation("service", "agent1");
+  expect(await serviceBindings.serviceOwnedConversationCount("service")).toBe(
+    1,
+  );
   store.discardConvProjection("agent1");
-  expect(await store.serviceOwnsConversation("service", "agent1")).toBe(false);
+  expect(
+    await serviceBindings.serviceOwnsConversation("service", "agent1"),
+  ).toBe(false);
   await writeFile(join(root, "service-bindings", "invalid.json"), "{");
   await expect(
-    store.serviceOwnedConversationCount("service"),
+    serviceBindings.serviceOwnedConversationCount("service"),
   ).rejects.toBeInstanceOf(ServiceStorageUnavailable);
 });
 
@@ -730,12 +737,17 @@ test("rollback attempts every cleanup despite an incomplete temp removal", async
     tmp_key: "scratch",
   };
   store.applyAgentMetadata({ rollback: conv });
-  await store.bindServiceConversation("service", "rollback");
-  await store.bindExternalKey("service", "service:key", "rollback");
-  await store.rollbackServiceConversation(conv);
+  const serviceBindings = fixtureBindings(root, store);
+  await serviceBindings.bindServiceConversation("service", "rollback");
+  await serviceBindings.bindExternalKey("service", "service:key", "rollback");
+  await store.rollbackServiceConversation(conv, serviceBindings);
   expect(store.load("rollback", { withPending: false })).toBeNull();
-  expect(await store.serviceOwnedConversationCount("service")).toBe(0);
-  expect(await store.lookupExternalKey("service", "service:key")).toBeNull();
+  expect(await serviceBindings.serviceOwnedConversationCount("service")).toBe(
+    0,
+  );
+  expect(
+    await serviceBindings.lookupExternalKey("service", "service:key"),
+  ).toBeNull();
 });
 
 test("a record without a backend retains its legacy provenance", async () => {

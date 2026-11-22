@@ -15,6 +15,7 @@ import { openWorkerSqliteStorage, SqliteWorker } from "./sqlite_worker";
 import type { AgentArchive, ArchivedAgent } from "./archive";
 import { sanitizeImportedProcesses } from "./revive_processes.ts";
 import { retirePath } from "../../utils/trash-sweep";
+import { isEffortLevel } from "../../effort_levels";
 
 export const MAX_REVIVE_BYTES = 256 * 1024 * 1024;
 const MAX_META_BYTES = 64 * 1024;
@@ -259,13 +260,7 @@ export async function importArchive(
       top_level: true,
       model: text(meta.model) ?? text(stored.model),
       effort: text(meta.effort) ?? text(stored.effort),
-      level:
-        typeof metaLevel === "number" &&
-        Number.isInteger(metaLevel) &&
-        metaLevel >= 1 &&
-        metaLevel <= 5
-          ? metaLevel
-          : null,
+      level: isEffortLevel(metaLevel) ? metaLevel : null,
       workdir: text(meta.workdir) ?? text(stored.cwd),
       created: null,
       archived: Date.now() / 1000,

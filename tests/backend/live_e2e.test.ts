@@ -14,7 +14,8 @@ import { openServerLog, ownSession, readDurableEntries } from "../live_e2e.ts";
 import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { fauxHost, idle, until } from "./fixtures/durable_host/host.ts";
 import { seedPiModelList, TEST_PI_MODELS } from "./pi_model_list_fixture.ts";
-import { Config, PI_MODEL_LIST_VERSION } from "../../src/config.ts";
+import { Config } from "../../src/config.ts";
+import { PI_MODEL_LIST_VERSION } from "../../src/models";
 import {
   assertOAuthCredentialsFresh,
   liveModel,
@@ -88,7 +89,7 @@ test("second live route uses Settings over the recorded authenticated catalog or
         levels: { 1: { model: selected, reasoning: "high" } },
       }),
     );
-    const catalog = config.authedChatModels();
+    const catalog = config.models.authedChatModels();
     expect(
       catalog.find((model) => model.id.split("/", 1)[0] === routes[0].provider)
         ?.id,

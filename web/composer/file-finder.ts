@@ -65,13 +65,7 @@ function owns(key: string, shift: boolean) {
   );
 }
 function paint(status = "") {
-  if (!document.getElementById("file-menu-style")) {
-    const link = document.createElement("link");
-    link.id = "file-menu-style";
-    link.rel = "stylesheet";
-    link.href = "/static/composer-files.css";
-    document.head.append(link);
-  }
+  menu.classList.add("composer-popup");
   showComposerAutocomplete(
     id,
     close,

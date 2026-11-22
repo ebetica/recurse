@@ -11,7 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { CHECKOUT_ROOT, PI_PACKAGE_ROOT } from "../../src/build_dir";
-import { Config, PI_MODEL_ROUTES } from "../../src/config";
+import { Config } from "../../src/config";
+import { PI_MODEL_ROUTES } from "../../src/models";
 import { captureFixture } from "./fixture_subprocess";
 
 const MODULES = join(CHECKOUT_ROOT, "node_modules");
@@ -47,7 +48,7 @@ test("installed Pi lists every model Recurse's defaults and routes use", async (
       env: { CHAT_DATA_DIR: join(root, "data"), HOME: join(root, "home") },
       authenticatedProviders: () => ["anthropic", "openai-codex"],
     });
-    await config.setPiModelList(reply.models);
+    await config.models.setPiModelList(reply.models);
     expect(reply.reasoning_levels_unavailable).toBeUndefined();
     expect(
       reply.models.filter(
@@ -65,15 +66,21 @@ test("installed Pi lists every model Recurse's defaults and routes use", async (
         env: { CHAT_DATA_DIR: join(root, "data"), HOME: join(root, "home") },
         authenticatedProviders: () => authed,
       });
-      for (const { model } of Object.values(ladder.effortLevels())) {
+      for (const { model } of Object.values(ladder.levels.effortLevels())) {
         used.add(model);
-        const route = ladder.modelPolicy(model);
-        for (const target of [route.reviewer, route.summary])
+        const { reviewer, summary } = JSON.parse(
+          await ladder.trustedModelPolicy(model),
+        );
+        for (const target of [
+          reviewer,
+          ...(reviewer.candidates ?? []),
+          summary,
+        ])
           used.add(`${target.provider}/${target.model}`);
       }
     }
     for (const model of used)
-      expect([model, config.unlistedModelSentence(model, 1)]).toEqual([
+      expect([model, config.models.unlistedModelSentence(model, 1)]).toEqual([
         model,
         null,
       ]);

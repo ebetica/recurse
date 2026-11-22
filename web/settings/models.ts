@@ -1,6 +1,9 @@
 // Model settings keep context caching, context limits and the effort levels on
-// the selected backend. Each level change saves all levels at once without
-// changing the default level.
+// the selected backend. Edits preserve the default effort level.
+import {
+  EFFORT_LEVELS,
+  OPTIONAL_EFFORT_LEVELS,
+} from "../../src/effort_levels.js";
 import { settingsClient, settingsLabel } from "./target.js";
 import { settingsDetail } from "./layout.js";
 import { buildSafetyReviewRow } from "./safety.js";
@@ -244,9 +247,7 @@ const thinkingRank = (level: string) => {
   return at < 0 ? THINKING_ORDER.length : at;
 };
 
-// Each level is one row: a button naming the model and the route that pays for
-// it (it opens the model finder), then a reasoning slider. Every change saves
-// at once, sending all five levels.
+// Each level has a model picker and reasoning slider. Edits save immediately.
 export function buildLadderSection(body: HTMLElement): void {
   const { api, jpost } = settingsClient();
   const backend = settingsLabel();
@@ -305,6 +306,9 @@ export function buildLadderSection(body: HTMLElement): void {
   const saveNow = async () => {
     const levels = rowValues();
     const sent = [...dirty];
+    const overrides = { ...levels };
+    for (const level of OPTIONAL_EFFORT_LEVELS)
+      if (!dirty.has(level)) delete overrides[level];
     failed.hidden = true;
     show("", "Saving…");
     const fail = (text: string) => {
@@ -315,7 +319,7 @@ export function buildLadderSection(body: HTMLElement): void {
       // Invariant: The rows edit models and reasoning only; the instance
       // default level rides the save untouched so it is never reset.
       const r = await jpost("/api/settings/effort-levels", {
-        levels,
+        levels: overrides,
         default_level: defaultLevel,
       });
       if (!r.ok) return fail(await errDetail(r, "Couldn't save."));
@@ -336,8 +340,7 @@ export function buildLadderSection(body: HTMLElement): void {
       fail("Network error. Try again.");
     }
   };
-  // Invariant: Each save sends every level as the rows show them then, so the
-  // last save holds the last change; loads wait for queued saves.
+  // Saves and loads share a queue; an earlier reply cannot discard newer edits.
   const save = () => queueSettingsSave(backend, saveNow);
 
   const buildRow = (
@@ -517,7 +520,7 @@ export function buildLadderSection(body: HTMLElement): void {
     for (const element of list.querySelectorAll(":scope > .row.effort"))
       element.remove();
     rows = [];
-    for (let level = 1; level <= 5; level++) {
+    for (const level of EFFORT_LEVELS) {
       const key = String(level);
       const entry = dirty.has(level) ? edited[key] : shown.ladder.levels[key];
       if (!entry) continue;

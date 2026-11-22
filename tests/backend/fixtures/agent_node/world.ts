@@ -2,6 +2,7 @@
 // ConfigActions and AgentNodes over one private root, with explicit clocks,
 // ids, loggers and scheduler for admission/config/registry/supervisor tests.
 import { seedPiModelList } from "../../pi_model_list_fixture";
+import { fixtureBindings } from "../conversation_store/spec";
 import { join } from "node:path";
 import { AgentStore } from "../../../../src/agents/storage/agent_store";
 import {
@@ -51,6 +52,7 @@ export function counter(prefix: string, width: number): () => string {
 interface World {
   agentStore: AgentStore;
   conversations: ConversationStore;
+  serviceBindings: ReturnType<typeof fixtureBindings>;
   nodes: AgentNodes<AgentNode, NodeStore>;
   configActions: ConfigActions;
   config: Config;
@@ -103,8 +105,6 @@ export function buildWorld(options: WorldOptions): World {
   const conversations = new ConversationStore(
     {
       dataDir: root,
-      externalKeyDir: join(root, "external-keys"),
-      serviceBindingsDir: join(root, "service-bindings"),
       titleLockDir: join(root, "title-locks"),
       muteLockDir: join(root, "mute-locks"),
     },
@@ -151,6 +151,7 @@ export function buildWorld(options: WorldOptions): World {
   return {
     agentStore,
     conversations,
+    serviceBindings: fixtureBindings(root, conversations),
     nodes,
     configActions,
     config,

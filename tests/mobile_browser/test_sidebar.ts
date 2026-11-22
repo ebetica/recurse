@@ -7,6 +7,7 @@ import type { BrowserContext, Locator, Page, Request } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
+  focusComposer,
   gotoRoot,
   postFixture,
   rootAgentId,
@@ -616,7 +617,7 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await context.close();
   },
-  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3448 show the draft row in its listed agent's place; #3289 retry a sidebar script run that timed out; #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
+  // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3551 fit visible section buttons within the header; #3448 show the draft row in its listed agent's place; #3289 retry a sidebar script run that timed out; #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
   async function test_sidebar_sections(browser, base) {
     let context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -810,16 +811,25 @@ export const tests: BrowserTest[] = [
     const headerContent = inbox.locator(
       ".tree-section-toggle, .tree-section-title, .tree-section-count",
     );
+    const archiveIdle = inbox.getByRole("button", {
+      name: "Archive idle > 1 day",
+    });
+    await archiveIdle.waitFor({ state: "hidden" });
     const beforeHeaderHover = await bounds(headerContent);
+    const headerHeight = (await inbox.boundingBox())!.height;
     await inbox.hover();
+    await archiveIdle.waitFor();
+    expect((await inbox.boundingBox())!.height).toBe(headerHeight);
+    expect((await archiveIdle.boundingBox())!.height).toBeLessThanOrEqual(
+      headerHeight,
+    );
     expect(await bounds(headerContent)).toEqual(beforeHeaderHover);
     await page.mouse.move(1200, 800);
     await inbox.locator(".tree-section-toggle").focus();
-    expect(await inbox.locator(".section-actions button").isVisible()).toBe(
-      true,
-    );
+    await page.keyboard.press("Tab");
+    await browserExpect(archiveIdle).toBeFocused();
     expect(await bounds(headerContent)).toEqual(beforeHeaderHover);
-    await inbox.getByRole("button", { name: "Archive idle > 1 day" }).click();
+    await archiveIdle.click();
     const dialog = page.getByRole("dialog", {
       name: "Archive 1 conversation?",
     });
@@ -1437,6 +1447,7 @@ async function typedTags(
     .getByRole("button", { name: "recurse-dev", exact: true })
     .click();
   await browserExpect(page.locator("#effort-range")).toHaveValue("4");
+  await focusComposer(page);
   await page.locator("#model-trigger").click();
   await page.locator("#effort-range").focus();
   await page.locator("#effort-range").press("ArrowLeft");
@@ -1625,7 +1636,10 @@ async function customScript(
     "  if (rows.some((r) => r.tags.hang)) for (;;);",
     "  if (rows.some((r) => r.tags.slow) && Date.now() < now * 1000 + 300) for (;;);",
     "  return [",
-    `    { title: "Mine", rows: rows.filter((r) => r.id === "${ids.fresh}") },`,
+    `    { title: "Mine", rows: rows.filter((r) => r.id === "${ids.fresh}"), actions: [
+      { label: "Archive idle longer than one day", set: "archived" },
+      { label: "Restore all archived conversations", clear: "archived" },
+    ] },`,
     `    { title: "Has PR", rows: rows.filter((r) => r.parent === "${ids.fresh}" && r.depth === 1 && r.prs.some((pr) => pr.number === 42 && pr.checks === "pass" && !pr.merged)) },`,
     `    { title: "Others", rows: rows.filter((r) => r.depth === 0 && r.id !== "${ids.fresh}") },`,
     `    { title: "Hidden", hideWhenEmpty: true, rows: ["${ids.fresh}", "unknown"], empty: "Hidden empty text", actions: [{ label: "Hidden action", set: "pinned", rows }] },`,
@@ -1646,10 +1660,27 @@ async function customScript(
       { title: "Visible empty", rows: 0 },
     ],
   });
+  await context.addInitScript(() =>
+    localStorage.setItem("recurse.sidebarWidth", "220"),
+  );
   const page = await context.newPage();
   const errors = captureErrors(page);
   await gotoRoot(page, base);
-  await header(page, "Mine").waitFor();
+  const mine = header(page, "Mine");
+  await mine.locator(".tree-section-toggle").focus();
+  const headerHeight = (await mine.boundingBox())!.height;
+  for (const name of [
+    "Archive idle longer than one day",
+    "Restore all archived conversations",
+  ]) {
+    const action = mine.getByRole("button", { name });
+    await page.keyboard.press("Tab");
+    await browserExpect(action).toBeFocused();
+    expect(await edgesUncovered(action)).toBeTrue();
+    expect((await action.boundingBox())!.height).toBeLessThanOrEqual(
+      headerHeight,
+    );
+  }
   await browserExpect(header(page, "Visible empty")).toHaveCount(1);
   await browserExpect(
     page.getByText("Visible empty text", { exact: true }),

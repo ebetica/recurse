@@ -15,7 +15,8 @@ calling conversation; [env](../src/extensions/core/environment/managed_tools.ts)
 changes its environment overrides. Both reuse the existing admission and
 validation modules in-process.
 [artifact](../src/extensions/core/environment/artifact.ts) creates, lists and
-renames Artifacts; its working paths are edited directly and Git commits publish.
+renames Artifacts and reads or replaces [saved app state](../src/artifacts/README.md#saved-app-state).
+Edit its working paths directly and commit to publish.
 All four native tools are callable directly or from codemode scripts and are excluded from
 read-only side conversations, whose prompt prefix stays identical to the parent.
 Mutations go through safety review; settings views do not.
@@ -90,8 +91,9 @@ is required; both forms preserve the agent’s worktree.
 agent using the connected remote's defaults. `interrupt`, `tail`, `wait` and
 `rm` accept that target through the home gateway; bare ids stay local. Remote
 creation cannot use local worktree or sibling options and has no automatic
-parent report. Offline calls fail without queuing. `send` keeps its relay behaviour, including
-send-only access through polling homes. The CLI waits up to 25 seconds per local
+parent report. Offline calls fail without queuing. Explicit effort is checked by
+the remote before queuing; a remote with only five levels rejects `--effort 6`.
+`send` keeps its relay behaviour, including send-only access through polling homes. The CLI waits up to 25 seconds per local
 outcome read, waking when the background send finishes rather than polling on a
 timer. Disconnecting a reader does not cancel delivery. `read id@label` reads a
 remote live or archived transcript through the authenticated

@@ -56,6 +56,7 @@ function removeUrlSurfaces(root: ParentNode): void {
     blocked.remove();
   for (const element of root.querySelectorAll<HTMLElement>("*")) {
     element.removeAttribute("style");
+    element.classList.remove("report-box-frame", "files-box-hint");
     for (const attribute of Array.from(element.attributes)) {
       const name = attribute.name.toLowerCase();
       const localName = attribute.localName.toLowerCase();
@@ -68,6 +69,7 @@ function removeUrlSurfaces(root: ParentNode): void {
           "data-image-alt",
           "data-path-image",
           "data-image-path",
+          "data-box-image",
         ].includes(name)
       ) {
         element.removeAttributeNode(attribute);
@@ -152,13 +154,20 @@ interface DocumentMarkdownOptions {
   agentId: string;
   documentPath?: string;
   artifactId?: string;
+  onImageFrame?: (
+    frame: HTMLElement,
+    position: number,
+    source: Promise<string | null>,
+  ) => void;
   /** An earlier version's text: highlight what is new since it. */
   previous?: string | null;
 }
 
+type MarkdownRender = DocumentMarkdownOptions & { imageCount: number };
+
 function markdownFragment(
   source: string,
-  options: DocumentMarkdownOptions,
+  options: MarkdownRender,
 ): DocumentFragment {
   // Invariant: A template is inert: remote images, srcset candidates, CSS URLs,
   // SVG refs, and media cannot issue a request in the gap before this policy
@@ -180,6 +189,7 @@ function markdownFragment(
   renderMathPlaceholders(template.content);
 
   for (const { image, source } of images) {
+    const position = ++options.imageCount;
     if (!image.isConnected && !template.content.contains(image)) continue;
     diffKeys.set(image, source || "");
     if (imageHost(source)) {
@@ -228,10 +238,15 @@ function markdownFragment(
         if (loaded) {
           const original = originalPathImage(used);
           if (original) image.dataset.pathImage = original;
-        } else if (!options.signal.aborted && frame.parentNode)
+          return original ? null : used;
+        }
+        if (!options.signal.aborted && frame.parentNode)
           frame.replaceWith(imageFailure(source || ""));
+        return null;
       };
-      void reveal();
+      const loadedSource = reveal();
+      if (!options.signal.aborted)
+        options.onImageFrame?.(frame, position, loadedSource);
       continue;
     }
     image.replaceWith(imageFailure(source || ""));
@@ -356,7 +371,7 @@ export function scrollDocumentFragment(
 function appendMarkdown(
   body: HTMLElement,
   source: string,
-  options: DocumentMarkdownOptions,
+  options: MarkdownRender,
 ): void {
   const section = document.createElement("section");
   section.className = "content artifact-markdown";
@@ -421,17 +436,18 @@ export function renderDocumentMarkdown(
     },
     { signal: options.signal },
   );
+  const markdown = { ...options, imageCount: 0 };
   if (typeof options.previous === "string")
-    return renderChanges(body, options.previous, source, options);
+    return renderChanges(body, options.previous, source, markdown);
   for (const part of documentParts(source))
     if (part.embed !== undefined)
       body.append(...embedNodes(part.embed, options.title));
-    else appendMarkdown(body, part.markdown!, options);
+    else appendMarkdown(body, part.markdown!, markdown);
 }
 
 function flatDocument(
   source: string,
-  options: DocumentMarkdownOptions,
+  options: MarkdownRender,
 ): DocumentFragment {
   const fragment = document.createDocumentFragment();
   for (const part of documentParts(source)) {
@@ -452,7 +468,7 @@ function renderChanges(
   body: HTMLElement,
   previous: string,
   source: string,
-  options: DocumentMarkdownOptions,
+  options: MarkdownRender,
 ): void {
   const section = document.createElement("section");
   section.className = "content artifact-markdown";

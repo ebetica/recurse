@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { themePalettes } from "../../src/themes";
 import {
   LOGIN,
+  addServerCookie,
   startServer,
   stopServer,
   runBrowserTests,
@@ -21,21 +22,7 @@ export const tests: BrowserTest[] = [
     const peer = await browser.newContext();
     const page = await context.newPage();
     try {
-      const login = await peer.request.post(remote.base + "login", {
-        form: { password: LOGIN },
-        maxRedirects: 0,
-      });
-      expect(login.status()).toBe(303);
-      await peer.addCookies([
-        {
-          name: "chat_auth",
-          value: login
-            .headers()
-            ["set-cookie"]!.split(";")[0]!
-            .slice("chat_auth=".length),
-          url: remote.base,
-        },
-      ]);
+      await addServerCookie(peer, remote);
       const get = async (path: string, other = false) => {
         const response = await (other ? peer : context).request.get(
           (other ? remote.base : base) + path,

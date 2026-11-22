@@ -57,8 +57,20 @@ export function installImageWheelNavigation(
 
 export function installImageZoom(image: HTMLImageElement): void {
   const frame = image.closest<HTMLElement>(".files-image-frame");
-  const viewport = frame?.parentElement;
-  if (!frame || !viewport || viewport.dataset.imageZoom) return;
+  if (frame) installFrameZoom(frame);
+}
+
+export function installFrameZoom(
+  frame: HTMLElement,
+  controls?: {
+    zoomIn: HTMLButtonElement;
+    zoomOut: HTMLButtonElement;
+    fit: HTMLButtonElement;
+    maxScale: () => number;
+  },
+): void {
+  const viewport = frame.parentElement;
+  if (!viewport || viewport.dataset.imageZoom) return;
   viewport.dataset.imageZoom = "1";
   const updateHint = (event: PointerEvent) => {
     const pane = viewport.closest<HTMLElement>(".image-popout-body");
@@ -77,12 +89,13 @@ export function installImageZoom(image: HTMLImageElement): void {
   let moved = false;
   let pinched = false;
   let lastPointerTouch = false;
-  const reset = document.createElement("button");
-  reset.type = "button";
-  reset.className = "btn sm image-zoom-reset";
-  reset.textContent = "Fit image";
-  reset.hidden = true;
-  viewport.append(reset);
+  const reset = controls?.fit ?? document.createElement("button");
+  if (!controls) {
+    reset.type = "button";
+    reset.className = "btn sm image-zoom-reset";
+    reset.textContent = "Fit image";
+    viewport.append(reset);
+  }
   const paint = () => {
     const limitX = (frame.offsetWidth * (scale - 1)) / 2;
     const limitY = (frame.offsetHeight * (scale - 1)) / 2;
@@ -90,10 +103,10 @@ export function installImageZoom(image: HTMLImageElement): void {
     y = Math.max(-limitY, Math.min(limitY, y));
     frame.style.transform = `translate(${x}px, ${y}px) scale(${scale})`;
     viewport.dataset.zoomed = String(scale > 1);
-    reset.hidden = scale === 1;
+    if (!controls) reset.hidden = scale === 1;
   };
   const zoom = (next: number, cx: number, cy: number) => {
-    next = Math.max(1, Math.min(8, next));
+    next = Math.max(1, Math.min(controls?.maxScale() ?? 8, next));
     const rect = viewport.getBoundingClientRect();
     const px = cx - rect.left - rect.width / 2;
     const bottom = parseFloat(getComputedStyle(viewport).paddingBottom) || 0;
@@ -108,6 +121,36 @@ export function installImageZoom(image: HTMLImageElement): void {
     x = y = 0;
     paint();
   };
+  if (controls) {
+    const stepZoom = (factor: number) => {
+      const rect = viewport.getBoundingClientRect();
+      zoom(
+        scale * factor,
+        rect.left + rect.width / 2,
+        rect.top + rect.height / 2,
+      );
+    };
+    controls.zoomIn.onclick = () => stepZoom(2);
+    controls.zoomOut.onclick = () => stepZoom(0.5);
+    viewport.addEventListener("keydown", (event) => {
+      if (
+        scale === 1 ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey
+      )
+        return;
+      const step = 40;
+      if (event.key === "ArrowLeft") x += step;
+      else if (event.key === "ArrowRight") x -= step;
+      else if (event.key === "ArrowUp") y += step;
+      else if (event.key === "ArrowDown") y -= step;
+      else return;
+      event.preventDefault();
+      paint();
+    });
+  }
   viewport.addEventListener(
     "wheel",
     (event) => {

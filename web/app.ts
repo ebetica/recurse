@@ -3,7 +3,7 @@
 // Auth/generation reload defers while browser-only work cannot survive.
 // Capture dispatch precedes local input handlers; unclaimed keys stay native.
 import { startMainThreadTiming } from "./main-thread-timing.js";
-import { installPhonePaneHistory } from "./phone-nav.js";
+import { installPhonePaneHistory, phoneListEntry } from "./phone-nav.js";
 import * as threadState from "./row-thread-state.js";
 import { rowThreads } from "./row-thread-state/index.js";
 import { startBackendDiscovery } from "./backends/discovery/index.js";
@@ -18,7 +18,11 @@ import {
   primaryPointerIsCoarse,
 } from "./state.js";
 import { startInteractionTiming } from "./interaction-timing.js";
-import { configureAgentFocus } from "./sidebar/focus.js";
+import {
+  configureAgentFocus,
+  focusAgentTree,
+  restoreAgentFocus,
+} from "./sidebar/focus.js";
 import { configureSidebarActions } from "./sidebar/index.js";
 import { configureArtifactRendering } from "./artifacts/artifact-state.js";
 import { commentOutbox } from "./artifacts/index.js";
@@ -26,7 +30,7 @@ import { renderContent } from "./artifacts/content-view.js";
 import { configureDisclosure } from "./conversation/disclosure.js";
 import * as threadRender from "./thread-render.js";
 import { configureRowPaint } from "./thread-render/index.js";
-import { configureBoxCommentOffer } from "./files/index.js";
+import { configureBoxCommentOffer } from "./comments/box/index.js";
 
 configureAgentFocus(renderSidebar);
 configureArtifactRendering(renderContent);
@@ -63,11 +67,13 @@ startMainThreadTiming(
   embeddedFrameHidden,
 );
 startBackendDiscovery();
-import { openEffortMenu } from "./models.js";
+import { dismissEffortMenu, openEffortMenu } from "./models.js";
+import { openContextViewer } from "./context-viewer.js";
 import { closePowerbarOverflow } from "./panes/powerbar.js";
 import type { PaneNavigation, TreeNode } from "./types.js";
 import type { WindowCommand } from "./dock/commands.js";
 import { $, inputEl, scrollEl } from "./dom.js";
+import { scrollThreadForReader } from "./thread-scroll/index.js";
 import {
   isNativeActivationKey,
   isTextEditorTarget,
@@ -113,9 +119,6 @@ import {
   cancelRename,
   commitRename,
   isRenaming,
-  mobileSidebarOpen,
-  focusAgentTree,
-  restoreAgentFocus,
 } from "./sidebar.js";
 import {
   agentSurfaceOpen,
@@ -210,7 +213,7 @@ import {
 import { openPullRequestFinder } from "./diff.js";
 import { configureSidePane, relaySideKey } from "./side-pane.js";
 import * as files from "./files.js";
-import { explorerSearchOwnsKey } from "./explorer.js";
+import { explorerSearchOwnsKey } from "./explorer/index.js";
 import {
   closeSelectionCommentFromKeyboard,
   handleCommentShortcut,
@@ -469,6 +472,7 @@ function keyContext(
       .getElementById("main")
       ?.classList.contains("fullscreen"),
     textSelected: hasTextSelection(event.target),
+    insideDialog: isDialogTarget(event.target),
     commentAvailable:
       event.key === "c" &&
       !isTextEditorTarget(event.target) &&
@@ -646,8 +650,20 @@ function execute(command: KeyCommand | null): void {
     case "choose-effort":
       openEffortMenu();
       break;
+    case "view-context":
+      void openContextViewer();
+      break;
     case "toggle-latest-turn":
       toggleLatestTurnEye();
+      break;
+    case "scroll-chat-down":
+    case "scroll-chat-up":
+      if (scrollEl.checkVisibility({ visibilityProperty: true }))
+        scrollThreadForReader(
+          scrollEl.scrollTop +
+            scrollEl.clientHeight *
+              (command === "scroll-chat-down" ? 0.5 : -0.5),
+        );
       break;
     case "scroll-bottom":
       scrollToLatest();
@@ -763,6 +779,13 @@ window.addEventListener("message", (event: MessageEvent) => {
 document.addEventListener(
   "keydown",
   (event: KeyboardEvent) => {
+    if (
+      event.target instanceof Element &&
+      (event.target.closest("dialog.mermaid-viewer[open]") ||
+        (event.target.closest(".live-thinking-summary") &&
+          /^(?:ArrowUp|ArrowDown|PageUp|PageDown|Home|End| )$/.test(event.key)))
+    )
+      return;
     // Invariant: Embedded editors and local controls keep native keys. Reader
     // shortcuts belong to the mounted Side pane, never the embedded agent tree.
     if (embedded && keyTarget(event.target) !== "composer") {
@@ -810,7 +833,7 @@ document.addEventListener(
     }
     const mobileDrawerEscape =
       event.key === "Escape" &&
-      mobileSidebarOpen() &&
+      phoneListEntry() &&
       window.matchMedia("(max-width: 700px)").matches;
     if (mobileDrawerEscape && isRenaming()) {
       event.preventDefault();
@@ -871,6 +894,20 @@ document.addEventListener(
         event.stopPropagation();
         return;
       }
+    }
+
+    // A touch-opened effort menu leaves keyboard focus in the draft.
+    if (
+      event.key === "Escape" &&
+      event.target === inputEl &&
+      !event.defaultPrevented &&
+      !event.isComposing &&
+      event.keyCode !== 229 &&
+      dismissEffortMenu()
+    ) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
     }
 
     let target = keyTarget(event.target);

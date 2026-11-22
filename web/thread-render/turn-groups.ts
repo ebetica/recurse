@@ -452,7 +452,7 @@ export function turnGroups(
       thinking &&
       !segment.tools.some(
         (tool) =>
-          tool.has_thinking || tool.thinking?.trim() || tool.live_thinking,
+          tool.thinking_entry_id && tool.thinking_entry_id === thinking.id,
       ) &&
       (thinking.has_thinking ||
         thinking.thinking?.trim() ||

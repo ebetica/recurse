@@ -1,7 +1,7 @@
 // Owns pane visibility, selection, bounded caches and desktop/mobile layout.
-// Conversation actions keep their module owners. Unavailable panes hide their
-// rail and close on refresh; discovery leaves Chat usable. Embedded apps
-// never schedule discovery, including reads settling after parking.
+// Desktop restores the saved window grid independently of pane data. Built-in
+// panes can close once unavailable; file tabs keep their own loading and errors.
+// Embedded apps never schedule discovery, including reads settling after parking.
 import { currentUiOwnerId, DRAFT, embedded, state } from "./state.js";
 import { isTextEditorTarget } from "../src/keyboard_target.js";
 import { phoneListEntry, openLinkedPhonePane } from "./phone-nav.js";
@@ -15,43 +15,37 @@ import {
   PANE_ICON,
   MESSAGE_ICON,
 } from "./icons.js";
-import { installPaneChrome } from "./panes/chrome.js";
-import { recordPaneOpen } from "./panes/frecency.js";
-import { scrollPane } from "./panes/navigation.js";
 import {
+  ArtifactPaneAutoOpenPolicy,
+  capturePaneViewState,
+  createPaneMenu,
   createPanePowerbar,
+  FileTabs,
+  installPaneChrome,
+  PaneInstanceCache,
   paneFullscreenControl,
+  PaneViewStateLifecycle,
+  recordPaneOpen,
   retainPanePowerbar,
+  scrollPane,
   updateFullscreenControl,
-} from "./panes/powerbar.js";
+  validPaneCacheDef,
+  validPaneViewStateDef,
+  type ArtifactAutoOpenObservation,
+} from "./panes/index.js";
+import { visibleFocusable } from "./focus_trap.js";
 import { $, inputEl, scrollEl } from "./dom.js";
 import { guardLeaveComments, pendingCommentCount } from "./comments.js";
 import { selectionCommentOwner } from "./comments/selection-draft/index.js";
-import {
-  ArtifactPaneAutoOpenPolicy,
-  type ArtifactAutoOpenObservation,
-} from "./panes/autoopen.js";
 import { storedPanesWidth, ensurePanesGrip } from "./resize.js";
 import { DesktopDock } from "./dock/desktop.js";
 import type { WindowCommand } from "./dock/commands.js";
 import { restoreAgentFocus } from "./sidebar/focus.js";
-import {
-  paneFocusIndicatorId,
-  paneIsActionable,
-  paneVisibilityAfterUserAction,
-} from "./panes/focus.js";
 import { backgroundWork } from "./background-work.js";
 import { conversationUiState } from "./conversation-ui-state/store.js";
 import type { PaneVisibility } from "./conversation-ui-state/schema.js";
-import {
-  capturePaneViewState,
-  PaneViewStateLifecycle,
-  validPaneViewStateDef,
-} from "./panes/view-state.js";
-import { PaneInstanceCache, validPaneCacheDef } from "./panes/cache.js";
-import { FileTabs } from "./panes/file-tabs.js";
 import type { PaneContext, PaneDef, PaneNavigation } from "./types.js";
-export { setPaneLoading } from "./panes/loading.js";
+export { setPaneLoading } from "./panes/index.js";
 
 for (const [id, icon] of [
   ["trash-btn", DELETE_ICON],
@@ -96,6 +90,9 @@ let paneParking: HTMLElement | null = null;
 let paneVisitAgentId: string | null = null;
 let paneVisitOwnerId: string | null = null;
 let paneRenderedAgentId: string | null = null;
+let paneConversationRead: "pending" | "requested" | "settled" = "pending";
+let paneReadAttempt = 0;
+let paneOpenAfterDispatch: (() => void) | null = null;
 let paneVisitVisibility: PaneVisibility = { kind: "default" };
 
 const panesEl = $("#panes")!,
@@ -176,7 +173,8 @@ export function beginPaneVisit(
 ): void {
   artifactAutoOpen.beginVisit(agentId);
   filesAutoOpen.beginVisit(agentId);
-  for (const def of paneDefinitions()) def.visit?.(agentId);
+  if (agentId === state.selectedId)
+    for (const def of paneDefinitions()) def.visit?.(agentId);
   clearArtifactAnnouncement();
   if (artifactsAttention) {
     artifactsAttention = false;
@@ -197,11 +195,33 @@ export function beginPaneVisit(
   paneVisitAgentId = agentId;
   paneVisitOwnerId = ownerId;
   paneRenderedAgentId = null;
+  paneConversationRead = "pending";
+  paneReadAttempt++;
+  paneOpenAfterDispatch = null;
   paneVisitVisibility = conversationUiState.pane(ownerId);
   if (paneVisitVisibility.kind !== "default") {
     artifactAutoOpen.noteUserPaneChoice(agentId);
     filesAutoOpen.noteUserPaneChoice(agentId);
   }
+}
+
+/** Paint the saved grid until the tree confirms the selection or reports failure. */
+export function previewDesktopPanes(id: string | null): void {
+  if (embedded || isMobile() || state.selectedId) return;
+  if (id && desktopDock.hasSavedLayout(id)) beginPaneVisit(id, id);
+  else if (paneVisitAgentId) beginPaneVisit("");
+  layout();
+  desktopDock.restoreLayout();
+}
+
+function desktopPaneContentReady(agentId: string): boolean {
+  return (
+    embedded ||
+    !agentId ||
+    agentId === DRAFT ||
+    paneConversationRead === "settled" ||
+    (paneConversationRead === "requested" && paneRenderedAgentId === agentId)
+  );
 }
 
 // Open/remembered-visible panes read immediately; closed probes queue behind
@@ -222,7 +242,12 @@ export function fetchPaneData(
     paneVisitVisibility.id === paneId &&
     paneVisitAgentId === agentId &&
     paneVisitOwnerId === currentUiOwnerId();
-  if (open.has(paneId) || (restoring && paneRenderedAgentId === agentId)) {
+  if (
+    (open.has(paneId) &&
+      paneVisitAgentId === agentId &&
+      (isMobile() || desktopPaneContentReady(agentId))) ||
+    (restoring && paneRenderedAgentId === agentId)
+  ) {
     void run();
     return;
   }
@@ -240,12 +265,14 @@ function noteUserPaneAction(
   desktopDock.userAction();
   if (!fileTabs.has(id)) {
     const prior = conversationUiState.pane(ownerId);
-    paneVisitVisibility = paneVisibilityAfterUserAction(
-      prior,
-      id,
-      opening,
-      preserveLastId,
-    );
+    const priorLast = prior.kind === "default" ? undefined : prior.lastId;
+    paneVisitVisibility = opening
+      ? {
+          kind: "open",
+          id,
+          lastId: preserveLastId && priorLast ? priorLast : id,
+        }
+      : { kind: "closed", lastId: priorLast || id };
     conversationUiState.setPane(ownerId, paneVisitVisibility);
   }
   if (id === ARTIFACTS_PANE_ID && opening)
@@ -355,6 +382,27 @@ export function openFileTab(
   );
 }
 
+/** Show a different file in this tab without moving or opening a window. */
+export function replaceFileTab(
+  body: HTMLElement,
+  key: string,
+  initial: unknown,
+): HTMLElement | null {
+  const id = body.dataset.pane;
+  const column = body.closest<HTMLElement>(".pane-col");
+  if (!id || !column || bodies.get(id) !== body) return null;
+  const focused = column.contains(document.activeElement);
+  const next = fileTabs.replace(id, key, initial, () => forgetPaneState(id));
+  if (!next) return null;
+  column.replaceChildren();
+  const replacement = ensureColumn(id, buildCtx(), column);
+  noteUserPaneAction(id, true);
+  desktopDock.fileChanged(id, next.pane.title || id, next.descriptor);
+  layout();
+  if (focused) focusPaneContent(id);
+  return replacement ?? null;
+}
+
 function buildCtxFor(id: string): PaneContext {
   // Invariant: Selection changes before a cold conversation fetch completes.
   // Never hand an old agent's conversation to panels already being retargeted
@@ -462,13 +510,7 @@ export function invalidatePaneCache(id: string, instanceKey?: string): void {
 
 function availableFor(ctx: PaneContext, discovering?: Set<string>): PaneDef[] {
   return paneDefinitions().filter((p) => {
-    if (
-      fileTabs.has(p.id) &&
-      (!fileTabs.needed(p.id) ||
-        (!open.has(p.id) &&
-          (isMobile() || paneRenderedAgentId !== ctx.agentId)))
-    )
-      return false;
+    if (fileTabs.has(p.id) && !open.has(p.id)) return false;
     try {
       const available = p.available ? p.available(ctx) : true;
       if (available === undefined) discovering?.add(p.id);
@@ -512,6 +554,7 @@ function usableFocusOrigin(
 }
 
 export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
+  if (!state.selectedId && paneVisitAgentId) return false;
   if (id === "chat") {
     if (isMobile() && !guardLeaveComments()) return false;
     if (isMobile())
@@ -577,7 +620,7 @@ export function openPane(id: string, options: OpenPaneOptions = {}): boolean {
     noteUserPaneAction(id, true, options.preserveLastId);
     if (!isMobile() && !fileTabs.has(id)) recordPaneOpen(id);
   }
-  layout();
+  layout(userInitiated ? id : undefined);
   syncPanes();
   if (focusHeading) {
     desktopDock.show(id);
@@ -591,26 +634,30 @@ function closePane(
   restoreFocus = userInitiated,
   preserveComments = false,
 ): boolean {
-  if (
-    !open.has(id) ||
-    (userInitiated &&
-      !preserveComments &&
-      !(fileTabs.has(id)
-        ? fileTabs.guardClose(id, bodies.get(id))
-        : guardLeaveComments()))
-  )
-    return false;
+  if (!open.has(id)) return false;
+  if (userInitiated) {
+    const pane = paneDefinitions().find((pane) => pane.id === id);
+    const body = bodies.get(id);
+    if (
+      pane?.guardClose
+        ? body && !pane.guardClose(body, preserveComments)
+        : !preserveComments && !guardLeaveComments()
+    )
+      return false;
+  }
   capturePaneState(id);
   if (userInitiated) noteUserPaneAction(id, false);
   const origin = focusOrigins.get(id);
   open.delete(id);
   forgetPaneState(id);
+  fileTabs.closed(id);
   desktopDock.remove(id);
   focusOrigins.delete(id);
   if (mobileActive === id) mobileActive = null;
   if (fullId === id) fullId = null;
   layout();
-  renderRail(availableFor(buildCtx()));
+  if (paneVisitAgentId === state.selectedId)
+    renderRail(availableFor(buildCtx()));
   if (restoreFocus) {
     const prior = document.activeElement;
     requestAnimationFrame(() => {
@@ -677,52 +724,10 @@ function syncFull(): void {
   desktopDock.refreshActions();
 }
 
-function focusables(root: HTMLElement): HTMLElement[] {
-  return [
-    ...root.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), a[href], select:not(:disabled), textarea:not(:disabled), input:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    ),
-  ].filter(
-    (element) =>
-      !element.hidden && getComputedStyle(element).display !== "none",
-  );
-}
 addEventListener("keydown", (event: KeyboardEvent) => {
   if (phoneListEntry()) return;
-  if (menuEl.classList.contains("on")) {
-    const items = focusables(menuEl);
-    if (
-      ["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key) &&
-      items.length
-    ) {
-      const index = items.indexOf(document.activeElement as HTMLElement);
-      const next =
-        event.key === "Home"
-          ? 0
-          : event.key === "End"
-            ? items.length - 1
-            : event.key === "ArrowDown"
-              ? (index + 1 + items.length) % items.length
-              : (index - 1 + items.length) % items.length;
-      event.preventDefault();
-      items[next].focus();
-      return;
-    }
-    if (event.key === "Tab") {
-      if (!items.length) {
-        event.preventDefault();
-        fabEl.focus();
-        return;
-      }
-      const index = items.indexOf(document.activeElement as HTMLElement);
-      if (event.shiftKey && index <= 0) {
-        event.preventDefault();
-        items[items.length - 1].focus();
-      } else if (!event.shiftKey && (index < 0 || index === items.length - 1)) {
-        event.preventDefault();
-        items[0].focus();
-      }
-    }
+  if (paneMenu.isOpen()) {
+    paneMenu.handleKey(event);
     return;
   }
   const activeId = fullId || (isMobile() ? mobileActive : null);
@@ -735,7 +740,7 @@ addEventListener("keydown", (event: KeyboardEvent) => {
           )
         : null;
   if (event.key === "Tab" && modal) {
-    const items = focusables(modal);
+    const items = visibleFocusable(modal);
     if (!items.length) {
       event.preventDefault();
       modal.querySelector<HTMLElement>(".pane-title")?.focus();
@@ -773,8 +778,8 @@ export function closePaneKeyboardLayer(): boolean {
     if (body) paneFullscreenControl(body).focus();
     return true;
   }
-  if (menuEl.classList.contains("on")) {
-    closeMenu();
+  if (paneMenu.isOpen()) {
+    paneMenu.close();
     fabEl.focus();
     return true;
   }
@@ -787,7 +792,7 @@ export function closePaneKeyboardLayer(): boolean {
 // Only phone overlays and menus are modal. Desktop fullscreen is a layout;
 // Pane mode/native editor keys depend on focus, not the layout's size.
 export function paneKeyboardLayerOpen(): boolean {
-  return menuEl.classList.contains("on") || (isMobile() && open.size > 0);
+  return paneMenu.isOpen() || (isMobile() && open.size > 0);
 }
 
 export const hasFullscreenPane = () => !!fullId;
@@ -818,14 +823,7 @@ function activePaneId(fallback = false): string | null {
 
 // Chat is always offered outside embedded views, including a new draft.
 export function paneActionable(): boolean {
-  return (
-    !embedded ||
-    open.size > 0 ||
-    paneIsActionable(
-      [...open],
-      availableFor(buildCtx()).map((p) => p.id),
-    )
-  );
+  return !embedded || open.size > 0 || availableFor(buildCtx()).length > 0;
 }
 
 const CHAT_PANE: PaneDef = { id: "chat", title: "Chat", icon: MESSAGE_ICON };
@@ -882,7 +880,11 @@ function focusPaneContent(id: string, heading = false, entry = false): boolean {
   const input = entry && body?.querySelector<HTMLElement>("[data-pane-entry]");
   const title = column?.querySelector<HTMLElement>(".pane-title");
   const target = input || (heading || body?.inert ? title : body);
-  if (!target) return false;
+  if (!target) {
+    if (isMobile() || !open.has(id)) return false;
+    desktopDock.focusControl(id, () => bodies.get(id) ?? null);
+    return true;
+  }
   if (body?.inert && !heading) body.dataset.paneFocusWhenReady = "true";
   desktopDock.focusControl(id, target);
   return true;
@@ -900,15 +902,19 @@ export function closeFocusedPaneFromKeyboard(
 ): boolean {
   const id = preferredId || activePaneId(true);
   if (!id) return false;
-  const closed = closePane(id, true, restoreVisibleOrigin, preserveComments);
-  if (closed && !restoreVisibleOrigin) restoreAgentFocus();
-  return closed;
+  if (restoreVisibleOrigin) return closePane(id, true, true, preserveComments);
+  return desktopDock.closeTab(id, (fallback) => {
+    const closed = closePane(id, true, false, preserveComments);
+    if (closed && fallback) restoreAgentFocus();
+    return closed;
+  });
 }
 
 // Tracks pane focus rings through focusin, clearing them on tree/composer
 // focus.
 function syncPaneFocusIndicator(): void {
-  const focusedId = paneFocusIndicatorId(focusedPaneId() ?? null, [...open]);
+  const focused = focusedPaneId();
+  const focusedId = focused && open.has(focused) ? focused : null;
   for (const col of panesEl.querySelectorAll<HTMLElement>(".pane-col"))
     col.classList.toggle("kb-focused", col.dataset.pane === focusedId);
 }
@@ -920,6 +926,7 @@ export function runWindowCommand(command: WindowCommand): boolean {
 }
 
 export function toggleFocusedPaneFullscreen(): boolean {
+  if (!state.selectedId && paneVisitAgentId) return false;
   const id = activePaneId(true);
   if (!id) return false;
   toggleFull(id);
@@ -927,16 +934,22 @@ export function toggleFocusedPaneFullscreen(): boolean {
 }
 
 // ---- column layout --------------------------------------------------------
-function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
+function ensureColumn(
+  id: string,
+  ctx: PaneContext,
+  column?: HTMLElement,
+): HTMLElement | undefined {
   const existing = bodies.get(id);
   if (existing) return existing;
   const p = paneDefinitions().find((x) => x.id === id);
   if (!p) return undefined;
   const ownerId = paneVisitOwnerId || currentUiOwnerId();
-  const col = document.createElement("div");
-  col.className = fileTabs.has(id) ? "pane-col file-tab" : "pane-col";
-  col.dataset.pane = id;
-  col.dataset.theme = "pane";
+  const col = column ?? document.createElement("div");
+  if (!column) {
+    col.className = fileTabs.has(id) ? "pane-col file-tab" : "pane-col";
+    col.dataset.pane = id;
+    col.dataset.theme = "pane";
+  }
   const head = createPanePowerbar(
     id,
     p.title || id,
@@ -954,7 +967,7 @@ function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
   }
   body.dataset.pane = id;
   col.append(retainPanePowerbar(body, head));
-  panesEl.appendChild(col);
+  if (!column) panesEl.appendChild(col);
   if (body.dataset.paneParked === "true") {
     try {
       const move = (
@@ -985,7 +998,7 @@ function ensureColumn(id: string, ctx: PaneContext): HTMLElement | undefined {
   return body;
 }
 
-function layout(): void {
+function layout(explicitPane?: string): void {
   const ctx = buildCtx();
   if (isMobile() || embedded) {
     if (fullId === "chat") {
@@ -1003,10 +1016,19 @@ function layout(): void {
       col.remove();
     }
   }
-  for (const p of paneDefinitions())
-    if (open.has(p.id)) ensureColumn(p.id, ctx);
-
   const mobile = isMobile();
+  const visitMatches = paneVisitAgentId === ctx.agentId;
+  if (visitMatches) {
+    if (mobile || desktopPaneContentReady(ctx.agentId)) {
+      for (const p of paneDefinitions())
+        if (open.has(p.id)) ensureColumn(p.id, ctx);
+    } else if (explicitPane && paneConversationRead !== "pending") {
+      // Explicit links initialize their target immediately after the focused
+      // read dispatches, without unlocking the other saved panes.
+      ensureColumn(explicitPane, ctx);
+    }
+  }
+
   const docked =
     !mobile &&
     !embedded &&
@@ -1020,6 +1042,7 @@ function layout(): void {
           icon: pane.icon || PANE_ICON,
           file: fileTabs.descriptor(pane.id),
         })),
+      !ctx.agentId && !visitMatches,
     );
   panesEl.classList.toggle("on", docked || open.size > 0);
   const w = mobile || docked ? null : storedPanesWidth();
@@ -1038,10 +1061,7 @@ function layout(): void {
       col.classList.toggle("mobile-active", col.dataset.pane === mobileActive);
     const overlay = open.size > 0 && !!mobileActive;
     panesEl.classList.toggle("overlay", overlay);
-    backdropEl.classList.toggle(
-      "on",
-      overlay || menuEl.classList.contains("on"),
-    );
+    backdropEl.classList.toggle("on", overlay || paneMenu.isOpen());
   } else {
     panesEl.classList.remove("overlay");
     backdropEl.classList.remove("on");
@@ -1151,6 +1171,9 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
   fabEl.setAttribute("aria-label", fabLabel);
 
   const railPanels = $("#pane-rail-panels")!;
+  const focusedPane =
+    railPanels.querySelector<HTMLButtonElement>(".rail-btn:focus")?.dataset
+      .pane;
   railPanels.innerHTML = "";
   for (const [index, p] of (mobile ? avail : [CHAT_PANE, ...avail]).entries()) {
     const b = document.createElement("button");
@@ -1177,156 +1200,34 @@ function renderRail(avail: PaneDef[], ctx = buildCtx()): void {
     }
     b.onclick = () => togglePane(p.id);
     railPanels.appendChild(b);
+    if (p.id === focusedPane) b.focus({ preventScroll: true });
   }
 
-  const panelItems = $("#pane-menu-panels")!;
-  panelItems.innerHTML = "";
-  for (const p of avail) {
-    const b = document.createElement("button");
-    const attention = attentive.includes(p);
-    b.className =
-      "menu-item pane-menu-item" +
-      (open.has(p.id) ? " active" : "") +
-      (attention ? " attention" : "");
-    b.dataset.pane = p.id;
-    b.setAttribute("role", "menuitem");
-    const badge = badges.get(p.id) || "";
-    const label = badge ? `${p.title || p.id} (${badge})` : p.title || p.id;
-    if (attention) b.setAttribute("aria-label", `${label} available`);
-    b.innerHTML = p.icon || PANE_ICON;
-    b.querySelector("svg")?.setAttribute("aria-hidden", "true");
-    const text = document.createElement("span");
-    text.textContent = label;
-    b.appendChild(text);
-    b.onclick = () => openPane(p.id, { focusEntry: true });
-    panelItems.appendChild(b);
-  }
+  paneMenu.renderItems(avail, badges, attentive, open, (id) =>
+    openPane(id, { focusEntry: true }),
+  );
 }
 
-menuEl.addEventListener(
-  "click",
-  (event) => {
-    const item = (event.target as Element | null)?.closest<HTMLButtonElement>(
-      ".pane-menu-item",
-    );
-    if (!item || item.disabled) return;
-    // Invariant: Delete's first tap is an inline confirmation, not an action.
-    if (item.id === "trash-btn" && !item.classList.contains("armed")) return;
-    closeMenu();
-    fabEl.focus({ preventScroll: true });
+const paneMenu = createPaneMenu({
+  fab: fabEl,
+  menu: menuEl,
+  backdrop: backdropEl,
+  overlayOpen: () => isMobile() && !!mobileActive && open.size > 0,
+  onBackdrop: () => {
+    if (isMobile() && mobileActive) closePane(mobileActive, true, true);
   },
-  true,
-);
-
-function openMenu(focusFirst = false): void {
-  menuEl.classList.add("on");
-  menuEl.scrollTop = 0;
-  backdropEl.classList.add("on");
-  fabEl.setAttribute("aria-expanded", "true");
-  if (focusFirst) requestAnimationFrame(() => focusables(menuEl)[0]?.focus());
-}
-function closeMenu(): void {
-  menuEl.classList.remove("on");
-  fabEl.setAttribute("aria-expanded", "false");
-  clearHot();
-  if (!(isMobile() && mobileActive && open.size))
-    backdropEl.classList.remove("on");
-}
+});
 
 addEventListener("popstate", () => {
-  if (phoneListEntry()) closeMenu();
+  if (phoneListEntry()) paneMenu.close();
 });
 
-// Phone FAB press/slide/release picks a panel; plain taps toggle the menu.
-let hotItem: HTMLElement | null = null;
-function clearHot(): void {
-  if (hotItem) {
-    hotItem.classList.remove("hot");
-    hotItem = null;
-  }
-}
-function setHot(el: HTMLElement | null): void {
-  if (el === hotItem) return;
-  clearHot();
-  if (el) {
-    el.classList.add("hot");
-    hotItem = el;
-  }
-}
-function inRect(x: number, y: number, el: HTMLElement | null): boolean {
-  if (!el) return false;
-  const r = el.getBoundingClientRect();
-  return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-}
-// Invariant: Only a painted item counts; rows the menu clips never match.
-function menuItemAt(x: number, y: number): HTMLElement | null {
-  const item = document
-    .elementFromPoint(x, y)
-    ?.closest<HTMLElement>(".pane-menu-item:not(:disabled)");
-  return item && menuEl.contains(item) ? item : null;
-}
-
-let fabActive = false,
-  fabWasOpen = false;
-fabEl.addEventListener("pointerdown", (e: PointerEvent) => {
-  fabActive = true;
-  fabWasOpen = menuEl.classList.contains("on");
-  try {
-    fabEl.setPointerCapture(e.pointerId);
-  } catch {}
-  openMenu();
-  e.preventDefault();
-});
-fabEl.addEventListener("pointermove", (e: PointerEvent) => {
-  if (fabActive) setHot(menuItemAt(e.clientX, e.clientY));
-});
-const fabFinish = (commit: boolean) => (e: PointerEvent) => {
-  if (!fabActive) return;
-  fabActive = false;
-  try {
-    fabEl.releasePointerCapture(e.pointerId);
-  } catch {}
-  const item = menuItemAt(e.clientX, e.clientY);
-  const overBtn = inRect(e.clientX, e.clientY, fabEl);
-  clearHot();
-  // Spec: Slide-release activates one item via pointer confirmation.
-  if (commit && item) {
-    item.dispatchEvent(
-      new MouseEvent("click", {
-        bubbles: true,
-        cancelable: true,
-        detail: 1,
-        clientX: e.clientX,
-        clientY: e.clientY,
-      }),
-    );
-  } else if (overBtn) {
-    if (fabWasOpen) closeMenu();
-  } else closeMenu();
-};
-fabEl.addEventListener("pointerup", fabFinish(true));
-fabEl.addEventListener("pointercancel", fabFinish(false));
-fabEl.addEventListener("click", (e: MouseEvent) => {
-  // Spec: Detail-0 keyboard clicks toggle; pointer gestures already handled
-  // their own generated clicks and must not activate twice.
-  if (e.detail === 0) {
-    if (menuEl.classList.contains("on")) closeMenu();
-    else openMenu(true);
-    return;
-  }
-  e.preventDefault();
-  e.stopPropagation();
-});
-fabEl.addEventListener("contextmenu", (e) => e.preventDefault());
-backdropEl.onclick = () => {
-  closeMenu();
-  if (isMobile() && mobileActive) closePane(mobileActive, true, true);
-};
 mq.addEventListener("change", () => {
-  closeMenu();
+  paneMenu.close();
   railHash = "";
   if (isMobile()) {
     desktopDock.sync(false, []);
+    if (paneVisitAgentId !== state.selectedId) beginPaneVisit(state.selectedId);
     const commentPane =
       selectionCommentOwner()?.closest<HTMLElement>(".pane-col")?.dataset.pane;
     mobileActive =
@@ -1359,6 +1260,35 @@ addEventListener("panes-relayout", () => layout());
 // ---- the per-poll sync (called from the conversation refresh) -------------
 let syncFailureAnnounced = false;
 
+// Login recovery can restore the link before the poll dispatches its read.
+export function deferPaneOpenUntilRead(open: () => void): boolean {
+  const defer = !isMobile() && !embedded && paneConversationRead === "pending";
+  paneOpenAfterDispatch = defer ? open : null;
+  return defer;
+}
+
+/** Window contents follow the focused read; the saved grid can paint earlier. */
+export function notePaneConversationRequested(
+  agentId: string,
+): ((failed: boolean) => void) | undefined {
+  if (paneVisitAgentId !== agentId || paneConversationRead === "settled")
+    return;
+  paneConversationRead = "requested";
+  const attempt = ++paneReadAttempt;
+  const afterDispatch = paneOpenAfterDispatch;
+  if (afterDispatch)
+    queueMicrotask(() => {
+      if (paneOpenAfterDispatch !== afterDispatch) return;
+      paneOpenAfterDispatch = null;
+      afterDispatch();
+    });
+  return (failed) => {
+    if (paneReadAttempt !== attempt) return;
+    paneConversationRead = "settled";
+    if (failed && !isMobile()) syncPanes();
+  };
+}
+
 export function notePaneConversationRendered(agentId: string): void {
   if (paneVisitAgentId === agentId) paneRenderedAgentId = agentId;
 }
@@ -1384,16 +1314,23 @@ function restorePanePreference(availableIds: ReadonlySet<string>): boolean {
 
 function syncPanesNow(): void {
   const ctx = buildCtx();
+  const mobile = isMobile();
+  let ownLayout = !mobile && desktopDock.restoreLayout();
+  if (paneVisitAgentId !== ctx.agentId) return;
+  desktopDock.finishPreview();
+  if (!mobile && !desktopPaneContentReady(ctx.agentId)) return;
   const rendered =
-    paneVisitAgentId === ctx.agentId &&
     paneRenderedAgentId === ctx.agentId &&
     paneVisitOwnerId === currentUiOwnerId();
-  if (!isMobile() && rendered) desktopDock.prepareLayout();
+  if (!mobile && [...open].some((id) => !bodies.has(id))) layout();
   const discovering = new Set<string>();
   const avail = availableFor(ctx, discovering);
   const availIds = new Set(avail.map((p) => p.id));
   for (const id of Array.from(open))
-    if (!availIds.has(id)) {
+    if (
+      !availIds.has(id) &&
+      (mobile || (!fileTabs.has(id) && rendered && !discovering.has(id)))
+    ) {
       // Invariant: If the pane being auto-closed currently holds keyboard
       // focus, hand focus back to the canonical tree/menu target so a Pane-mode
       // user is never dropped onto <body>.
@@ -1406,8 +1343,8 @@ function syncPanesNow(): void {
   // Artifact discovery. openPane() re-enters sync with the pane present, so
   // return after a successful restore rather than refreshing the same body
   // twice.
-  const ownLayout =
-    !isMobile() && rendered && desktopDock.restoreLayout(availIds, discovering);
+  if (!ownLayout && !mobile && rendered)
+    ownLayout = desktopDock.restoreLayout(availIds);
   if (!ownLayout && restorePanePreference(availIds)) return;
 
   const artifacts = registry.find((p) => p.id === ARTIFACTS_PANE_ID);
@@ -1494,4 +1431,3 @@ addEventListener("pagehide", () => {
 });
 
 beginPaneVisit(state.selectedId);
-if (!embedded && !isMobile()) layout();

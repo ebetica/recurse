@@ -1,7 +1,7 @@
 // Muse subscription device flow (RFC 8628), then one-time key mint.
 // Muse-code credentials never authenticate meta pay-as-you-go or other routes.
 // Errors expose status/machine code only, never response bodies or tokens.
-import type { Config } from "../config";
+import type { ModelCatalog } from "../models";
 import { parsePythonJson, pyCompactJson } from "../utils/python-json";
 import {
   pyError,
@@ -101,7 +101,7 @@ function asSeconds(value: unknown, fallback: number): number {
 
 interface MuseOptions {
   store: ProviderCredentialStore;
-  config: Pick<Config, "upsertCustomProvider">;
+  models: Pick<ModelCatalog, "upsertCustomProvider">;
   env: Readonly<Record<string, string | undefined>>;
   userAgent: string;
   /** oauth.HTTP_TIMEOUT, in milliseconds. */
@@ -113,7 +113,7 @@ interface MuseOptions {
 
 export class MuseAuth {
   private readonly store: ProviderCredentialStore;
-  private readonly config: Pick<Config, "upsertCustomProvider">;
+  private readonly models: Pick<ModelCatalog, "upsertCustomProvider">;
   private readonly env: Readonly<Record<string, string | undefined>>;
   private readonly userAgent: string;
   private readonly timeoutMs: number;
@@ -122,7 +122,7 @@ export class MuseAuth {
 
   constructor(options: MuseOptions) {
     this.store = options.store;
-    this.config = options.config;
+    this.models = options.models;
     this.env = options.env;
     this.userAgent = options.userAgent;
     this.timeoutMs = options.timeoutMs;
@@ -325,7 +325,7 @@ export class MuseAuth {
       key: apiKey,
     });
     await this.store.clearPending(PENDING_FILE_NAME);
-    await this.config.upsertCustomProvider(PROVIDER, MUSE_CODE_CATALOG_ENTRY);
+    await this.models.upsertCustomProvider(PROVIDER, MUSE_CODE_CATALOG_ENTRY);
     return this.authStatus();
   }
 

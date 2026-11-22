@@ -7,6 +7,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { readdir, readFile } from "node:fs/promises";
@@ -27,30 +28,33 @@ const GIT_ID = {
 
 const chunk = (delta: object, finish: string | null = null) =>
   `data: ${JSON.stringify({ id: "s", object: "chat.completion.chunk", created: 0, model: "scripted", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`;
-const TEXT =
-  chunk({ role: "assistant", content: "scripted reply" }) +
-  chunk({}, "stop") +
-  "data: [DONE]\n\n";
-
-let hold = true;
+const PROMPT = "hello across the update";
+const REPLY = "scripted reply";
+const replyGate = Promise.withResolvers<void>();
 let requests = 0;
-let release: () => void = () => {};
 const provider = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
   idleTimeout: 0,
   async fetch(request) {
-    await request.text();
-    requests++;
-    if (hold) await new Promise<void>((resolve) => (release = resolve));
-    return new Response(TEXT, {
-      headers: { "Content-Type": "text/event-stream" },
-    });
+    const body = await request.text();
+    const naming = body.includes("Name the conversation from the message.");
+    if (!naming && body.includes(PROMPT)) {
+      requests++;
+      await replyGate.promise;
+    }
+    const text = naming ? "Update test" : REPLY;
+    return new Response(
+      chunk({ role: "assistant", content: text }) +
+        chunk({}, "stop") +
+        "data: [DONE]\n\n",
+      { headers: { "Content-Type": "text/event-stream" } },
+    );
   },
 });
 const root = mkdtempSync(join(tmpdir(), "recurse-update-"));
 afterAll(() => {
-  release();
+  replyGate.resolve();
   provider.stop(true);
   rmSync(root, { recursive: true, force: true });
 });
@@ -112,7 +116,7 @@ async function dataDirGroups(dataDir: string): Promise<number[]> {
   return [...groups];
 }
 
-// Feature: #2897 Settings "Update now" restarts a supervised install into the newest release and keeps its run.
+// Regression: #3548 (#2897) Update now restarts before a held reply finishes and startup resumes it.
 test("Update now moves a release install to the next tag, restarts it and keeps its run", async () => {
   const dev = join(root, "dev");
   const tracked = await captureFixture(
@@ -268,12 +272,60 @@ test("Update now moves a release install to the next tag, restarts it and keeps 
     ).id as string;
     const sent = await api(`/api/conversations/${cid}/deliver`, {
       method: "POST",
-      body: JSON.stringify({ content: "hello across the update" }),
+      body: JSON.stringify({ content: PROMPT }),
     });
     expect(sent.status).toBe(200);
     await until(async () => requests > 0);
+    const view = async () =>
+      (await json(await api(`/api/conversations/${cid}/view`))) as {
+        turn_status: string;
+        blocks: { role: string; origin: string; text: string }[];
+      };
+    expect((await view()).turn_status).toBe("running");
 
     await publish(dev, "0.0.2");
+    expect(await updateStatus()).toMatchObject({
+      checking: false,
+      available: "v0.0.1",
+      checked_at: checked.checked_at,
+    });
+    const checkCalls = join(root, "check-calls");
+    const resume = join(root, "resume-check");
+    const script = join(install, "install.sh");
+    const savedScript = join(install, "install-check-fixture.sh");
+    copyFileSync(script, savedScript);
+    writeFileSync(
+      script,
+      `printf '%s\\n' "$@" >> '${checkCalls}'\n` +
+        `while [ ! -f '${resume}' ]; do sleep 0.05; done\n` +
+        `exec bash '${savedScript}' "$@"\n`,
+    );
+    try {
+      const responses = await Promise.all(
+        [1, 2].map(() => api("/api/settings/update/check", { method: "POST" })),
+      );
+      expect(responses.map((r) => r.status)).toEqual([202, 202]);
+      for (const response of responses)
+        expect(await json(response)).toMatchObject({
+          checking: true,
+          update: null,
+        });
+      writeFileSync(resume, "");
+      const refreshed = await until(async () => {
+        const status = await updateStatus();
+        return status.checking ? null : status;
+      });
+      expect(refreshed).toMatchObject({
+        installed: "v0.0.1",
+        available: "v0.0.2",
+        update: null,
+      });
+      expect(await readFile(checkCalls, "utf8")).toBe("--check\n");
+    } finally {
+      writeFileSync(resume, "");
+      copyFileSync(savedScript, script);
+      unlinkSync(savedScript);
+    }
     writeFileSync(join(install, "package.json"), "{}\n");
     expect(
       (await api("/api/settings/update", { method: "POST", body: "{}" }))
@@ -291,35 +343,58 @@ test("Update now moves a release install to the next tag, restarts it and keeps 
       (await api("/api/settings/update", { method: "POST", body: "{}" }))
         .status,
     ).toBe(202);
-    const waiting = await until(async () => {
-      const { update } = await updateStatus();
-      return ["waiting", "failed"].includes(update?.state) ? update : null;
+    const restart = await until(async () => {
+      const output = await readFile(log, "utf8");
+      return /re-executing supervisor|redeploy pending/.test(output)
+        ? output
+        : null;
     });
-    expect(waiting, await readFile(log, "utf8")).toEqual({
-      state: "waiting",
-      detail: "1",
-    });
-    expect(await version()).toBe("0.0.1");
+    expect(restart).toContain("re-executing supervisor");
+    expect(restart).toContain("server exited with code 0");
+    await until(async () => (await version()) === "0.0.2");
     expect(await git(install, "describe", "--tags")).toBe("v0.0.2");
+    await until(async () => requests >= 2);
+    replyGate.resolve();
+    const settled = await until(async () => {
+      const page = await view();
+      return page.turn_status === "idle" &&
+        page.blocks.some(
+          (row) => row.role === "assistant" && row.text === REPLY,
+        )
+        ? page
+        : null;
+    });
+    expect(
+      settled.blocks
+        .filter((row) => row.role === "user" || row.role === "assistant")
+        .map(({ role, origin, text }) => ({ role, origin, text })),
+    ).toEqual([
+      {
+        role: "user",
+        origin: "operator",
+        text: `[recurse-origin: operator]\n${PROMPT}`,
+      },
+      { role: "assistant", origin: "assistant", text: REPLY },
+    ]);
+    expect(requests).toBe(2);
 
+    const current = await until(async () => {
+      const status = await updateStatus();
+      return !status.checking && status.installed ? status : null;
+    });
+    expect(current).toMatchObject({
+      installed: "v0.0.2",
+      release: { version: "0.0.2" },
+      update: null,
+    });
     const calls = join(root, "install-calls");
     writeFileSync(
       join(install, "install.sh"),
       `echo "$1" >> ${calls}\nsleep 600\n`,
     );
-    hold = false;
-    release();
-    await until(async () => (await version()) === "0.0.2");
-    expect(await updateStatus()).toMatchObject({
-      checking: true,
-      release: { version: "0.0.2" },
-      update: null,
-    });
-    await until(() =>
-      api(`/api/conversations/${cid}/view`).then(async (r) =>
-        (await r.text()).includes("scripted reply"),
-      ),
-    );
+    expect(
+      (await api("/api/settings/update/check", { method: "POST" })).status,
+    ).toBe(202);
     expect(
       (await api("/api/settings/update", { method: "POST", body: "{}" }))
         .status,
@@ -331,7 +406,7 @@ test("Update now moves a release install to the next tag, restarts it and keeps 
         : false,
     );
   } finally {
-    release();
+    replyGate.resolve();
     supervisor.kill("SIGTERM");
     expect(await supervisor.exited, await readFile(log, "utf8")).toBe(0);
   }

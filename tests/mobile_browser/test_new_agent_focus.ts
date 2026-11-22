@@ -191,6 +191,7 @@ export const tests: BrowserTest[] = [
     for (const width of [1280, 412]) {
       const context = await browser.newContext({
         viewport: { width, height: 800 },
+        hasTouch: width === 412,
       });
       const page = await context.newPage();
       const create = async (title: string, parent: string | null) => {
@@ -333,6 +334,41 @@ export const tests: BrowserTest[] = [
         },
         [dying, previous, next],
       );
+      if (width === 412) {
+        const swiped = await create("Swipe to delete", parent);
+        await page.locator("#menu-btn").tap();
+        const row = page.locator(`.agent[data-id="${swiped}"]`);
+        await row.scrollIntoViewIfNeeded();
+        const box = (await row.boundingBox())!;
+        const x = box.x + box.width / 2;
+        const y = box.y + box.height / 2;
+        const touch = await context.newCDPSession(page);
+        await touch.send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [{ x, y }],
+        });
+        await touch.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [{ x: x - 120, y }],
+        });
+        await touch.send("Input.dispatchTouchEvent", {
+          type: "touchEnd",
+          touchPoints: [],
+        });
+        await browserExpect(row).toHaveCount(0);
+        await browserExpect
+          .poll(async () => {
+            const response = await page.request.get(`${base}api/tree`);
+            expect(response.ok()).toBe(true);
+            return (await response.json()).some(
+              (node: { id: string }) => node.id === swiped,
+            );
+          })
+          .toBe(false);
+        await browserExpect(
+          page.locator(`.agent[data-id="${parent}"]`),
+        ).toHaveAttribute("aria-current", "page");
+      }
       await context.close();
     }
   },
@@ -475,6 +511,8 @@ export const tests: BrowserTest[] = [
     const openedChild = await create("Saved open child", opened);
     const folded = await create("Saved folded parent", null);
     const foldedChild = await create("Saved folded child", folded);
+    const takenOver = await create("Taken-over grandchild", foldedChild);
+    const other = await create("Selected agent", null);
     const row = (id: string) => page.locator(`.agent[data-id="${id}"]`);
     const current = (id: string) =>
       page.locator(`.agent[data-id="${id}"][aria-current="page"]`);
@@ -529,10 +567,21 @@ export const tests: BrowserTest[] = [
     await row(folded).click();
     await current(folded).waitFor();
     await browserExpect(row(openedChild)).toHaveCount(0);
+    const takeover = await page.request.post(
+      `${base}api/conversations/${takenOver}/take-over`,
+      { data: { taken_over: true } },
+    );
+    expect(takeover.ok()).toBe(true);
+    await row(other).click();
+    await current(other).waitFor();
+    await browserExpect(row(takenOver)).toBeVisible();
+    await browserExpect(row(opened)).toHaveAttribute("aria-expanded", "false");
+    await browserExpect(row(openedChild)).toHaveCount(0);
     await press(opened, "l");
     await press(folded, "l");
     await press(folded, "h");
     await row(foldedChild).waitFor({ state: "detached" });
+    await browserExpect(row(takenOver)).toHaveCount(0);
     await browserExpect(row(openedChild)).toBeVisible();
     await page.reload();
     await current(folded).waitFor();

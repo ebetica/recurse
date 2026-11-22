@@ -1,7 +1,7 @@
 import { expect } from "bun:test";
 import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { retire } from "../../src/utils/trash";
-import type { Page, Route } from "playwright";
+import type { BrowserContext, Page, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { waitForPaneTransition } from "./pane_layout";
 import {
@@ -16,10 +16,11 @@ import {
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
-  captureErrors,
   dispatchArtifactSelection,
+  openPage,
   postFixture,
   runBrowserTests,
+  screenshot,
   type BrowserTest,
 } from "./common";
 
@@ -43,10 +44,6 @@ export const tests: BrowserTest[] = [
       "workspace".repeat(15),
       "workspace".repeat(15),
     );
-    const shots =
-      process.env.EXPLORER_SHOTS ||
-      join(process.env.RECURSE_AGENT_TMPDIR || tmpdir(), "shots", "explorer");
-    await mkdir(shots, { recursive: true });
     try {
       await mkdir(join(root, "src"), { recursive: true });
       expect(root.length).toBeGreaterThan(256);
@@ -117,15 +114,14 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           model: "fauxordinary/faux-1",
           workdir: root,
         });
-        const context = await browser.newContext({
+        const { context, page } = await openPage(browser, {
           viewport: { width, height: 915 },
-          isMobile: width === 412,
-          hasTouch: width === 412,
+          touch: width === 412,
+          ...(width === 1280
+            ? { permissions: ["clipboard-read", "clipboard-write"] }
+            : {}),
         });
-        if (width === 1280)
-          await context.grantPermissions(["clipboard-read", "clipboard-write"]);
         try {
-          const page = await context.newPage();
           hints.watch(page);
           const boundary = await watchExplorerPreview(page, probe);
           const requests: string[] = [];
@@ -312,7 +308,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
               await pane.locator(".pane-item-cursor").getAttribute("data-path"),
             ).toBe("src/application.ts");
           }
-          await page.screenshot({ path: join(shots, `${width}-tree.png`) });
+          await screenshot(page, `explorer/${width}-tree`);
           if (width === 1280) await page.keyboard.press("l");
           else
             await pane
@@ -361,7 +357,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
                 .evaluate((node, saved) => node === saved, original),
             ).toBeTrue();
           }
-          await page.screenshot({ path: join(shots, `${width}-preview.png`) });
+          await screenshot(page, `explorer/${width}-preview`);
           if (width === 1280) {
             const body = pane.locator(".pane-body");
             const before = requests.length;
@@ -521,6 +517,10 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
             const neighbour = page.locator(".dv-tab", {
               hasText: nextFile.split("/").at(-1)!,
             });
+            const neighbourId = await neighbour.getAttribute("data-dock-panel");
+            const missing = page
+              .locator(`.pane-col[data-pane="${neighbourId}"]`)
+              .getByText("File unavailable.", { exact: true });
             await page.reload();
             await pane
               .locator(".explorer-source", {
@@ -542,7 +542,8 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
             );
             await switchTo(other.agent);
             await returned();
-            expect(await neighbour.count()).toBe(0);
+            await missing.waitFor({ state: "attached" });
+            expect(await neighbour.count()).toBe(1);
             expect(
               await page.locator(".dv-tab", { hasText: "Explorer" }).count(),
             ).toBe(1);
@@ -552,7 +553,8 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
                 hasText: "Read-only file preview",
               })
               .waitFor();
-            expect(await neighbour.count()).toBe(0);
+            await missing.waitFor({ state: "attached" });
+            expect(await neighbour.count()).toBe(1);
             await page.waitForFunction(
               ({ owner, key }) => {
                 const storage = (globalThis as any).localStorage;
@@ -753,7 +755,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
               client: body.clientWidth,
             }));
           expect(bodyWidth.scroll).toBeLessThanOrEqual(bodyWidth.client);
-          await page.screenshot({ path: join(shots, `${width}-comments.png`) });
+          await screenshot(page, `explorer/${width}-comments`);
           const downloading = page.waitForEvent("download");
           await pane.getByRole("link", { name: "Download file" }).click();
           const download = await downloading;
@@ -861,7 +863,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
               .locator(".explorer-result", { hasText: "src/application.ts" })
               .waitFor();
           }
-          await page.screenshot({ path: join(shots, `${width}-search.png`) });
+          await screenshot(page, `explorer/${width}-search`);
           const selected = await input.getAttribute("aria-activedescendant");
           const selectedPath = selected
             ? await tree.locator(`#${selected}`).getAttribute("data-path")
@@ -1003,9 +1005,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
               exact: true,
             })
             .scrollIntoViewIfNeeded();
-          await page.screenshot({
-            path: join(shots, `${width}-html-preview.png`),
-          });
+          await screenshot(page, `explorer/${width}-html-preview`);
           const afterReopen = requests.length;
           expect(requests.slice(beforeHtmlReopen, afterReopen)).toEqual(
             width === 1280
@@ -1028,9 +1028,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           ).toBe(htmlNote);
           expect(requests).toHaveLength(afterReopen);
           await pane.locator(".report-comment").scrollIntoViewIfNeeded();
-          await page.screenshot({
-            path: join(shots, `${width}-html-source-comments.png`),
-          });
+          await screenshot(page, `explorer/${width}-html-source-comments`);
           page.once("dialog", (dialog) => dialog.accept());
           if (width === 1280) {
             await page
@@ -1116,13 +1114,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           await composer.press("End");
           await page.keyboard.insertText("ing");
           const olderSearch = await lazyRoutes.get("picking")!.promise;
-          if (process.env.LAZY_SEARCH_SCREENSHOT_DIR)
-            await page.screenshot({
-              path: join(
-                process.env.LAZY_SEARCH_SCREENSHOT_DIR,
-                `files-${width}.png`,
-              ),
-            });
+          await screenshot(page, `explorer/files-${width}`);
           await browserExpect(fileOption).toBeVisible();
           await browserExpect(fileOption).toHaveAttribute(
             "aria-selected",
@@ -1182,9 +1174,6 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
             }
           }
           await composer.press("ArrowLeft");
-          await page.waitForFunction(
-            "document.getElementById('file-menu-style')?.sheet",
-          );
           const menuBounds = (await fileMenu.boundingBox())!;
           const fieldBounds = (await page.locator("#composer").boundingBox())!;
           expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(
@@ -1193,9 +1182,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           expect(menuBounds.y + menuBounds.height).toBeGreaterThan(
             fieldBounds.y - fieldBounds.height,
           );
-          await page.screenshot({
-            path: join(shots, `${width}-composer-files.png`),
-          });
+          await screenshot(page, `explorer/${width}-composer-files`);
           if (width === 1280) await fileOption.click();
           else {
             await composer.press("ArrowDown");
@@ -1205,9 +1192,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           const chosen = "Review ``" + pickedPath + "`` ";
           expect(await composer.inputValue()).toBe(chosen);
           expect(await fileMenu.isVisible()).toBe(false);
-          await page.screenshot({
-            path: join(shots, `${width}-composer-path.png`),
-          });
+          await screenshot(page, `explorer/${width}-composer-path`);
           const pickerReply = `Composer files ${width} received`;
           const pickerMessage = `${chosen}\nReply only ${pickerReply}`;
           await composer.fill(pickerMessage);
@@ -1313,9 +1298,6 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           await context.close();
         }
       }
-      console.log(
-        `Explorer screenshots: ${shots}/{1280,412}-{tree,preview,comments,search,html-preview,html-source-comments}.png`,
-      );
     } finally {
       retire(temporary, join(tmpdir(), ".trash"));
     }
@@ -1323,9 +1305,8 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
   // Feature: #3251 opening Explorer focuses search, whose results update lazily.
   async function test_explorer_search_is_focused_and_lazy(browser, base) {
     const root = await mkdtemp(join(tmpdir(), "browser-explorer-lazy-"));
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
+    let context: BrowserContext | undefined;
+    let testFailed = false;
     try {
       for (const name of [
         "alpha-one.ts",
@@ -1339,8 +1320,11 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
         model: "fauxordinary/faux-1",
         workdir: root,
       });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
+      const opened = await openPage(browser, {
+        viewport: { width: 1280, height: 800 },
+      });
+      context = opened.context;
+      const { page, errors } = opened;
       await page.goto(`${base}#agent=${agent}`, {
         waitUntil: "domcontentloaded",
       });
@@ -1424,21 +1408,38 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
           .evaluate((node) => node === node.ownerDocument.activeElement),
       ).toBeTrue();
       expect(errors).toEqual([]);
+    } catch (error) {
+      testFailed = true;
+      throw error;
     } finally {
-      await context.close();
-      retire(root, join(tmpdir(), ".trash"));
+      const cleanupErrors: unknown[] = [];
+      try {
+        await context?.close();
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      try {
+        retire(root, join(tmpdir(), ".trash"));
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+      if (cleanupErrors.length) {
+        const message = "Explorer lazy search cleanup failed";
+        if (testFailed) console.error(message, ...cleanupErrors);
+        else if (cleanupErrors.length === 1) throw cleanupErrors[0];
+        else throw new AggregateError(cleanupErrors, message);
+      }
     }
   },
   // Regression: #3195 copy the opened file's folder, not an older tree root.
   async function test_explorer_copy_uses_opened_working_folder(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 1280, height: 915 },
+      permissions: ["clipboard-read", "clipboard-write"],
     });
     const roots = new Set<string>();
     try {
-      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       const first = await postFixture(base, "seed-changes-base");
-      const page = await context.newPage();
       await page.goto(`${base}#agent=${first.cid}`, {
         waitUntil: "domcontentloaded",
       });

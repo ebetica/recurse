@@ -8,6 +8,7 @@ import {
   inputEl,
   liveBarEl,
   msgsEl,
+  phoneComposerFocused,
   scrollEl,
   shellOverlayEl,
   titleEl,
@@ -41,6 +42,14 @@ let agentSurfaceReturnFocus: HTMLElement | null = null;
 
 type PaintThread = (conv: Conversation) => void;
 
+function liveChipKeepsFocus(event: MouseEvent): boolean {
+  return (
+    event.detail !== 0 &&
+    phoneComposerFocused() &&
+    (event.currentTarget as HTMLElement).closest("#live-bar") !== null
+  );
+}
+
 export function shellChipT(
   conv: Conversation,
   label: string,
@@ -58,12 +67,13 @@ export function shellChipT(
     aria-expanded=${shellSurfaceAgent === conv.id ? "true" : "false"}
     aria-label=${`${label} for ${title}`}
     title=${`${label} for ${title}`}
-    @click=${(event: Event) => {
+    @click=${(event: MouseEvent) => {
       event.stopPropagation();
       openShellSurface(
         conv.id,
         event.currentTarget as HTMLButtonElement,
         paintThread,
+        !liveChipKeepsFocus(event),
       );
     }}
   >
@@ -90,12 +100,13 @@ export function agentChipT(
     aria-expanded=${agentSurfaceAgent === conv.id ? "true" : "false"}
     aria-label=${`${label} for ${title}`}
     title=${`${label} for ${title}`}
-    @click=${(event: Event) => {
+    @click=${(event: MouseEvent) => {
       event.stopPropagation();
       openAgentSurface(
         conv.id,
         event.currentTarget as HTMLButtonElement,
         paintThread,
+        !liveChipKeepsFocus(event),
       );
     }}
   >
@@ -226,12 +237,13 @@ function openAgentSurface(
   cid: string,
   button: HTMLButtonElement,
   paintThread: PaintThread,
+  moveFocus: boolean,
 ): void {
   const current = state.currentConv;
   if (!current || current.id !== cid) return;
   if (!activeDescendants(state.nodes, cid).length) return;
   if (agentSurfaceAgent === cid) {
-    closeAgentSurface();
+    closeAgentSurface(moveFocus);
     return;
   }
   // Invariant: The two chips share the one overlay slot: opening one closes the
@@ -242,7 +254,7 @@ function openAgentSurface(
   agentSurfaceReturnFocus = button;
   paintThread(current);
   agentSurfaceButton(cid)?.setAttribute("aria-expanded", "true");
-  focusShellSurface();
+  if (moveFocus) focusShellSurface();
 }
 
 export function shellSurfaceOpen(): boolean {
@@ -362,7 +374,7 @@ export function paintShellSurface(conv?: Conversation | null): void {
     conv.id !== shellSurfaceAgent ||
     activeShells(conv).shellCount === 0
   ) {
-    closeShellSurface();
+    closeShellSurface(shellOverlayEl.contains(document.activeElement));
     return;
   }
   render(shellSurfaceT(conv), shellOverlayEl);
@@ -424,7 +436,7 @@ export function paintAgentSurface(conv?: Conversation | null): void {
     conv.id !== agentSurfaceAgent ||
     !activeDescendants(state.nodes, conv.id).length
   ) {
-    closeAgentSurface();
+    closeAgentSurface(shellOverlayEl.contains(document.activeElement));
     return;
   }
   render(agentSurfaceT(conv), shellOverlayEl);
@@ -435,12 +447,13 @@ function openShellSurface(
   cid: string,
   button: HTMLButtonElement,
   paintThread: PaintThread,
+  moveFocus: boolean,
 ): void {
   const current = state.currentConv;
   if (!current || current.id !== cid || activeShells(current).shellCount === 0)
     return;
   if (shellSurfaceAgent === cid) {
-    closeShellSurface();
+    closeShellSurface(moveFocus);
     return;
   }
   if (shellSurfaceAgent) closeShellSurface(false);
@@ -449,20 +462,24 @@ function openShellSurface(
   shellSurfaceReturnFocus = button;
   paintThread(current);
   shellSurfaceButton(cid)?.setAttribute("aria-expanded", "true");
-  focusShellSurface();
+  if (moveFocus) focusShellSurface();
 }
 
 function shellSurfaceKeydown(event: KeyboardEvent): void {
   if (!shellSurfaceAgent && !agentSurfaceAgent) return;
   const dialog = shellOverlayEl.querySelector<HTMLElement>(".shell-surface");
-  if (!dialog?.contains(event.target as Node)) return;
-  if (event.key === "Escape") {
+  if (!dialog) return;
+  const inside = dialog.contains(event.target as Node);
+  if (
+    event.key === "Escape" &&
+    (inside || (event.target === inputEl && !event.isComposing))
+  ) {
     event.preventDefault();
     event.stopPropagation();
-    if (!closeShellSurface()) closeAgentSurface();
+    if (!closeShellSurface(inside)) closeAgentSurface(inside);
     return;
   }
-  if (event.key !== "Tab") return;
+  if (!inside || event.key !== "Tab") return;
   const focusable = [
     ...dialog.querySelectorAll<HTMLElement>(
       'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
@@ -495,7 +512,10 @@ document.addEventListener("click", (event) => {
     target?.closest(".shell-chip, .agent-chip")
   )
     return;
-  if (!closeShellSurface()) closeAgentSurface();
+  const active = document.activeElement;
+  const restore =
+    !active || active === document.body || shellOverlayEl.contains(active);
+  if (!closeShellSurface(restore)) closeAgentSurface(restore);
 });
 
 // The centralized keymap treats visible live tool rows as a local layer: one

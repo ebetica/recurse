@@ -1,40 +1,44 @@
 import { expect } from "bun:test";
+import { EFFORT_LEVELS } from "../../src/effort_levels";
 import type { Locator, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
+  checkedHitPoint,
+  checkedTap,
+  expectHitCorners,
+  focusComposer,
   gotoRoot,
   mockConversation,
   postFixture,
   routeArtifacts,
   runBrowserTests,
+  visibleAndUncovered,
   waitForLayout,
   type BrowserTest,
 } from "./common";
+import { runConv, tree } from "./fixtures";
 
 async function expectVisuallyHidden(status: Locator) {
   await browserExpect(status).toHaveCSS("position", "absolute");
   await browserExpect(status).toHaveCSS("clip", "rect(0px, 0px, 0px, 0px)");
 }
 
+const fixtureEntry = (level: number) => ({
+  model: level < 4 ? "test/model-b" : "test/model-a",
+  reasoning: ["low", "medium", "high", "max", "xhigh", "max"][level - 1],
+});
 const ladder = {
   default_level: 3,
   levels: Object.fromEntries(
-    [1, 2, 3, 4, 5].map((level) => [
-      String(level),
-      {
-        model: level < 4 ? "test/model-b" : "test/model-a",
-        reasoning: ["low", "medium", "high", "max", "xhigh"][level - 1],
-      },
-    ]),
+    EFFORT_LEVELS.map((level) => [level, fixtureEntry(level)]),
   ),
   reachability: Object.fromEntries(
-    [1, 2, 3, 4, 5].map((level) => [
-      String(level),
+    EFFORT_LEVELS.map((level) => [
+      level,
       {
+        ...fixtureEntry(level),
         reachable: true,
-        model: level < 4 ? "test/model-b" : "test/model-a",
-        reasoning: ["low", "medium", "high", "max", "xhigh"][level - 1],
         reason: "",
       },
     ]),
@@ -45,41 +49,8 @@ const ladder = {
   ],
   reasoning: ["low", "medium", "high", "xhigh", "max"],
 };
-const tree = (status = "running") => [
-  {
-    id: "main",
-    parent: null,
-    updated: 1,
-    title: "Coordinator",
-    status,
-    kind: null,
-    children: 0,
-    queued: 0,
-    preview: "",
-    muted: false,
-  },
-];
-const running = (
-  status = "running",
-  active_run: string | null = "run-browser",
-) => ({
-  id: "main",
-  title: "Coordinator",
-  parent: null,
-  status,
-  kind: null,
-  active_run,
-  msg_count: 0,
-  window_cursor: 0,
-  turns: [],
-  pending: [],
-});
-const waitValue = async (predicate: () => boolean, label: string) => {
-  const deadline = Date.now() + 5000;
-  while (!predicate() && Date.now() < deadline)
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  if (!predicate()) throw new Error(`timed out waiting for ${label}`);
-};
+const pollStop = (read: () => unknown, message: string) =>
+  browserExpect.poll(read, { message, intervals: [20] });
 
 async function runTokenlessStopLookupRace(
   browser: any,
@@ -92,7 +63,7 @@ async function runTokenlessStopLookupRace(
   const page = await context.newPage();
   const errors = captureErrors(page);
   const posts: any[] = [];
-  const runningState = running("running", null);
+  const runningState = runConv("running", null);
   const oldState = { ...runningState, active_run: "run-old" };
   const replacementState = { ...runningState, active_run: "run-new" };
   const phase = {
@@ -106,7 +77,7 @@ async function runTokenlessStopLookupRace(
   await page.route(`${base}api/tree`, (route: Route) =>
     route.fulfill({
       json: [
-        { ...tree()[0], active_run: null, children: 1 },
+        { ...tree("main", "running")[0], active_run: null, children: 1 },
         {
           id: "other",
           parent: "main",
@@ -119,7 +90,7 @@ async function runTokenlessStopLookupRace(
     }),
   );
   await page.route(`${base}api/conversations/other**`, (route: Route) =>
-    route.fulfill({ json: running("idle", null) }),
+    route.fulfill({ json: runConv("idle", null) }),
   );
   await mockConversation(page, base, "main", () => runningState);
   await page.route(`${base}api/conversations/main**`, (route: Route) => {
@@ -200,9 +171,9 @@ async function runTokenlessStopLookupRace(
     expect(await page.locator("#send.armed").count()).toBe(0);
     phase.name = "hold-a";
     await page.locator("#send").click();
-    await waitValue(() => phase.name === "a-held", "first held lookup");
+    await pollStop(() => phase.name, "first held lookup").toBe("a-held");
     await page.evaluate("void fetch('/api/conversations/main?focused=1')");
-    await waitValue(() => phase.heldPoll.length === 1, "held polling lookup");
+    await pollStop(() => phase.heldPoll.length, "held polling lookup").toBe(1);
     await phase.heldPoll[0].fulfill({ json: runningState });
     phase.pollReleased = true;
     await page.locator('.agent[data-id="other"]').click();
@@ -211,14 +182,14 @@ async function runTokenlessStopLookupRace(
     await page.locator("#send.stop").waitFor();
     phase.name = "hold-c";
     await page.locator("#send").click();
-    await waitValue(() => phase.name === "c-held", "replacement lookup");
+    await pollStop(() => phase.name, "replacement lookup").toBe("c-held");
     expect(phase.pollReleased).toBeTrue();
     await page.waitForFunction(
       "document.querySelector('#send')?.getAttribute('aria-label') === 'Confirm stop this agent'",
     );
     expect(posts).toHaveLength(0);
     await page.locator("#send").click();
-    await waitValue(() => posts.length === 1, "tokenless race Stop");
+    await pollStop(() => posts.length, "tokenless race Stop").toBe(1);
     expect(posts[0].run_id).toBe("run-new");
     if (!staleFirst) expect(phase.staleReleasedAfterCurrent).toBeTrue();
     await page.locator("#send.stop").waitFor();
@@ -232,10 +203,10 @@ async function runTokenlessStopLookupRace(
 
 // Regression: #2479 one confirm click stops the newer run despite an older lookup. (also #2410 model selection errors stay visible and retain manual retry.)
 const modelSelectionError: BrowserTest = async (browser, base) => {
-  for (const [index, model] of [
-    "",
-    "not-a-model",
-    "fauxordinary/removed",
+  for (const [index, { model, effort }] of [
+    { model: "" },
+    { model: "not-a-model", effort: "default" },
+    { model: "fauxordinary/removed", effort: null },
   ].entries()) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
@@ -244,10 +215,20 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
       const agent = `model-selection-${index}`;
       const seeded = await context.request.post(
         `${base}__browser-test/seed-model-selection-error`,
-        { data: { agent, model } },
+        { data: { agent, model, effort } },
       );
       expect(seeded.ok()).toBeTrue();
       const page = await context.newPage();
+      if (effort === null)
+        await page.route(
+          (url) => url.pathname === `/api/conversations/${agent}`,
+          async (route) => {
+            const response = await route.fetch();
+            const detail = await response.json();
+            delete detail.effort;
+            await route.fulfill({ response, json: detail });
+          },
+        );
       const errors = captureErrors(page);
       const sends: string[] = [];
       page.on("request", (request) => {
@@ -263,11 +244,12 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
       await page.locator("#input:enabled").waitFor();
       const trigger = page.locator("#model-trigger");
       const name = model || "Unknown model";
-      await browserExpect(trigger.locator(".model-name")).toHaveText(name);
+      await browserExpect(trigger).toHaveText(name);
       await browserExpect(trigger).toHaveAttribute(
         "aria-label",
         `${name}: choose effort level`,
       );
+      await focusComposer(page);
       await trigger.click();
       const menu = page.locator("#model-menu:popover-open");
       await browserExpect(menu.locator("#effort-model")).toHaveText(name);
@@ -435,9 +417,213 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  async function compactComposerTargets(browser, base) {
-    for (const width of [412, 1280]) {
-      const mobile = width === 412;
+  // Regression: #3563 tapping the composer outside shell details keeps native textarea focus.
+  async function test_tap_composer_after_shell(browser, base) {
+    const { agent } = await postFixture(base, "seed-live-tools", {
+      mode: "background-output",
+    });
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      const input = page.locator("#input");
+      await input.fill("Run the shell tools.");
+      await checkedTap(page.locator("#send"));
+      const chip = page.locator("#live-bar .shell-chip");
+      const surface = page.locator(".shell-surface");
+      await checkedTap(chip);
+      await surface.waitFor();
+      await checkedTap(page.locator("#composer-wrap"), { x: 4, y: 4 });
+      await surface.waitFor({ state: "hidden" });
+      await browserExpect(chip).toBeFocused();
+      await checkedTap(chip);
+      await surface.waitFor();
+      await checkedTap(input);
+      await browserExpect(input).toBeFocused();
+      await surface.waitFor({ state: "hidden" });
+      await input.evaluate((field) =>
+        field.addEventListener(
+          "blur",
+          () => {
+            field.dataset.blurred = "true";
+          },
+          { once: true },
+        ),
+      );
+      await checkedTap(chip);
+      await surface.waitFor();
+      await browserExpect(input, "shell chip keeps the caret").toBeFocused();
+      await checkedTap(chip);
+      await surface.waitFor({ state: "hidden" });
+      const { agent: child } = await postFixture(base, "seed-live-tools", {
+        parent: agent,
+      });
+      try {
+        const delivered = await page.request.post(
+          `${base}api/conversations/${child}/deliver`,
+          { data: { content: "Run the background check." } },
+        );
+        expect(delivered.ok()).toBe(true);
+        const agentChip = page.locator("#live-bar .agent-chip");
+        await checkedTap(agentChip);
+        await page
+          .getByRole("dialog", { name: "Active agents for Live tools" })
+          .waitFor();
+        await browserExpect(input, "agent chip keeps the caret").toBeFocused();
+        await checkedTap(agentChip);
+        await surface.waitFor({ state: "hidden" });
+        await checkedTap(agentChip);
+        await surface.waitFor();
+        await postFixture(base, "durable-thinking-cleanup", { agent: child });
+        await surface.waitFor({ state: "hidden" });
+        await browserExpect(input).toBeFocused();
+        expect(await input.getAttribute("data-blurred")).toBeNull();
+      } finally {
+        await postFixture(base, "durable-thinking-cleanup", { agent: child });
+      }
+      const thread = page.locator("#messages");
+      await checkedTap(thread.locator(".activity-group-toggle"));
+      await checkedTap(thread.locator(".turn-series-toggle"));
+      await checkedTap(thread.locator(".turn-tool-head").first());
+      await checkedTap(
+        thread
+          .getByRole("region", { name: "Output", exact: true })
+          .locator("pre"),
+      );
+      await checkedTap(input);
+      await browserExpect(input).toBeFocused();
+      await checkedTap(chip);
+      await surface.waitFor();
+      await page.keyboard.press("Escape");
+      await surface.waitFor({ state: "hidden" });
+      await browserExpect(input).toBeFocused();
+      await checkedTap(chip);
+      await surface.waitFor();
+      await postFixture(base, "durable-thinking-cleanup", { agent });
+      await surface.waitFor({ state: "hidden" });
+      await browserExpect(input).toBeFocused();
+    } finally {
+      await postFixture(base, "durable-thinking-cleanup", { agent });
+      await page.close();
+    }
+  },
+
+  // Regression: #3564 composer controls must not blur a focused phone draft.
+  async function test_effort_tap_keeps_phone_caret(browser, base) {
+    const { agent } = await postFixture(base, "seed-durable-context", {});
+    const page = await browser.newPage({
+      viewport: { width: 390, height: 540 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      const input = page.locator("#input");
+      await checkedTap(input);
+      await input.fill("Keep this draft and caret.");
+      await input.press("Home");
+      await input.evaluate((node) =>
+        node.addEventListener(
+          "blur",
+          () => {
+            node.dataset.blurred = "true";
+          },
+          { once: true },
+        ),
+      );
+      const trigger = page.getByRole("button", { name: "Choose effort level" });
+      const [chooser] = await Promise.all([
+        page.waitForEvent("filechooser"),
+        checkedTap(page.getByRole("button", { name: "Attach file" })),
+      ]);
+      await chooser.setFiles([]);
+      await browserExpect(input, "Attach keeps the caret").toBeFocused();
+      await checkedTap(trigger);
+      const popup = page.getByRole("dialog", { name: "Effort level" });
+      await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
+      await browserExpect(popup).toBeVisible();
+      await browserExpect(input, "effort pill keeps the caret").toBeFocused();
+      const range = popup.getByRole("slider", { name: "Effort level" });
+      await browserExpect(range).toBeEnabled();
+      const box = (await range.boundingBox())!;
+      const before = await range.inputValue();
+      const cdp = await page.context().newCDPSession(page);
+      const { min, max } = await range.evaluate((el: HTMLInputElement) => ({
+        min: el.min,
+        max: el.max,
+      }));
+      const next = before === min ? max : min;
+      const start =
+        14 +
+        ((Number(before) - Number(min)) / (Number(max) - Number(min))) *
+          (box.width - 28);
+      const end = next === min ? 14 : box.width - 14;
+      const modelResponse = () =>
+        page.waitForResponse(
+          (r) =>
+            r.request().method() === "POST" &&
+            new URL(r.url()).pathname === `/api/conversations/${agent}/model`,
+        );
+      const origin = await checkedHitPoint(range, {
+        x: start,
+        y: box.height / 2,
+      });
+      const point = (x: number) => [{ x: origin.x + x - start, y: origin.y }];
+      const saved = modelResponse();
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [origin],
+      });
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: point((start + end) / 2),
+      });
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchMove",
+        touchPoints: point(end),
+      });
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      expect((await saved).ok()).toBe(true);
+      await browserExpect(range).toHaveValue(next);
+      await browserExpect(
+        input,
+        "effort slider drag keeps the caret",
+      ).toBeFocused();
+      await browserExpect(range).toBeEnabled();
+      const mouseOrigin = await checkedHitPoint(range, {
+        x: end,
+        y: box.height / 2,
+      });
+      await page.mouse.move(mouseOrigin.x, mouseOrigin.y);
+      await page.mouse.down();
+      await page.mouse.move(mouseOrigin.x + start - end, mouseOrigin.y);
+      await page.mouse.up();
+      await browserExpect(
+        input,
+        "effort slider mouse drag keeps the caret on a touch device",
+      ).toBeFocused();
+      expect(
+        await input.evaluate((node: HTMLTextAreaElement) => [
+          node.selectionStart,
+          node.dataset.blurred,
+        ]),
+      ).toEqual([0, undefined]);
+    } finally {
+      await page.close();
+    }
+  },
+
+  // Regression: #3565 the desktop context meter is reachable before the composer receives focus.
+  async function test_compact_composer_targets(browser, base) {
+    const { agent, tokens } = await postFixture(base, "seed-durable-context");
+    for (const width of [390, 412, 1280]) {
+      const mobile = width < 700;
       const context = await browser.newContext({
         viewport: { width, height: 915 },
         isMobile: mobile,
@@ -445,8 +631,14 @@ export const tests: BrowserTest[] = [
       });
       try {
         const page = await context.newPage();
-        await gotoRoot(page, base);
-        await page.locator(".agent.selected").waitFor({ state: "attached" });
+        await page.goto(`${base}#agent=${agent}`);
+        await page
+          .locator(`#conv-title`)
+          .filter({ hasText: "Recorded Durable context" })
+          .waitFor();
+        await page
+          .locator("#context-indicator.on")
+          .waitFor({ state: "attached" });
         await waitForLayout(page);
         const composer = page.locator("#composer");
         const input = page.locator("#input");
@@ -484,62 +676,132 @@ export const tests: BrowserTest[] = [
               lineHeight,
               contentHeight: bottom - top,
               firstLine: top + lineHeight / 2,
-              lastLine: bottom - lineHeight / 2,
             };
           });
-        for (const text of ["", "A typical one-line message"]) {
-          await input.fill(text);
-          const { firstLine, contentHeight, lineHeight } = await textGeometry();
-          expect(Math.abs(contentHeight - lineHeight)).toBeLessThanOrEqual(1);
-          const box = (await composer.boundingBox())!;
-          await expectAligned(
-            text ? "typed" : "placeholder",
-            firstLine,
-            centerY(box),
-          );
-        }
+        const expectLines = async (count: number) => {
+          const { contentHeight, lineHeight } = await textGeometry();
+          expect(
+            Math.abs(contentHeight - count * lineHeight),
+          ).toBeLessThanOrEqual(1);
+        };
+        await expectLines(1);
         const surrounding = (await composer.boundingBox())!;
-        const field = (await input.boundingBox())!;
-        expect(surrounding.height - field.height).toBeLessThanOrEqual(10);
-        expect(field.x - surrounding.x).toBeLessThanOrEqual(42);
-        expect(field.width / surrounding.width).toBeGreaterThan(0.75);
-        const singleLine = await textGeometry();
-        for (const button of buttons) {
-          await browserExpect(button).toBeEnabled();
+        const expectBottomRow = async () => {
+          const field = (await input.boundingBox())!;
+          const [attach, send] = await Promise.all(
+            buttons.map((button) => button.boundingBox()),
+          );
+          expect(attach!.y).toBeGreaterThanOrEqual(field.y + field.height - 1);
+          expect(send!.y).toBeGreaterThanOrEqual(field.y + field.height - 1);
+          expect(attach!.x).toBeCloseTo(field.x, 0);
+          expect(send!.x + send!.width).toBeCloseTo(field.x + field.width, 0);
+          await expectAligned("bottom row");
           if (mobile) {
+            for (const button of buttons) await expectHitCorners(button);
             expect(
-              await button.evaluate((el) => {
-                const { x, y, width, height } = el.getBoundingClientRect();
-                const insetCorners = [-21.5, 21.5];
-                return insetCorners.every((dx) =>
-                  insetCorners.every((dy) =>
-                    el.contains(
-                      el.ownerDocument.elementFromPoint(
-                        x + width / 2 + dx,
-                        y + height / 2 + dy,
-                      ),
-                    ),
+              await input.evaluate((el) => {
+                const { left, right, top, bottom } = el.getBoundingClientRect();
+                return [left + 2, right - 2].every((x) =>
+                  [top + 2, bottom - 2].every(
+                    (y) => document.elementFromPoint(x, y) === el,
                   ),
                 );
               }),
-              `${button} should be hit at all four inset corners`,
-            ).toBeTrue();
+            ).toBe(true);
+          }
+        };
+        if (mobile) {
+          await expectAligned(
+            "collapsed placeholder",
+            (await textGeometry()).firstLine,
+            centerY(surrounding),
+          );
+          for (const button of buttons) await expectHitCorners(button);
+          await input.tap();
+        } else {
+          await visibleAndUncovered(page, "#context-indicator");
+          await expectBottomRow();
+          await input.click();
+          expect(await composer.boundingBox()).toEqual(surrounding);
+        }
+        await expectBottomRow();
+        await input.fill("One-line draft");
+        await input.blur();
+        await browserExpect(input).not.toBeFocused();
+        await expectBottomRow();
+        await expectLines(1);
+        const lines = ["First line", "Second line", "Third line", "Last line"];
+        const draft = lines.join("\n");
+        await input.fill(draft);
+        await input.blur();
+        await expectBottomRow();
+        if (mobile) {
+          for (const edge of ["left", "right"] as const) {
+            await input.blur();
+            const point = await input.evaluate((el, edge) => {
+              const rect = el.getBoundingClientRect();
+              return {
+                x: rect[edge] + (edge === "left" ? 2 : -2),
+                y: rect.bottom - 2,
+              };
+            }, edge);
+            await page.touchscreen.tap(point.x, point.y);
+            await browserExpect(input).toBeFocused();
+            await browserExpect(input).toHaveValue(draft);
           }
         }
-        const lines = ["First line", "Second line", "Third line", "Last line"];
-        await input.fill(lines.join("\n"));
-        const { lastLine, contentHeight, lineHeight } = await textGeometry();
-        expect(
-          Math.abs(
-            contentHeight -
-              singleLine.contentHeight -
-              (lines.length - 1) * lineHeight,
-          ),
-        ).toBeLessThanOrEqual(1);
-        await expectAligned("multiline last line", lastLine);
-        expect((await composer.boundingBox())!.height).toBeGreaterThan(
-          surrounding.height,
+        await expectLines(lines.length);
+        await browserExpect(buttons[1]!).toBeEnabled();
+        const response = await page.request.get(
+          `${base}api/conversations/${agent}/context-usage`,
         );
+        expect(response.ok()).toBe(true);
+        const { context_window: max } = await response.json();
+        expect(max).toBeGreaterThan(tokens);
+        const usage = `Context usage: ${tokens.toLocaleString("en-US")} of ${max.toLocaleString("en-US")} tokens used`;
+        const meter = composer.getByRole("meter", { name: usage, exact: true });
+        await browserExpect(meter).toBeVisible();
+        await browserExpect(meter).toHaveAttribute("aria-valuemin", "0");
+        await browserExpect(meter).toHaveAttribute(
+          "aria-valuemax",
+          String(max),
+        );
+        await browserExpect(meter).toHaveAttribute(
+          "aria-valuenow",
+          String(tokens),
+        );
+        const fraction = await meter.evaluate(
+          (el) =>
+            parseFloat(
+              el.ownerDocument.defaultView!.getComputedStyle(el, "::before")
+                .width,
+            ) / el.getBoundingClientRect().width,
+        );
+        expect(fraction).toBeCloseTo(tokens / max, 3);
+        await browserExpect(
+          composer.locator("#context-indicator"),
+        ).toHaveAttribute("title", `${usage}. Open context details (Shift+C).`);
+        await browserExpect(composer.locator("#context-control")).toHaveText(
+          "",
+        );
+        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/composer-context-meter-${width}.png`,
+          });
+        await expectAligned(
+          "full bottom row",
+          centerY((await meter.boundingBox())!),
+          centerY((await composer.locator("#model-trigger").boundingBox())!),
+        );
+        for (const id of ["#attach", "#send"]) {
+          const control = page.locator(id);
+          const box = (await control.boundingBox())!;
+          for (const x of [4, box.width - 4])
+            for (const y of [4, box.height - 4])
+              await checkedHitPoint(control, { x, y });
+          if (width < 700) await expectHitCorners(control);
+        }
       } finally {
         await context.close();
       }
@@ -727,12 +989,50 @@ export const tests: BrowserTest[] = [
     }
   },
 
+  async function test_phone_effort_chip_names_the_model_variant(browser, base) {
+    const { agent } = await postFixture(base, "seed-durable-context");
+    for (const width of [320, 360, 390, 412]) {
+      const page = await browser.newPage({
+        viewport: { width, height: 844 },
+        isMobile: true,
+        hasTouch: true,
+      });
+      try {
+        await page.goto(`${base}#agent=${agent}`);
+        await page.locator("#input").tap();
+        const trigger = page.locator("#model-trigger");
+        const name = trigger.locator(".model-name");
+        await browserExpect(trigger).toHaveText("Opus 5.5 Medium");
+        await browserExpect(trigger).toHaveAttribute(
+          "aria-label",
+          /^Level \d: Claude Opus 5\.5 · Medium: /,
+        );
+        await visibleAndUncovered(page, "#context-indicator");
+        await visibleAndUncovered(page, "#model-trigger .model-name");
+        await expectHitCorners(trigger);
+        await expectHitCorners(page.locator("#context-indicator"));
+        await browserExpect(
+          page.getByRole("switch", { name: /^Safety review/ }),
+        ).toBeHidden();
+        const { scrollWidth, clientWidth } = await name.evaluate((el) => ({
+          scrollWidth: el.scrollWidth,
+          clientWidth: el.clientWidth,
+        }));
+        expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+      } finally {
+        await page.close();
+      }
+    }
+  },
+
+  // Regression: #3565 desktop composer controls stay visible across focus and effort keyboard shortcuts.
   async function test_effort_ladder_rejected_switch_reverts(browser, base) {
     for (const width of [1280, 412, 390]) {
       const { agent, model, effort } = await postFixture(
         base,
         "seed-recorded-effort-choice",
       );
+      const shown = model.replace(/^Claude /, "");
       const modelUrl = `${base}api/conversations/${agent}/model`;
       const mobile = width !== 1280;
       const context = await browser.newContext({
@@ -768,35 +1068,178 @@ export const tests: BrowserTest[] = [
         });
         const label = menu.locator("#effort-model");
         const composer = page.locator("#composer");
-        const recordedAction = `Level 3: ${model}: choose effort level`;
-        await browserExpect(name).toHaveText(model);
+        const recordedLabel = `${model} · Low`;
+        const recordedAction = `Level 3: ${recordedLabel}: choose effort level`;
+        await browserExpect(name).toHaveText(shown);
+        await browserExpect(trigger.locator("svg")).toHaveCount(0);
+        await browserExpect(trigger).toHaveText(`${shown} Low`);
         await browserExpect(trigger).toHaveAttribute(
           "aria-label",
           recordedAction,
         );
         await waitForLayout(page);
-        expect(
-          await trigger.evaluate((el, touch) => {
-            const { left, right, top, bottom, height } =
-              el.getBoundingClientRect();
-            const center = top + height / 2;
-            const ys = touch
-              ? [center - 21, center + 21]
-              : [top + 3, bottom - 3];
-            const inset = touch ? 6 : 3;
-            return [left + inset, right - inset].every((x) =>
-              ys.every((y) =>
-                el.contains(el.ownerDocument.elementFromPoint(x, y)),
-              ),
-            );
-          }, mobile),
-        ).toBeTrue();
+        const row = page.locator("#conv-controls");
+        const input = page.locator("#input");
         const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
-        if (shots && width !== 390)
-          await page.screenshot({ path: `${shots}/effort-chip-${width}.png` });
+        const initialCard = await composer.boundingBox();
+        const checkRow = async () => {
+          await visibleAndUncovered(page, "#model-trigger");
+          expect((await row.boundingBox())!.y).toBeGreaterThanOrEqual(
+            await input.evaluate((el) => el.getBoundingClientRect().bottom),
+          );
+          if (!mobile)
+            expect(await composer.boundingBox()).toEqual(initialCard);
+        };
+        if (mobile) await browserExpect(row).toBeHidden();
+        else await checkRow();
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/composer-unfocused-${width}.png`,
+          });
+        if (mobile) await input.tap();
+        else await input.click();
+        await browserExpect(input).toBeFocused();
+        await checkRow();
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/composer-focused-${width}.png`,
+          });
+        if (mobile) {
+          await input.fill("Keep this draft when the picker closes.");
+          await checkedTap(trigger);
+          await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
+          await browserExpect(menu).toBeVisible();
+          await browserExpect(input).toBeFocused();
+          const cdp = await context.newCDPSession(page);
+          await cdp.send("Emulation.setTouchEmulationEnabled", {
+            enabled: false,
+          });
+          await page.waitForFunction(
+            () => !window.matchMedia("(pointer: coarse)").matches,
+          );
+          await input.evaluate((field) =>
+            field.addEventListener(
+              "blur",
+              () => {
+                field.dataset.blurred = "true";
+              },
+              { once: true },
+            ),
+          );
+          await page.keyboard.press("Escape");
+          await browserExpect(
+            input,
+            "Escape dismisses effort without blurring the draft",
+          ).toBeFocused();
+          await browserExpect(menu).toBeHidden();
+          expect(await input.getAttribute("data-blurred")).toBeNull();
+          await browserExpect(input).toHaveValue(
+            "Keep this draft when the picker closes.",
+          );
+          await cdp.send("Emulation.setTouchEmulationEnabled", {
+            enabled: true,
+            maxTouchPoints: 1,
+          });
+          await page.waitForFunction(
+            () => window.matchMedia("(pointer: coarse)").matches,
+          );
+          await input.fill("");
+        } else {
+          await input.blur();
+          await checkRow();
+          await page.locator(".prompt-banner-row").focus();
+          await page.keyboard.press("Tab");
+          await browserExpect(page.locator("#scroll-btn")).toBeFocused();
+          await checkRow();
+          await page.keyboard.press("Tab");
+          await browserExpect(input).toBeFocused();
+          await checkRow();
+          await page.keyboard.press("Tab");
+          await browserExpect(page.locator("#attach")).toBeFocused();
+          await page.keyboard.press("Tab");
+          await browserExpect(trigger).toBeFocused();
+          await page.keyboard.press("Enter");
+          await browserExpect(menu).toBeFocused();
+          await page.keyboard.press("Tab");
+          await browserExpect(range).toBeFocused();
+          await page.keyboard.press("Tab");
+          await browserExpect(
+            menu.getByRole("switch", { name: /^Safety review/ }),
+          ).toBeFocused();
+          await page.keyboard.press("Escape");
+          await browserExpect(trigger).toBeFocused();
+          await trigger.blur();
+          await checkRow();
+          for (const shortcut of ["e", "Shift+M"]) {
+            await page.keyboard.press(shortcut);
+            await browserExpect(trigger).toHaveAttribute(
+              "aria-expanded",
+              "true",
+            );
+            await visibleAndUncovered(page, "#effort-range");
+            await checkRow();
+            await page.keyboard.press("Escape");
+            await browserExpect(trigger).toBeFocused();
+            await trigger.blur();
+            await checkRow();
+          }
+          await focusComposer(page);
+        }
+        const chipLayout = await trigger.evaluate((el, touch) => {
+          const { left, right, top, bottom, height } =
+            el.getBoundingClientRect();
+          const x = (left + right) / 2;
+          const y = top + height / 2;
+          const hit = (x: number, y: number) =>
+            el.contains(el.ownerDocument.elementFromPoint(x, y));
+          const textRects = (selector: string) => {
+            const text = el.ownerDocument.createRange();
+            text.selectNodeContents(el.querySelector(selector)!);
+            return [...text.getClientRects()].filter((rect) => rect.width > 0);
+          };
+          const [model] = textRects(".model-name");
+          const suffix = textRects(".effort-reasoning-text");
+          return {
+            endCorners: [left + 16, right - 16].flatMap((x) =>
+              (touch ? [y - 21, y + 21] : [top + 3, bottom - 3]).map((y) =>
+                hit(x, y),
+              ),
+            ),
+            minimumCorners:
+              !touch ||
+              [x - 21, x + 21].every((x) =>
+                [y - 21, y + 21].every((y) => hit(x, y)),
+              ),
+            centeredText:
+              Math.abs(model!.left - left - (right - suffix[0]!.right)) < 1,
+            reasoningOnModelLine:
+              suffix.length === 1 &&
+              suffix.every(
+                (rect) =>
+                  model &&
+                  rect.top < model.bottom &&
+                  rect.bottom > model.top &&
+                  rect.left >= left &&
+                  rect.right <= right &&
+                  rect.top >= top &&
+                  rect.bottom <= bottom &&
+                  [rect.left + 1, rect.right - 1].every((x) =>
+                    hit(x, rect.top + rect.height / 2),
+                  ),
+              ),
+          };
+        }, mobile);
+        expect(chipLayout).toEqual({
+          endCorners: [true, true, true, true],
+          minimumCorners: true,
+          centeredText: true,
+          reasoningOnModelLine: true,
+        });
         if (mobile) await trigger.tap();
         else await trigger.click();
-        await browserExpect(menu).toBeVisible();
+        await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
+        await visibleAndUncovered(page, "#effort-range");
+        await visibleAndUncovered(page, "#send");
         if (mobile) {
           await browserExpect
             .poll(() =>
@@ -813,32 +1256,53 @@ export const tests: BrowserTest[] = [
             )
             .toBe(true);
         }
-        await browserExpect(label).toHaveText(model);
+        const dots = menu.locator(".effort-stops > span");
+        await browserExpect(dots).toHaveCount(EFFORT_LEVELS.length);
+        const points = await dots.evaluateAll((dots) =>
+          dots.map((dot) => {
+            const box = dot.getBoundingClientRect();
+            const x = box.left + box.width / 2;
+            const y = box.top + box.height / 2;
+            return {
+              x,
+              y,
+              left: box.left,
+              right: box.right,
+              nonempty: box.width > 0 && box.height > 0,
+              control: dot.ownerDocument.elementFromPoint(x, y)?.id,
+            };
+          }),
+        );
+        expect(
+          points.every(
+            (dot, i) =>
+              dot.nonempty && (i === 0 || points[i - 1]!.right < dot.left),
+          ),
+        ).toBeTrue();
+        expect(points.map(({ control }) => control)).toEqual(
+          EFFORT_LEVELS.map(() => "effort-range"),
+        );
+        expect(points[0]!.y).toBeGreaterThan(
+          await label.evaluate((el) => el.getBoundingClientRect().bottom),
+        );
+        await browserExpect(label).toHaveText(`${model} Low`);
+        await visibleAndUncovered(page, "#effort-model");
         const status = menu.getByRole("status");
         await browserExpect
           .poll(() => status.ariaSnapshot())
-          .toBe(`- status: ${JSON.stringify(`Level 3: ${model}`)}`);
+          .toBe(`- status: ${JSON.stringify(`Level 3: ${recordedLabel}`)}`);
         await expectVisuallyHidden(status);
         await browserExpect(range).toHaveValue("3");
         await browserExpect(range).toHaveAttribute(
           "aria-valuetext",
-          `Level 3: ${model}`,
+          `Level 3: ${recordedLabel}`,
         );
         if (mobile) {
-          expect(
-            await range.evaluate((el) => {
-              const { left, right, top, height } = el.getBoundingClientRect();
-              return [left + 3, right - 3].every((x) =>
-                [-21, 21].every(
-                  (dy) =>
-                    el.ownerDocument.elementFromPoint(
-                      x,
-                      top + height / 2 + dy,
-                    ) === el,
-                ),
-              );
-            }),
-          ).toBeTrue();
+          await expectHitCorners(range, 44, {
+            horizontalInset: 3,
+            exact: true,
+            scroll: false,
+          });
         }
         const response = await page.request.get(
           `${base}api/settings/effort-levels`,
@@ -854,27 +1318,27 @@ export const tests: BrowserTest[] = [
           live.models.find(({ id }) => id === selector)!.label;
         const choice3 = labelFor(at3.model);
         const choice5 = labelFor(at5.model);
-        if (shots && width !== 390)
+        const pendingLabel = `${choice3} · Medium`;
+        const previewLabel = `${choice5} · Xhigh`;
+        if (shots)
           await page.screenshot({ path: `${shots}/effort-open-${width}.png` });
         await range.evaluate((el) => {
           (el as HTMLInputElement).value = "5";
         });
         await range.dispatchEvent("input");
         await browserExpect(range).toHaveValue("5");
-        await browserExpect(label).toHaveText(choice5);
-        await browserExpect(status).toHaveText(`Level 5: ${choice5}`);
+        await browserExpect(label).toHaveText(`${choice5} Xhigh`);
+        await browserExpect(status).toHaveText(`Level 5: ${previewLabel}`);
         await expectVisuallyHidden(status);
         await browserExpect(range).toHaveAttribute(
           "aria-valuetext",
-          `Level 5: ${choice5}`,
+          `Level 5: ${previewLabel}`,
         );
-        await browserExpect(name).toHaveText(model);
+        await browserExpect(trigger).toHaveText(`${shown} Low`);
         await browserExpect(trigger).toHaveAttribute(
           "aria-label",
           recordedAction,
         );
-        if (shots && width !== 390)
-          await page.screenshot({ path: `${shots}/effort-moved-${width}.png` });
         await waitForLayout(page);
         await browserExpect(menu).toBeVisible();
         const geometry = await composer.boundingBox();
@@ -887,17 +1351,17 @@ export const tests: BrowserTest[] = [
         expect(rejected.status()).toBe(409);
         await browserExpect(range).toHaveValue("3");
         await browserExpect(trigger).not.toHaveClass(/pending/);
-        await browserExpect(name).toHaveText(model);
+        await browserExpect(trigger).toHaveText(`${shown} Low`);
         await browserExpect(trigger).toHaveAttribute(
           "aria-label",
           recordedAction,
         );
         await browserExpect(menu).toBeVisible();
-        await browserExpect(label).toHaveText(model);
-        await browserExpect(status).toHaveText(`Level 3: ${model}`);
+        await browserExpect(label).toHaveText(`${model} Low`);
+        await browserExpect(status).toHaveText(`Level 3: ${recordedLabel}`);
         await browserExpect(range).toHaveAttribute(
           "aria-valuetext",
-          `Level 3: ${model}`,
+          `Level 3: ${recordedLabel}`,
         );
         await browserExpect
           .poll(() => composer.boundingBox())
@@ -905,10 +1369,11 @@ export const tests: BrowserTest[] = [
         expect(posts).toEqual([{ level: 5 }]);
 
         rejectChange = false;
+        const { x, y } = points[2]!;
         const [accepted] = await Promise.all([
           modelResponse(),
-          mobile ? range.tap() : range.click(),
-          browserExpect(label).toHaveText(choice3),
+          mobile ? page.touchscreen.tap(x, y) : page.mouse.click(x, y),
+          browserExpect(label).toHaveText(`${choice3} Medium`),
         ]);
         expect(accepted.status()).toBe(200);
         expect((await accepted.json()).pending_model).toEqual({
@@ -918,18 +1383,77 @@ export const tests: BrowserTest[] = [
         });
         await browserExpect(range).toBeEnabled();
         await browserExpect(trigger).toHaveClass(/pending/);
-        await browserExpect(name).toHaveText(choice3);
+        await browserExpect(trigger).toHaveText(
+          `${choice3.replace(/^Claude /, "")} Medium`,
+        );
         await browserExpect(trigger).toHaveAttribute(
           "aria-label",
-          `Level 3: ${choice3}: switches on your next message; choose effort level`,
+          `Level 3: ${pendingLabel}: switches on your next message; choose effort level`,
         );
-        await browserExpect(label).toHaveText(choice3);
-        await browserExpect(status).toHaveText(`Level 3: ${choice3}`);
+        await browserExpect(label).toHaveText(`${choice3} Medium`);
+        if (shots)
+          await page.screenshot({
+            path: `${shots}/effort-pending-${width}.png`,
+          });
+        await browserExpect(status).toHaveText(`Level 3: ${pendingLabel}`);
         await browserExpect(range).toHaveAttribute(
           "aria-valuetext",
-          `Level 3: ${choice3}`,
+          `Level 3: ${pendingLabel}`,
         );
         expect(posts).toEqual([{ level: 5 }, { level: 3 }]);
+        if (width === 390) {
+          const ladderUrl = `${base}api/settings/effort-levels`;
+          const saveLevels = async (levels: typeof live.levels) => {
+            const update = await page.request.post(ladderUrl, {
+              data: { levels, default_level: live.default_level },
+            });
+            expect(update.ok()).toBeTrue();
+          };
+          await page.keyboard.press("Escape");
+          try {
+            await saveLevels({
+              ...live.levels,
+              "3": { ...at3, reasoning: "high" },
+            });
+            await page.reload();
+            await focusComposer(page);
+            await trigger.tap();
+            await range.dispatchEvent("input");
+            await browserExpect(label).toHaveText(`${choice3} High`);
+            await page.keyboard.press("Escape");
+            await trigger.tap();
+            await browserExpect(trigger).toHaveText(
+              `${choice3.replace(/^Claude /, "")} Medium`,
+            );
+            await browserExpect(label).toHaveText(`${choice3} Medium`);
+            await browserExpect(range).toHaveAttribute(
+              "aria-valuetext",
+              `Level 3: ${pendingLabel}`,
+            );
+          } finally {
+            await saveLevels(live.levels);
+          }
+          const fifth = (await dots.nth(4).boundingBox())!;
+          const [switched] = await Promise.all([
+            modelResponse(),
+            page.touchscreen.tap(
+              fifth.x + fifth.width / 2,
+              fifth.y + fifth.height / 2,
+            ),
+          ]);
+          expect(switched.ok()).toBeTrue();
+          await browserExpect(range).toHaveValue("5");
+          await browserExpect(label).toHaveText(`${choice5} Xhigh`);
+          expect(posts).toEqual([{ level: 5 }, { level: 3 }, { level: 5 }]);
+
+          await page.keyboard.press("Escape");
+          await page.setViewportSize({ width, height: 300 });
+          await input.fill("Draft line\n".repeat(14));
+          await trigger.tap();
+          await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
+          await visibleAndUncovered(page, "#effort-model");
+          await visibleAndUncovered(page, "#effort-range");
+        }
         expect(errors).toEqual([]);
       } finally {
         await context.close();
@@ -941,8 +1465,8 @@ export const tests: BrowserTest[] = [
     const context = await browser.newContext({
       viewport: { width: 1100, height: 800 },
     });
-    const long =
-      "Anthropic: Test B with a name longer than the chip and the page";
+    const shown = "Test B with a name longer than the chip and the page";
+    const long = `Anthropic: ${shown}`;
     const page = await context.newPage();
     const errors = captureErrors(page);
     await routeArtifacts(page, base);
@@ -950,7 +1474,32 @@ export const tests: BrowserTest[] = [
       route.fulfill({
         json: {
           ...ladder,
-          models: [ladder.models[0], { id: "test/model-b", label: long }],
+          levels: {
+            ...ladder.levels,
+            5: { model: "test/model-c", reasoning: "max" },
+            6: { model: "test/model-d", reasoning: "max" },
+          },
+          reachability: {
+            ...ladder.reachability,
+            5: {
+              model: "test/model-c",
+              reasoning: "max",
+              reachable: true,
+              reason: "",
+            },
+            6: {
+              model: "test/model-d",
+              reasoning: "max",
+              reachable: true,
+              reason: "",
+            },
+          },
+          models: [
+            { id: "test/model-d", label: "Gemini 3.5 Flash" },
+            { id: "test/model-a", label: "GPT-6 Sol" },
+            { id: "test/model-b", label: long },
+            { id: "test/model-c", label: "GPT-6.2 Sol" },
+          ],
         },
       }),
     );
@@ -972,7 +1521,7 @@ export const tests: BrowserTest[] = [
           node.clientHeight > 0 && node.scrollHeight <= node.clientHeight,
       );
     const height = () => input.evaluate((node) => node.clientHeight);
-    await browserExpect(chip).toHaveText(long);
+    await browserExpect(chip).toHaveText(shown);
     await browserExpect.poll(() => fits(input)).toBe(true);
     const oneLine = await height();
     for (const width of [1100, 750, 412]) {
@@ -1034,32 +1583,43 @@ export const tests: BrowserTest[] = [
     await trigger.click();
     await range.press("ArrowRight");
     await browserExpect(range).toHaveValue("4");
-    await browserExpect(label).toHaveText("Test A");
-    await browserExpect(status).toHaveText("Level 4: Test A");
+    await browserExpect(label).toHaveText("GPT-6 Sol");
+    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol");
     await expectVisuallyHidden(status);
     await browserExpect(range).toHaveAttribute(
       "aria-valuetext",
-      "Level 4: Test A",
+      "Level 4: GPT-6 Sol",
     );
-    await browserExpect(chip).toHaveText("Test A");
+    await browserExpect(chip).toHaveText("6 Sol");
     await browserExpect(trigger).toHaveAttribute(
       "aria-label",
-      "Level 4: Test A: choose effort level",
+      "Level 4: GPT-6 Sol: choose effort level",
     );
+    await range.press("ArrowRight");
+    await browserExpect(chip).toHaveText("6.2 Sol");
+    await browserExpect(trigger).toHaveAttribute(
+      "aria-label",
+      "Level 5: GPT-6.2 Sol: choose effort level",
+    );
+    await range.press("ArrowRight");
+    await browserExpect(chip).toHaveText("Gemini 3.5 Flash");
+    await range.press("ArrowLeft");
+    await range.press("ArrowLeft");
+    await browserExpect(chip).toHaveText("6 Sol");
     await menu.focus();
     await page.keyboard.press("j");
     await browserExpect(menu).toBeFocused();
-    await browserExpect(label).toHaveText("Test A");
+    await browserExpect(label).toHaveText("GPT-6.2 Sol");
     await browserExpect
       .poll(() => status.ariaSnapshot())
-      .toBe('- status: "Level 5: Test A"');
+      .toBe('- status: "Level 5: GPT-6.2 Sol"');
     await expectVisuallyHidden(status);
     await browserExpect(range).toHaveAttribute(
       "aria-valuetext",
-      "Level 5: Test A",
+      "Level 5: GPT-6.2 Sol",
     );
     await page.keyboard.press("k");
-    await browserExpect(status).toHaveText("Level 4: Test A");
+    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol");
     await page.locator("#input").fill("Use the selected effort level");
     const req = page.waitForRequest(`${base}api/conversations`);
     await page.locator("#send").click();
@@ -1158,9 +1718,9 @@ export const tests: BrowserTest[] = [
     let heldStop: Route | null = null;
     const diagnostics: any[] = [];
     await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({ json: tree() }),
+      route.fulfill({ json: tree("main", "running") }),
     );
-    await mockConversation(page, base, "main", () => running());
+    await mockConversation(page, base, "main", () => runConv());
     await page.route(`${base}api/conversations/main/deliver`, (route) => {
       const body = route.request().postDataJSON();
       posts.push(body);
@@ -1189,9 +1749,8 @@ export const tests: BrowserTest[] = [
     ).toBeTrue();
     expect(posts.length).toBe(0);
     await stop.click();
-    await waitValue(
-      () => posts.length === 1,
-      "Stop request without randomUUID",
+    await pollStop(() => posts.length, "Stop request without randomUUID").toBe(
+      1,
     );
     expect(posts).toHaveLength(1);
     expect(posts[0]).toEqual({
@@ -1215,10 +1774,10 @@ export const tests: BrowserTest[] = [
     expect(await page.locator("#input").isDisabled()).toBeFalse();
     await page.locator("#input").fill("queued after Stop");
     expect(await page.locator("#input").inputValue()).toBe("queued after Stop");
-    await waitValue(
+    await pollStop(
       () => diagnostics.some((row) => row.event === "request_id_fallback"),
       "fallback diagnostics",
-    );
+    ).toBe(true);
     const fallback = diagnostics.filter(
       (row) => row.event === "request_id_fallback",
     );
@@ -1239,10 +1798,10 @@ export const tests: BrowserTest[] = [
     const posts: any[] = [];
     let resolved = "run-old";
     await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({ json: tree() }),
+      route.fulfill({ json: tree("main", "running") }),
     );
     await mockConversation(page, base, "main", () =>
-      running("running", resolved),
+      runConv("running", resolved),
     );
     await page.route(`${base}api/conversations/main/deliver`, (route) => {
       const body = route.request().postDataJSON();
@@ -1269,7 +1828,7 @@ export const tests: BrowserTest[] = [
     );
     resolved = "run-new";
     await stop.click();
-    await waitValue(() => posts.length === 1, "stale-run Stop");
+    await pollStop(() => posts.length, "stale-run Stop").toBe(1);
     expect(posts).toHaveLength(1);
     expect(posts[0].run_id).toBe("run-new");
     await page.waitForFunction(
@@ -1292,9 +1851,9 @@ export const tests: BrowserTest[] = [
     const errors = captureErrors(page);
     const stops: any[] = [];
     const steers: any[] = [];
-    let state = running();
+    let state = runConv();
     await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({ json: tree(state.status) }),
+      route.fulfill({ json: tree("main", state.status) }),
     );
     await mockConversation(page, base, "main", () => state);
     await page.route(`${base}api/conversations/main/deliver`, (route) => {
@@ -1365,7 +1924,7 @@ export const tests: BrowserTest[] = [
         .evaluate((e) => e.classList.contains("armed")),
     ).toBeFalse();
     await send.click();
-    await waitValue(() => steers.length === 1, "working-turn steer");
+    await pollStop(() => steers.length, "working-turn steer").toBe(1);
     expect(steers[0].content).toBe("steer while working");
     expect(stops).toHaveLength(0);
     await page.locator("#input").fill("temporary");
@@ -1385,14 +1944,14 @@ export const tests: BrowserTest[] = [
       { timeout: 5_000 },
     );
     expect(await page.locator("#send.armed").count()).toBe(0);
-    state = running("running", "run-mobile-2");
+    state = runConv("running", "run-mobile-2");
     await stop.waitFor({ timeout: 5_000 });
     await stop.click();
     expect(await stop.getAttribute("aria-label")).toBe(
       "Confirm stop this agent",
     );
     await stop.click();
-    await waitValue(() => stops.length === 1, "confirmed mobile Stop");
+    await pollStop(() => stops.length, "confirmed mobile Stop").toBe(1);
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -1409,16 +1968,16 @@ export const tests: BrowserTest[] = [
     await page.route(`${base}api/tree`, (route) =>
       route.fulfill({
         json: [
-          { ...tree("error")[0], id: "main" },
-          { ...tree("idle")[0], id: "other", title: "Other" },
+          ...tree("main", "error"),
+          { ...tree("other")[0], title: "Other" },
         ],
       }),
     );
     await mockConversation(page, base, "main", () =>
-      running("error", "run-reader-error"),
+      runConv("error", "run-reader-error"),
     );
     await mockConversation(page, base, "other", () => ({
-      ...running("idle", null),
+      ...runConv("idle", null),
       id: "other",
       title: "Other",
     }));
@@ -1464,7 +2023,7 @@ export const tests: BrowserTest[] = [
       "q again to interrupt",
     );
     await page.keyboard.press("q");
-    await waitValue(() => stops.length === 1, "errored-run keyboard Stop");
+    await pollStop(() => stops.length, "errored-run keyboard Stop").toBe(1);
     expect(stops[0].run_id).toBe("run-reader-error");
     expect(errors).toEqual([]);
     await context.close();

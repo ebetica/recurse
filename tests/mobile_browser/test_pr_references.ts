@@ -1,20 +1,38 @@
 import { expect } from "bun:test";
 import type { Browser, Page } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { postFixture, runBrowserTests, type BrowserTest } from "./common";
 
 export const tests: BrowserTest[] = [
+  // Regression: #3570 Messages render while the GitHub link lookup is blocked.
   async function test_pr_references(browser, base) {
-    const { checkout, plain } = await postFixture(base, "seed-pr-references");
+    const { checkout, plain, started, release } = await postFixture(
+      base,
+      "seed-pr-references",
+    );
     for (const width of [1280, 390]) {
       const page = await browser.newPage({
         viewport: { width, height: 844 },
         isMobile: width === 390,
         hasTouch: width === 390,
       });
-      await page.goto(`${base}#agent=${checkout}`);
       const links = page.locator('.msg.assistant a[href*="/pull/"]');
+      try {
+        await page.goto(`${base}#agent=${checkout}`);
+        if (width === 1280) {
+          await browserExpect.poll(() => Bun.file(started).exists()).toBe(true);
+          await browserExpect(
+            page.locator(".msg.assistant .content", {
+              hasText: "Review #42 from pr-checkout",
+            }),
+          ).toBeVisible();
+          expect(await links.count()).toBe(0);
+        }
+      } finally {
+        await writeFile(release, "");
+      }
       await links.first().waitFor();
       expect(
         await links.evaluateAll((nodes) =>

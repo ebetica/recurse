@@ -47,6 +47,17 @@ export function treeLinkUrl(href: string, roots: string[]): string {
   return url.href;
 }
 
+/** Opens the Artifact in its owning conversation without sharing view state. */
+export function artifactLinkUrl(
+  href: string,
+  agent: string,
+  artifact: string,
+): string {
+  const url = new URL(href);
+  url.hash = new URLSearchParams({ agent, artifact }).toString();
+  return url.href;
+}
+
 interface AgentLinkRead {
   /** Whether the fragment carries an `agent` parameter at all. */
   present: boolean;

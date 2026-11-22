@@ -9,6 +9,8 @@ storage does not import either one or the instance that wires them together.
 work to [agent_store.worker.ts](agent_store.worker.ts);
 [conversation_store.ts](conversation_store.ts) serializes metadata changes and
 publishes the in-memory projection;
+[service_bindings.ts](service_bindings.ts) stores service ownership and external
+keys in separate files and checks targets through the live projection;
 [conversation_model_choices.ts](conversation_model_choices.ts) freezes existing
 model choices in a recorded startup pass.
 

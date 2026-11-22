@@ -1,9 +1,27 @@
 import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import { captureErrors, postFixture, type BrowserTest } from "./common";
+import recordedThinking from "./fixtures/thinking-stream.json";
+
+function withThinkingCleanup(
+  test: BrowserTest,
+  agent = "durable-thinking",
+): BrowserTest {
+  const wrapped: BrowserTest = async (...args) => {
+    try {
+      await test(...args);
+    } finally {
+      await postFixture(args[1], "durable-thinking-cleanup", { agent });
+    }
+  };
+  Object.defineProperty(wrapped, "name", { value: test.name });
+  return wrapped;
+}
+
+const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
 
 // Regression: #3518 keep the latest thought and its disclosure through tools, replies and the end of a run.
-export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
+const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
   browser,
   base,
 ) => {
@@ -64,20 +82,10 @@ export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
             );
           };
           const expectDisclosure = (expanded: boolean) =>
-            browserExpect
-              .poll(() =>
-                disclosure.evaluate((button) => {
-                  const bounds = button
-                    .querySelector(".disclosure-caret path")
-                    ?.getBoundingClientRect();
-                  if (!bounds?.width || !bounds.height) return null;
-                  return [
-                    button.getAttribute("aria-expanded"),
-                    bounds.width > bounds.height,
-                  ];
-                }),
-              )
-              .toEqual([String(expanded), expanded]);
+            browserExpect(disclosure).toHaveAttribute(
+              "aria-expanded",
+              String(expanded),
+            );
           const prose =
             "I am waiting for the command to finish before checking its result.";
           const title = thinking.startsWith("chatgpt")
@@ -137,7 +145,16 @@ export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
           await screenshot("expanded");
           const openThread = async () => {
             await page.locator(".activity-group-toggle").first().click();
-            await page.locator(".turn-series-toggle").first().click();
+            const commands = page.locator(".turn-series-toggle").first();
+            await browserExpect(commands).toHaveAttribute(
+              "aria-expanded",
+              "false",
+            );
+            await browserExpect(thought).toHaveText(/^Thought for \d+s · /, {
+              useInnerText: true,
+            });
+            await commands.click();
+            await browserExpect(thought).toHaveCount(1);
           };
           await openThread();
           await expectThreadOpen();
@@ -215,7 +232,17 @@ export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
             await openThread();
             await expectSameThought();
           }
+          if (width === 390) {
+            await disclosure.tap();
+            await expectDisclosure(false);
+          }
           await release("thinking-content");
+          if (width === 390) {
+            await expectTitle("Reviewing the command result");
+            await expectDisclosure(false);
+            await browserExpect(summary).toHaveCount(0);
+            await disclosure.tap();
+          }
           const expectNewThought = async () => {
             await expectTitle("Reviewing the command result");
             await browserExpect(summary).toHaveText(
@@ -288,7 +315,7 @@ export const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
 };
 
 // Regression: #3536 a committed unreadable-only thought shows Waiting, even after reload.
-export const test_unreadable_thinking_waits_after_commit_and_reload: BrowserTest =
+const test_unreadable_thinking_waits_after_commit_and_reload: BrowserTest =
   async (browser, base) => {
     const { agent } = await postFixture(base, "seed-live-thinking-idle", {
       redacted: true,
@@ -322,3 +349,266 @@ export const test_unreadable_thinking_waits_after_commit_and_reload: BrowserTest
       }
     }
   };
+
+export const tests: BrowserTest[] = [
+  withThinkingCleanup(
+    // Regression: #2274 thinking stays readable across tool commit (also #2357 expanded thinking remains whole in page flow.; #2357 collapsed handover must fetch stored prose, not keep reading offset=-1.; #2357 expanded groups must not duplicate running summaries.)
+    async function test_running_thought_loads_and_survives_its_commit(
+      browser,
+      base,
+    ) {
+      const { agent } = await postFixture(base, "seed-durable-thinking");
+      const page = await browser.newPage({
+        viewport: { width: 412, height: 915 },
+        isMobile: true,
+        hasTouch: true,
+      });
+      const errors = captureErrors(page);
+      const offsets: number[] = [];
+      page.on("request", (request) => {
+        if (request.url().includes(`/api/conversations/${agent}/thinking?`))
+          offsets.push(
+            Number(new URL(request.url()).searchParams.get("offset")),
+          );
+      });
+      const storedRead = page
+        .waitForResponse(
+          (response) =>
+            response.url().includes(`/api/conversations/${agent}/thinking?`) &&
+            Number(new URL(response.url()).searchParams.get("offset")) >= 0,
+          { timeout: 30_000 },
+        )
+        .then(
+          () => true,
+          () => false,
+        );
+      const samples: {
+        state: string;
+        thoughts: number;
+        running: number;
+        completed: number;
+      }[] = [];
+      const sample = async (state: string) => {
+        if (shots)
+          await page.screenshot({ path: `${shots}/dedupe-${state}.png` });
+        const text = recordedThinking.thinking.replace(/\s+/g, " ").trim();
+        const bodies = await page
+          .locator(".turn-thinking-body, .live-thinking-summary")
+          .allInnerTexts();
+        const summaries = await page
+          .locator(
+            ".activity-group-summary .turn-summary, .turn-series-toggle, .live-thinking-title",
+          )
+          .allInnerTexts();
+        samples.push({
+          state,
+          thoughts: bodies.filter(
+            (body) => body.replace(/\s+/g, " ").trim() === text,
+          ).length,
+          running: summaries.filter((line) => /\bRunning\b/.test(line)).length,
+          completed: summaries.filter((line) =>
+            /\bRan \d+ commands?\b/.test(line),
+          ).length,
+        });
+      };
+      const openGroup = async () => {
+        await page.locator(".activity-group-toggle").first().click();
+        await page.locator(".activity-group.open").first().waitFor();
+        await page.locator(".turn-series-toggle").first().waitFor();
+        for (const toggle of await page
+          .locator('.turn-series-toggle[aria-expanded="false"]')
+          .all())
+          await toggle.click();
+        for (const toggle of await page
+          .locator('.turn-thinking-toggle[aria-expanded="false"]')
+          .all())
+          await toggle.click();
+        await page.waitForFunction(
+          (text) =>
+            Array.from(
+              document.querySelectorAll(
+                '.turn-thinking-toggle[aria-expanded="true"]',
+              ),
+            ).every(
+              (toggle: any) =>
+                (
+                  document.getElementById(toggle.getAttribute("aria-controls"))
+                    ?.innerText ?? ""
+                )
+                  .replace(/\s+/g, " ")
+                  .trim() === text,
+            ),
+          recordedThinking.thinking.replace(/\s+/g, " ").trim(),
+        );
+      };
+      await page.goto(`${base}#agent=${agent}`);
+      await page
+        .locator("#input")
+        .fill("Replay the recorded streaming thought.");
+      await page.locator("#send").click();
+      await openGroup();
+      for (const toggle of await page
+        .locator('.live-thinking-copy[aria-expanded="false"]')
+        .all())
+        await toggle.click();
+      expect(offsets).toContain(-1);
+      const liveText = await page.request.get(
+        `${base}api/conversations/${agent}/thinking?offset=-1`,
+      );
+      expect(await liveText.json()).toEqual({
+        text: recordedThinking.thinking,
+        live: true,
+      });
+      const summary = page.locator(".live-thinking-summary");
+      expect(
+        await page
+          .locator(".turn-tool")
+          .first()
+          .getAttribute("data-message-offset"),
+      ).toBe("-1");
+      await page.locator(".activity-group-hide").first().click();
+      await page.waitForFunction(
+        (text) =>
+          document
+            .querySelector<HTMLElement>(".live-thinking-summary")
+            ?.innerText.replace(/\s+/g, " ")
+            .trim() === text,
+        recordedThinking.thinking.replace(/\s+/g, " ").trim(),
+      );
+      await sample("collapsed-live");
+      await openGroup();
+      await sample("expanded-live");
+      await page.locator(".activity-group-hide").first().click();
+      const readsBeforeCommit = offsets.length;
+      await postFixture(base, "release", { agent, gate: "commit" });
+      await page
+        .locator(".activity-group-summary .turn-summary")
+        .filter({ hasText: /\bRunning\b/ })
+        .first()
+        .waitFor();
+      await page.evaluate(
+        () =>
+          new Promise<void>((resolve) =>
+            (globalThis as any).requestAnimationFrame(() => resolve()),
+          ),
+      );
+      const storedReadWhileCollapsed = offsets
+        .slice(readsBeforeCommit)
+        .some((offset) => offset >= 0);
+      for (const toggle of await page
+        .locator('.live-thinking-copy[aria-expanded="false"]')
+        .all())
+        await toggle.click();
+      await summary
+        .getByText("Now running the sample command.", { exact: false })
+        .waitFor();
+      await sample("collapsed-committed");
+      if (shots)
+        await page.screenshot({ path: `${shots}/thinking-expanded.png` });
+      expect((await summary.innerText()).trim()).toBe(
+        recordedThinking.thinking.trim(),
+      );
+      expect(
+        await summary.evaluate(
+          (node) => node.scrollHeight - node.clientHeight - node.scrollTop,
+        ),
+      ).toBeLessThanOrEqual(1);
+      await openGroup();
+      await page.waitForFunction(
+        () =>
+          Array.from(
+            document.querySelectorAll(".turn-tool[data-message-offset]"),
+          ).some((node: any) => Number(node.dataset.messageOffset) >= 0),
+        undefined,
+        { timeout: 30_000 },
+      );
+      expect(await storedRead).toBeTrue();
+      expect(offsets.some((offset) => offset >= 0)).toBeTrue();
+      const storedText = await page.request.get(
+        `${base}api/conversations/${agent}/thinking?offset=${offsets.find((offset) => offset >= 0)}`,
+      );
+      expect(await storedText.json()).toEqual({
+        text: recordedThinking.thinking,
+        live: false,
+      });
+      const thought = page.locator(".turn-thinking-toggle").first();
+      const body = page.locator(".turn-thinking-body").first();
+      await body
+        .getByText("Now running the sample command.", { exact: false })
+        .waitFor();
+      for (const toggle of await page
+        .locator('.live-thinking-copy[aria-expanded="false"]')
+        .all())
+        await toggle.click();
+      await summary
+        .getByText("Now running the sample command.", { exact: false })
+        .waitFor();
+      await sample("expanded-committed");
+      expect(storedReadWhileCollapsed).toBeTrue();
+      expect(samples).toEqual([
+        { state: "collapsed-live", thoughts: 1, running: 0, completed: 0 },
+        { state: "expanded-live", thoughts: 1, running: 0, completed: 0 },
+        { state: "collapsed-committed", thoughts: 1, running: 1, completed: 0 },
+        { state: "expanded-committed", thoughts: 2, running: 1, completed: 0 },
+      ]);
+      expect(await thought.getAttribute("aria-expanded")).toBe("true");
+      expect((await body.innerText()).trim()).toBe(
+        recordedThinking.thinking.replace(/\s+/g, " "),
+      );
+      expect((await summary.innerText()).trim()).toBe(
+        recordedThinking.thinking.trim(),
+      );
+      expect(await page.locator("#conv-status.running").count()).toBe(1);
+      await postFixture(base, "release", { agent, gate: "reply" });
+      const secondThought = page.locator(".turn-thinking-toggle").nth(1);
+      await secondThought.waitFor();
+      expect(await thought.getAttribute("aria-expanded")).toBe("true");
+      expect(await secondThought.getAttribute("aria-expanded")).toBe("false");
+      await page
+        .getByText("Thinking stream finished.", { exact: true })
+        .waitFor();
+      await page.locator("#conv-status.running").waitFor({ state: "detached" });
+      const stopped = await page.request.post(
+        `${base}api/conversations/${agent}/deliver`,
+        { data: {} },
+      );
+      expect(stopped.ok()).toBeTrue();
+      expect(errors).toEqual([]);
+      await page.close();
+    },
+  ),
+
+  // Regression: #2423 a failed thinking case must not leave a working agent for the next case.
+  async function test_failed_thinking_case_leaves_no_working_agent(
+    browser,
+    base,
+    data,
+    serverPid,
+  ) {
+    const page = await browser.newPage();
+    const failing = withThinkingCleanup(async () => {
+      await postFixture(base, "seed-durable-thinking", {
+        agent: "durable-thinking-failure",
+      });
+      await page.goto(`${base}#agent=durable-thinking-failure`);
+      await page
+        .locator("#input")
+        .fill("Replay the recorded streaming thought.");
+      await page.locator("#send").click();
+      await page.locator(".working.live-panel").waitFor();
+      throw new Error("deliberate thinking assertion failure");
+    }, "durable-thinking-failure");
+    await expect(failing(browser, base, data, serverPid)).rejects.toThrow(
+      "deliberate thinking assertion failure",
+    );
+    await page.reload();
+    await page.waitForFunction(
+      () => !document.querySelector(".working"),
+      undefined,
+      { timeout: 8_000 },
+    );
+    await page.close();
+  },
+  test_last_thinking_survives_wait_and_reload,
+  test_unreadable_thinking_waits_after_commit_and_reload,
+];

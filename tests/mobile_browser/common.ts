@@ -12,11 +12,12 @@ import { createInterface } from "node:readline";
 import { Readable } from "node:stream";
 import { retire } from "../../src/utils/trash";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   chromium,
   type Browser,
   type BrowserContext,
+  type BrowserContextOptions,
   type Locator,
   type Page,
   type Route,
@@ -60,24 +61,77 @@ export type BrowserTest = (
   serverPid: number,
 ) => Promise<void>;
 
-export async function expectHitCorners(control: Locator, size = 44) {
+export async function checkedHitPoint(
+  control: Locator,
+  offset?: { x: number; y: number },
+) {
   await control.scrollIntoViewIfNeeded();
-  expect(
-    await control.evaluate((el, size) => {
+  const { x, y, hit } = await control.evaluate((el, offset) => {
+    const box = el.getBoundingClientRect();
+    const x = box.left + (offset?.x ?? box.width / 2);
+    const y = box.top + (offset?.y ?? box.height / 2);
+    return { x, y, hit: el.contains(el.ownerDocument.elementFromPoint(x, y)) };
+  }, offset);
+  expect(hit, `hit ${control} at (${x}, ${y})`).toBe(true);
+  return { x, y };
+}
+
+export async function checkedTap(
+  control: Locator,
+  offset?: { x: number; y: number },
+) {
+  const { x, y } = await checkedHitPoint(control, offset);
+  await control.page().touchscreen.tap(x, y);
+}
+
+export async function expectHitCorners(
+  control: Locator,
+  size = 44,
+  {
+    label = String(control),
+    scroll = true,
+    horizontalInset,
+    centerOnHitArea = false,
+    exact = false,
+  }: {
+    label?: string;
+    scroll?: boolean;
+    horizontalInset?: number;
+    centerOnHitArea?: boolean;
+    exact?: boolean;
+  } = {},
+) {
+  if (scroll) await control.scrollIntoViewIfNeeded();
+  const hits = await control.evaluate(
+    (el, { size, horizontalInset, centerOnHitArea, exact }) => {
       const r = el.getBoundingClientRect();
       const offset = (size - 2) / 2;
-      return [-offset, offset].every((x) =>
-        [-offset, offset].every((y) =>
-          el.contains(
-            el.ownerDocument.elementFromPoint(
-              r.left + r.width / 2 + x,
-              r.top + r.height / 2 + y,
-            ),
-          ),
-        ),
+      const centerX = r.left + r.width / 2;
+      const centerY = r.top + r.height / 2;
+      const hitAt = (x: number, y: number) => {
+        const hit = el.ownerDocument.elementFromPoint(x, y);
+        return exact ? hit === el : el.contains(hit);
+      };
+      let targetY = centerY;
+      if (centerOnHitArea) {
+        if (!hitAt(centerX, centerY)) return [false, false, false, false];
+        let top = centerY;
+        let bottom = centerY;
+        while (top > centerY - size && hitAt(centerX, top - 1)) top--;
+        while (bottom < centerY + size && hitAt(centerX, bottom + 1)) bottom++;
+        targetY = (top + bottom) / 2;
+      }
+      const xs =
+        horizontalInset === undefined
+          ? [centerX - offset, centerX + offset]
+          : [r.left + horizontalInset, r.right - horizontalInset];
+      return xs.flatMap((x) =>
+        [-offset, offset].map((y) => hitAt(x, targetY + y)),
       );
-    }, size),
-  ).toBe(true);
+    },
+    { size, horizontalInset, centerOnHitArea, exact },
+  );
+  expect(hits, label).toEqual([true, true, true, true]);
 }
 
 export async function themeColors(page: Page, ...colors: string[]) {
@@ -252,13 +306,25 @@ async function logIn(base: string, deadline: number): Promise<string> {
   return cookie;
 }
 
-export async function startServer(
-  options: { auth?: boolean; sourceRoot?: string } = {},
-): Promise<{
+type BrowserServer = {
   process: any;
   base: string;
   data: string;
-}> {
+  root: string;
+  cookie: string | undefined;
+};
+
+export function startServer(options: {
+  auth: true;
+  sourceRoot?: string;
+}): Promise<BrowserServer & { cookie: string }>;
+export function startServer(options?: {
+  auth?: boolean;
+  sourceRoot?: string;
+}): Promise<BrowserServer>;
+export async function startServer(
+  options: { auth?: boolean; sourceRoot?: string } = {},
+): Promise<BrowserServer> {
   browserProgress("server-prepare");
   if (!options.auth) rootId = undefined;
   const data = await mkdtemp(join(tmpdir(), "recurse-browser-"));
@@ -400,8 +466,8 @@ export async function startServer(
     const listeningMs = Date.now() - (deadline - 30_000);
     const base = `http://127.0.0.1:${port}/`;
     browserProgress(`server-ready pid=${child.pid}`);
-    const headers: Record<string, string> = {};
-    if (options.auth) headers.cookie = await logIn(base, deadline);
+    const cookie = options.auth ? await logIn(base, deadline) : undefined;
+    const headers: Record<string, string> = cookie ? { cookie } : {};
     await waitReady(base, deadline, headers);
     console.log(
       `Server startup: ${JSON.stringify({ group: coverageGroup, pid: child.pid, listening_ms: listeningMs, ready_ms: Date.now() - (deadline - 30_000) })}`,
@@ -419,7 +485,7 @@ export async function startServer(
     }
     if (!root) throw new Error("browser test server returned no root agent");
     if (!options.auth) rootId = ARTIFACT.owner_agent_id = root;
-    return { process: child, base, data };
+    return { process: child, base, data, root, cookie };
   } catch (error) {
     await stopServer({ process: child, data });
     await Promise.allSettled(readers);
@@ -430,6 +496,21 @@ export async function startServer(
   } finally {
     clearTimeout(timer);
   }
+}
+
+export function addServerCookie(
+  context: BrowserContext,
+  server: { base: string; cookie: string },
+): Promise<void> {
+  return context.addCookies([
+    {
+      name: "chat_auth",
+      value: server.cookie.slice("chat_auth=".length),
+      url: server.base,
+      httpOnly: true,
+      sameSite: "Lax",
+    },
+  ]);
 }
 
 export async function stopServer(server: {
@@ -627,6 +708,36 @@ export function captureErrors(page: Page): string[] {
       errors.push(message.text());
   });
   return errors;
+}
+
+export async function openPage(
+  browser: Browser,
+  { touch, ...options }: BrowserContextOptions & { touch?: boolean } = {},
+) {
+  const context = await browser.newContext({
+    ...(touch === undefined ? {} : { isMobile: touch, hasTouch: touch }),
+    ...options,
+  });
+  try {
+    const page = await context.newPage();
+    return { context, page, errors: captureErrors(page) };
+  } catch (error) {
+    await context.close().catch((cleanupError) => {
+      console.error(
+        "Browser context cleanup after page setup failed",
+        cleanupError,
+      );
+    });
+    throw error;
+  }
+}
+
+export async function screenshot(page: Page, name: string): Promise<void> {
+  const directory = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+  if (!directory) return;
+  const path = join(directory, `${name}.png`);
+  await mkdir(dirname(path), { recursive: true });
+  await page.screenshot({ path });
 }
 
 export async function recordJumpHighlight(
@@ -900,6 +1011,11 @@ export async function routeArtifacts(
   });
 }
 
+export async function focusComposer(page: Page): Promise<void> {
+  await waitForLayout(page);
+  await page.locator("#input:enabled").focus();
+}
+
 export async function visibleAndUncovered(
   page: Page,
   selector: string,
@@ -959,7 +1075,7 @@ export async function postFixture(
   return response.json();
 }
 
-export const TURN_TOTAL_USAGE = {
+export const TURN_TOTAL_USAGE = Object.freeze({
   output: 75,
   input: 300,
   cacheRead: 1_900,
@@ -967,7 +1083,7 @@ export const TURN_TOTAL_USAGE = {
   calls: 2,
   replies: 2,
   partial: false,
-};
+});
 
 export function summary(counts: Record<string, any> = {}): any {
   return {
@@ -991,16 +1107,29 @@ export function turn(
   turnId: string,
   ask: string,
   reply: string,
-  options: { tools?: any[]; cursor?: number; summary?: any } = {},
+  options: {
+    tools?: any[];
+    cursor?: number;
+    summary?: any;
+    includeRows?: boolean;
+    rowIds?: { user: string; assistant: string };
+    usage?: Record<string, number> | null;
+  } = {},
 ): any {
   const tools = options.tools ?? [];
   const cursor = options.cursor ?? 0;
+  const { rowIds } = options;
+  const usage =
+    options.usage === undefined
+      ? { input: 120, output: 40, cacheRead: 900, cacheWrite: 60 }
+      : options.usage;
   const sum =
     options.summary ?? summary({ tools: tools.length, shell: tools.length });
   const segments = [
     {
       user: [
         {
+          ...(rowIds && { id: rowIds.user }),
           kind: "user",
           offset: cursor + 10,
           role: "user",
@@ -1010,16 +1139,17 @@ export function turn(
       ],
       tools,
       assistant: {
+        ...(rowIds && { id: rowIds.assistant }),
         kind: "assistant",
         offset: cursor + 90,
         role: "assistant",
         content: reply,
-        usage: { input: 120, output: 40, cacheRead: 900, cacheWrite: 60 },
+        usage,
       },
       summary: sum,
     },
   ];
-  return {
+  const value = {
     turn_id: turnId,
     cursor,
     started_at: 1,
@@ -1029,9 +1159,13 @@ export function turn(
     summary: sum,
     partial: false,
     segments,
+  };
+  if (options.includeRows === false) return value;
+  return {
+    ...value,
     rows: [
       {
-        id: `${turnId}:u0`,
+        id: rowIds?.user ?? `${turnId}:u0`,
         kind: "text",
         role: "user",
         origin: "operator",
@@ -1052,12 +1186,12 @@ export function turn(
         live: false,
       })),
       {
-        id: `${turnId}:a0`,
+        id: rowIds?.assistant ?? `${turnId}:a0`,
         kind: "text",
         role: "assistant",
         origin: "assistant",
         text: reply,
-        usage: { input: 120, output: 40, cacheRead: 900, cacheWrite: 60 },
+        usage: usage && { ...usage },
         live: false,
       },
     ],
@@ -1255,6 +1389,10 @@ export async function runBrowserTests(
           browser = await chromium.launch({
             timeout: 30_000,
             headless: true,
+            ignoreDefaultArgs:
+              label === "live-tools" || label === "thinking"
+                ? ["--hide-scrollbars"]
+                : undefined,
             handleSIGINT: false,
             handleSIGTERM: false,
           });

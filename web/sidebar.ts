@@ -3,7 +3,7 @@
 // Rename/swipe freeze repaint until done; accepted deletes fence older reads.
 // Rows keep title, badges and time on one line; models stay in the composer.
 import { sharedTrees, reloadChangedTreeLink } from "./shared-trees.js";
-import { copyText } from "./tool_details.js";
+import { copyLink } from "./tool_details.js";
 import { remoteSectionHeader } from "./backends/discovery/index.js";
 import { treeFor, treeOf } from "./backends/tree.js";
 import { backendFor, backends } from "./backends/backend.js";
@@ -22,8 +22,6 @@ import {
   embedded,
 } from "./state.js";
 import { $, listEl, titleEl, inputEl } from "./dom.js";
-import { focusAgentTree } from "./sidebar/focus.js";
-export { focusAgentTree, restoreAgentFocus } from "./sidebar/focus.js";
 import {
   MESSAGE_ICON,
   NEW_ICON,
@@ -49,6 +47,7 @@ import { beginPaneVisit, syncPanes } from "./panes.js";
 import { openArtifactLink } from "./artifacts/pane.js";
 import { guardLeaveComments } from "./comments.js";
 import {
+  deferImageVisitSelectionHistory,
   phoneNavigation,
   phoneListEntry,
   syncPhoneSelection,
@@ -88,28 +87,32 @@ import {
   type TreeRelationship,
 } from "./tree_projection.js";
 import { canDrop } from "./reparent.js";
-import { initAgentDrag, isDraggingAgent } from "./sidebar/drag.js";
 import type { TreeNode } from "./types.js";
 import type { Action, Section } from "../src/sidebar_script/index.js";
 import {
   SIDEBAR_CHANGE,
-  refreshSidebarTree,
-  shownTags,
-  startDraft,
-} from "./sidebar/index.js";
-import * as folds from "./sidebar/agent-folds.js";
-import { holdOpen, moveHold, openHold, releaseHold } from "./sidebar/hold.js";
-import {
   arrange,
+  collapsedAgent,
+  focusAgentTree,
+  foldAgent,
+  foldedAgents,
+  initAgentDrag,
+  initRowTouch,
+  isDraggingAgent,
   isFolded,
+  keptOpen,
+  keepSubagentsOpen,
+  noteSelection,
+  refreshSidebarTree,
   rowActions,
   rowButtons,
-  rowHoldItems,
+  sectionForBackend,
   sectionHeader,
   sectionKey,
-  sectionHoldItems,
-  sectionForBackend,
-} from "./sidebar/sections.js";
+  shownTags,
+  startDraft,
+  unfoldAgent,
+} from "./sidebar/index.js";
 
 interface TreeEntry {
   n?: TreeNode;
@@ -145,8 +148,6 @@ const RELATIONSHIP_DESCRIPTION: Record<TreeRelationship, string> = {
   sibling: "Sibling agent",
   child: "Child agent",
 };
-
-const isArmed = (): boolean => deleteArmed;
 
 // Frozen ranks prevent jumping; hourly resorts put newly born agents first.
 let sortRank: Record<string, number> = {};
@@ -196,8 +197,8 @@ function visibleTree(): TreeEntry[] {
           stableOrder(Object.values(state.nodes)),
           state.selectedId,
           {
-            collapsed: folds.foldedAgents(),
-            expanded: folds.keptOpen,
+            collapsed: foldedAgents(),
+            expanded: keptOpen,
             autoCollapseDepth: DEFAULT_FOLD_DEPTH,
           },
         ).map((e) => ({
@@ -243,8 +244,8 @@ function sectioned(): TreeEntry[] {
     ),
     state.selectedId,
     {
-      collapsed: folds.foldedAgents(),
-      expanded: folds.keptOpen,
+      collapsed: foldedAgents(),
+      expanded: keptOpen,
       autoCollapseDepth: DEFAULT_FOLD_DEPTH,
     },
   )) {
@@ -344,14 +345,12 @@ function announceNode(n: TreeNode, action: string): void {
     status,
     n.queued ? queuedDescription(n.queued) : "",
   ].filter(Boolean);
-  // Invariant: Reset first so moving away and back to the same row is announced
-  // again.
-  treeAnnouncer.textContent = "";
-  treeAnnouncer.textContent = details.join(". ");
+  announce(details.join(". "));
 }
 
-// Speak a one-off drag-move outcome into the same live region.
-function announceMove(text: string): void {
+function announce(text: string): void {
+  // Invariant: Reset first so moving away and back to the same row is announced
+  // again.
   treeAnnouncer.textContent = "";
   treeAnnouncer.textContent = text;
 }
@@ -420,10 +419,7 @@ function rowT(
     (!open && n.id === state.cursorId ? " cursor" : "") +
     (!open && deleteArmed && n.id === state.cursorId ? " armed" : "");
   const onClick = () => {
-    if (touchActionHandled) {
-      touchActionHandled = false;
-      return;
-    }
+    if (rowTouch.takeTap()) return;
     if (n.id !== state.selectedId && !guardLeaveComments()) return;
     state.cursorId = n.id;
     selectAgent(n.id);
@@ -521,7 +517,7 @@ export function activeAgentRowT(
 export function renderSidebar(): void {
   // Invariant: Repainting during imperative rename/swipe would destroy input or
   // overwrite live gesture classes. Freeze until the interaction completes.
-  if (renaming || (swipe && swipe.active) || isDraggingAgent()) return;
+  if (renaming || rowTouch.active() || isDraggingAgent()) return;
   if (
     !state.nodes[state.cursorId] &&
     state.nodes[state.selectedId] &&
@@ -656,7 +652,7 @@ export function selectAgent(
   // below, while draft promotion transfers both views to the newly created
   // conversation.
   state.draft = null;
-  folds.noteSelection(id);
+  noteSelection(id);
   state.selectedId = id;
   state.cursorId = id;
   if (outgoing === DRAFT && preserveAttachments) promoteComposerOwner(id);
@@ -667,9 +663,8 @@ export function selectAgent(
   // Invariant: Cancel departed work before registering the new visit's probes.
   // Re-selecting the same conversation keeps still-relevant work.
   if (id !== outgoing) abandonBackgroundWarming();
-  // Invariant: Retarget panels at selection before any cold/failed fetch.
-  // Withhold mismatched currentConv; render panels only after their thread data
-  // so prior-agent controls and late responses never act on a new selection.
+  // End the old pane visit before the focused read. The new grid can paint
+  // immediately, but its panes never receive the previous agent's data.
   beginPaneVisit(id);
   // Invariant: Only a navigation that will read this conversation is an
   // interaction worth timing. Reclaiming a deleted selection passes
@@ -693,9 +688,8 @@ export function selectAgent(
   // this conversation and must never dim or become inert.
   if (id !== DRAFT) showSelectedConversation(id, preserveAttachments);
   preloadSkills();
-  // Invariant: Start the focused read BEFORE rendering the panels. It holds the
-  // background queue for its whole flight, so a closed panel's availability
-  // probe is queued behind it instead of taking a connection ahead of it.
+  // Dispatch the focused read before mounting saved panes. Its hold keeps
+  // closed-pane probes from taking a connection ahead of the focused read.
   if (refetch) refreshConv();
   syncPanes();
   renderSidebar();
@@ -731,6 +725,12 @@ function currentHistoryView(): HistoryView {
 }
 
 export function syncHistoryToSelection(): void {
+  const correction = correctingHistory;
+  if (!deferImageVisitSelectionHistory(() => writeSelectionHistory(correction)))
+    writeSelectionHistory(correction);
+}
+
+function writeSelectionHistory(correctingHistory: boolean): void {
   const next = currentHistoryView();
   const url = agentLinkUrl(location.href, next.agent, correctingHistory);
   if (syncPhoneSelection(next, url, correctingHistory)) return;
@@ -869,31 +869,27 @@ export function treeAscendOrCollapse(): void {
     state.cursorId,
     anchor,
     anchorHasChildren(anchor),
-    folds.collapsedAgent() === anchor,
+    collapsedAgent() === anchor,
   );
   if (action === "collapse") {
-    folds.foldAgent(anchor);
+    foldAgent(anchor);
     renderSidebar();
     if (state.nodes[anchor])
       announceNode(state.nodes[anchor], "Collapsed subagents");
     return;
   }
-  const up = currentParent();
-  if (up && guardLeaveComments()) selectAgent(up);
+  goUp();
 }
 
 export function treeExpandIfCollapsed(): boolean {
   const anchor = anchorId();
   if (
-    resolveLAction(
-      state.cursorId,
-      anchor,
-      folds.collapsedAgent() === anchor,
-    ) !== "expand"
+    resolveLAction(state.cursorId, anchor, collapsedAgent() === anchor) !==
+    "expand"
   )
     return false;
-  folds.unfoldAgent();
-  folds.keepSubagentsOpen(anchor);
+  unfoldAgent();
+  keepSubagentsOpen(anchor);
   renderSidebar();
   if (state.nodes[anchor])
     announceNode(state.nodes[anchor], "Expanded subagents");
@@ -1169,7 +1165,7 @@ function killAgent(dying: string | null | undefined): void {
         settleRemovalSelection();
         pendingDeletes.delete(dying);
         const title = op.removedNodes[dying]?.title || "agent";
-        announceMove(`Deleting ${title}: the backend is removing it`);
+        announce(`Deleting ${title}: the backend is removing it`);
         renderSidebar();
         return;
       }
@@ -1192,7 +1188,7 @@ function killAgent(dying: string | null | undefined): void {
       // inspectability.
       const reason = error instanceof DeleteRefused ? error.message : "";
       const title = op.removedNodes[dying]?.title || "agent";
-      announceMove(`Deleting ${title} failed${reason ? ": " + reason : ""}`);
+      announce(`Deleting ${title} failed${reason ? ": " + reason : ""}`);
       requestUiStatus("Delete failed");
       // Invariant: Restore only this operation's nodes, then reapply any
       // overlapping/newer tombstones. A failed request never changes the
@@ -1253,7 +1249,7 @@ function reparentAgent(source: string, target: string | null): void {
   pendingReparents.set(source, op);
   node.parent = target;
   selectAgent(source);
-  announceMove(
+  announce(
     targetTitle
       ? `Moved ${node.title} under ${targetTitle}`
       : `Moved ${node.title} to top level`,
@@ -1268,14 +1264,13 @@ function reparentAgent(source: string, target: string | null): void {
     .catch(() => {
       pendingReparents.delete(source);
       if (state.nodes[source]) state.nodes[source].parent = from;
-      announceMove(`Move of ${node.title} was rejected`);
+      announce(`Move of ${node.title} was rejected`);
       renderSidebar();
     })
     .finally(() => refreshSidebarTree());
 }
 
 const shareBtn = $<HTMLButtonElement>("#share-link-btn")!;
-let shareNoticeTimer = 0;
 shareBtn.onclick = async () => {
   let node = state.nodes[state.selectedId];
   if (!node) return;
@@ -1284,14 +1279,10 @@ shareBtn.onclick = async () => {
     seen.add(node.id);
     node = state.nodes[node.parent];
   }
-  const copied = await copyText(treeLinkUrl(location.href, [node.id]));
-  const notice = $("#share-link-status")!;
-  notice.textContent = copied ? "Link copied" : "Could not copy link";
-  notice.hidden = false;
-  clearTimeout(shareNoticeTimer);
-  shareNoticeTimer = window.setTimeout(() => {
-    notice.hidden = true;
-  }, 1800);
+  await copyLink(
+    treeLinkUrl(location.href, [node.id]),
+    $("#share-link-status")!,
+  );
 };
 
 // ---------------- up-to-parent button (visible twin of the phone back button)
@@ -1306,7 +1297,7 @@ const trashHold = attachHoldTip(trashBtn, document, {
     trashBtn.closest("#pane-menu")
       ? null
       : trashBtn.classList.contains("on")
-        ? isArmed()
+        ? deleteArmed
           ? "Tap again to delete this agent and all its descendants"
           : "Delete this agent and all its descendants"
         : null,
@@ -1319,7 +1310,7 @@ const trashHold = attachHoldTip(trashBtn, document, {
 });
 trashBtn.onclick = () => {
   if (trashHold.takeHoldConsumed()) return;
-  if (isArmed() && state.cursorId === state.selectedId) {
+  if (deleteArmed && state.cursorId === state.selectedId) {
     disarmDelete();
     killAgent(state.selectedId);
   } else {
@@ -1350,9 +1341,6 @@ export function refreshUpBtn(authoritativeTree = false): void {
 // The phone list is a screen, not a dismissible drawer.
 const sidebar = $("#sidebar")!;
 const menuBtn = $<HTMLButtonElement>("#menu-btn")!;
-export function mobileSidebarOpen(): boolean {
-  return phoneListEntry();
-}
 menuBtn.onclick = () => {
   if (phoneNavigation()) {
     if (!phoneListEntry() && guardLeaveComments()) history.back();
@@ -1481,168 +1469,11 @@ export function startRename(id: string): void {
   input.addEventListener("mousedown", (e) => e.stopPropagation());
 }
 
-let touchActionHandled = false;
-let longPressTimer = 0;
-// Hold opens the action menu; left swipe deletes; native scrolling keeps pan-y.
-const SWIPE_START = 12;
-const DISMISS_MIN = 90;
-interface Swipe {
-  row: HTMLElement;
-  id: string | undefined;
-  x0: number;
-  y0: number;
-  dx: number;
-  active: boolean;
-  armed: boolean;
-}
-let swipe: Swipe | null = null;
-let pressAt = [0, 0];
-
-function resetRow(row: HTMLElement | null, animate: boolean): void {
-  if (!row) return;
-  row.classList.remove("swiping", "dismiss-armed");
-  if (animate)
-    row.style.transition =
-      "transform var(--motion-move) ease, opacity var(--motion-move) ease";
-  else row.style.transition = "";
-  row.style.transform = "";
-  row.style.opacity = "";
-}
-
-listEl.addEventListener(
-  "touchstart",
-  (e: TouchEvent) => {
-    if (renaming || e.touches.length > 1) return;
-    const t = e.touches[0];
-    const header = (e.target as HTMLElement | null)?.closest<HTMLElement>(
-      ".tree-section-header",
-    );
-    const section = sectionsByTitle.get(header?.dataset.sectionKey ?? "");
-    clearTimeout(longPressTimer);
-    pressAt = [t.clientX, t.clientY];
-    if (section?.actions.length)
-      longPressTimer = setTimeout(
-        () => openHold(sectionHoldItems(section), t.clientX, t.clientY),
-        450,
-      ) as unknown as number;
-    const row = (e.target as HTMLElement | null)?.closest<HTMLElement>(
-      ".agent",
-    );
-    if (!row) return;
-    const id = row.dataset.id;
-    swipe = {
-      row,
-      id,
-      x0: t.clientX,
-      y0: t.clientY,
-      dx: 0,
-      active: false,
-      armed: false,
-    };
-    touchActionHandled = false;
-    // Invariant: Holding opens the row's action menu, Rename last; the row's
-    // own tap-open is swallowed afterwards. A draft row has no actions.
-    if (id && id !== DRAFT)
-      longPressTimer = setTimeout(() => {
-        if (!swipe || swipe.active) return;
-        touchActionHandled = true;
-        swipe = null;
-        const items = rowHoldItems(actionsById.get(id) ?? [], id, () =>
-          startRename(id),
-        );
-        openHold(items, t.clientX, t.clientY);
-      }, 450) as unknown as number;
-  },
-  { passive: true },
-);
-
-listEl.addEventListener(
-  "touchmove",
-  (e: TouchEvent) => {
-    const t = e.touches[0];
-    if (holdOpen()) {
-      e.preventDefault();
-      return moveHold(t.clientX, t.clientY);
-    }
-    const [x, y] = pressAt;
-    if (Math.hypot(t.clientX - x, t.clientY - y) > SWIPE_START)
-      clearTimeout(longPressTimer);
-    if (!swipe) return;
-    const dx = t.clientX - swipe.x0,
-      dy = t.clientY - swipe.y0;
-    if (!swipe.active) {
-      // Invariant: First real movement kills the long-press. Commit to a
-      // horizontal swipe only when the travel is clearly sideways; a vertical
-      // drag hands off to scrolling.
-      if (Math.abs(dy) > SWIPE_START && Math.abs(dy) >= Math.abs(dx)) {
-        clearTimeout(longPressTimer);
-        swipe = null;
-        return;
-      }
-      if (Math.abs(dx) > SWIPE_START && Math.abs(dx) > Math.abs(dy)) {
-        clearTimeout(longPressTimer);
-        if (!swipe.id || swipe.id === DRAFT) {
-          swipe = null;
-          return;
-        }
-        swipe.active = true;
-        swipe.row.style.transition = "";
-        swipe.row.classList.add("swiping");
-      } else return;
-    }
-    e.preventDefault();
-    swipe.dx = Math.min(0, dx);
-    swipe.row.style.transform = `translateX(${swipe.dx}px)`;
-    swipe.row.style.opacity = String(Math.max(0.35, 1 + swipe.dx / 260));
-    const armed = -swipe.dx >= DISMISS_MIN;
-    if (armed !== swipe.armed) {
-      swipe.armed = armed;
-      swipe.row.classList.toggle("dismiss-armed", armed);
-    }
-  },
-  { passive: false },
-);
-
-function endSwipe(): void {
-  clearTimeout(longPressTimer);
-  if (!swipe) return;
-  const s = swipe;
-  swipe = null;
-  if (!s.active) return;
-  if (s.armed) {
-    // Invariant: Slide the row out, then delete optimistically (the teardown
-    // runs on the backend). touchActionHandled keeps the follow-up tap from
-    // opening it.
-    touchActionHandled = true;
-    const w = s.row.offsetWidth || 320;
-    s.row.classList.remove("dismiss-armed");
-    s.row.style.transition =
-      "transform var(--motion-fast) ease, opacity var(--motion-fast) ease";
-    s.row.style.transform = `translateX(-${w}px)`;
-    s.row.style.opacity = "0";
-    setTimeout(() => killAgent(s.id), 150);
-  } else {
-    resetRow(s.row, true);
-  }
-}
-listEl.addEventListener("touchend", (e: TouchEvent) => {
-  const t = e.changedTouches[0];
-  // Invariant: A hold's release never also taps the row or header under it.
-  if (holdOpen() && t) {
-    e.preventDefault();
-    releaseHold(t.clientX, t.clientY);
-  }
-  endSwipe();
+const rowTouch = initRowTouch({
+  remove: killAgent,
+  rename: startRename,
+  renaming: isRenaming,
+  section: (key) => sectionsByTitle.get(key),
+  actions: (id) => actionsById.get(id),
 });
-listEl.addEventListener("contextmenu", (e) => {
-  // Invariant: A touch hold's context menu would cancel the touch and menu.
-  if (holdOpen() || swipe) e.preventDefault();
-});
-listEl.addEventListener("touchcancel", () => {
-  // Invariant: A cancelled hold keeps its menu open for a tap.
-  clearTimeout(longPressTimer);
-  if (swipe && swipe.active) resetRow(swipe.row, true);
-  swipe = null;
-});
-
-initAgentDrag(() => holdOpen() || !!swipe, renderSidebar, reparentAgent);
+initAgentDrag(rowTouch.blocksDrag, renderSidebar, reparentAgent);

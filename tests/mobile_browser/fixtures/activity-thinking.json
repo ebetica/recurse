@@ -64,6 +64,7 @@
     "kind": "text",
     "role": "assistant",
     "text": "",
+    "has_thinking": true,
     "model_time_ms": 10488
   },
   {

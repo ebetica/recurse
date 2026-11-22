@@ -31,16 +31,21 @@ const progress = (state: string, detail: string | null = null) => ({
 async function routeUpdates(page: Page, base: string) {
   const held: Route[] = [];
   let arrived = () => {};
-  await page.route(`${base}api/settings/update`, (route) => {
-    held.push(route);
-    arrived();
-  });
+  const statusUrl = `${base}api/settings/update`;
+  await page.route(
+    (url) => url.href === statusUrl || url.href === `${statusUrl}/check`,
+    (route) => {
+      held.push(route);
+      arrived();
+    },
+  );
   return {
-    async next(method: string): Promise<Route> {
+    async next(method: string, url = statusUrl): Promise<Route> {
       while (!held.length)
         await new Promise<void>((resolve) => (arrived = resolve));
       const route = held.shift()!;
       expect(route.request().method()).toBe(method);
+      expect(route.request().url()).toBe(url);
       return route;
     },
     pending: () => held.length,
@@ -78,6 +83,9 @@ export const tests: BrowserTest[] = [
       await open({ json: skipped });
       await browserExpect(status).toHaveText(skipped.skipped);
       await browserExpect(status).toBeVisible();
+      await browserExpect(
+        footer.getByRole("button", { name: "Check for updates" }),
+      ).toBeHidden();
       await page.locator('#settings-nav button[data-cat="account"]').click();
       await browserExpect(
         page.getByRole("button", { name: "Change password", exact: true }),
@@ -115,6 +123,59 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
+  // Feature: #3542 Check for updates refreshes the Settings footer in place.
+  async function test_settings_check_for_updates_refreshes_the_footer(
+    browser,
+    base,
+  ) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 844 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const page = await context.newPage();
+    try {
+      const updates = await routeUpdates(page, base);
+      const current = { ...AVAILABLE, available: AVAILABLE.installed };
+      await gotoRoot(page, base);
+      await page.locator(".agent").first().waitFor();
+      await openSettingsPanel(page);
+      const footer = page.locator("#settings-release");
+      const status = footer.getByRole("status");
+      await (await updates.next("GET")).fulfill({ json: current });
+      await browserExpect(status).toHaveText(
+        "Up to date: v0.1.0 (newest release).",
+      );
+      const check = footer.getByRole("button", { name: "Check for updates" });
+      await browserExpect(check).toBeVisible();
+      await expectHitCorners(check);
+      await check.focus();
+      await page.keyboard.press("Enter");
+      await browserExpect(status).toHaveText("Checking for updates…");
+      const start = await updates.next(
+        "POST",
+        `${base}api/settings/update/check`,
+      );
+      await start.fulfill({
+        status: 202,
+        json: { ...current, checking: true },
+      });
+      const poll = await updates.next("GET");
+      await browserExpect(status).toHaveText("Checking for updates…");
+      await browserExpect(check).toHaveAttribute("aria-disabled", "true");
+      await browserExpect(check).toBeFocused();
+      await poll.fulfill({ json: AVAILABLE });
+      await browserExpect(status).toHaveText(AVAILABLE_TEXT);
+      await browserExpect(check).toBeHidden();
+      await browserExpect(status).toBeFocused();
+      const update = footer.getByRole("button", { name: "Update now" });
+      await browserExpect(update).toBeVisible();
+      await page.keyboard.press("Tab");
+      await browserExpect(update).toBeFocused();
+    } finally {
+      await context.close();
+    }
+  },
   async function test_settings_update_now_follows_the_update(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 390, height: 844 },
@@ -147,12 +208,17 @@ export const tests: BrowserTest[] = [
       await browserExpect(updateNow).toHaveAttribute("aria-disabled", "true");
       await browserExpect(updateNow).toBeFocused();
       await page.keyboard.press("Enter");
+      await (await updates.next("GET")).fulfill({ json: progress("building") });
+      await browserExpect(status).toHaveText(
+        "Building the new version; this one keeps running…",
+      );
       await (
         await updates.next("GET")
       ).fulfill({ json: progress("waiting", "2") });
       await browserExpect(status).toHaveText(
-        "Installed. Recurse restarts into it when 2 running turn(s) finish.",
+        "Update installed. Restart Recurse to apply it now.",
       );
+      await browserExpect(updateNow).toHaveAttribute("aria-disabled", "true");
       await (
         await updates.next("GET")
       ).fulfill({
@@ -185,9 +251,11 @@ export const tests: BrowserTest[] = [
       await browserExpect(status).toBeFocused();
       await page.locator("#settings-close").click();
       await openSettingsPanel(page);
-      await (await updates.next("GET")).fulfill({ json: progress("building") });
+      await (
+        await updates.next("GET")
+      ).fulfill({ json: progress("restarting") });
       await browserExpect(status).toHaveText(
-        "Building the new version; this one keeps running…",
+        "Restarting; unfinished replies resume when Recurse is back…",
       );
       const poll = await updates.next("GET");
       const cancelled = page.waitForEvent(

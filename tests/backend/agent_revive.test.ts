@@ -579,7 +579,7 @@ test("external archive and bare Durable copies use new ids, sanitize, remain pas
     JSON.stringify({
       ...entry,
       model: "missing/model",
-      level: null,
+      level: 6,
       workdir: join(root, "missing-cwd"),
     }),
   );
@@ -603,9 +603,8 @@ test("external archive and bare Durable copies use new ids, sanitize, remain pas
   expect(state.env?.overrides).toEqual({ ORDINARY: "keep" });
   expect(state.off).toBe(false);
   expect(
-    (await instance.durable.archive.get(String(result.archive_id)))
-      ?.origin_path,
-  ).toBe(dir);
+    await instance.durable.archive.get(String(result.archive_id)),
+  ).toMatchObject({ origin_path: dir, level: 6 });
   await send(String(result.id), "external follow-up");
   await until(
     () => asked.some((t) => t.includes("external follow-up")) && idle(),

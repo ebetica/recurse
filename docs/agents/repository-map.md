@@ -31,13 +31,14 @@ composes the server; `bun src/server.ts --check` composes it without listening.
 | [src/search/](../../src/search/README.md)                                         | Agent message search, derived text files, ripgrep and background backfill                                                                                                                        |
 | `src/tool_projection/`                                                            | Dependency-free, redacted summaries of tool calls; full payloads stay in `src/tool_details.ts`, never in hot conversation state                                                                  |
 | `src/observability/`                                                              | Logs, event-loop lag, slow spans, startup metrics                                                                                                                                                |
+| [src/models/](../../src/models/README.md)                                         | Pi model catalog, custom providers, login-aware model selection and the effort ladder                                                                                                            |
 | `src/utils/`                                                                      | Pinned file and JSON operations, trash retirement (`trash.ts`), file locks, task sets, date-partition expiry                                                                                     |
 | `src/themes/`, `src/media/`, `src/pull_request/`                                  | Fonts and palettes, MIME data, patch parsing; each main module sits beside its directory                                                                                                         |
 
 Shared modules: [branding.ts](../../src/branding.ts) (instance name and icon),
-[config.ts](../../src/config.ts) (instance settings and model
-policy), [process_lifecycle.ts](../../src/process_lifecycle.ts) (process-group
+[config.ts](../../src/config.ts) (instance settings and trusted reviewer routing), [process_lifecycle.ts](../../src/process_lifecycle.ts) (process-group
 cleanup), [deleted_bin.ts](../../src/deleted_bin.ts) (retained deletion),
+[src/git/](../../src/git/README.md) (bounded Git and GitHub CLI subprocesses),
 [workdir_git.ts](../../src/workdir_git.ts) (Git queries by working folder),
 [../../src/web/router/](../../src/web/router/) (HTTP matching and responses),
 [../../src/web/api_v1/schema/](../../src/web/api_v1/schema/) (shared API contract),

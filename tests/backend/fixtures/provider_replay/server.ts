@@ -148,6 +148,7 @@ export function replayProvider(
     throw new Error("invalid replay time scale");
   const failures: string[] = [];
   const requests: Record<string, unknown>[] = [];
+  const requestHeaders: Record<string, string>[] = [];
   const cursors = { sse: 0, websocket: 0 };
   let websocketConnections = 0;
   let resolveWebsocketClosed!: () => void;
@@ -172,6 +173,7 @@ export function replayProvider(
       if (actualHeaders[name] !== value)
         throw new Error(`request mismatch: header ${name}`);
     requests.push(body);
+    requestHeaders.push(actualHeaders);
     return exchange;
   };
   const send = async (
@@ -270,6 +272,7 @@ export function replayProvider(
     server,
     baseUrl: server.url.origin,
     requests,
+    requestHeaders,
     failures,
     websocketClosed,
     get websocketConnections() {

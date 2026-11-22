@@ -1,7 +1,7 @@
 // Tree polls share owner revision reads for 1s, including missing owners.
 // CLI hooks write markers directly; expiry observes cross-process changes.
 // Keep only owners in the latest tree; retry failures on the next poll.
-import { revision, type ArtifactContext } from "../artifacts";
+import { revision, type ArtifactContext } from "./store";
 
 export class ArtifactRevisions {
   private readonly owners = new Map<

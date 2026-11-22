@@ -494,7 +494,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       "--title",
       "Remote worker",
       "--effort",
-      "2",
+      "6",
       "Answer from the remote instance",
     );
     expect(created).toMatchObject({ code: 0 });
@@ -578,7 +578,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
     const stored = remote.conversations.load(cid)!;
     expect(stored.parent).toBeNull();
     expect(stored.workdir).toBe(worlds[1]!.env.CHAT_REPO_URL);
-    expect(stored.level).toBe(2);
+    expect(stored.level).toBe(6);
     expect(remote.durable.safetyReviewOff(cid)).toBe(false);
     expect(home.conversations.load(cid)).toBeNull();
     for (const args of [
@@ -621,7 +621,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       authenticatedProviders: () => [reviewModel.provider],
       storedCustomProviders: () => [reviewModel.provider],
     });
-    await reviewConfig.setPiModelList([
+    await reviewConfig.models.setPiModelList([
       {
         provider: reviewModel.provider,
         id: reviewModel.id,
@@ -630,7 +630,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
         file_provider: true,
       },
     ]);
-    await reviewConfig.setEffortLevel(
+    await reviewConfig.levels.setEffortLevel(
       1,
       `${reviewModel.provider}/${reviewModel.id}`,
       "low",

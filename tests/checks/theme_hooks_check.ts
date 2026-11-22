@@ -17,7 +17,7 @@ const hooks: Record<string, string[]> = {
   "web/panes.ts": ["pane"],
 };
 const protectedSurfaces: Record<string, string[]> = {
-  "web/explorer.ts": ["file-destination", "model-file-warning"],
+  "web/explorer/viewer.ts": ["file-destination", "model-file-warning"],
   "web/settings/auth.ts": ["provider-sign-in"],
   "web/settings/backends.ts": ["remote-sign-in"],
   "web/settings/mcp.ts": ["service-sign-in"],

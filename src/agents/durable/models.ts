@@ -1,5 +1,5 @@
 // Listing/turns share restricted Pi metadata; built-ins use Settings auth.
-// Anthropic keeps Recurse refresh/captures; Fable needs a newer CLI identity.
+// Claude uses Pi's summarized thinking and catalog fallbacks; Fable needs a newer CLI identity.
 // RECURSE_READ_ONLY_SIGN_INS reads external auth.json without writes/refresh;
 // catalogs/usage remain private. Custom providers retain their key/env_key.
 import {
@@ -53,11 +53,6 @@ export function trustedModelCatalog<T extends Models>(models: T): T {
   return (Reflect.get(models, TRUSTED_CATALOG) as T | undefined) ?? models;
 }
 
-const anthropicModels = new WeakMap<
-  object,
-  ReturnType<Provider["getModels"]>[number]
->();
-
 /** Pi also supports OpenAI OAuth on the platform route; Recurse doesn't. */
 function withPlatformKeyOnly(provider: Provider): Provider {
   if (provider.id !== "openai") return provider;
@@ -73,26 +68,34 @@ function withPlatformKeyOnly(provider: Provider): Provider {
 
 /** Recurse token refresh and independently inspectable Anthropic requests. */
 function withRecurseAnthropicRefresh(provider: Provider): Provider {
+  if (provider.id !== "anthropic") return provider;
+  const anthropicModels = new WeakMap<
+    object,
+    ReturnType<Provider["getModels"]>[number]
+  >();
   const oauth = provider.auth.oauth;
-  if (provider.id !== "anthropic" || oauth === undefined) return provider;
-  const auth = {
-    ...provider.auth,
-    oauth: {
-      name: oauth.name,
-      isSubscription: oauth.isSubscription,
-      loginLabel: oauth.loginLabel,
-      login: oauth.login.bind(oauth),
-      toAuth: oauth.toAuth.bind(oauth),
-      refresh: async (credential: OAuthCredential, signal: AbortSignal) => ({
-        ...credential,
-
-        ...(await (
-          await import("../../auth/anthropic_oauth.ts")
-        ).refreshAnthropicToken(credential.refresh, signal)),
-        type: "oauth" as const,
-      }),
-    },
-  };
+  const auth = oauth
+    ? {
+        ...provider.auth,
+        oauth: {
+          name: oauth.name,
+          isSubscription: oauth.isSubscription,
+          loginLabel: oauth.loginLabel,
+          login: oauth.login.bind(oauth),
+          toAuth: oauth.toAuth.bind(oauth),
+          refresh: async (
+            credential: OAuthCredential,
+            signal: AbortSignal,
+          ) => ({
+            ...credential,
+            ...(await (
+              await import("../../auth/anthropic_oauth.ts")
+            ).refreshAnthropicToken(credential.refresh, signal)),
+            type: "oauth" as const,
+          }),
+        },
+      }
+    : provider.auth;
   return new Proxy(provider, {
     get(target, key) {
       if (key === "auth") return auth;
@@ -129,14 +132,14 @@ function withRecurseAnthropicRefresh(provider: Provider): Provider {
   });
 }
 
-/** Stamp responses with the effort frozen into the provider request. */
+/** Stamp responses with the requested effort. */
 export function withRequestedEffort(models: Models): Models {
   return new Proxy(models, {
     get(target, key) {
       if (key === "streamSimple")
         return (...args: Parameters<Models["streamSimple"]>) => {
-          const stream = target.streamSimple(...args);
           const thinkingLevel = args[2]?.reasoning ?? "off";
+          const stream = target.streamSimple(...args);
           const stamp = (
             message: Awaited<ReturnType<typeof stream.result>>,
           ) => {
@@ -234,8 +237,22 @@ function withConfiguredHeaders(
               ),
             );
           const fetch = options?.fetch ?? globalThis.fetch;
+          // Pi sets this literal header using only the completed payload.
+          const configuredBeta =
+            model.api === "anthropic-messages"
+              ? extra?.["anthropic-beta"]
+              : undefined;
+          const keepProviderBeta = (name: string) =>
+            name === "anthropic-beta" && configuredBeta !== undefined;
+          const modelHeaders = omit(model.headers);
           return target[key](
-            { ...model, headers: omit(model.headers) },
+            {
+              ...model,
+              headers:
+                configuredBeta === undefined
+                  ? modelHeaders
+                  : { ...modelHeaders, "anthropic-beta": configuredBeta },
+            },
             context,
             {
               ...options,
@@ -246,7 +263,8 @@ function withConfiguredHeaders(
               fetch: (async (...input: Parameters<typeof globalThis.fetch>) => {
                 const request = new Request(...input);
                 if (fileKey !== undefined) {
-                  for (const name of ambient) request.headers.delete(name);
+                  for (const name of ambient)
+                    if (!keepProviderBeta(name)) request.headers.delete(name);
                   if (
                     model.api === "anthropic-messages" &&
                     !fileKey.includes("sk-ant-oat")
@@ -256,7 +274,7 @@ function withConfiguredHeaders(
                     request.headers.set("authorization", `Bearer ${fileKey}`);
                 }
                 for (const [name, value] of Object.entries(extra ?? {}))
-                  request.headers.set(name, value);
+                  if (!keepProviderBeta(name)) request.headers.set(name, value);
                 return fetch(request);
               }) as typeof globalThis.fetch,
             },
@@ -678,7 +696,7 @@ export function customProviderSync(
         continue;
       const builtin = builtins.get(id);
       if (builtin === undefined) models.deleteProvider(id);
-      else models.setProvider(withRecurseAnthropicRefresh(builtin));
+      else models.setProvider(builtin);
     }
     for (const [id, spec] of Object.entries(providers)) {
       if (reserved?.has(id)) continue;

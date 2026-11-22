@@ -19,11 +19,8 @@ import {
 } from "../../extensions/core/context/server-compaction";
 import { ReportDoc } from "./report";
 import { ReplyTimesDoc } from "./reply_times";
-import {
-  ConversationView,
-  LOST_STOP_REASON,
-  thinkingInfo,
-} from "../view/conversation";
+import { LOST_STOP_REASON, thinkingInfo } from "../view";
+import { ConversationView } from "../view/conversation";
 import { splitPiUserText } from "../view/session_entries";
 import { slowSpan } from "../../observability/slow-span";
 import { displayToolContent } from "./display_content";
@@ -207,7 +204,7 @@ export function projectionEntries(
         const usage = message.usage as Rec | undefined;
         if (typeof usage?.totalTokens === "number" && usage.totalTokens > 0)
           state.tokens = usage.totalTokens;
-        const thinking = thinkingInfo(message.content);
+        const thinking = thinkingInfo(message);
         if (thinking.hasThinking)
           state[thinking.title === null ? "unavailableThinking" : "thinking"] =
             {
@@ -428,7 +425,7 @@ function latestThinkingRow(rows: readonly ProjectionEntry[]) {
       message.role !== "assistant"
     )
       continue;
-    const info = thinkingInfo(message.content);
+    const info = thinkingInfo(message);
     if (!info.hasThinking || (info.title === null && row._offset === undefined))
       continue;
     return {
@@ -546,7 +543,7 @@ export class DurableRows {
       run?.first !== undefined &&
       this.scheduleOlderThinking(conversation, context, run.first, notify)
     );
-    this.view.syncLive(liveRows, { caughtUp: true });
+    this.view.rows.syncLive(liveRows, true);
     const active = (live?.tools ?? [])
       .filter((slot) => slot.name === "codemode" && slot.status === "running")
       .map((slot) => slot.callId);
@@ -573,7 +570,7 @@ export class DurableRows {
         force.add(id);
     if (performance.now() >= this.filesRetryAt)
       for (const id of this.pendingFiles) force.add(id);
-    const callIds = this.view
+    const callIds = this.view.rows
       .unresolvedAttachments(force)
       .filter((id) => !this.pendingFiles.has(id) || force.has(id));
     if (callIds.length)
@@ -599,7 +596,7 @@ export class DurableRows {
           if (published[id]) {
             const merged = new Map<string, unknown>();
             for (const item of [
-              ...(this.view.attachments[id] ?? []),
+              ...(this.view.rows.attachments[id] ?? []),
               ...published[id],
             ])
               merged.set(String((item as { id: unknown }).id), item);
@@ -672,9 +669,7 @@ export class DurableRows {
         let unavailable: EntryRecord | undefined;
         const entry = page.items.find((item) => {
           if (item.kind !== "pi.assistant") return false;
-          const info = thinkingInfo(
-            (item.model?.[0] as Rec | undefined)?.content,
-          );
+          const info = thinkingInfo(item.model?.[0] as Rec | undefined);
           if (info.title !== null) return true;
           if (info.hasThinking) unavailable ??= item;
           return false;
@@ -728,7 +723,7 @@ export class DurableRows {
     let cursor: Cursor | undefined;
     for (let pages = 0; ; pages += 1) {
       if (pages === CATCH_UP_PAGES) {
-        this.view.reset("durable");
+        this.view.rows.reset("durable");
         this.publishedNested.clear();
         this.activeCodemode.clear();
         this.pendingFiles.clear();
@@ -769,7 +764,7 @@ export class DurableRows {
   ): void {
     if (!records.length) return;
     slowSpan("view_projection", this.cid, () =>
-      this.view.ingest(
+      this.view.rows.ingest(
         projectionEntries(
           records,
           this.state,
@@ -806,7 +801,7 @@ export class DurableRows {
     );
     const { records, parent } = this.olderPage(page.items, page.next);
     const older = rowState();
-    this.view.prepend(
+    this.view.rows.prepend(
       projectionEntries(
         records,
         older,
@@ -866,7 +861,7 @@ export class DurableViews {
       live = snapshot;
       let cached = this.rows.get(view);
       if (cached === undefined || cached.generation !== generation) {
-        if (cached !== undefined) view.reset("durable");
+        if (cached !== undefined) view.rows.reset("durable");
         cached = {
           generation,
           rows: new DurableRows(cid, this.pageSize, view, artifactPrefix),

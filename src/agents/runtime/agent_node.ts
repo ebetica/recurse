@@ -103,10 +103,7 @@ export interface AgentNodeDeps {
     ConfigActions,
     "safetyOffLocked" | "applyPendingSafety" | "safetyEffectiveOff"
   >;
-  config: Pick<
-    Config,
-    "ladderHome" | "chatSettings" | "agentTempLeaf" | "paths"
-  >;
+  config: Pick<Config, "levels" | "models" | "agentTempLeaf" | "paths">;
   runtime: RuntimeErrors;
   /** The shared agent store admission binds. */
   agentStore: NodeStore;
@@ -845,7 +842,7 @@ export class AgentNode {
           );
         const changed = conv.model !== resolved;
         if (changed) {
-          const home = config.ladderHome(resolved);
+          const home = config.levels.ladderHome(resolved);
           if (home !== null) [conv.level, conv.model, conv.effort] = home;
           else {
             const previous = conv.model;
@@ -853,7 +850,7 @@ export class AgentNode {
             if (typeof previous === "string" && previous !== resolved)
               conv.legacy_model = previous;
             conv.model = resolved;
-            conv.effort = config.chatSettings(resolved)[1];
+            conv.effort = config.models.chatSettings(resolved)[1];
           }
           conversations.invalidateContextUsage(conv);
           conv[SET_MODEL_MARKER] = true;

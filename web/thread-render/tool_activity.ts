@@ -91,9 +91,16 @@ function thinkingSummaryLabel(value: unknown): string {
 /** Plain prose beneath the title already shown by the live bar. */
 export function thinkingSummaryBody(value: string, title: string): string {
   const text = value.trim();
+  if (
+    text.startsWith("**") &&
+    !text.includes("\n") &&
+    text.indexOf("**", 2) < 0
+  )
+    return "";
   const heading = /^\*\*(.+?)\*\*[ \t]*(?:\r?\n|$)/u.exec(text);
   const body =
-    heading && thinkingSummaryLabel(heading[0]) === title
+    heading &&
+    (heading[0] === text || thinkingSummaryLabel(heading[0]) === title)
       ? text.slice(heading[0].length)
       : text;
   return body.replaceAll("**", "").trim();
@@ -239,9 +246,8 @@ export function liveActivityState(
         .slice(currentRunRows.indexOf(currentThinking) + 1)
         .some((row) => row.kind === "tool_call")),
   );
-  const summary = thinkingSummaryLabel(
-    latestThinking?.thinking_title ?? latestThinking?.thinking,
-  );
+  const title = latestThinking?.thinking_title ?? latestThinking?.thinking;
+  const summary = thinkingSummaryLabel(title);
   const thinking =
     latestThinking && !thinkingActive && summary === "Thinking"
       ? "Waiting"
@@ -300,7 +306,7 @@ export function holdLiveTitle(
   return { state: { turnKey, title, shownAt: now }, changed: true };
 }
 
-export type ActivityStatusKind = "panel" | "summary" | "waiting";
+type ActivityStatusKind = "panel" | "summary" | "waiting";
 
 export function activityStatusKind(
   streaming: boolean,

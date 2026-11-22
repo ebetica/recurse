@@ -51,9 +51,8 @@ const DEFAULT_AUTO_COLLAPSE_DEPTH = 0;
 const DEFAULT_MAX_DEPTH = 256;
 const DEFAULT_MAX_ROWS = 10_000;
 
-// Projects all nodes into a bounded forest, folding deep branches except the
-// selected lineage. Missing parents/cycle components become roots;
-// emitted/depth/row guards keep malformed snapshots finite.
+// Projects a bounded forest with automatic folding. Missing parents and cycle
+// components become roots; emitted/depth/row guards keep snapshots finite.
 export function projectAgentForest(
   nodes: readonly TreeNode[],
   selectedId = "",
@@ -79,15 +78,18 @@ export function projectAgentForest(
   const emitted = new Set<string>();
   const hiddenRoots = new Set<string>();
 
-  // Invariant: Expand the selected node and every real ancestor of it; this is
-  // the only automatic exception to default folding. A malformed cycle is
-  // bounded by `seen`.
-  const selectedLineage = new Set<string>();
-  let lineageId = selectedId;
-  while (lineageId && !selectedLineage.has(lineageId)) {
-    selectedLineage.add(lineageId);
-    lineageId = byId.get(lineageId)?.parent || "";
-  }
+  // Invariant: Automatic folding spares the selection and its ancestors,
+  // and ancestors of taken-over agents. Manual folds and caps still win.
+  const autoExpanded = new Set<string>();
+  const keepLineageOpen = (id: string) => {
+    while (id && !autoExpanded.has(id)) {
+      autoExpanded.add(id);
+      id = byId.get(id)?.parent || "";
+    }
+  };
+  keepLineageOpen(selectedId);
+  for (const node of nodes)
+    if (node.taken_over === true) keepLineageOpen(node.parent || "");
 
   const visit = (node: TreeNode, depth: number): void => {
     if (out.length >= maxRows || emitted.has(node.id)) return;
@@ -98,7 +100,7 @@ export function projectAgentForest(
     const autoCollapsed =
       hasChildren &&
       depth >= autoCollapseDepth &&
-      !selectedLineage.has(node.id) &&
+      !autoExpanded.has(node.id) &&
       !options.expanded?.has(node.id);
     const collapsed =
       hasChildren &&

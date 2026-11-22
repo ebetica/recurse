@@ -23,7 +23,60 @@ const settings = $("#settings-btn")!;
 const menu = $("#menu-btn")!;
 const listActions = $("#agent-list-actions")!;
 let pendingSelection: { view: HistoryView; url: string } | null = null;
+let imageVisit: { writeSelection?: () => void } | null = null;
 let syncPaneSelection = () => {};
+let closeViewer: (() => void) | undefined;
+let viewerStep:
+  | { url: string; before: string; entry: string; current: boolean }
+  | undefined;
+
+function dismissOpenViewer(): void {
+  const close = closeViewer;
+  closeViewer = undefined;
+  close?.();
+}
+
+/** Dismiss on navigation everywhere; add a Back step only on top-level phones. */
+export function viewerHistoryDismiss(close: () => void): () => void {
+  closeViewer = close;
+  if (phoneNavigation() && window === window.top) {
+    const entry = { ...history.state, phoneViewer: true };
+    viewerStep = {
+      url: location.href,
+      before: JSON.stringify(history.state),
+      entry: JSON.stringify(entry),
+      current: true,
+    };
+    history.pushState(entry, "");
+  }
+  let dismissing = false;
+  return () => {
+    if (dismissing) return;
+    dismissing = true;
+    if (viewerStep?.current && history.state?.phoneViewer) history.back();
+    else dismissOpenViewer();
+  };
+}
+
+function consumesViewerTraversal(event: PopStateEvent): boolean {
+  dismissOpenViewer();
+  const step = viewerStep;
+  if (step?.url === location.href) {
+    const destination = JSON.stringify(event.state);
+    if (step.current && step.before === destination) {
+      step.current = false;
+      return true;
+    }
+    if (!step.current && step.entry === destination) {
+      // The closed viewer's Forward entry doesn't reopen the document.
+      step.current = true;
+      history.back();
+      return true;
+    }
+  }
+  viewerStep = undefined;
+  return false;
+}
 
 function sync(): void {
   const active = phoneNavigation();
@@ -121,6 +174,23 @@ function paneDepth(): number {
     : Number(!!pane);
 }
 
+/** Pop the image and any phone pane steps the conversation is leaving. */
+export function popImageVisitHistory(): void {
+  const panes =
+    phoneNavigation() && history.state?.phonePane && !history.state?.settings
+      ? paneDepth() + (history.state?.artifactView?.depth || 0)
+      : 0;
+  imageVisit = {};
+  history.go(-1 - panes);
+}
+
+/** Write the selection only after its outgoing image and pane have popped. */
+export function deferImageVisitSelectionHistory(write: () => void): boolean {
+  if (!imageVisit) return false;
+  imageVisit.writeSelection = write;
+  return true;
+}
+
 /** Linked files add a Back step above the currently open phone pane. */
 export function openLinkedPhonePane(
   id: string,
@@ -149,9 +219,9 @@ export function openLinkedPhonePane(
   return true;
 }
 
-/** A phone pane closes before the conversation's Back step. */
+/** Back closes the phone pane first; a refused close restores its entry. */
 export function installPhonePaneHistory(
-  close: () => void,
+  close: () => boolean,
   restore: (id: string, file?: unknown) => boolean | null,
 ): void {
   const panes = $("#panes")!;
@@ -170,6 +240,7 @@ export function installPhonePaneHistory(
     else if (
       !open &&
       !pendingSelection &&
+      !imageVisit &&
       history.state?.phonePane &&
       !history.state?.settings
     )
@@ -201,7 +272,10 @@ export function installPhonePaneHistory(
       wasOpen = false;
       if (location.href !== paneUrl && readArtifactLink(location.hash))
         observe();
-      else close();
+      else if (!close()) {
+        wasOpen = true;
+        history.forward();
+      }
     }
   });
 }
@@ -209,7 +283,17 @@ phone.addEventListener("change", () => {
   seed();
   sync();
 });
-addEventListener("popstate", () => {
+window.addEventListener("popstate", (event) => {
+  if (imageVisit) {
+    const { writeSelection } = imageVisit;
+    imageVisit = null;
+    writeSelection?.();
+    syncPaneSelection();
+  }
+  if (consumesViewerTraversal(event)) {
+    event.stopImmediatePropagation();
+    return;
+  }
   if (pendingSelection) {
     const { view, url } = pendingSelection;
     pendingSelection = null;

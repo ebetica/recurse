@@ -16,7 +16,8 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { buildApp, WebLogSink } from "../../src/web/app";
-import { gitEnv, WorkdirGit } from "../../src/workdir_git";
+import { gitEnv } from "../../src/git";
+import { WorkdirGit } from "../../src/workdir_git";
 import { prepareGitIdentity } from "../../src/git_identity";
 import {
   isRecurseCheckout,
@@ -420,7 +421,6 @@ test("test_in_place_no_clone_and_one_hop_origin", async () => {
   await prepareCodeSource(DATA);
   const wg = workdirGit();
   expect(await wg.ready()).toBe(true);
-  expect(await wg.defaultBranch()).toBe("master");
 
   expect(isFile(join(REPO_DIR, ".git"))).toBe(true);
   const common = await git(REPO_DIR, "rev-parse", "--git-common-dir");

@@ -7,7 +7,7 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "../backends/backend.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 import { openFileTab } from "../panes.js";
-import { registerFileTabSource } from "../panes/file-tabs.js";
+import { decodeFileTabKey, registerFileTabSource } from "../panes/index.js";
 import { ATTACHMENT_FILE_ICON, FILE_DOWNLOAD_ICON } from "../icons.js";
 import {
   renderDocumentMarkdown,
@@ -23,10 +23,13 @@ import {
   renderComments,
 } from "./comment-bar.js";
 import { claimComments, reanchor } from "./selection-comments.js";
-import type { CommentPane } from "./artifact-state.js";
+import { createCommentState, type CommentPane } from "./artifact-state.js";
 import { commentMount } from "../comments/selection-draft/index.js";
 import { installImageZoom } from "../image-preview/zoom.js";
-import { installBoxComments } from "../files/index.js";
+import {
+  registerInlineBoxFrame,
+  installBoxComments,
+} from "../comments/box/index.js";
 import { requestUiStatus } from "../ui-events.js";
 import { highlightSource } from "../source-preview.js";
 
@@ -88,26 +91,9 @@ export function openArtifactFile(target: Target, fragment = ""): boolean {
 }
 
 registerFileTabSource("artifact", (key, id) => {
-  let parts: unknown;
-  try {
-    parts = JSON.parse(key);
-  } catch {
-    return null;
-  }
-  if (
-    !Array.isArray(parts) ||
-    parts.length !== 5 ||
-    parts.some(
-      (value) =>
-        typeof value !== "string" ||
-        !value ||
-        value.length > 2048 ||
-        /[\x00-\x1f]/.test(value),
-    ) ||
-    JSON.stringify(parts) !== key
-  )
-    return null;
-  const [agent, artifact, version, path, owner] = parts as string[];
+  const parts = decodeFileTabKey(key, 5, 2048);
+  if (!parts) return null;
+  const [agent, artifact, version, path, owner] = parts;
   if (!/^[0-9a-f]{40}$/.test(version!) || path!.startsWith("/")) return null;
   const target = {
     agent: agent!,
@@ -140,9 +126,16 @@ registerFileTabSource("artifact", (key, id) => {
       fragment = typeof value === "string" ? value : "";
       if (shown?.isConnected) scrollDocumentFragment(shown, fragment);
     },
-    guardClose: (element) => discardCurrent(element as CommentPane),
+    guardClose: (element, preserveComments) =>
+      preserveComments ||
+      !(element as CommentPane)._rs ||
+      discardCurrent(element as CommentPane),
     available: (ctx) => ctx.agentId === target.agent,
-    render(element) {
+    render(element, ctx) {
+      if (ctx.agentId !== target.agent) {
+        element.textContent = "File unavailable.";
+        return;
+      }
       if (shown === element) {
         comments(element as CommentPane);
         return;
@@ -155,12 +148,8 @@ registerFileTabSource("artifact", (key, id) => {
       element.classList.add("files-view");
       installBoxComments(element);
       pane._rs = {
-        agentId: target.agent,
+        ...createCommentState(target.agent),
         selId: commentId,
-        deleting: false,
-        sending: false,
-        sendFailed: false,
-        sendSeq: 0,
         contentInfo: {
           id: commentId,
           title: target.path,
@@ -274,6 +263,7 @@ registerFileTabSource("artifact", (key, id) => {
               agentId: target.agent,
               artifactId: target.artifact,
               documentPath: target.path,
+              onImageFrame: registerInlineBoxFrame,
               signal,
               resolveRelative: (path) =>
                 artifactFileUrl(

@@ -40,7 +40,6 @@ import {
   activityUsageLabel,
   boundaryUsage,
 } from "./thread-render/activity-usage.js";
-import { activeDescendantCount } from "./active-agents.js";
 import {
   ATTACHMENT_DOWNLOAD_ICON,
   ATTACHMENT_FILE_ICON,
@@ -51,10 +50,6 @@ import {
   HIDE_ICON,
   TOKENS_ICON,
 } from "./icons.js";
-import {
-  activityStatusKind,
-  type ActivityStatusKind,
-} from "./thread-render/tool_activity.js";
 import { copyButtonT } from "./conversation/copy-button/index.js";
 import { messageCopyScope } from "./conversation/copy.js";
 import { openActivityUsageModal, openTurnPromptModal } from "./prompt.js";
@@ -101,11 +96,7 @@ import type {
   ToolEntry,
 } from "./types.js";
 
-import { activeShells } from "./conversation/shell-surface.js";
-import {
-  liveToolLabelVisible,
-  waitingPanelT,
-} from "./conversation/live-panel.js";
+import { liveToolLabelVisible } from "./conversation/live-panel.js";
 import { thinkingT, toolThinkingEntry } from "./conversation/thinking.js";
 import {
   activityGroupOpen,
@@ -817,16 +808,6 @@ function toolRowsT(conv: Conversation, slice: ActivitySlice): TemplateResult {
   )}`;
 }
 
-function seriesThinkingTitle(slice: ActivitySlice): string | null {
-  let title: string | null = null;
-  for (const entry of slice.segment.tools) {
-    if (entry.thinking?.trim()) title = entry.thinking.trim();
-  }
-  const assistant = slice.segment.assistant;
-  if (assistant?.thinking?.trim()) title = assistant.thinking.trim();
-  return title;
-}
-
 function seriesIsOpen(
   conv: Conversation,
   boundary: ActivityBoundary,
@@ -840,13 +821,18 @@ function seriesIsOpen(
   );
 }
 
-function seriesThinkingTitleT(
+function closedSeriesThinkingT(
+  conv: Conversation,
   slice: ActivitySlice,
 ): TemplateResult | typeof nothing {
-  const title = seriesThinkingTitle(slice);
-  return title
-    ? html`<div class="turn-thinking-series-title" role="note">${title}</div>`
-    : nothing;
+  const tool =
+    slice.segment.tools.findLast(
+      (entry) => entry.offset >= 0 && entry.thinking?.trim(),
+    ) ??
+    slice.segment.tools.findLast(
+      (entry) => entry.offset >= 0 && entry.has_thinking,
+    );
+  return tool ? thinkingT(conv, toolThinkingEntry(slice, tool)) : nothing;
 }
 
 function toolSeriesT(
@@ -984,7 +970,7 @@ function turnGroupItemsT(
           item.slice,
           item.slice.segmentIndex,
         )
-          ? seriesThinkingTitleT(item.slice)
+          ? closedSeriesThinkingT(conv, item.slice)
           : nothing}${toolSeriesT(
           conv,
           boundary,
@@ -1159,14 +1145,12 @@ export function activityBoundaryT(
   boundary: ActivityBoundary,
   {
     current,
-    queued = false,
     replyOnly = false,
     insideChunk = false,
     expanded = false,
     inheritedFooter = nothing,
   }: {
     current: boolean;
-    queued?: boolean;
     replyOnly?: boolean;
     insideChunk?: boolean;
     expanded?: boolean;
@@ -1182,26 +1166,6 @@ export function activityBoundaryT(
     `${renderedLogGeneration}-${boundary.key}`,
   );
   const running = boundaryIsLive(boundary);
-  // Invariant: Only the latest response shows live or continued background
-  // status. Footers contain outcomes and actions, never repeated activity
-  // counts.
-  const boundaryShells = current ? activeShells(conv).shellCount : 0;
-  const boundaryAgents = current
-    ? activeDescendantCount(state.nodes, conv.id)
-    : 0;
-  // Invariant: A new run supersedes the preceding response's background status,
-  // even when admission precedes its first live row.
-  const superseded =
-    !running && (conv.status === "running" || conv.status === "interrupting");
-  const status: ActivityStatusKind = activityStatusKind(
-    running ||
-      (current &&
-        (conv.status === "running" || conv.status === "interrupting")),
-    superseded ? 0 : boundaryShells,
-    superseded ? 0 : boundaryAgents,
-    current,
-    queued,
-  );
   const usage = boundaryUsage(boundary);
   const usageLabel = activityUsageLabel(usage);
   const reply = boundaryDisplayedReply(boundary);
@@ -1331,7 +1295,6 @@ export function activityBoundaryT(
       )}
       ${!footerReply ? footer : nothing}
     </div>
-    ${status === "waiting" ? waitingPanelT(conv) : nothing}
     ${compactionPoint ? markerT(conv, compactionPoint.turn.system!) : nothing}
   </section>`;
 }

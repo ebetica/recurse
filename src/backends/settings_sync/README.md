@@ -1,6 +1,8 @@
 # Complete non-secret settings-sync inventory and canonical comparison
 
 This module preserves the shared contract without importing its parent's orchestration.
+Effort items use the remote's advertised levels. Sync does not send unsupported
+levels or a default the remote cannot select.
 
 ## Source files
 

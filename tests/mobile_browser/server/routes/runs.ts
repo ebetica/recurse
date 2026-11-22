@@ -291,7 +291,13 @@ export function routes(fx: Fixture): Routes {
         await release(agent);
         await release(agent, "finish");
         await release(agent, "after-unreadable");
+        await release(agent, "thinking-title");
+        await release(agent, "thinking-title-tail");
+        await release(agent, "thinking-short");
+        await release(agent, "thinking-overflow");
         await release(agent, "thinking-content");
+        await release(agent, "thinking-tail");
+        await release(agent, "thinking-replaced");
         await release(agent, "after-run");
         await release(agent, "idle-finish");
         await instance.durable.stop(agent);
@@ -392,8 +398,13 @@ export function routes(fx: Fixture): Routes {
       return { ok: true };
     },
     "seed-live-tools": async (body) => {
-      const { mode = "long", thinking } = body as {
+      const {
+        mode = "long",
+        thinking,
+        parent,
+      } = body as {
         mode?: string;
+        parent?: string;
         thinking?:
           | "claude"
           | "claude-redacted"
@@ -401,7 +412,7 @@ export function routes(fx: Fixture): Routes {
           | "chatgpt-encrypted";
       };
       const agent = `live-tools-${mode}-${hex(4)}`;
-      await create(agent, "Live tools");
+      await create(agent, "Live tools", parent);
       const outputGate =
         thinking || mode.includes("output")
           ? join(
@@ -581,13 +592,110 @@ export function routes(fx: Fixture): Routes {
       ]);
       return { agent, outputGate };
     },
+    "seed-sticky-thinking": async ({ crowded }) => {
+      const agent = `sticky-thinking-${hex(4)}`;
+      await create(agent, "Checking sample output");
+      const directory = await agentTemp.agentTempPath(
+        conversations.load(agent)!,
+      );
+      const commandGate = join(directory, "command-finished");
+      const backgroundGate = join(directory, "background-finished");
+      const gatedCommand = (path: string, background = false) =>
+        fauxToolCall("bash", {
+          command: `while [ ! -e ${JSON.stringify(path)} ]; do sleep 0.05; done`,
+          ...(background ? { background } : {}),
+        });
+      const thinking = hold(agent, "thinking-start");
+      const tool = hold(agent, "thinking-tool");
+      const finished = hold(agent);
+      script(agent, undefined, undefined, (event) => {
+        if (event.type === "thinking_start") return thinking;
+        if (event.type === "toolcall_start") return tool;
+        return undefined;
+      }).setResponses([
+        fauxAssistantMessage(
+          [
+            fauxThinking(
+              "**I found the sample in the second results file. I’ll check its output against the reference before reporting any differences.**\nI’ll compare the fields in the same order.",
+            ),
+            fauxToolCall("bash", { command: "true" }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(
+          [
+            fauxText("I’ve checked the source file."),
+            ...(crowded
+              ? [gatedCommand(backgroundGate, true), gatedCommand(commandGate)]
+              : []),
+            gatedCommand(commandGate),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        () =>
+          finished.then(() =>
+            fauxAssistantMessage("The sample output is ready."),
+          ),
+      ]);
+      return { agent, commandGate, backgroundGate };
+    },
     "seed-live-thinking-idle": async (body) => {
       const agent = `live-thinking-idle-${hex(4)}`;
       await create(agent, "Thinking before idle");
       const finished = hold(agent, "idle-finish");
-      script(agent).setResponses([
+      const long = body?.long === true;
+      const titleGate = long ? hold(agent, "thinking-title") : undefined;
+      const titleTail = long ? hold(agent, "thinking-title-tail") : undefined;
+      const shortGate = long ? hold(agent, "thinking-short") : undefined;
+      const overflowGate = long ? hold(agent, "thinking-overflow") : undefined;
+      const firstAppend = long ? hold(agent, "thinking-content") : undefined;
+      const lastAppend = long ? hold(agent, "thinking-tail") : undefined;
+      const replaced = long ? hold(agent, "thinking-replaced") : undefined;
+      const heading = "**Checking sample output**";
+      const gap = " ".repeat(100);
+      const lines = [
+        "I will check the source and keep the output available for comparison.",
+        "The first sample establishes the expected order of the records.",
+        "The second sample includes entries that cross a page boundary.",
+        "I can compare the original and the new output without editing either.",
+        "The labels remain visible while the output continues to arrive.",
+        "I will check that each entry appears in the original order.",
+        "The command has one more set of records to verify.",
+        "I will check the last entry against the reference.",
+        "The second check uses the same ordering as the first.",
+        "The last page lists the records that crossed the boundary.",
+        "The final sample confirms that all records are present.",
+      ];
+      const shortThought = `${heading}${gap}\n${lines[0]}${gap}\n`;
+      let streamed = "";
+      script(
+        agent,
+        undefined,
+        undefined,
+        long
+          ? (event) => {
+              if (event.type === "thinking_start") return titleGate;
+              if (event.type === "text_start" && streamed) return replaced;
+              if (event.type !== "thinking_delta") return undefined;
+              const previous = streamed;
+              streamed += event.delta;
+              const began = (after: number) =>
+                !previous.slice(after).trim() && streamed.slice(after).trim();
+              const reached = (line: string) =>
+                !previous.includes(line) && streamed.includes(line);
+              if (previous && previous.length < heading.length)
+                return titleTail;
+              if (began(heading.length)) return shortGate;
+              if (began(shortThought.length)) return overflowGate;
+              if (reached(lines[7]!)) return firstAppend;
+              if (reached(lines[10]!)) return lastAppend;
+              return undefined;
+            }
+          : undefined,
+      ).setResponses([
         fauxAssistantMessage(
           [
+            ...(long ? [fauxText("I will compare the samples.")] : []),
             ...(body?.redacted === true
               ? [
                   {
@@ -599,16 +707,33 @@ export function routes(fx: Fixture): Routes {
                 ]
               : [
                   fauxThinking(
-                    "**Checking before idle**\nI will finish without background work.",
+                    long
+                      ? `${shortThought}${lines.slice(1).join("\n")}`
+                      : "**Checking before idle**\nI will finish without background work.",
                   ),
                 ]),
+            ...(long
+              ? [
+                  fauxToolCall("bash", {
+                    command: "printf 'Background sample\\n'; sleep 60",
+                    background: true,
+                  }),
+                ]
+              : []),
             fauxToolCall("bash", { command: "printf 'Checked'" }),
           ],
           { stopReason: "toolUse" },
         ),
         () =>
           finished.then(() =>
-            fauxAssistantMessage("Finished without background work."),
+            fauxAssistantMessage(
+              long
+                ? [
+                    fauxThinking("**Final sample check**\nThe samples agree."),
+                    fauxText("Sample output checked."),
+                  ]
+                : "Finished without background work.",
+            ),
           ),
       ]);
       return { agent };

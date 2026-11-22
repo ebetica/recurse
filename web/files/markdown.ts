@@ -14,9 +14,9 @@ import {
   rendersAsMarkdown,
   versionGroups,
   versionLabel,
-  type FilePreviewState,
   type SessionFile,
 } from "./model.js";
+import type { FilePreviewState } from "./collection.js";
 
 interface FilesMarkdownSource {
   files: SessionFile[];

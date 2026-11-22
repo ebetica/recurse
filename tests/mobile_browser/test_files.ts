@@ -283,7 +283,7 @@ export const tests: BrowserTest[] = [
       }
     }
   },
-  // Regression: #3373 consume held refreshes that arrive before their waiter.
+  // Regression: #3562 wait for the selected agent's Files button, not the outgoing rail's. (also #3373 consume held refreshes that arrive before their waiter.)
   async function test_session_files_pane(browser, base) {
     const fixture = (await postFixture(base, "seed-files-pane")) as Fixture;
     expect(fixture).toBeTruthy();
@@ -584,7 +584,9 @@ export const tests: BrowserTest[] = [
         `document.activeElement?.closest('.agent')?.dataset.id === ${JSON.stringify(fixture.demo)}`,
       ),
     ).toBeTrue();
-    await filesButton.waitFor();
+    await page
+      .locator('.rail-btn[data-pane="files"][aria-label^="Files (2)"]')
+      .waitFor();
     expect(await filesButton.count()).toBe(1);
     if ((await filesButton.getAttribute("aria-expanded")) !== "true")
       await filesButton.click();
@@ -957,8 +959,16 @@ export const tests: BrowserTest[] = [
           .locator(".files-error", { hasText: deletionError })
           .isVisible(),
       ).toBeTrue();
+      await openListedFile(page, failed.name);
+      await file
+        .locator(".files-detail h1", { hasText: failed.name })
+        .waitFor();
+      const reopenedError = file.locator(".files-error", {
+        hasText: deletionError,
+      });
+      await reopenedError.waitFor();
       page.once("dialog", (dialog) => void dialog.accept());
-      await file.getByRole("button", { name: "Retry" }).click();
+      await reopenedError.getByRole("button", { name: "Retry" }).click();
       await list.locator(".files-summary", { hasText: "2 files" }).waitFor();
       expect(await list.locator(".files-error").count()).toBe(0);
       expect(

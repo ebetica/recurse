@@ -2,12 +2,15 @@
 
 ## Source files
 
-- [`../files.ts`](../files.ts): bounded collection, list and per-element viewers.
-- [`model.ts`](model.ts): metadata paging, version grouping and text-preview LRU.
+- [`../files.ts`](../files.ts): list, selection and viewer navigation.
+- [`collection.ts`](collection.ts): metadata paging, file routes and text-preview LRU.
+- [`preview.ts`](preview.ts): file-kind rendering, lazy previews and shared viewer controls.
+- [`image-viewer.ts`](image-viewer.ts): image dialog, history, gallery and sharing.
+- [`swipe.ts`](swipe.ts): shared touch and wheel stepping.
+- [`comments.ts`](comments.ts): comment marks and drafts across Files viewers.
+- [`model.ts`](model.ts): file identity, version grouping and the settled-turn observer.
 - [`markdown.ts`](markdown.ts): sibling links through shared Markdown and file tabs,
   and what is new since the reviewed version.
-- [`box-comments.ts`](box-comments.ts): image and PDF box gestures and
-  highlights. App startup supplies the popover action for a finished box.
 - [`diff-preview.ts`](diff-preview.ts): inert diff rendering and comment anchors.
 - [`style.css`](style.css): collection and viewer layout.
 
@@ -20,11 +23,13 @@ the Files pane. Row commits notify it synchronously before the next thread paint
 On desktop, opening a listed file or a reply's file button opens a file tab
 beside Chat through [`../panes/file-tabs.ts`](../panes/file-tabs.ts). The Files
 list stays separate. Reopening selects the current conversation's existing tab
-and retains its viewer and notes. Versions and neighboring files open their own
-tabs rather than replacing an annotated viewer. Headers retain actions but no
+and retains its viewer and notes. The version menu still opens a separate file
+tab. Previous and Next (including keyboard and gestures) step between available
+files in the current tab, even if another tab already shows the destination.
+Staged notes stay with their file when stepping. Headers retain actions but no
 Back control. The desktop metadata row stays below those actions while file
 content scrolls, with an opaque background. Its shared row height also reserves
-scroll padding so heading and anchor jumps clear it. Phones keep their existing layout.
+scroll padding so heading and anchor jumps clear it.
 Each tab stays on its selected published version; automatic offers
 leave the active document and saved arrangement unchanged. The first server-read
 turn establishes the visit's baseline and is never offered, including when a new
@@ -35,7 +40,8 @@ metadata arrives in a subsequent frame. Phones retain
 in-place details, image dialogs and Back navigation. Markdown sibling links open
 file views with a Back step on phones; fragments scroll the opened document.
 Markdown siblings opened from Artifacts use the same reading padding as published
-Markdown files.
+Markdown files. [Markdown tables](../util.ts) share layout with Artifacts and
+chat: long cells wrap, and tables scroll only when their columns cannot fit.
 
 Uploaded and published HTML and Explorer HTML use the Artifact app isolation.
 Source shows highlighted markup; Preview runs inline scripts and styles and
@@ -52,7 +58,7 @@ frame itself. Either can contact another host and disclose the file's own
 content or that it was opened.
 Files larger than 256 KiB open as source with the first 256 KiB and a Download
 action for the rest. If HTML is too complex to prepare safely, Preview is
-unavailable and the file opens as Source. Live Artifact apps are unchanged.
+unavailable and the file opens as Source.
 
 Modified clicks and unsupported types retain browser navigation. Inline image enlargement
 retains its dialog on both layouts. Single-key shortcuts close image dialogs
@@ -66,8 +72,21 @@ Desktop image tabs fit the remaining content area below the file header, in
 both docked and fullscreen windows. Images preserve their aspect ratio, center
 on both axes and upscale small originals, matching the phone dialog. The fitted
 frame stays the same size as the image so zoom, drawing and normalized comment
-marks share the original image coordinates; phone layout is unchanged. Staged
-comments use a bounded scrolling list below the image, keeping Send visible.
+marks share the original image coordinates. Staged comments use a bounded
+scrolling list below the image, keeping Send visible.
+[Image sharing](../image-preview/README.md) falls back to an ordinary download
+when Web Share is unavailable. Shares retain the admitted file media type;
+local-path images use the byte-checked response type.
+
+## Documents
+
+[document-preview.ts](../document-preview.ts) lazily mounts document views.
+[Its worker](../document-preview.worker.ts) loads Mammoth, SheetJS, pptxtojson,
+notebookjs and inert LinkeDOM. Conversion is capped, cancellable and worker-only.
+Signature-based ZIP bounds limit archive expansion; DOMPurify sanitizes markup
+before it enters the opaque [CSP frame](../document-media/). Converted content
+can show raster data images but cannot run scripts, use the network, open links,
+embed content, add CSS or access the parent origin. Failures retain Download.
 
 ## Changes since reviewed
 
@@ -100,7 +119,7 @@ restores preview observers and document/PDF resources even when the content need
 no repaint. File tabs
 share the eight-open/32-definition bounds with Explorer and the existing
 12-body retention limit. Collection and text caches retain their existing
-12-conversation and 24-preview limits. No new store, endpoint or quota is added.
+12-conversation and 24-preview limits. Tabs reuse the Files store, routes and quotas.
 
 The list remains newest-first and groups published versions by name. Metadata
 refresh remains bounded and throttled during a running turn. An open collection
@@ -115,13 +134,13 @@ Unknown languages stay plain. Above 64K characters or 2,000 lines, syntax stays
 off; at most 4,000 token fragments reach the DOM, bounding phone rendering as
 well as worker input. A five-second worker deadline keeps pathological parsing
 off the main thread. Both viewers use the same syntax theme variables. Text
-selection and comment marks survive; Edit mode stays a plain textarea. Existing
-preview byte caps are unchanged.
+selection and comment marks survive; Edit mode stays a plain textarea.
 
 ## Rules for changes
 
 Reuse the collection, renderers and shared pane lifecycle. Keep file identity,
-comment guards, owner checks and live bounds intact on every view.
+comment guards, owner checks and live bounds intact on every view. Files and
+Artifacts share [image and PDF box comments](../comments/box/README.md).
 
 Real browser coverage uses accepted files through the fake provider:
 

@@ -521,7 +521,7 @@ test("operator Explorer reads only the current folder with bounded pages and pre
       "/api/conversations/repo/tree/search?q=explorer",
     );
     expect(repoSearch.bytes).toBeLessThan(20_000);
-    expect(repoSearch.data.results).toContain("web/explorer.ts");
+    expect(repoSearch.data.results).toContain("web/explorer/viewer.ts");
     faux.setResponses([
       fauxAssistantMessage(
         fauxToolCall("chdir", { directory: join(work, "src") }),

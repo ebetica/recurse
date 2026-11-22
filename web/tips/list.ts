@@ -79,7 +79,7 @@ export const TIPS: readonly Tip[] = [
     id: "effort",
     area: "Agents and skills",
     title: "Pick the effort level",
-    text: "Choose a level from 1 to 5 with the effort button above the message box, or press e. Change the model and reasoning for each level in Settings.",
+    text: "Choose a level with the effort button above the message box, or press e. Change the model and reasoning for each level in Settings.",
     ask: {
       where: "this",
       request: "Start the subagents for routine work at effort level 2.",

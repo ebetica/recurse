@@ -1,7 +1,7 @@
-// Settings updates: install.sh --check at most daily per release, cached in the
-// data directory. "Update now" uses the supervisor's child-private IPC channel.
-// Self-deploy-disabled, isolated test, unsupervised and channel-less installs
-// are skipped.
+// Settings updates: a single install.sh --check runs at a time, automatically
+// when the release's cached result is due or immediately on operator request.
+// Results are cached in the data directory. "Update now" uses the supervisor's
+// child-private IPC channel. Manual actions honor the same refusal reasons.
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { selfDeployEnabledByEnv } from "./launcher/git";
 import {
@@ -60,7 +60,7 @@ interface RecurseUpdatesDeps {
   readonly now?: () => number;
 }
 
-const IN_PROGRESS = new Set(["updating", "building", "waiting", "restarting"]);
+const IN_PROGRESS = new Set(["updating", "building", "restarting"]);
 
 function parseCheck(stdout: string): Record<string, string> {
   const fields: Record<string, string> = {};
@@ -115,8 +115,10 @@ export class RecurseUpdates {
     };
   }
 
-  /** The cached check and update progress; starts a check when it is due. */
-  async status(): Promise<RecurseUpdateStatus> {
+  /** Return update status and start a detached check when due or requested. */
+  async status({
+    checkNow = false,
+  }: { checkNow?: boolean } = {}): Promise<RecurseUpdateStatus> {
     if (
       !this.deps.env.RECURSE_ISOLATED_ROOT &&
       selfDeployEnabledByEnv(this.deps.env) &&
@@ -127,7 +129,7 @@ export class RecurseUpdates {
       const due =
         last?.key !== this.key ||
         this.now() - last.checked_at >= CHECK_INTERVAL_SECONDS;
-      if (due) this.startCheck();
+      if (checkNow ? !this.refusal() : due) this.startCheck();
     }
     const skipped = this.refusal();
     const check = skipped || this.cached?.key !== this.key ? null : this.cached;

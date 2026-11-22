@@ -8,7 +8,7 @@ import { PEN_ICON, actionIcon } from "../icons.js";
 import type { TreeNode } from "../types.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 import { runAction } from "./actions.js";
-import { shownTags } from "./index.js";
+import { shownTags } from "./tag-state.js";
 import { startDraft } from "./action-handlers.js";
 import defaultSidebar from "./default_sidebar.js";
 import { arrangedScriptRows, scriptOutput } from "./script.js";
@@ -165,6 +165,14 @@ export function sectionHeader(
               type="button"
               class="btn sm quiet"
               title=${a.label}
+              @focus=${(e: FocusEvent) => {
+                const button = e.currentTarget as HTMLButtonElement;
+                if (button.matches(":focus-visible"))
+                  button.scrollIntoView({
+                    block: "nearest",
+                    inline: "nearest",
+                  });
+              }}
               @click=${(e: Event) =>
                 void runSectionAction(a, section, anchorOf(e))}
             >

@@ -1,20 +1,5 @@
-// Pure state transitions for paged Files metadata.
+// File identity, versions, labels and the settled-turn observer.
 import type { AgentAttachment } from "../types.js";
-
-export function filesRefreshDue(
-  running: boolean,
-  changed: boolean,
-  lastRefresh: number,
-  now: number,
-): boolean {
-  // Invariant: An idle conversation never changes under the pane, so a version
-  // change is a discrete event (turn settled, upload staged) worth one
-  // immediate reload. A running conversation churns, so it stays on the minute
-  // throttle.
-  if (!changed) return false;
-  if (!running) return true;
-  return now - lastRefresh >= 60_000;
-}
 
 interface FileSource {
   offset: number | null;
@@ -23,13 +8,6 @@ interface FileSource {
   turn_id: string;
   role: "operator" | "agent";
   timestamp: number | null;
-}
-
-export interface FilePreviewState {
-  status: "idle" | "loading" | "ready" | "missing" | "evicted";
-  text?: string;
-  truncated?: boolean;
-  controller?: AbortController;
 }
 
 export interface SessionFile {
@@ -47,87 +25,6 @@ export interface SessionFile {
   created_at?: number;
   references: number;
   sources: FileSource[];
-}
-
-export function mergeSessionFiles(
-  target: Map<string, SessionFile>,
-  incomingFiles: SessionFile[],
-  maxFiles: number,
-  maxSources: number,
-): void {
-  for (const incoming of incomingFiles || []) {
-    if (
-      !incoming ||
-      typeof incoming.key !== "string" ||
-      !incoming.key ||
-      (target.size >= maxFiles && !target.has(incoming.key))
-    )
-      continue;
-    const prior = target.get(incoming.key);
-    if (!prior) {
-      target.set(incoming.key, {
-        ...incoming,
-        references: Math.max(0, Number(incoming.references) || 0),
-        sources: (incoming.sources || []).slice(0, maxSources),
-      });
-      continue;
-    }
-    prior.references += Math.max(0, Number(incoming.references) || 0);
-    const identities = new Set(
-      prior.sources.map(
-        (source) => `${source.offset ?? "pending"}:${source.message_id || ""}`,
-      ),
-    );
-    for (const source of incoming.sources || []) {
-      const identity = `${source.offset ?? "pending"}:${source.message_id || ""}`;
-      if (identities.has(identity) || prior.sources.length >= maxSources)
-        continue;
-      identities.add(identity);
-      prior.sources.push(source);
-    }
-    prior.sources.sort(
-      (a, b) =>
-        (a.offset ?? Number.MAX_SAFE_INTEGER) -
-        (b.offset ?? Number.MAX_SAFE_INTEGER),
-    );
-  }
-}
-
-export function ensureFilePreview(
-  previews: Map<string, FilePreviewState>,
-  key: string,
-): FilePreviewState {
-  let preview = previews.get(key);
-  if (!preview) {
-    preview = { status: "idle" };
-    previews.set(key, preview);
-  }
-  return preview;
-}
-
-export function retainFilePreview(
-  previews: Map<string, FilePreviewState>,
-  lru: string[],
-  key: string,
-  limit: number,
-  protectedKey?: string,
-): string[] {
-  const next = lru.filter((candidate) => candidate !== key);
-  next.push(key);
-  while (next.length > limit) {
-    const index = next.findIndex((candidate) => candidate !== protectedKey);
-    if (index < 0) break;
-    const [oldest] = next.splice(index, 1);
-    if (!oldest) break;
-    const preview = previews.get(oldest);
-    if (!preview) continue;
-    preview.controller?.abort();
-    preview.controller = undefined;
-    preview.status = "evicted";
-    preview.text = undefined;
-    preview.truncated = undefined;
-  }
-  return next;
 }
 
 export type FileSelection = ({ key: string } | { id: string }) & {
@@ -262,24 +159,4 @@ export class SettledTurnFile {
   current(cid: string): string | null {
     return cid === this.cid ? this.file : null;
   }
-}
-
-export function filesPaneAvailable(
-  initialized: boolean,
-  error: string | null,
-  visibleCount: number,
-): boolean {
-  // Invariant: Availability is known state, never optimism. An unprobed
-  // conversation offers no pane until its first snapshot resolves; a recorded
-  // error still offers it so the reader can see and retry.
-  return error !== null || (initialized && visibleCount > 0);
-}
-
-export function currentFilesRequest(
-  selectedId: string,
-  requestAgentId: string,
-  currentRequest: number,
-  request: number,
-): boolean {
-  return selectedId === requestAgentId && currentRequest === request;
 }

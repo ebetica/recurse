@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { PI_MODEL_LIST_VERSION } from "../../src/config";
+import { PI_MODEL_LIST_VERSION } from "../../src/models";
 
 export const TEST_PI_MODELS = [
   ["anthropic", "claude-opus-5", "Claude Opus 5", 1_000_000],

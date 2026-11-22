@@ -5,6 +5,7 @@
 
 import { constants } from "node:fs";
 import { BRAND_ICON_NAMES } from "../branding";
+import { APP_STATE_MAX_BYTES } from "../artifact_app_state_protocol";
 import { open, readFile, rename } from "node:fs/promises";
 import { isIP, isIPv6 } from "node:net";
 import { join } from "node:path";
@@ -430,6 +431,9 @@ function operatorConversationPath(path: string): boolean {
   );
 }
 
+const appStatePath =
+  /^\/api\/(?:backends\/[^/]+\/)?artifacts\/[^/]+\/app-state\/?$/;
+
 function operatorOnlyPath(path: string): boolean {
   const normalized = path.replace(/\/+$/, "");
   return (
@@ -440,6 +444,7 @@ function operatorOnlyPath(path: string): boolean {
     normalized === "/api/v1/agents/tags" ||
     normalized.startsWith("/api/pi/") ||
     ["/login", "/logout", "/api/password"].includes(normalized) ||
+    appStatePath.test(normalized) ||
     operatorConversationPath(normalized)
   );
 }
@@ -483,6 +488,8 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
     )
       ex.bodyLimit = LOGIN_BODY_MAX_BYTES;
     if (ex.path === "/api/ui-timing") ex.bodyLimit = 24 * 1024;
+    if (ex.request.method === "PUT" && appStatePath.test(ex.path))
+      ex.bodyLimit = APP_STATE_MAX_BYTES;
     if (
       ex.request.method === "PUT" &&
       /^\/api\/(?:backends\/[^/]+\/)?conversations\/[^/]+\/tree\/file\/?$/.test(

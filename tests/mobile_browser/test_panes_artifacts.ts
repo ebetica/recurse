@@ -25,8 +25,10 @@ import { join } from "node:path";
 import * as artifacts from "../../src/artifacts";
 import { artifactReopen } from "./artifact_reopen";
 import { artifactLinks } from "./artifact_links";
+import { tests as artifactImageComments } from "./test_artifact_image_comments";
 
 export const tests: BrowserTest[] = [
+  ...artifactImageComments,
   // Regression: #3328 submitting selection comments must not close or hide the Artifact pane.
   async function test_artifact_comments_keep_pane_open(browser, base, data) {
     const store = {
@@ -287,13 +289,20 @@ export const tests: BrowserTest[] = [
           await request.continue();
         });
         const reload = page.reload();
-        await requested;
-        await page.locator(".agent").first().waitFor();
-        expect(
-          await page.locator('.pane-col[data-pane="report"]').count(),
-        ).toBe(0);
-        expect(files).toEqual([]);
-        release();
+        try {
+          await requested;
+          await page
+            .getByRole("tab", { name: "Artifacts", selected: true })
+            .waitFor();
+          expect(
+            await page
+              .getByRole("heading", { name: "Second initial", exact: true })
+              .count(),
+          ).toBe(0);
+          expect(files).toEqual([]);
+        } finally {
+          release();
+        }
         await reload;
         await page.unroute(route);
         page.off("request", recordFile);
@@ -597,16 +606,7 @@ export const tests: BrowserTest[] = [
     }
     const remote = await startServer({ auth: true });
     try {
-      const login = await fetch(remote.base + "login", {
-        method: "POST",
-        redirect: "manual",
-        body: new URLSearchParams({ password: LOGIN }),
-      });
-      const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
-      const tree = (await (
-        await fetch(remote.base + "api/tree", { headers: { cookie } })
-      ).json()) as Array<{ id: string; parent: string | null }>;
-      const remoteOwner = tree.find((node) => node.parent === null)!.id;
+      const { cookie, root: remoteOwner } = remote;
       const remoteContext = {
         artifactsDir: join(remote.data, "data", "artifact_repos"),
         trashDir: join(remote.data, "data", "trash"),
@@ -881,16 +881,7 @@ export const tests: BrowserTest[] = [
   async function test_artifact_disk_publication_refresh(browser, base, data) {
     const remote = await startServer({ auth: true });
     try {
-      const login = await fetch(remote.base + "login", {
-        method: "POST",
-        redirect: "manual",
-        body: new URLSearchParams({ password: LOGIN }),
-      });
-      const cookie = login.headers.get("set-cookie")!.split(";")[0]!;
-      const tree = (await (
-        await fetch(remote.base + "api/tree", { headers: { cookie } })
-      ).json()) as Array<{ id: string; parent: string | null }>;
-      const remoteOwner = tree.find((node) => node.parent === null)!.id;
+      const remoteOwner = remote.root;
       for (const [directory, label, owner] of [
         [data, "", rootAgentId()],
         [remote.data, "ArtifactRemote", remoteOwner],

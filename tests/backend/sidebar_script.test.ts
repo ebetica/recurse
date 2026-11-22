@@ -212,7 +212,7 @@ test("agents save checked sidebar scripts and the operator undoes and resets the
     expect(parts[8]).toContain('ERROR Tag: clear "ask" needs ask: "tag"');
     expect(parts[9]).toContain('ERROR newAgent.ask must be "tag"');
     expect(parts[10]).toContain(
-      "ERROR newAgent defaults need a custom tag and effort 1-5",
+      "ERROR newAgent defaults need a custom tag and effort 1-6",
     );
     for (const part of parts.slice(11, 13))
       expect(part).toContain(

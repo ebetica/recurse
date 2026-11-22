@@ -2,8 +2,9 @@
 import { html, type TemplateResult } from "lit";
 import { until } from "lit/directives/until.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import type { FilePreviewState, SessionFile } from "./model.js";
-import { MAX_RENDER_ROWS, renderPatch, type ViewLine } from "../diff/render.js";
+import type { FilePreviewState } from "./collection.js";
+import type { SessionFile } from "./model.js";
+import { MAX_RENDER_ROWS, renderPatch, type ViewLine } from "../diff/index.js";
 
 const previews = new WeakMap<FilePreviewState, Promise<TemplateResult>>();
 const settled = new WeakSet<FilePreviewState>();

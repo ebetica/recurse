@@ -841,7 +841,7 @@ describe("owner scoping", () => {
     }
   });
 
-  test("an artifact is addressable only under its owner", async () => {
+  test("artifact files and saved app state are addressable only under their owner", async () => {
     const other = refs.values.get("art_b")!;
     expect(
       (await get(`/api/artifacts/${other}/file?agent=owner-b&path=notes.md`))
@@ -852,6 +852,59 @@ describe("owner scoping", () => {
         (await get(`/api/artifacts/${other}/file?agent=${agent}&path=notes.md`))
           .status,
       ).toBe(404);
+    const artifact = refs.values.get("art_a")!;
+    const base = `http://127.0.0.1:${app.running.port}`;
+    const state = (agent: string) =>
+      `${base}/api/artifacts/${artifact}/app-state?agent=${agent}`;
+    const ownState = state("owner-a");
+    const json = { "content-type": "application/json", origin: base };
+    const put = (
+      url: string,
+      headers: Record<string, string>,
+      body = '{"attendees":2}',
+    ) => fetch(url, { method: "PUT", headers, body });
+    expect((await fetch(ownState)).status).toBe(200);
+    expect((await put(ownState, json)).status).toBe(204);
+    for (const agent of ["owner-b", "missing-owner"]) {
+      expect((await fetch(state(agent))).status).toBe(404);
+      expect((await put(state(agent), json)).status).toBe(404);
+    }
+    for (const origin of ["null", "https://another-site.example"]) {
+      const denied = await put(ownState, { ...json, origin }, "false");
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({
+        detail: "cross-site request blocked",
+      });
+    }
+    const authorization = `Bearer ${(await app.backendKeys.mint("app-state-test")).key}`;
+    for (const marker of [
+      { "x-recurse-agent": "" },
+      { "x-recurse-agent-caller": "owner-a", authorization },
+      { "x-loopback-token": app.loopbackToken },
+    ] as Record<string, string>[]) {
+      expect((await fetch(ownState, { headers: marker })).status).toBe(403);
+      expect(
+        (await put(ownState, { ...json, ...marker }, "false")).status,
+      ).toBe(403);
+    }
+    expect(
+      (await put(ownState, { ...json, "content-type": "text/plain" })).status,
+    ).toBe(415);
+    expect((await put(ownState, json, "attendees:2")).status).toBe(400);
+    expect(
+      (await put(ownState, json, JSON.stringify("ä".repeat(131072)))).status,
+    ).toBe(413);
+    const saved = await fetch(ownState, { headers: { authorization } });
+    expect(saved.status).toBe(200);
+    expect(saved.headers.get("cache-control")).toBe("private, no-store");
+    expect(await saved.json()).toEqual({ attendees: 2 });
+    expect(
+      (
+        await fetch(ownState, {
+          headers: { "if-none-match": saved.headers.get("etag")! },
+        })
+      ).status,
+    ).toBe(304);
   });
 });
 

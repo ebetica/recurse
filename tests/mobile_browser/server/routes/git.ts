@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
@@ -28,8 +28,13 @@ export function routes(fx: Fixture): Routes {
 
   return {
     "seed-pr-references": async () => {
-      const cwd = await mkdtemp(join(tmpdir(), "pr-references-"));
-      const plain = await mkdtemp(join(tmpdir(), "pr-plain-"));
+      const root = await mkdtemp(
+        join(instance.config.paths.DATA_DIR, "pr-references-"),
+      );
+      const cwd = join(root, "checkout");
+      const plain = join(root, "plain");
+      const bin = join(root, "bin");
+      await Promise.all([cwd, plain, bin].map((dir) => mkdir(dir)));
       await git(cwd, "init");
       await git(
         cwd,
@@ -58,7 +63,22 @@ export function routes(fx: Fixture): Routes {
           JSON.stringify({ version: 1, cwd: conv.workdir }),
         );
       }
-      return { checkout: "pr-checkout", plain: "pr-plain" };
+      const started = join(cwd, ".git", "lookup-started");
+      const release = join(cwd, ".git", "lookup-release");
+      const realGit = Bun.which("git")!;
+      await writeFile(
+        join(bin, "git"),
+        `#!/bin/sh
+if [ "$PWD" = ${Bun.$.escape(cwd)} ] && [ "$*" = '--no-replace-objects --no-optional-locks remote get-url origin' ]; then
+  touch .git/lookup-started
+  while [ ! -f .git/lookup-release ]; do sleep 0.02; done
+fi
+exec ${Bun.$.escape(realGit)} "$@"
+`,
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${bin}:${process.env.PATH}`;
+      return { checkout: "pr-checkout", plain: "pr-plain", started, release };
     },
     "seed-changes-base": async () => {
       const cwd = await mkdtemp(join(tmpdir(), "changes-base-"));

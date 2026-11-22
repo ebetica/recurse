@@ -6,8 +6,10 @@ import { parseConversationId } from "../backends/conversation-id/index.js";
 import { artifactWorkingPath } from "../../src/artifacts/working_path.js";
 import { html, render, type TemplateResult } from "lit";
 import { live } from "lit/directives/live.js";
-import { imageCommentHint } from "../image-preview/zoom.js";
+import { imageCommentHint } from "../image-preview/index.js";
+import { findBoxFrame } from "../comments/box/index.js";
 import { repeat } from "lit/directives/repeat.js";
+import { until } from "lit/directives/until.js";
 import { panePowerbar } from "../panes/powerbar.js";
 import {
   artifactDeleteUrl,
@@ -30,8 +32,10 @@ import {
   dropComments,
   editPendingComment,
   editingPendingComment,
+  notifyCommentChange,
   orderedComments,
   pendingFor,
+  reanchor,
   stageSelectionForSend,
   syncSelectionDraft,
   unmark,
@@ -57,6 +61,7 @@ function cardT(pane: CommentPane, comment: Comment): TemplateResult {
   const onInput = (event: Event) => {
     comment.text = (event.target as HTMLTextAreaElement).value;
     renderBar(pane);
+    notifyCommentChange(pane);
   };
   const onRemove = () => {
     const key = currentCommentKey(pane);
@@ -64,7 +69,10 @@ function cardT(pane: CommentPane, comment: Comment): TemplateResult {
     comment.crop?.release();
     for (const root of commentRoots(pane)) unmark(root, comment.cid);
     renderComments(pane);
-    syncSelectionDraft();
+    if (pane.dataset.pane === "report" && pane._rs.selId)
+      reanchor(pane, pane._rs.selId);
+    else syncSelectionDraft();
+    notifyCommentChange(pane);
   };
   const shortQuote =
     comment.quote.length > 80
@@ -95,6 +103,24 @@ function cardT(pane: CommentPane, comment: Comment): TemplateResult {
             class="report-comment-quote"
             .textContent=${comment.quote}
           ></blockquote>
+          ${comment.box?.image && comment.crop
+            ? until(
+                comment.crop.preview().then(
+                  (url) =>
+                    url
+                      ? html`<img
+                          class="report-comment-crop"
+                          src=${url}
+                          alt="Selected area"
+                        />`
+                      : null,
+                  () =>
+                    html`<span class="report-comment-quote"
+                      >Crop preview unavailable</span
+                    >`,
+                ),
+              )
+            : null}
           <label class="sr-only" for=${`artifact-comment-${comment.cid}`}
             >Comment on “${shortQuote}”</label
           >
@@ -159,6 +185,7 @@ function locateComment(root: Element, range: Range): CommentLocation | null {
   const nodes: Text[] = [];
   let full = "";
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.closest(".files-box-hint")) continue;
     nodes.push(node as Text);
     full += node.textContent || "";
   }
@@ -218,8 +245,13 @@ function composeMessage(
     if (box) {
       boxNumber++;
       const crop = crops.get(note.cid);
+      const source = box.page
+        ? ` (page ${box.page})`
+        : box.image
+          ? ` (image ${box.image})`
+          : "";
       lines.push(
-        `- box ${boxNumber}${box.page ? ` (page ${box.page})` : ""}, ${commentBoxCoordinates(pane, box)}${crop ? `, attached as ${crop.filename}` : snapshot ? " (crop unavailable; coordinates only)" : ""}:`,
+        `- box ${boxNumber}${source}, ${commentBoxCoordinates(box, note.crop?.pixels)}${crop ? `, attached as ${crop.filename}` : snapshot ? " (crop unavailable; coordinates only)" : ""}:`,
         note.text.trim(),
         ...(crop ? [`![${crop.filename}](${crop.url})`] : []),
         "",
@@ -272,6 +304,7 @@ export function renderBar(pane: CommentPane): void {
     if (key) dropComments(key);
     for (const root of commentRoots(pane)) unmarkAll(root);
     renderComments(pane);
+    notifyCommentChange(pane);
   };
   const send = async () => {
     if (!stageSelectionForSend(pane)) return;
@@ -317,7 +350,9 @@ export function renderBar(pane: CommentPane): void {
       prepared.push({
         token,
         filename,
-        crop: note.crop ?? prepareCommentCrop(pane, note.box),
+        crop:
+          note.crop ??
+          prepareCommentCrop(findBoxFrame(pane, note.box), note.box),
       });
     }
     const snapshot = composeMessage(pane, placeholders, submitted);
@@ -350,6 +385,7 @@ export function renderBar(pane: CommentPane): void {
       }
     }
     renderComments(pane);
+    notifyCommentChange(pane);
     pane.dispatchEvent(new Event("comments-submitting", { bubbles: true }));
   };
   const sendLabel = editing
@@ -417,6 +453,7 @@ export function discardCurrent(pane: CommentPane): boolean {
   cancelSelectionComment(pane);
   if (id) dropComments(id);
   for (const root of commentRoots(pane)) unmarkAll(root);
+  notifyCommentChange(pane);
   return true;
 }
 
@@ -467,6 +504,7 @@ export async function restoreSelected(pane: ArtifactEl): Promise<void> {
     rs.versionMenuOpen = false;
     rs.versionsId = null;
     rs.versions = [];
+    rs.contentAbort?.abort();
     rs.selectedVersion = null;
     rs.followCurrent = true;
     rs.headVersion = null;
@@ -528,8 +566,6 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
   const ownsRequest = () =>
     rs.deleteSeq === request && rs.agentId === requestedAgent;
   const currentRequest = () => ownsRequest() && rs.selId === requestedId;
-  rs.imageAbort?.abort();
-  rs.imageAbort = null;
   rs.deleting = true;
   rs.versionMenuOpen = false;
   cancelSelectionComment(pane);
@@ -598,6 +634,8 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
     rs.versions = [];
     rs.versionsLoading = false;
     rs.versionsError = false;
+    rs.contentAbort?.abort();
+    rs.contentAbort = null;
     pane.querySelector<HTMLElement>(".report-doc")!.innerHTML = "";
     renderComments(pane);
     await refreshList(requestedAgent, true);

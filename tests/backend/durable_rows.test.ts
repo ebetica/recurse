@@ -148,7 +148,7 @@ test("a recorded transcript shows the rows of a Pi session with the same message
   };
   const view = new ViewEntry(new ConversationView("c1", ""));
   const batch = await readBatch(inputs, view.feed);
-  applyBatch(view, view.instanceId, batch);
+  applyBatch(view, view.rows.instance_id, batch);
   const pi = window(view, inputs, { caughtUp: true, limit: 100 }).blocks;
   expect(shape(durable)).toEqual(shape(pi as Rec[]));
   expect(

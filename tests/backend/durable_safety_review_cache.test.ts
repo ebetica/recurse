@@ -110,7 +110,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     authenticatedProviders: () => ["faux", model.provider],
     storedCustomProviders: () => [model.provider],
   });
-  await config.setPiModelList(
+  await config.models.setPiModelList(
     [model, changedModel].map((entry) => ({
       provider: entry.provider,
       id: entry.id,
@@ -118,7 +118,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
       context_window: entry.contextWindow,
     })),
   );
-  await config.setEffortLevel(1, `${model.provider}/${model.id}`, "low");
+  await config.levels.setEffortLevel(1, `${model.provider}/${model.id}`, "low");
   const open = () =>
     new DurableHost({ ...deps, models, config, captureIdleMs: 1 });
   let host = open();
@@ -278,7 +278,7 @@ test("consecutive Durable reviews preserve the actual Codex cache identity and w
     expect(JSON.stringify(reviews[3]!.input)).toContain("touch three");
     expect(roles(reviews[3]!)).toEqual(["developer", ...Array(5).fill("user")]);
     const live = await host.open("c1");
-    await config.setEffortLevel(
+    await config.levels.setEffortLevel(
       1,
       `${changedModel.provider}/${changedModel.id}`,
       "low",

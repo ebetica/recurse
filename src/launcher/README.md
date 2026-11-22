@@ -3,7 +3,8 @@
 The launcher starts and supervises Recurse for a target project. `./recurse`
 prepares the checkout and invokes [../local.ts](../local.ts), which holds the
 data-directory lock and starts the server. The supervisor builds a new checkout
-generation while the old server serves, then restarts when turns are idle.
+generation while the old server serves, then stops it normally and restarts
+without waiting for turns to finish. Startup resumes unfinished durable turns.
 Single-run and prebuilt modes bypass watching.
 
 **Source files:** [../local.ts](../local.ts) selects launch mode and roots;

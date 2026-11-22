@@ -11,6 +11,9 @@ import { blobName } from "../../../../src/agents/runtime/attachments/store";
 import { CHECKOUT_ROOT } from "../../../../src/build_dir";
 import { type Fixture, type Routes, hex, nowSeconds } from "../fixture";
 
+const wideMermaid = () =>
+  Bun.file(join(import.meta.dir, "../../fixtures/wide_mermaid.md")).text();
+
 export function routes(fx: Fixture): Routes {
   const { load, save, rootAgentId, once } = fx;
   const { instance } = fx;
@@ -47,7 +50,9 @@ export function routes(fx: Fixture): Routes {
       const enc = new TextEncoder();
       const text = await seedUpload(
         "files-demo",
-        enc.encode("bounded browser text preview\n"),
+        enc.encode(
+          `bounded browser text preview\nbounded again\n${"Notes on the browser preview. ".repeat(23).trim()}\n`,
+        ),
         "browser-notes.txt",
       );
       const image = await seedUpload(
@@ -543,6 +548,12 @@ export function routes(fx: Fixture): Routes {
       await started.promise;
       await save({ ...load(conv.id)!, updated: nowSeconds() });
       return { ok: true };
+    },
+    "seed-mermaid-reply": async () => {
+      const agent = `mermaid-reply-${hex(4)}`;
+      await create(agent, "Diagram walkthrough");
+      script(agent).setResponses([fauxAssistantMessage(await wideMermaid())]);
+      return { agent };
     },
     "seed-published-diff": async () => {
       const agent = "published-diff";

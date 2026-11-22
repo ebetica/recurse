@@ -1,6 +1,5 @@
-// Owns context-gap controls, not fetching or diff state. diff.ts owns
-// requests/state; lazy render.ts owns library row models, so the main
-// bundle does not load the diff library.
+// Owns context-gap controls. file-view.ts owns requests and expansion state;
+// render.ts owns row models and loads the diff library on demand.
 import { el } from "../dom.js";
 import { CHEVRON_DOWN_ICON, CHEVRON_UP_ICON } from "../icons.js";
 import type { ExpandDir, HunkExpand } from "./render.js";

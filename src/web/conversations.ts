@@ -1,36 +1,18 @@
 // Thin lifecycle/message/view routes over owner services.
 // Gate views before existence checks; focused SSE follows durable commits.
-// Bind service creates under lease; roll back lost races.
 // Relayed text is always agent input; audit its forwarding key separately.
 
 import { createHash } from "node:crypto";
 import { validBackendKeyName } from "../auth/backend_keys";
 import { keyedLabel } from "../backends/label";
-import { pyStrip } from "../auth/provider_store";
-import {
-  SERVICE_CREATE_MAX_ACTIVE,
-  SERVICE_MESSAGE_MAX_CHARS,
-  validateServicePolicy,
-  type ServicePolicy,
-} from "../auth/service";
-import { EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL } from "../config";
-import {
-  ExternalKeyConflict,
-  ServiceStorageUnavailable,
-  cleanTitleOrder,
-  stripPendingKeys,
-  validateExternalKey,
-} from "../agents/storage";
+import { pyStrip, SERVICE_MESSAGE_MAX_CHARS } from "../auth";
+import { EFFORT_LEVEL_RANGE, isEffortLevel } from "../effort_levels";
+import { cleanTitleOrder, stripPendingKeys } from "../agents/storage";
 import { linkedPrList } from "../agents/conversation_prs";
 import type { Tags } from "../agent_metadata/index";
 import { TreeLifecycleBusy } from "../agents/lifecycle";
 import { AttachmentError } from "../agents/runtime/attachments/base";
-import { pyTruthy } from "../agents/runtime/turn_prep";
-import {
-  CompletedReplyCursorError,
-  CompletedReplyCursorExpired,
-  CompletedReplyStorageUnavailable,
-} from "../agents/view/reader";
+import { pyTruthy } from "../agents/runtime";
 import {
   cleanBaseRef,
   DIFF_REQUEST_TIMEOUT_MS,
@@ -48,63 +30,27 @@ import { conditionalJson } from "./caching";
 import { creationTags } from "./tags";
 import { compactConversation } from "./compact";
 import { conversationEvents } from "./conversation_events";
-import { createMessageSender } from "./deliver_message";
-import { jsonObjectBody } from "./request";
 import {
-  agentMarked,
-  authMethod,
-  isOperator,
-  serviceOwnsRequest,
-  servicePrincipalOf,
-  serviceRequestPolicy,
-} from "./request_auth";
+  codePoints,
+  dictBody,
+  errorName,
+  header,
+  isValueError,
+  noStore,
+  queryStr,
+} from "./conversation_request";
+import { createLiveSteerCheck, createMessageSender } from "./deliver_message";
+import { agentMarked, authMethod, isOperator } from "./request_auth";
 import { HttpError, jsonResponse, type Exchange, type Router } from "./router";
 const SWITCH_TRACE_RE = /^[0-9a-f]{16,64}$/;
 /** config._TEMP_ID_RE. */
 export const TEMP_ID_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const SERVICE_CREATE_FIELDS = new Set(["title", "external_key"]);
-/** Seconds a service create waits for a slot before 429. */
-const SERVICE_CREATE_WAIT_SECONDS = 5;
-
 type Rec = Record<string, unknown>;
 type Status<T> = readonly [number, T];
-
-/** asyncio.Semaphore with `wait_for(acquire(), timeout)`. */
-export class CreateSlots {
-  private waiters: (() => void)[] = [];
-  constructor(private free = SERVICE_CREATE_MAX_ACTIVE) {}
-  /** True once a slot is held; false when `timeoutMs` passed first. */
-  acquire(timeoutMs: number): Promise<boolean> {
-    if (this.free > 0 && !this.waiters.length) {
-      this.free -= 1;
-      return Promise.resolve(true);
-    }
-    return new Promise((resolve) => {
-      const grant = () => {
-        clearTimeout(timer);
-        resolve(true);
-      };
-      const timer = setTimeout(() => {
-        this.waiters = this.waiters.filter((item) => item !== grant);
-        resolve(false);
-      }, timeoutMs);
-      this.waiters.push(grant);
-    });
-  }
-  release(): void {
-    const next = this.waiters.shift();
-    if (next) next();
-    else this.free += 1;
-  }
-  get available(): number {
-    return this.free;
-  }
-}
 
 export interface ConversationsRoutesDeps {
   /** 503 `service_storage_unavailable` + Retry-After: 2 until action-ready. */
   requireActionReady(): void;
-  readonly serviceCreateSlots: CreateSlots;
   readonly notifications?: { addViewer(cid: string): () => void };
   readonly log: RuntimeLogger;
   /** Monotonic milliseconds. */
@@ -117,17 +63,7 @@ export interface ConversationsRoutesDeps {
     subtree(cid: string): Rec[];
     save(conv: Rec): Promise<unknown>;
     effectiveWorkdir(conv: Rec): string;
-    lookupExternalKey(principal: string, key: string): Promise<Rec | null>;
-    serviceOwnedConversationCount(principal: string): Promise<number>;
-    bindServiceConversation(principal: string, cid: string): Promise<void>;
-    bindExternalKey(principal: string, key: string, cid: string): Promise<void>;
-    rollbackServiceConversation(conv: Rec): Promise<void>;
   };
-  /** mutation_guard.mutate_external_storage (the lifecycle lease). */
-  mutateExternalStorage<T>(
-    work: () => Promise<T>,
-    rollback?: () => Promise<void>,
-  ): Promise<T>;
   readonly delivery: {
     deliver(
       cid: string,
@@ -149,11 +85,6 @@ export interface ConversationsRoutesDeps {
   };
   readonly reads: {
     readConversationMetadata(cid: string): Rec | null | Promise<Rec | null>;
-    readCompletedReplies(
-      cid: string,
-      cursor: string | null,
-      options: { wait?: unknown },
-    ): Promise<Rec | null>;
     readViewWindow(
       cid: string,
       options: {
@@ -211,12 +142,6 @@ export interface ConversationsRoutesDeps {
       tags?: Tags;
       muted: boolean;
       operatorSelectedModel?: boolean;
-    }): Promise<Rec>;
-    createOrRejoinServiceConversation(options: {
-      title: string | null;
-      servicePrincipal: string;
-      externalKey: string | null;
-      allowedModels: readonly string[] | null;
     }): Promise<Rec>;
     setTakenOver(cid: string, takenOver: boolean): Promise<Rec>;
   };
@@ -334,36 +259,39 @@ export interface ConversationsRoutesDeps {
   };
 }
 
-const errorName = (error: unknown) =>
-  error instanceof Error ? error.name : "";
-const isValueError = (error: unknown) => errorName(error) === "ValueError";
-const isInt = (value: unknown): value is number =>
-  typeof value === "number" && Number.isInteger(value);
-const validLevel = (value: unknown): value is number =>
-  isInt(value) && value >= EFFORT_MIN_LEVEL && value <= EFFORT_MAX_LEVEL;
-const codePoints = (text: string) => Array.from(text).length;
-
-/** Conversation bodies strip the UTF-8 BOM even when not parsed as JSON. */
-async function dictBody(ex: Exchange, required: false): Promise<Rec | null>;
-async function dictBody(ex: Exchange, required?: true): Promise<Rec>;
-async function dictBody(ex: Exchange, required = true): Promise<Rec | null> {
-  return jsonObjectBody(ex, required, (bytes) =>
-    new TextDecoder().decode(bytes),
-  );
-}
-
-const noStore = { "cache-control": "no-store" };
-const header = (ex: Exchange, name: string) => ex.request.headers.get(name);
-const queryStr = (ex: Exchange, name: string) => {
-  const value = ex.query[name];
-  return value === null || value === undefined ? null : String(value);
-};
-
 export function registerConversationRoutes(
   router: Router,
   deps: ConversationsRoutesDeps,
 ): ReturnType<typeof createMessageSender> {
   const { store } = deps;
+  const githubRepos = new Map<
+    string,
+    { url: string | null; pending: boolean }
+  >();
+  function githubRepoForRead(
+    stored: string,
+    workdirFile: string | null,
+    focused: boolean,
+  ): string | null {
+    const key = JSON.stringify([stored, workdirFile]);
+    const entry = githubRepos.get(key) ?? { url: null, pending: false };
+    if (focused && !entry.pending) {
+      githubRepos.delete(key);
+      githubRepos.set(key, entry);
+      if (githubRepos.size > 100)
+        githubRepos.delete(githubRepos.keys().next().value!);
+      entry.pending = true;
+      // Recheck the persisted cwd; the next ordinary read gets the result.
+      void deps.git
+        .githubRepoUrl(stored, workdirFile)
+        .catch(() => null)
+        .then((url) => {
+          entry.url = url;
+          entry.pending = false;
+        });
+    }
+    return entry.url;
+  }
   const operatorSelectedFileModel = (ex: Exchange, model: unknown): boolean => {
     const fileModel =
       typeof model === "string" && deps.config.isFileProviderModel(model);
@@ -375,15 +303,7 @@ export function registerConversationRoutes(
     return fileModel;
   };
 
-  const messageIsLiveSteer = (cid: string): boolean => {
-    if (deps.liveRunId(cid) === null) return false;
-    try {
-      const status = deps.nodes.node(cid).piStatus();
-      return status !== null && status !== "interrupting";
-    } catch {
-      return false;
-    }
-  };
+  const messageIsLiveSteer = createLiveSteerCheck(deps);
 
   const uploadsAvailable = async (cid: string, ids: string[]) => {
     const snap = deps.reads.fileSnapshot(cid);
@@ -407,184 +327,12 @@ export function registerConversationRoutes(
     messageIsLiveSteer,
   );
 
-  const requireServicePrincipal = (ex: Exchange): [string, ServicePolicy] => {
-    const principal = servicePrincipalOf(ex);
-    const policy = serviceRequestPolicy(ex);
-    if (principal === null)
-      throw new HttpError(401, "service authentication required");
-    if (policy === null) throw new HttpError(403, "service policy unavailable");
-    return [principal, policy];
-  };
-
   const agentHeader = (ex: Exchange): string | null => {
     if (typeof ex.state.backend_agent === "string")
       return ex.state.backend_agent;
     const by = header(ex, "x-recurse-agent");
     return by !== null && TEMP_ID_RE.test(by) ? by : null;
   };
-
-  const createServiceConversation = async (
-    principal: string,
-    rawBody: Rec | null,
-    rawPolicy: ServicePolicy,
-  ): Promise<Rec> => {
-    const policy = validateServicePolicy(rawPolicy);
-    if (policy === null) throw new HttpError(403, "service policy unavailable");
-    const body = rawBody ?? {};
-    if (Object.keys(body).some((key) => !SERVICE_CREATE_FIELDS.has(key)))
-      throw new HttpError(422, "unsupported service create field");
-    const title = body.title ?? null;
-    if (
-      title !== null &&
-      (typeof title !== "string" || !pyStrip(title) || codePoints(title) > 200)
-    )
-      throw new HttpError(422, "invalid title");
-    let externalKey: string | null;
-    try {
-      externalKey = validateExternalKey(body.external_key ?? null);
-    } catch (error) {
-      throw new HttpError(422, (error as Error).message);
-    }
-    const ownedLimit = policy.quotas?.max_owned_conversations ?? null;
-    const allowedModels = policy.allowed_models;
-    let published: Rec | null = null;
-    const rollbackPublished = async () => {
-      if (published === null) return;
-      try {
-        await store.rollbackServiceConversation(published);
-      } finally {
-        published = null;
-      }
-    };
-    const checkQuota = async () => {
-      if (ownedLimit === null) return;
-      let owned: number;
-      try {
-        owned = await store.serviceOwnedConversationCount(principal);
-      } catch (error) {
-        if (error instanceof ServiceStorageUnavailable)
-          throw new ServiceRefusal("service_storage_unavailable");
-        throw error;
-      }
-      if (owned >= ownedLimit) throw new ServiceRefusal("quota_exceeded");
-    };
-    // Invariant: Leased advisory gate before the phased create: a bound address
-    // returns its conversation and an over-quota principal fails before
-    // anything publishes. Both are rechecked under the bind lease below.
-    const precheck = async (): Promise<Rec | null> => {
-      if (externalKey) {
-        const existing = await store.lookupExternalKey(principal, externalKey);
-        if (existing !== null) return { ...existing, _created: false };
-      }
-      await checkQuota();
-      return null;
-    };
-    // Invariant: Authoritative address resolution under the same lease as the
-    // binds: a key bound mid-flight rejoins its owner instead of conflicting.
-    const bind = async (conv: Rec): Promise<Rec> => {
-      if (externalKey) {
-        const current = await store.lookupExternalKey(principal, externalKey);
-        if (current !== null && current.id !== conv.id) {
-          await rollbackPublished();
-          return { ...current, _created: false };
-        }
-      }
-      await checkQuota();
-      try {
-        await store.bindServiceConversation(principal, String(conv.id));
-        if (externalKey)
-          await store.bindExternalKey(principal, externalKey, String(conv.id));
-      } catch (error) {
-        if (!(error instanceof ExternalKeyConflict) || !externalKey)
-          throw error;
-        // Invariant: Lost the bind race after the lookup: rejoin the winner, or
-        // fail closed on a dangling leaf.
-        const current = await store.lookupExternalKey(principal, externalKey);
-        if (current === null) throw error;
-        await rollbackPublished();
-        return { ...current, _created: false };
-      }
-      return conv;
-    };
-    const storage = async <T>(work: () => Promise<T>): Promise<T> => {
-      try {
-        return await work();
-      } catch (error) {
-        if (isOsError(error))
-          throw new ServiceRefusal("service_storage_unavailable");
-        throw error;
-      }
-    };
-    if (
-      !(await deps.serviceCreateSlots.acquire(
-        SERVICE_CREATE_WAIT_SECONDS * 1000,
-      ))
-    )
-      throw new HttpError(429, "service create is busy");
-    let conv: Rec;
-    try {
-      const existing = await storage(() =>
-        deps.mutateExternalStorage(precheck),
-      );
-      if (existing !== null) conv = existing;
-      else {
-        // Invariant: Service threads are isolated top-level rows: a
-        // caller-selected parent would be an IDOR path.
-        conv = await storage(() =>
-          deps.create.createOrRejoinServiceConversation({
-            title: title as string | null,
-            servicePrincipal: principal,
-            externalKey,
-            allowedModels: allowedModels ?? null,
-          }),
-        );
-        if (conv._external_key_created !== false) {
-          published = conv;
-          const fresh = conv;
-          conv = await storage(() =>
-            deps.mutateExternalStorage(() => bind(fresh), rollbackPublished),
-          );
-        } else conv = { ...conv, _created: false };
-      }
-    } catch (error) {
-      if (error instanceof ExternalKeyConflict)
-        throw new HttpError(409, error.message);
-      if (error instanceof TreeLifecycleBusy)
-        throw new HttpError(429, "service create is busy");
-      if (error instanceof ServiceRefusal || isValueError(error)) {
-        const text = (error as Error).message;
-        if (text === "model_not_allowed")
-          throw new HttpError(403, "model_not_allowed");
-        if (text === "quota_exceeded")
-          throw new HttpError(429, "max_owned_conversations exceeded");
-        if (text === "service_storage_unavailable")
-          throw new HttpError(503, "service_storage_unavailable");
-        throw new HttpError(422, "service conversation creation rejected");
-      }
-      throw error;
-    } finally {
-      deps.serviceCreateSlots.release();
-    }
-    return {
-      id: conv.id,
-      status: conv.status,
-      title: conv.title ?? null,
-      created: conv._created !== false,
-    };
-  };
-
-  router.post(
-    "/api/service/conversations",
-    async (ex) => {
-      // Invariant: FastAPI validates the body before the handler runs.
-      const body = await dictBody(ex, false);
-      const [principal, policy] = requireServicePrincipal(ex);
-      return jsonResponse(
-        await createServiceConversation(principal, body, policy),
-      );
-    },
-    { longRunning: true },
-  );
 
   router.post(
     "/api/conversations",
@@ -617,8 +365,8 @@ export function registerConversationRoutes(
       if (parent !== null && !pyTruthy(store.load(parent as string)))
         throw new HttpError(404, "parent agent not found");
       const level = body.level ?? null;
-      if (level !== null && !validLevel(level))
-        throw new HttpError(422, "level must be 1-5");
+      if (level !== null && !isEffortLevel(level))
+        throw new HttpError(422, `level must be ${EFFORT_LEVEL_RANGE}`);
       try {
         return jsonResponse(
           await deps.create.create({
@@ -664,8 +412,8 @@ export function registerConversationRoutes(
     if (prompt !== null && typeof prompt !== "string")
       throw new HttpError(422, "prompt must be text");
     const effort = body.effort ?? null;
-    if (effort !== null && !validLevel(effort))
-      throw new HttpError(422, "effort must be 1-5");
+    if (effort !== null && !isEffortLevel(effort))
+      throw new HttpError(422, `effort must be ${EFFORT_LEVEL_RANGE}`);
     if (Object.keys(body).some((key) => key.startsWith("safety")))
       throw new HttpError(422, "spawn cannot change safety review");
     if (body.backend !== undefined)
@@ -767,11 +515,12 @@ export function registerConversationRoutes(
       delete record.run_state_clock;
       record.github_repo_url = null;
       try {
-        record.github_repo_url = await deps.git.githubRepoUrl(
+        record.github_repo_url = githubRepoForRead(
           store.effectiveWorkdir(record),
           typeof record.tmp_key === "string"
             ? deps.git.workdirFile(record.tmp_key)
             : null,
+          focused,
         );
       } catch {}
 
@@ -818,50 +567,6 @@ export function registerConversationRoutes(
       query: {
         focused: { type: "bool", default: false },
       },
-    },
-  );
-
-  router.get(
-    "/api/service/conversations/{cid}/replies",
-    async (ex) => {
-      // Invariant: Service-owned completed turns with an at-least-once cursor;
-      // the read never records delivery.
-      requireServicePrincipal(ex);
-      const cid = ex.params.cid!;
-      if (!serviceOwnsRequest(ex, cid))
-        throw new HttpError(404, "conversation not found");
-      let page: Rec | null;
-      try {
-        page = await deps.reads.readCompletedReplies(
-          cid,
-          queryStr(ex, "after"),
-          {
-            wait: ex.query.wait,
-          },
-        );
-      } catch (error) {
-        if (error instanceof CompletedReplyCursorExpired)
-          return jsonResponse(
-            { error: { code: "cursor_expired", message: error.message } },
-            410,
-            noStore,
-          );
-        if (error instanceof CompletedReplyStorageUnavailable)
-          throw new HttpError(503, "reply storage unavailable");
-        if (
-          error instanceof CompletedReplyCursorError ||
-          isValueError(error) ||
-          error instanceof RangeError
-        )
-          throw new HttpError(422, (error as Error).message);
-        throw error;
-      }
-      if (page === null) throw new HttpError(404, "conversation not found");
-      return jsonResponse(page, 200, noStore);
-    },
-    {
-      query: { after: { type: "str" }, wait: { type: "float", default: 0 } },
-      longRunning: true,
     },
   );
 
@@ -998,7 +703,8 @@ export function registerConversationRoutes(
     let model = body.model ?? null;
     let effort = body.effort ?? null;
     if (level !== null) {
-      if (!validLevel(level)) throw new HttpError(422, "level must be 1-5");
+      if (!isEffortLevel(level))
+        throw new HttpError(422, `level must be ${EFFORT_LEVEL_RANGE}`);
       if (model === null) {
         let reasoning: string;
         try {
@@ -1277,58 +983,6 @@ export function registerConversationRoutes(
     return jsonResponse(state, 202);
   });
 
-  router.post("/api/service/conversations/{cid}/messages", async (ex) => {
-    const cid = ex.params.cid!;
-    const body = await dictBody(ex);
-    const [, policy] = requireServicePrincipal(ex);
-    const ownership = ex.state.service_conversation_ownership;
-    if (
-      !Array.isArray(ownership) ||
-      ownership.length !== 2 ||
-      !ownership.every((value) => typeof value === "string")
-    )
-      throw new HttpError(403, "service ownership unavailable");
-    if (!serviceOwnsRequest(ex, cid))
-      throw new HttpError(404, "conversation not found");
-    const conv = store.load(cid, { withPending: false });
-    if (!pyTruthy(conv)) throw new HttpError(404, "conversation not found");
-    const allowed = policy.allowed_models;
-    if (allowed !== null && !allowed.includes(conv!.model as string))
-      throw new HttpError(403, "model_not_allowed");
-    const active = (conv!.active_turn ?? {}) as Rec;
-    if (pyTruthy(conv!.safety_off) || pyTruthy(active.safety_off))
-      throw new HttpError(403, "service safety review is required");
-    const keys = Object.keys(body);
-    if (keys.length !== 1 || keys[0] !== "content")
-      throw new HttpError(422, "service message accepts only content");
-    const raw = body.content;
-    if (
-      raw !== null &&
-      raw !== undefined &&
-      typeof raw !== "string" &&
-      pyTruthy(raw)
-    )
-      throw new TypeError("service message content must be text");
-    const content = pyTruthy(raw) ? pyStrip(raw as string) : "";
-    if (!content) throw new HttpError(422, "empty message");
-    if (codePoints(content) > SERVICE_MESSAGE_MAX_CHARS)
-      throw new HttpError(413, "message is too large");
-    const steer = messageIsLiveSteer(cid);
-    const messageId = await deps.delivery.deliver(cid, content, {
-      start: false,
-      origin: "service",
-    });
-    if (messageId === null) throw new HttpError(404, "conversation not found");
-    deps.delivery.requestRun(cid);
-    const latest = store.load(cid, { withPending: false });
-    return jsonResponse({
-      ok: true,
-      status: (latest ?? conv!).status,
-      message_id: messageId,
-      steer,
-    });
-  });
-
   router.post("/api/conversations/{cid}/deliver", async (ex) => {
     const cid = ex.params.cid!;
     const body = await dictBody(ex);
@@ -1592,17 +1246,6 @@ export function registerConversationRoutes(
   );
   return sendMessage;
 }
-
-/** A named refusal inside a service create. */
-class ServiceRefusal extends Error {
-  override name = "ValueError";
-}
-
-const isOsError = (error: unknown) =>
-  typeof error === "object" &&
-  error !== null &&
-  typeof (error as { code?: unknown }).code === "string" &&
-  /^E[A-Z]+$/.test((error as { code: string }).code);
 
 /** Python float(text) accepts this spelling. */
 function pyFloatText(text: string): boolean {

@@ -5,7 +5,6 @@ import type { ContextTokenEstimate, ContextUsageDetail } from "../types.js";
 type ContextSplitKey = keyof ContextTokenEstimate;
 
 interface ContextBarSegment {
-  id: ContextSplitKey | "used";
   label: string;
   tokens: number;
   basisPoints: number;
@@ -66,7 +65,6 @@ function allocatePoints(values: number[], total: number): number[] {
 
 export function contextBarSegments(
   detail: ContextUsageDetail,
-  aggregateFallback = false,
 ): ContextBarSegment[] {
   const max =
     validCount(detail.context_window) && detail.context_window > 0
@@ -76,20 +74,8 @@ export function contextBarSegments(
   if (max === null || used === null) return [];
   const usedPoints = Math.min(10_000, Math.round((used / max) * 10_000));
   const estimate = safeEstimate(detail.estimated_tokens, used);
-  if (!estimate)
-    return aggregateFallback && usedPoints > 0
-      ? [
-          {
-            id: "used",
-            label: "Used",
-            tokens: used,
-            basisPoints: usedPoints,
-            color: "input",
-          },
-        ]
-      : [];
+  if (!estimate) return [];
   const rows = CONTEXT_SPLIT.map((row) => ({
-    id: row.key,
     label: row.label,
     tokens: estimate[row.key],
     color: row.color,
@@ -132,10 +118,6 @@ export function contextOverviewLabel(detail: ContextUsageDetail): string {
           (row) => `${formatContextInteger(estimate[row.key])} ${row.label}`,
         ).join(", ")
     : measured;
-}
-
-export function contextMiniBarCollapsed(containerWidth: number): boolean {
-  return !Number.isFinite(containerWidth) || containerWidth < 620;
 }
 
 type ContextDetailFetcher = (

@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Config } from "../../src/config.ts";
+import { EFFORT_LEVELS } from "../../src/effort_levels.ts";
 import {
   ReadOnlySignIns,
   SIGN_INS_NEED_REFRESH,
@@ -148,7 +149,7 @@ function reviewFailures(
 }
 
 async function run(): Promise<void> {
-  const model = process.argv[2] ?? new Config().effortLevels()[1]!.model;
+  const model = process.argv[2] ?? new Config().levels.effortLevels()[1]!.model;
   const provider = model.slice(0, model.indexOf("/"));
   const source = process.env.PI_CODING_AGENT_DIR;
   if (!source || !provider) {
@@ -206,7 +207,7 @@ async function run(): Promise<void> {
       JSON.stringify({
         version: 1,
         default_level: 1,
-        levels: Object.fromEntries([1, 2, 3, 4, 5].map((n) => [n, level])),
+        levels: Object.fromEntries(EFFORT_LEVELS.map((n) => [n, level])),
       }),
     );
     stage = "server startup";

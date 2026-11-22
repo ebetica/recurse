@@ -498,6 +498,7 @@ async function test_deferred_generation_recovery_keeps_chat_usable(
         draft: false,
         convId: "main",
         content: "restored failed send",
+        level: 6,
         waitForIndex: -1,
       },
     ],

@@ -12,14 +12,7 @@ export interface UpdateRequest {
 
 export interface UpdateReport {
   readonly type: "update-status";
-  /** install.sh running, nothing newer, building, waiting for turns, etc. */
-  readonly state:
-    | "updating"
-    | "current"
-    | "building"
-    | "waiting"
-    | "restarting"
-    | "failed";
+  readonly state: "updating" | "current" | "building" | "restarting" | "failed";
   readonly detail: string | null;
 }
 

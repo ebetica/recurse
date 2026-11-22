@@ -69,6 +69,7 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
   const deps: CreateDeps = {
     tasks: new TaskSet(() => {}),
     conversations: world.conversations,
+    serviceBindings: world.serviceBindings,
     nodes: world.nodes,
     lifecycle: {
       guard: async (_site, _cid, fn, o) => {
@@ -132,9 +133,9 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
   };
   const realRollback =
     conversations.rollbackServiceConversation.bind(conversations);
-  conversations.rollbackServiceConversation = async (conv) => {
+  conversations.rollbackServiceConversation = async (conv, serviceBindings) => {
     calls.push(["rollback", conv.id]);
-    return realRollback(conv);
+    return realRollback(conv, serviceBindings);
   };
   const create = new SupervisorCreate(deps);
   return {
@@ -172,7 +173,7 @@ test("new conversations and children use Durable", async () => {
 
 test("new conversations and spawns on a Settings custom provider use Durable", async () => {
   const t = setup();
-  await t.world.config.upsertCustomProvider("local-llm", {
+  await t.world.config.models.upsertCustomProvider("local-llm", {
     base_url: "http://127.0.0.1:9/v1",
     env_key: "LOCAL_LLM_KEY",
     wire_api: "completions",

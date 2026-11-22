@@ -190,6 +190,8 @@ export const artifactPageUrl = (
   version?: string | null,
 ): string =>
   backendFor(agentId).url(artifactPath(id, "/page") + query(agentId, version));
+export const artifactAppStatePath = (agentId: string, id: string): string =>
+  artifactPath(id, "/app-state") + query(agentId);
 export const artifactVersionsUrl = (agentId: string, id: string): string =>
   backendFor(agentId).url(artifactPath(id, "/versions") + query(agentId));
 export const artifactRestoreUrl = (id: string): string =>

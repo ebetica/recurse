@@ -2,10 +2,18 @@ import { expect } from "bun:test";
 import type { Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { loadRecording } from "../backend/fixtures/model_response/replay";
-import { captureErrors, closeWithRoutes, type BrowserTest } from "./common";
+import {
+  captureErrors,
+  closeWithRoutes,
+  expectHitCorners,
+  focusComposer,
+  visibleAndUncovered,
+  waitForLayout,
+  type BrowserTest,
+} from "./common";
 
 export const tests: BrowserTest[] = [
-  // Regression: #3249 usage must name the served model. (also #2408 a recorded pre-clear response must not end the wait.)
+  // Regression: #3249 #2408 #3565 report the served model, reject pre-clear data, and keep warnings reachable in narrow Chat windows.
   async function test_recorded_stream_changed_served_model_chip(browser, base) {
     const recording = await loadRecording();
     const reasoningValues = /\b(off|minimal|low|medium|high|xhigh|max)\b/i;
@@ -40,6 +48,7 @@ export const tests: BrowserTest[] = [
       ] as const) {
         if (checkRow) {
           await view.locator("#downgrade-chip").waitFor();
+          await focusComposer(view);
           const layout = await view.locator("#conv-controls").evaluate((row) =>
             [...row.querySelectorAll("button")]
               .map((item) => item.getBoundingClientRect())
@@ -88,13 +97,26 @@ export const tests: BrowserTest[] = [
         .waitFor();
       const chip = page.locator("#downgrade-chip");
       expect(await chip.isVisible()).toBeFalse();
-      expect(await page.locator("#safety-btn .lbl").innerText()).toBe(
-        "Safety review",
-      );
-      expect(await page.locator("#safety-btn").getAttribute("aria-label")).toBe(
-        "Safety review, on",
-      );
       await screenshots("before");
+      const anchors = () =>
+        page.locator("#composer").evaluate((composer) =>
+          ["#attach", "#context-indicator", "#model-trigger", "#send"].map(
+            (selector) => {
+              const { x, y, width, height } = composer
+                .querySelector(selector)!
+                .getBoundingClientRect();
+              return { selector, x, y, width, height };
+            },
+          ),
+        );
+      const phoneWidth = (width: number) =>
+        page.setViewportSize({ width, height: 915 });
+      await focusComposer(page);
+      await visibleAndUncovered(page, "#context-indicator");
+      const beforeWarning = await anchors();
+      await phoneWidth(390);
+      const beforeWarning390 = await anchors();
+      await phoneWidth(412);
       const original = await seed(true, agent);
       await chip.waitFor();
       await browserExpect(
@@ -120,6 +142,30 @@ export const tests: BrowserTest[] = [
       ).toEqual([true, true, true, true]);
       expect((await chip.getAttribute("class")) ?? "").not.toContain("seen");
       await screenshots("after", true);
+      expect(await anchors()).toEqual(beforeWarning);
+      await phoneWidth(390);
+      const afterWarning390 = await anchors();
+      const centers = afterWarning390.map(({ y, height }) => y + height / 2);
+      const chipBox = (await chip.boundingBox())!;
+      centers.push(chipBox.y + chipBox.height / 2);
+      expect(Math.max(...centers) - Math.min(...centers)).toBeLessThanOrEqual(
+        1,
+      );
+      expect(afterWarning390).toEqual(beforeWarning390);
+      await phoneWidth(412);
+      await page.locator("#input").blur();
+      const controlsWithLayout = await page
+        .locator("#conv-controls :is(#context-indicator, #model-trigger)")
+        .evaluateAll((controls) =>
+          controls
+            .filter((control) => {
+              const { width, height } = control.getBoundingClientRect();
+              return width > 0 && height > 0;
+            })
+            .map((control) => control.id),
+        );
+      expect(controlsWithLayout).toEqual([]);
+      await visibleAndUncovered(page, "#downgrade-chip");
       await chip.click();
       const catalog = await (
         await page.request.get(`${base}api/models`)
@@ -138,6 +184,7 @@ export const tests: BrowserTest[] = [
       await popover.locator(".model-response-row time").waitFor();
       expect(await chip.getAttribute("class")).toContain("seen");
       await page.keyboard.press("Escape");
+      await browserExpect(chip).toBeFocused();
       await page.reload();
       await chip.waitFor();
       expect(await chip.getAttribute("class")).toContain("seen");
@@ -227,17 +274,6 @@ export const tests: BrowserTest[] = [
       if (shots)
         await page.screenshot({ path: `${shots}/turn-usage-after-412.png` });
       await page.locator("#prompt-close").click();
-      await page.locator("#safety-btn").click();
-      await page
-        .getByRole("button", { name: "Turn off safety review", exact: true })
-        .click();
-      await page
-        .locator("#safety-btn .lbl")
-        .filter({ hasText: /^Yolo mode$/ })
-        .waitFor();
-      expect(await page.locator("#safety-btn").getAttribute("aria-label")).toBe(
-        "Safety review off (Yolo mode)",
-      );
       const result = await page.request.post(
         `${base}__browser-test/seed-model-response`,
         {
@@ -261,8 +297,12 @@ export const tests: BrowserTest[] = [
           });
         });
       await page.goto(`${base}?served-model#agent=${fake.agent}`);
-      await page.locator("#input").waitFor();
-      const controlsBefore = await page.locator("#conv-controls").boundingBox();
+      await page.locator("#safety-row.on").waitFor({ state: "attached" });
+      await focusComposer(page);
+      const pill = page.locator("#model-trigger");
+      const pillWidth = () =>
+        pill.evaluate((node) => node.getBoundingClientRect().width);
+      const fullWidth = await pillWidth();
       await page.locator("#input").fill("Reply with NORMAL_MODEL_OK.");
       await page.locator("#send").click();
       await page
@@ -271,8 +311,21 @@ export const tests: BrowserTest[] = [
           exact: true,
         })
         .waitFor();
-      const controlsAfter = await page.locator("#conv-controls").boundingBox();
-      expect(controlsAfter).toEqual(controlsBefore);
+      await focusComposer(page);
+      expect(await pillWidth()).toBe(fullWidth);
+      for (const width of [390, 361, 360, 320]) {
+        await page.setViewportSize({ width, height: 915 });
+        await focusComposer(page);
+        expect(await pillWidth()).toBe(fullWidth);
+        await visibleAndUncovered(page, "#model-trigger .model-name");
+        for (const control of [
+          "#context-indicator",
+          "#downgrade-chip",
+          "#model-trigger",
+        ])
+          await expectHitCorners(page.locator(control));
+      }
+      await page.setViewportSize({ width: 412, height: 915 });
       const servedExplanation =
         "Model changed: requested Faux Model → served Served model";
       await page.locator("#downgrade-chip").click();
@@ -332,6 +385,60 @@ export const tests: BrowserTest[] = [
             path: `${shots}/downgrade-usage-${view.viewportSize()!.width}-${appearance}.png`,
           });
         await view.locator("#prompt-close").click();
+      }
+      await desktop.goto(`${base}#agent=${agent}`);
+      await desktop.locator("#model-trigger").click();
+      await desktop
+        .getByRole("switch", { name: "Safety review, on", exact: true })
+        .click();
+      const safetySaved = desktop.waitForResponse(
+        `${base}api/conversations/${agent}/safety`,
+      );
+      await desktop
+        .getByRole("button", { name: "Turn off safety review", exact: true })
+        .click();
+      expect((await safetySaved).ok()).toBeTrue();
+      await seed(true, agent);
+      await desktop.reload();
+      await desktop.locator("#downgrade-chip").waitFor();
+      await desktop
+        .getByRole("button", { name: "Safety review off", exact: true })
+        .waitFor();
+      await desktop.locator('.rail-btn[data-pane="explorer"]').click();
+      const sash = desktop.locator("#dock .dv-sash:visible:not([inert])");
+      await sash.waitFor();
+      const split = (await sash.boundingBox())!;
+      const main = desktop.locator("#main");
+      const left = (await main.boundingBox())!.x;
+      const y = split.y + split.height / 2;
+      await desktop.mouse.move(split.x + split.width / 2, y);
+      await desktop.mouse.down();
+      await desktop.mouse.move(left + 145, y);
+      await desktop.mouse.up();
+      await waitForLayout(desktop);
+      expect((await main.boundingBox())!.width).toBeLessThan(170);
+      const cdp = await desktop.context().newCDPSession(desktop);
+      for (const touch of [false, true]) {
+        await cdp.send("Emulation.setTouchEmulationEnabled", {
+          enabled: touch,
+        });
+        await desktop.waitForFunction(
+          (touch) => window.matchMedia("(pointer: coarse)").matches === touch,
+          touch,
+        );
+        for (const id of [
+          "attach",
+          "safety-warning",
+          "downgrade-chip",
+          "context-indicator",
+          "model-trigger",
+          "send",
+        ]) {
+          await visibleAndUncovered(desktop, `#${id}`);
+          await expectHitCorners(desktop.locator(`#${id}`), touch ? 44 : 24, {
+            centerOnHitArea: touch,
+          });
+        }
       }
       expect(errors).toEqual([]);
     } finally {
@@ -436,10 +543,12 @@ export const tests: BrowserTest[] = [
           ladderGate.open();
           await ladderRead;
           expect(ladderName).toBeDefined();
-          await browserExpect(name).toHaveText(ladderName!);
+          await browserExpect(name).toHaveText(
+            ladderName!.replace(/^Claude /, ""),
+          );
           await browserExpect(trigger).toHaveAttribute(
             "aria-label",
-            `Level 3: ${ladderName}: choose effort level`,
+            `Level 3: ${ladderName} · Medium: choose effort level`,
           );
           expect(await firstLine()).toBe(
             "Model changed: requested … → served …",

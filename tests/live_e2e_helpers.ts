@@ -12,16 +12,16 @@ import { STRICT_ISOLATED_PATH_ENV } from "../src/local_roots.ts";
 import { Config } from "../src/config.ts";
 
 export function liveModel(provider: string, config = new Config()) {
-  const levels = config.effortLevels();
+  const levels = config.levels.effortLevels();
   const order = [
-    config.defaultEffortLevel(),
+    config.levels.defaultEffortLevel(),
     ...Object.keys(levels).map(Number),
   ];
   for (const level of order) {
     const id = levels[level]!.model;
     const separator = id.indexOf("/");
     if (id.slice(0, separator) !== provider) continue;
-    const unlisted = config.unlistedModelSentence(id, level);
+    const unlisted = config.models.unlistedModelSentence(id, level);
     if (unlisted) throw new Error(unlisted);
     return { id, route: { provider, modelId: id.slice(separator + 1) } };
   }

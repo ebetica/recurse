@@ -1,8 +1,14 @@
 import { expect } from "bun:test";
+import type { Locator } from "playwright";
+declare const window: any;
+declare const MutationObserver: any;
+declare const requestAnimationFrame: any;
 import {
   captureErrors,
   gotoRoot,
   mockConversation,
+  postFixture,
+  recordJumpHighlight,
   runBrowserTests,
   themeColors,
   waitForLayout,
@@ -13,12 +19,22 @@ import { ConversationView } from "../../src/agents/view/conversation";
 import captured from "../backend/fixtures/compaction/real-shapes.json";
 import { SERVER_COMPACTION_MARKER } from "../../src/extensions/core/context/server-compaction";
 import durableBoundary from "./fixtures/durable-compaction-boundary.json";
+import recorded from "./fixtures/durable-compaction-jump.json";
 import durableUser from "./fixtures/durable-compaction-user.json";
 import {
   projectionEntries,
   rowState,
 } from "../../src/agents/durable/durable_rows";
 import type { EntryRecord } from "@earendil-works/pi-durable";
+
+const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+
+async function openCompactedSummary(divider: Locator, text: string) {
+  expect(await divider.locator(".disclosure-body").count()).toBe(0);
+  await divider.locator(".compacted-head").click();
+  await divider.locator(".disclosure-body").waitFor({ timeout: 15_000 });
+  await divider.getByText(text, { exact: false }).first().waitFor();
+}
 
 export const tests: BrowserTest[] = [
   // Regression: #2831 retained user and tool boundaries jump without expanding compacted activity.
@@ -459,6 +475,349 @@ export const tests: BrowserTest[] = [
         await context.close();
       }
     }
+  },
+
+  // Feature: #2514 compaction jumps reveal the recorded kept message.
+  async function test_durable_compaction_jump_reveals_first_recorded_kept_message(
+    browser,
+    base,
+  ) {
+    const [kept, input, summary, response] = recorded;
+    const rows = [
+      row("prior", "user", "Prior request"),
+      row("prior-response", "assistant", "Prior response"),
+      row(String(summary!.id), "compaction", summary!.text, {
+        kind: "marker",
+        meta: { compact_marker: true, firstKeptEntryId: String(summary!.head) },
+      }),
+      row(String(kept!.id), "user", kept!.text, {
+        origin: "agent",
+        sender: "sender",
+      }),
+      row("kept-response", "assistant", "Kept response"),
+      row(String(input!.id), "user", input!.text),
+      row(String(response!.id), "assistant", response!.text),
+      row("notice", "compaction-notice", "Context compacted.", {
+        kind: "marker",
+        meta: { summaryEntryId: String(summary!.id) },
+      }),
+    ];
+    const page = await browser.newPage({
+      viewport: { width: 412, height: 915 },
+      isMobile: true,
+      hasTouch: true,
+    });
+    const errors = captureErrors(page);
+    await mockConversation(page, base, "main", () => ({
+      id: "main",
+      title: "Recorded compaction",
+      parent: null,
+      backend: "durable",
+      status: "idle",
+      msg_count: rows.length,
+      rows,
+    }));
+    await gotoRoot(page, base);
+    const jump = page.locator(".compaction-jump-link");
+    await jump.waitFor();
+    expect(await page.getByText(kept!.text, { exact: true }).count()).toBe(0);
+    const highlighted = await recordJumpHighlight(page);
+    await jump.click();
+    expect(await highlighted()).toBe(`row:${kept!.id}`);
+    if (shots)
+      await page.screenshot({ path: `${shots}/durable-first-kept.png` });
+    expect(await page.getByText(kept!.text, { exact: true }).isVisible()).toBe(
+      true,
+    );
+    expect(await jump.innerText()).toBe("Jump to first kept message");
+    expect(errors).toEqual([]);
+    await page.close();
+  },
+
+  // Regression: #2874 #3348 restore readers and resize after live work settles.
+  async function test_durable_jump_pages_past_compaction(browser, base) {
+    for (const width of [390, 1280]) {
+      const mobile = width === 390;
+      const { agent } = await postFixture(base, "seed-durable-history", {
+        agent: `durable-history-${width}`,
+        neighbours: 8,
+      });
+      const page = await browser.newPage({
+        viewport: { width, height: 844 },
+        hasTouch: mobile,
+        isMobile: mobile,
+      });
+      const errors = captureErrors(page);
+      await page.goto(`${base}#agent=${agent}`, {
+        waitUntil: "domcontentloaded",
+      });
+      await page.getByText("Answer 69", { exact: true }).waitFor();
+      const jump = page.locator(".compaction-jump-link");
+      await jump.waitFor();
+      if (shots)
+        await page.screenshot({ path: `${shots}/durable-notice-${width}.png` });
+      const highlighted = await recordJumpHighlight(page);
+      await jump.click();
+      await highlighted();
+      const divider = page.locator(".compacted-activity");
+      await openCompactedSummary(divider, "Summary of turns 0-19.");
+      const top = async (text: string) =>
+        (await page.getByText(text, { exact: true }).boundingBox())!.y;
+      const at = (await divider.boundingBox())!.y;
+      expect(at).toBeLessThan(await top("Answer 40"));
+      expect(await page.getByText("Answer 25", { exact: true }).count()).toBe(
+        1,
+      );
+      if (shots)
+        await page.screenshot({
+          path: `${shots}/durable-summary-${width}.png`,
+        });
+      const open = async (id: string, title: string) => {
+        if (mobile) await page.locator("#menu-btn").click();
+        await page.locator(`.agent[data-id="${id}"]`).click();
+        await page.locator("#conv-title", { hasText: title }).waitFor();
+        await page
+          .locator("#conv-freshness:not(.on)")
+          .waitFor({ state: "attached" });
+      };
+      await postFixture(base, "durable-history-more", {
+        agent,
+        from: 70,
+        to: 71,
+        report: true,
+      });
+      await postFixture(base, "durable-history-more", {
+        agent,
+        from: 71,
+        to: 76,
+      });
+      const turn = page.locator(".activity-boundary", { hasText: "Answer 70" });
+      await turn.locator(".activity-group-toggle").click();
+      const report = await turn
+        .locator(".agent-message[data-row-id]")
+        .getAttribute("data-row-id");
+      const reader = page.locator(`#scroll [data-row-id="${report}"]`);
+      const readerTop = () =>
+        reader.evaluate(
+          (row) =>
+            row.getBoundingClientRect().top -
+            document.querySelector("#scroll")!.getBoundingClientRect().top,
+        );
+      await waitForLayout(page);
+      await reader.evaluate((row) => {
+        row.scrollIntoView({ block: "start" });
+        document.querySelector("#scroll")!.scrollTop += 4;
+      });
+      await waitForLayout(page);
+      const left = await readerTop();
+      expect(left).toBeCloseTo(-4, 0);
+      if (mobile) {
+        await page.getByText("Answer 75", { exact: true }).waitFor();
+        await page.locator("#live-bar[hidden]").waitFor({ state: "attached" });
+        await waitForLayout(page);
+        const viewport = page.viewportSize()!;
+        const paneHeight = await page
+          .locator("#scroll")
+          .evaluate((element) => element.clientHeight);
+        for (const height of [viewport.height + 1, viewport.height]) {
+          await page.setViewportSize({ ...viewport, height });
+          await waitForLayout(page);
+          const after = await readerTop();
+          const resizedHeight = await page
+            .locator("#scroll")
+            .evaluate((element) => element.clientHeight);
+          expect(resizedHeight).toBe(paneHeight + height - viewport.height);
+          expect(after).toBeCloseTo(left, 0);
+        }
+      }
+      for (let n = 0; n < 8; n += 1)
+        await open(`${agent}-${n}`, `Neighbour ${n}`);
+      await postFixture(base, "durable-history-more", {
+        agent,
+        from: 76,
+        to: 128,
+        compact: true,
+      });
+      await open(agent, "Durable history");
+      await page.getByText("Answer 127", { exact: true }).waitFor();
+      await reader.waitFor();
+      await waitForLayout(page);
+      expect(await readerTop()).toBeCloseTo(left, 0);
+      const fromBottom = () =>
+        page.evaluate(() => {
+          const scroll = document.querySelector("#scroll")!;
+          return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight;
+        });
+      const beforeJump = await page
+        .locator("#scroll")
+        .evaluate((el) => el.scrollTop);
+      await page.locator("#scroll-btn.visible").click();
+      await page.waitForFunction((before) => {
+        const scroll = document.querySelector("#scroll")!;
+        return (
+          scroll.scrollTop > before &&
+          scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight > 140
+        );
+      }, beforeJump);
+      await postFixture(base, "durable-history-more", {
+        agent,
+        from: 128,
+        to: 129,
+      });
+      await page.getByText("Answer 128", { exact: true }).waitFor();
+      await page.waitForFunction(() => {
+        const scroll = document.querySelector("#scroll")!;
+        return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 1;
+      });
+      await open("main", "Agent");
+      await postFixture(base, "durable-history-more", {
+        agent,
+        from: 129,
+        to: 130,
+      });
+      await open(agent, "Durable history");
+      await page.getByText("Answer 129", { exact: true }).waitFor();
+      await waitForLayout(page);
+      expect(await fromBottom()).toBeLessThan(1);
+      expect(errors).toEqual([]);
+      await page.close();
+    }
+  },
+
+  // Regression: #3341 #3313 #3317 keep following after a hidden jump.
+  async function test_durable_operator_compact_two_places(browser, base) {
+    const { agent } = await postFixture(base, "seed-durable-compactable");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    const errors = captureErrors(page);
+    await page.goto(`${base}#agent=${agent}`, {
+      waitUntil: "domcontentloaded",
+    });
+    await page.getByText("Reply 29", { exact: true }).waitFor();
+    const composer = page.locator("#input");
+    await composer.fill("/compact");
+    await page
+      .locator("#skill-menu .skill-option.action", { hasText: "/compact" })
+      .waitFor();
+    const response = page.waitForResponse(
+      `${base}api/conversations/${agent}/compact`,
+    );
+    await composer.press("Escape");
+    await composer.press("Enter");
+    expect((await response).ok()).toBe(true);
+    const compacting = page.locator(".thread-marker", {
+      hasText: "Compacting…",
+    });
+    await compacting.waitFor({ timeout: 10_000 });
+    expect(await compacting.count()).toBe(1);
+    if (shots)
+      await page.screenshot({ path: `${shots}/durable-compacting.png` });
+    await postFixture(base, "release", { agent, gate: "reply" });
+    const jump = page.locator(".compaction-jump-link");
+    await jump.waitFor({ timeout: 15_000 });
+    await compacting.waitFor({ state: "detached" });
+    const notice = (await jump.boundingBox())!.y;
+    expect(notice).toBeGreaterThan(
+      (await page.getByText("Reply 29", { exact: true }).boundingBox())!.y,
+    );
+    expect(
+      await page
+        .getByText("Your context was just compacted", {
+          exact: false,
+        })
+        .count(),
+    ).toBe(0);
+    if (shots)
+      await page.screenshot({ path: `${shots}/durable-compact-notice.png` });
+    const highlighted = await recordJumpHighlight(page);
+    await jump.click();
+    const kept = page.locator(`[data-row-id="${await highlighted()}"]`);
+    const inView = (row: any) => {
+      const box = row.getBoundingClientRect();
+      const view = document.querySelector("#scroll")!.getBoundingClientRect();
+      return box.bottom > view.top && box.top < view.bottom;
+    };
+    await waitForLayout(page);
+    expect(await kept.evaluate(inView)).toBe(true);
+    const divider = page.locator(".compacted-activity");
+    await openCompactedSummary(divider, "Summary of the early tasks.");
+    expect((await divider.boundingBox())!.y).toBeLessThan(
+      (await page.getByText("Reply 29", { exact: true }).boundingBox())!.y,
+    );
+    if (shots) {
+      await divider.evaluate((el) => el.scrollIntoView({ block: "center" }));
+      await page.screenshot({ path: `${shots}/durable-compact-summary.png` });
+    }
+    const scroller = page.locator("#scroll");
+    await scroller.evaluate((el) => (el.scrollTop = el.scrollHeight));
+    await waitForLayout(page);
+    await scroller.evaluate((el) => {
+      const started = new MutationObserver((changes: any[]) => {
+        if (
+          !changes.some(
+            (change) =>
+              !change.oldValue?.split(" ").includes("file-jump-target") &&
+              change.target.classList.contains("file-jump-target"),
+          )
+        )
+          return;
+        started.disconnect();
+        el.style.display = "none";
+        const show = () => {
+          el.style.display = "";
+          window.__shownAgain = true;
+        };
+        requestAnimationFrame(() => requestAnimationFrame(show));
+      });
+      started.observe(document.querySelector("#messages"), {
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["class"],
+        attributeOldValue: true,
+      });
+    });
+    await jump.click();
+    await page.waitForFunction(() => window.__shownAgain);
+    await waitForLayout(page);
+    await postFixture(base, "durable-history-more", {
+      agent,
+      from: 30,
+      to: 31,
+    });
+    const answer = page.getByText("Answer 30", { exact: true });
+    await answer.waitFor();
+    await waitForLayout(page);
+    expect(await answer.evaluate(inView)).toBe(true);
+    await scroller.evaluate((el) => (el.scrollTop -= el.clientHeight));
+    await waitForLayout(page);
+    const again = await recordJumpHighlight(page);
+    await page.clock.install();
+    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
+    await jump.click();
+    await postFixture(base, "durable-history-more", {
+      agent,
+      from: 31,
+      to: 32,
+    });
+    await page.getByText("Answer 31", { exact: true }).waitFor();
+    await scroller.evaluate((el) => {
+      const start = el.scrollTop;
+      const shift = () => {
+        if (Math.abs(el.scrollTop - start) <= 1) return;
+        el.removeEventListener("scroll", shift);
+        el.style.paddingBottom = "1px";
+      };
+      el.addEventListener("scroll", shift);
+    });
+    await page.clock.resume();
+    const target = page.locator(`[data-row-id="${await again()}"]`);
+    await target.and(page.locator(".file-jump-target")).waitFor({
+      state: "detached",
+    });
+    await waitForLayout(page);
+    expect(await target.evaluate(inView)).toBe(true);
+    expect(errors).toEqual([]);
   },
 ];
 

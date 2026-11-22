@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Config } from "../../src/config";
-import { PiModelUpdater } from "../../src/pi_model_list";
+import { PiModelUpdater } from "../../src/models";
 import { Router } from "../../src/web/router";
 import { registerSettingsRoutes } from "../../src/web/settings";
 import { TaskSet } from "../../src/utils/tasks";
@@ -38,7 +38,7 @@ function world(replies: Reply[]) {
   let written = 0;
   const updater = new PiModelUpdater({
     nativeRequest,
-    config,
+    catalog: config.models,
     spawn: (name, work) => tasks.spawn(name, work),
     afterUpdate: async () => void written++,
     now: () => 1_790_000_000,

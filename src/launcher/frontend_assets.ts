@@ -1,4 +1,6 @@
 // Shared asset publication for package scripts and native frontend staging.
+// Always-loaded feature styles join app.css in cascade order; shared primitives
+// come last. Optional views can load their own stylesheets.
 import {
   copyFile,
   cp,
@@ -9,6 +11,13 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, join } from "node:path";
+
+export const APP_CSS_SOURCES = [
+  "web/composer/style.css",
+  "web/theme.css",
+  "web/panes/powerbar.css",
+  "web/app.css",
+] as const;
 
 /** Copy browser assets under their public names and assemble the shell CSS. */
 export async function copyFrontendAssets(
@@ -31,9 +40,11 @@ export async function copyFrontendAssets(
     await copyFile(join(webDir, source), join(outputDir, publicName));
   await writeFile(
     join(outputDir, "app.css"),
-    (await readFile(join(webDir, "theme.css"), "utf8")) +
-      (await readFile(join(webDir, "panes/powerbar.css"), "utf8")) +
-      (await readFile(join(webDir, "app.css"), "utf8")),
+    (
+      await Promise.all(
+        APP_CSS_SOURCES.map((file) => readFile(join(codeDir, file), "utf8")),
+      )
+    ).join(""),
   );
   await writeFile(
     join(outputDir, "dockview.css"),

@@ -4,7 +4,9 @@
 // Empty queues await activity; startup/pending receipts and notices retry.
 import { lstat, opendir, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import { EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL, type Config } from "../config";
+import type { Config } from "../config";
+import type { ModelCatalog } from "../models";
+import { EFFORT_LEVEL_RANGE, isEffortLevel } from "../effort_levels";
 import {
   ERROR,
   WARNING,
@@ -51,8 +53,7 @@ const SPAWN_REJECTION_MESSAGES: Readonly<Record<string, string>> = {
     "The parent is being deleted; choose a live parent and retry.",
   unsupported_model:
     "The requested model is not available. Choose a listed model and retry.",
-  unsupported_effort:
-    "The requested effort level is not 1-5. Retry with --effort 1-5 or omit it to inherit.",
+  unsupported_effort: `The requested effort level is not ${EFFORT_LEVEL_RANGE}. Retry with --effort ${EFFORT_LEVEL_RANGE} or omit it to inherit.`,
   rejected:
     "The server could not safely accept this spawn. Check that the parent " +
     "and its working directory are still active, then retry.",
@@ -118,10 +119,9 @@ export interface AgentTreeDeps {
   >;
   durable: Pick<DurableHost, "owns" | "stop" | "clear" | "compact">;
   prompts: Pick<Prompts, "dropTurnSystemPrompt">;
-  config: Pick<
-    Config,
-    "chatModel" | "credentialRevision" | "isFileProviderModel"
-  >;
+  config: Pick<Config, "credentialRevision"> & {
+    models: Pick<ModelCatalog, "chatModel" | "isFileProviderModel">;
+  };
   supervisor: TreeSupervisor;
   spawnOutcomes: SpawnOutcomes;
   /** pi_session_retirement, injected (runtime_boundary.test.ts). */
@@ -510,15 +510,15 @@ export class AgentTree {
           else {
             let creatorModel: string;
             try {
-              creatorModel = this.deps.config.chatModel(
+              creatorModel = this.deps.config.models.chatModel(
                 (creatorConv.model ?? null) as string | null,
               ).id;
             } catch (error) {
               if (!isValueError(error)) throw error;
-              creatorModel = this.deps.config.chatModel().id;
+              creatorModel = this.deps.config.models.chatModel().id;
             }
-            model = this.deps.config.isFileProviderModel(creatorModel)
-              ? this.deps.config.chatModel().id
+            model = this.deps.config.models.isFileProviderModel(creatorModel)
+              ? this.deps.config.models.chatModel().id
               : creatorModel;
           }
         }
@@ -529,11 +529,7 @@ export class AgentTree {
     if (explicit !== null) extra.workdir = explicit;
     const effort = req.effort ?? null;
     if (effort !== null) {
-      if (
-        typeof effort !== "number" ||
-        !Number.isInteger(effort) ||
-        !(EFFORT_MIN_LEVEL <= effort && effort <= EFFORT_MAX_LEVEL)
-      )
+      if (!isEffortLevel(effort))
         throw new ValueError(
           `unsupported spawn effort level: ${pyRepr(effort)}`,
         );

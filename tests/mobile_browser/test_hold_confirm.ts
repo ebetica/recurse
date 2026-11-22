@@ -3,32 +3,13 @@ import type { Browser, Page } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
-  gotoRoot,
-  mockConversation,
   runBrowserTests,
   startNewAgent,
   type BrowserTest,
 } from "./common";
-import { idleConv, tree } from "./fixtures";
+import { idleConv, openFixtureConversation, runConv } from "./fixtures";
 
 const idle = () => ({ ...idleConv(), pending: [] });
-const running = () => ({
-  ...idle(),
-  status: "running",
-  active_run: "run-hold",
-});
-const open = async (
-  page: any,
-  base: string,
-  conv: () => any,
-  status = "idle",
-) => {
-  await page.route(`${base}api/tree*`, (route: any) =>
-    route.fulfill({ json: [{ ...tree()[0], status }] }),
-  );
-  await mockConversation(page, base, "main", conv);
-  await gotoRoot(page, base);
-};
 const tip = async (page: any) => {
   const locator = page.locator(".hold-tip.on");
   await locator.waitFor();
@@ -113,7 +94,12 @@ export const tests: BrowserTest[] = [
       posts.push(route.request().postDataJSON());
       return route.fulfill({ json: { ok: true, status: "stopping" } });
     });
-    await open(page, base, running, "running");
+    await openFixtureConversation(
+      page,
+      base,
+      () => runConv("running", "run-hold"),
+      "running",
+    );
     const stop = page.locator("#send.stop");
     await stop.waitFor();
     await stop.hover();
@@ -143,7 +129,7 @@ export const tests: BrowserTest[] = [
     });
     const page = await context.newPage();
     const errors = captureErrors(page);
-    await open(page, base, idle);
+    await openFixtureConversation(page, base, idle);
     await page.locator("#pane-fab").click();
     const trash = page.locator("#trash-btn.on");
     await trash.waitFor();
@@ -178,7 +164,7 @@ export const tests: BrowserTest[] = [
     page.on("request", (request) => {
       if (request.method() === "DELETE") deletes.push(request.url());
     });
-    await open(page, base, idle);
+    await openFixtureConversation(page, base, idle);
     await page.locator("#trash-btn.on").waitFor({ state: "attached" });
     const cdp = await context.newCDPSession(page);
     const touch = (

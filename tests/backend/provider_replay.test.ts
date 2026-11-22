@@ -2,10 +2,13 @@ import { expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DurableHost } from "../../src/agents/durable/host";
 import { durableModels } from "../../src/agents/durable/models";
+import { testDeps, until } from "./fixtures/durable_host/host";
 import {
   createModels,
   cleanupSessionResources,
+  type AnthropicMessagesCompat,
   type Context,
   type Tool,
 } from "@earendil-works/pi-ai";
@@ -171,6 +174,150 @@ for (const name of ["openai-codex-sse", "openai-codex-auto", "anthropic-sse"]) {
     }
   }, 10000);
 }
+
+// Regression: #3617 Claude uses summarized thinking without a progress reminder and keeps provider fallbacks.
+test("Claude turns request summarized thinking and preserve fallbacks", async () => {
+  const agentDir = mkdtempSync(join(tmpdir(), "thinking-display-"));
+  const configuredModel = "operator-summary";
+  const configuredBeta = "fine-grained-tool-streaming-2025-05-14";
+  await Bun.write(
+    join(agentDir, "models.json"),
+    JSON.stringify({
+      providers: {
+        anthropic: {
+          models: [
+            {
+              id: configuredModel,
+              reasoning: true,
+              headers: { "anthropic-beta": configuredBeta },
+            },
+          ],
+        },
+      },
+    }),
+  );
+  const models = durableModels(agentDir);
+  await models.refresh({ allowNetwork: false });
+  const provider = models.getProvider("anthropic")!;
+  const catalog = builtinProviders()
+    .find(({ id }) => id === "anthropic")!
+    .getModels();
+  const compat = (model: (typeof catalog)[number]) =>
+    model.compat as AnthropicMessagesCompat | undefined;
+  const opus = catalog.find(
+    (model) =>
+      /\bOpus\b/i.test(model.name) &&
+      compat(model)?.supportsMidConvoEffort &&
+      model.thinkingLevelMap?.low,
+  )!;
+  const fable = catalog.find((model) => model.name === "Claude Fable 5.2")!;
+  const cases = [
+    ["opus", opus.id, "low"],
+    ["fable", fable.id, "xhigh"],
+    ["disabled", configuredModel, "off"],
+  ] as const;
+  const recording: Recording = await Bun.file(
+    `${import.meta.dir}/fixtures/provider_replay/anthropic-sse.json`,
+  ).json();
+  const replay = replayProvider(
+    {
+      ...recording,
+      exchanges: cases.map(([, model]) => ({
+        ...recording.exchanges[0]!,
+        request: { model },
+        requestHeaders: {},
+      })),
+    },
+    { timeScale: 0 },
+  );
+  models.setProvider({
+    ...provider,
+    getModels: provider.getModels,
+    getAllModels: provider.getAllModels,
+    auth: {
+      apiKey: {
+        name: "Recorded test",
+        resolve: async () => ({ auth: { apiKey: "sk-ant-oat-recorded-test" } }),
+      },
+    },
+    streamSimple: (model, context, options) =>
+      provider.streamSimple(
+        { ...model, baseUrl: replay.baseUrl },
+        context,
+        options,
+      ),
+  });
+  const host = new DurableHost({
+    ...testDeps(
+      agentDir,
+      (cid) => ({ id: cid, backend: "durable", workdir: agentDir }),
+      () => cases.map(([cid]) => cid),
+    ),
+    settings: (conv) => {
+      const [, model, effort] = cases.find(([cid]) => cid === conv.id)!;
+      return [`anthropic/${model}`, effort];
+    },
+    models,
+  });
+  try {
+    for (const [index, [cid, model, effort]] of cases.entries()) {
+      await host.send(cid, "Check the public marker.", `wire-${cid}`);
+      await until(async () => {
+        const blocks = (await host.view(cid)).blocks as Array<{
+          text?: string;
+          live?: boolean;
+        }>;
+        return (
+          replay.failures.length > 0 ||
+          blocks.some((row) => row.text === "RECORDED_PROVIDER_OK" && !row.live)
+        );
+      });
+      expect(replay.failures).toEqual([]);
+      const wire = replay.requests[index]!;
+      const beta = replay.requestHeaders[index]!["anthropic-beta"];
+      if (effort === "off") {
+        expect(wire.thinking).toEqual({ type: "disabled" });
+        expect(beta).toBe(configuredBeta);
+      } else {
+        expect(wire.thinking).toMatchObject({
+          type: "adaptive",
+          display: "summarized",
+        });
+        const original = model === fable.id ? fable : opus;
+        const fallbacks = compat(original)?.allowedFallbackModels;
+        if (model === fable.id)
+          expect(fallbacks?.length ?? 0).toBeGreaterThan(0);
+        expect(wire.fallbacks).toEqual(
+          fallbacks?.map(({ model }) => ({ model })),
+        );
+      }
+      expect(beta).not.toMatch(
+        /thinking-display-updates|mid-conversation-system-clear-at/,
+      );
+      expect(wire.messages).not.toContainEqual(
+        expect.objectContaining({ clear_at: "next_user_message" }),
+      );
+      const { request } = (await host.prompt(cid)) as {
+        request: {
+          options: { thinkingDisplay?: string };
+          context: { messages: Array<{ clearAt?: string; content: unknown }> };
+        };
+      };
+      expect(request.options.thinkingDisplay).toBeUndefined();
+      expect(request.context.messages).not.toContainEqual(
+        expect.objectContaining({ clearAt: "next_user_message" }),
+      );
+      expect(JSON.stringify(request.context.messages)).not.toContain(
+        "Briefly tell the user what you found",
+      );
+    }
+    replay.assertComplete();
+  } finally {
+    await host.close();
+    await replay.server.stop(true);
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
 
 test.each(["model", "tools", "reasoning"])(
   "HTTP request missing %s is rejected, not replayed",

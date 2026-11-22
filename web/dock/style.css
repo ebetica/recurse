@@ -372,6 +372,10 @@ body #panes.docked.on {
   flex-direction: column;
   min-height: 0;
 }
+#dock .dock-loading {
+  padding: var(--space-4);
+  color: var(--muted);
+}
 #panes.docked #dock .dock-panel > .pane-col {
   flex: 1;
   min-height: 0;

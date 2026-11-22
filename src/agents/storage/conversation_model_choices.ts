@@ -1,23 +1,14 @@
 // One recorded startup pass freezes pre-existing ladder choices; per-record
 // versions make an interrupted pass safe to resume without retuning its writes.
 import { join } from "node:path";
-import {
-  EFFORT_MIN_LEVEL,
-  EFFORT_MAX_LEVEL,
-  THINKING_LEVELS,
-  type Thinking,
-  type Config,
-} from "../../config";
+import type { Config } from "../../config";
+import { THINKING_LEVELS, type Thinking } from "../../models";
+import { isEffortLevel } from "../../effort_levels";
 import { atomicJson, readJson } from "../../utils";
 import type { ConversationRecord } from "./conversation_store";
 
 export function validLevel(value: unknown): number | null {
-  return typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= EFFORT_MIN_LEVEL &&
-    value <= EFFORT_MAX_LEVEL
-    ? value
-    : null;
+  return isEffortLevel(value) ? value : null;
 }
 
 export function conversationModelSettings(
@@ -36,7 +27,7 @@ export function conversationModelSettings(
     throw new Error(
       "No recorded model. Pick an effort level again for this conversation.",
     );
-  const resolved = config.chatSettings(
+  const resolved = config.models.chatSettings(
     typeof model === "string" ? model : null,
   );
   return [
@@ -64,9 +55,9 @@ export async function migrateConversationModelChoices(input: {
     const row: ConversationRecord = { ...current, model_choice_version: 1 };
     const level =
       validLevel(row.level) ??
-      (!("model" in row) ? input.config.defaultEffortLevel() : null);
+      (!("model" in row) ? input.config.levels.defaultEffortLevel() : null);
     if (level !== null) {
-      [row.model, row.effort] = input.config.resolveEffortLevel(level);
+      [row.model, row.effort] = input.config.levels.resolveEffortLevel(level);
       row.level = level;
     } else
       [row.model, row.effort] = conversationModelSettings(input.config, row);
@@ -82,14 +73,15 @@ export async function migrateConversationModelChoices(input: {
           const selected =
             selectedLevel === null
               ? null
-              : input.config.resolveEffortLevel(selectedLevel);
+              : input.config.levels.resolveEffortLevel(selectedLevel);
           row.pending_model = {
             ...choice,
             effort:
-              selected?.[0] === input.config.canonicalModelId(choice.model)
+              selected?.[0] ===
+              input.config.models.canonicalModelId(choice.model)
                 ? selected[1]
-                : (input.config.ladderHome(choice.model)?.[2] ??
-                  input.config.chatSettings(choice.model)[1]),
+                : (input.config.levels.ladderHome(choice.model)?.[2] ??
+                  input.config.models.chatSettings(choice.model)[1]),
           };
         } catch {
           row.pending_model = { ...choice, effort: null };

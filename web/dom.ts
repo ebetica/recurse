@@ -1,4 +1,6 @@
 // Shared long-lived shell handles; modules query their private nodes locally.
+import { primaryPointerIsCoarse } from "./state.js";
+
 export const $ = <T extends Element = HTMLElement>(s: string): T | null =>
   document.querySelector<T>(s);
 
@@ -44,6 +46,9 @@ export const sendEl = req<HTMLButtonElement>("#send");
 export const titleEl = req("#conv-title");
 export const scrollBtn = req<HTMLButtonElement>("#scroll-btn");
 export const shellOverlayEl = req("#shell-overlay");
+
+export const phoneComposerFocused = (): boolean =>
+  document.activeElement === inputEl && primaryPointerIsCoarse();
 
 document.body.dataset.theme = "background";
 req("#sidebar").dataset.theme = "sidebar";

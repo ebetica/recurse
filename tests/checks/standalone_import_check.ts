@@ -57,6 +57,7 @@ const ENTRIES = new Map<string, readonly string[]>([
       "src/agents/durable/message_projection.ts",
       "src/backends/label/index.ts",
       "src/backends/label/label.ts",
+      "src/effort_levels.ts",
       "src/title_text.ts",
       "tools/subagent_args.ts",
       "tools/worktree.ts",

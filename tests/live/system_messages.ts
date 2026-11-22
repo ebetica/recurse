@@ -11,6 +11,7 @@ import {
 import { openSync, closeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
+import { EFFORT_LEVELS } from "../../src/effort_levels.ts";
 import { ownSession, request, waitReady, waitSettled } from "../live_e2e.ts";
 import {
   assertAuthUnchanged,
@@ -157,7 +158,7 @@ async function run(): Promise<void> {
     console.log("private server ready");
     for (const model of models) {
       const ladder = Object.fromEntries(
-        [1, 2, 3, 4, 5].map((level) => [
+        EFFORT_LEVELS.map((level) => [
           level,
           { model, reasoning: level === 4 ? "high" : "medium" },
         ]),

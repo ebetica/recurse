@@ -1,48 +1,25 @@
 import { expect } from "bun:test";
-import { mkdir } from "node:fs/promises";
-import type { Locator, Page } from "playwright";
+import type { Page } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { renderThemeCss, themePalettes } from "../../src/themes";
 import {
+  expectHitCorners,
   gotoRoot,
   mockConversation,
+  openPage,
   postFixture,
   rootAgentId,
   runBrowserTests,
+  screenshot,
   themeColors,
   waitForLayout,
   type BrowserTest,
 } from "./common";
 import { idleConv, row, tree } from "./fixtures";
 
-async function screenshot(page: Page, name: string) {
-  const dir = process.env.RECURSE_SCREENSHOT_DIR;
-  if (!dir) return;
-  await mkdir(dir, { recursive: true });
-  const stage = process.env.RECURSE_SCREENSHOT_STAGE || "after";
-  await page.screenshot({ path: `${dir}/${stage}-${name}.png` });
-}
-
-async function assertTouchTarget(target: Locator, reach = 19) {
-  const selector = String(target);
-  const hits = await target.evaluate((element, reach) => {
-    const box = element.getBoundingClientRect();
-    return [-reach, reach].flatMap((x) =>
-      [-reach, reach].map((y) =>
-        element.contains(
-          element.ownerDocument.elementFromPoint(
-            box.x + box.width / 2 + x,
-            box.y + box.height / 2 + y,
-          ),
-        ),
-      ),
-    );
-  }, reach);
-  expect({ selector, hits }).toEqual({
-    selector,
-    hits: [true, true, true, true],
-  });
-}
+const screenshotStage = process.env.RECURSE_SCREENSHOT_STAGE || "after";
+const headerShot = (page: Page, name: string) =>
+  screenshot(page, `header/${screenshotStage}-${name}`);
 
 export const tests: BrowserTest[] = [
   // Regression: #2297 desktop actions must remain reachable without overflow. (also Feature #2310 viewport changes move actions between phone and desktop hosts.; #2363 parent navigation can replace rail buttons during box reads.)
@@ -51,10 +28,9 @@ export const tests: BrowserTest[] = [
     const { demo } = await postFixture(base, "seed-published-sizes");
     await postFixture(base, "seed-artifact-app", { agent: demo });
     for (const width of [412, 1280]) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
       });
-      const page = await context.newPage();
       await page.goto(`${base}#agent=${demo}`);
       await page.locator("#trash-btn.on").waitFor({ state: "attached" });
       await page
@@ -63,13 +39,13 @@ export const tests: BrowserTest[] = [
       await page
         .locator('#pane-menu-panels [data-pane="report"]')
         .waitFor({ state: "attached" });
-      await screenshot(page, `${width}-rail`);
+      await headerShot(page, `${width}-rail`);
       if (width === 412) {
         await page.locator("#pane-fab").click();
         expect(await page.locator("#pane-menu #takeover-btn").isVisible()).toBe(
           true,
         );
-        await screenshot(page, `${width}-rail-menu`);
+        await headerShot(page, `${width}-rail-menu`);
         await context.close();
         continue;
       }
@@ -94,7 +70,9 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator('#pane-rail [aria-label="Agents"]').count(),
       ).toBe(0);
-      await assertTouchTarget(page.locator("#settings-btn"));
+      await expectHitCorners(page.locator("#settings-btn"), 40, {
+        scroll: false,
+      });
       const newBox = (await page.locator("#new-top").boundingBox())!;
       const linkBox = (await page.locator("#share-link-btn").boundingBox())!;
       expect({
@@ -313,7 +291,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#window-key-hints").waitFor({ state: "visible" });
       await page.keyboard.press("f");
       await page.locator("#main.fullscreen #top-actions #new-top").waitFor();
-      await assertTouchTarget(page.locator("#new-top"));
+      await expectHitCorners(page.locator("#new-top"), 40, { scroll: false });
       await page.keyboard.press("w");
       await page.locator("#window-key-hints").waitFor({ state: "visible" });
       await page.keyboard.press("f");
@@ -424,7 +402,7 @@ export const tests: BrowserTest[] = [
       );
       await page.keyboard.press("o");
       await page.locator("#pane-finder-query").fill("Files");
-      await screenshot(page, `${width}-pane-finder`);
+      await headerShot(page, `${width}-pane-finder`);
       await page.keyboard.press("Enter");
       await page.waitForFunction(
         () =>
@@ -484,7 +462,7 @@ export const tests: BrowserTest[] = [
           )
         );
       });
-      await screenshot(page, `1280-full-titles`);
+      await headerShot(page, `1280-full-titles`);
       await page.keyboard.press("Shift+H");
       await page.locator("#sidebar").waitFor({ state: "visible" });
       await page.waitForFunction(() =>
@@ -623,7 +601,7 @@ export const tests: BrowserTest[] = [
         ),
       ).toBe(true);
       await page.mouse.move(640, 400);
-      await screenshot(page, `desktop-windows`);
+      await headerShot(page, `desktop-windows`);
       await page
         .locator('#dock .dv-tab[data-dock-panel="report"] .dock-tab-icon')
         .click();
@@ -634,9 +612,10 @@ export const tests: BrowserTest[] = [
       await page
         .locator('.pane-col[data-pane="report"]')
         .waitFor({ state: "detached" });
-      expect(await page.locator('.pane-col[data-pane="files"]').count()).toBe(
-        1,
-      );
+      await focusedWindow("explorer");
+      await strip
+        .locator('.dv-tab[data-dock-panel="files"] .dock-tab-icon')
+        .click();
       await fullscreen.focus();
       await page.setViewportSize({ width: 412, height: 915 });
       const menuItem = {
@@ -663,7 +642,7 @@ export const tests: BrowserTest[] = [
       expect(
         await page.locator(".pane-col.mobile-active").getAttribute("data-pane"),
       ).toBe("files");
-      await screenshot(page, `phone-overlay`);
+      await headerShot(page, `phone-overlay`);
       await page.locator(".pane-col.mobile-active .pane-head .x").click();
       await page.locator("#panes").waitFor({ state: "hidden" });
       expect(await page.locator("#main").isVisible()).toBeTrue();
@@ -706,7 +685,7 @@ export const tests: BrowserTest[] = [
       await browserExpect(
         page.locator("#pane-rail > #trash-btn"),
       ).toBeVisible();
-      await screenshot(page, `${width}-rail-root`);
+      await headerShot(page, `${width}-rail-root`);
       await context.close();
     }
   },
@@ -716,12 +695,10 @@ export const tests: BrowserTest[] = [
     base,
   ) {
     for (const width of [412]) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
+        touch: width === 412,
       });
-      const page = await context.newPage();
       let parent: string | null = "parent";
       let takenOver = false;
       const pins: boolean[] = [];
@@ -742,7 +719,7 @@ export const tests: BrowserTest[] = [
       });
       await gotoRoot(page, base);
       await page.locator("#pane-fab").click();
-      await screenshot(page, `${width}-enabled-menu`);
+      await headerShot(page, `${width}-enabled-menu`);
       if (width === 412) await page.locator("#takeover-btn").tap();
       else await page.locator("#takeover-btn").click();
       await page
@@ -796,12 +773,10 @@ export const tests: BrowserTest[] = [
     }
   },
   async function test_overflow_slide_actions(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
     await page.route(`${base}api/tree*`, (route) =>
       route.fulfill({ json: [{ ...tree()[0], parent: "parent" }] }),
     );
@@ -884,12 +859,10 @@ export const tests: BrowserTest[] = [
   },
   // Regression: #2861 confirmed Delete must not leave the conversation actions menu open.
   async function test_overflow_touch_tap_delete(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
     await page.route(`${base}api/tree*`, (route) =>
       route.fulfill({ json: tree() }),
     );
@@ -953,11 +926,10 @@ export const tests: BrowserTest[] = [
       [390, 280, "GitHub Light"],
       [1280, 900, "Material Dark"],
     ] as const) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height },
         deviceScaleFactor: width === 412 ? 2.6 : 1,
-        hasTouch: width < 700,
-        isMobile: width < 700,
+        touch: width < 700,
         ...(width === 412
           ? {
               userAgent:
@@ -965,7 +937,6 @@ export const tests: BrowserTest[] = [
             }
           : {}),
       });
-      const page = await context.newPage();
       const title = "A conversation name long enough to truncate on a phone";
       await page.route(`${base}api/tree*`, (route) =>
         route.fulfill({
@@ -1020,7 +991,7 @@ export const tests: BrowserTest[] = [
         ),
       );
       const shot = (stage: string) =>
-        screenshot(
+        headerShot(
           page,
           `${width}x${height}-${theme.replaceAll(" ", "-")}-${stage}`,
         );
@@ -1059,7 +1030,7 @@ export const tests: BrowserTest[] = [
         "#conv-title",
         ...(width < 700 ? ["#menu-btn", "#pane-fab"] : []),
       ])
-        await assertTouchTarget(page.locator(id));
+        await expectHitCorners(page.locator(id), 40, { scroll: false });
       await shot("closed");
       if (width === 1280) {
         expect(
@@ -1079,7 +1050,7 @@ export const tests: BrowserTest[] = [
           "#chip-kids",
           "#new-top",
         ]);
-        await assertTouchTarget(page.locator("#new-top"));
+        await expectHitCorners(page.locator("#new-top"), 40, { scroll: false });
         await shot("chat-fullscreen");
         await page.keyboard.press("w");
         await page.locator("#window-key-hints").waitFor({ state: "visible" });
@@ -1087,7 +1058,9 @@ export const tests: BrowserTest[] = [
         await page.locator("#pane-rail > #new-top:first-child").waitFor();
         await page.keyboard.press("Shift+H");
         expect(await page.locator("#sidebar").isVisible()).toBe(false);
-        await assertTouchTarget(page.locator("#menu-btn"));
+        await expectHitCorners(page.locator("#menu-btn"), 40, {
+          scroll: false,
+        });
         expect(
           await page.locator("#menu-btn").getAttribute("aria-expanded"),
         ).toBe("false");
@@ -1161,7 +1134,7 @@ export const tests: BrowserTest[] = [
       const iconBoxes = [];
       for (const item of await items.all()) {
         await item.scrollIntoViewIfNeeded();
-        await assertTouchTarget(item, 21);
+        await expectHitCorners(item, 44, { scroll: false });
         const icon = item.locator("svg");
         expect(await icon.count()).toBe(1);
         expect(await icon.getAttribute("aria-hidden")).toBe("true");
@@ -1188,7 +1161,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#pane-menu").waitFor({ state: "hidden" });
       await page.locator("#pane-fab").click();
       await page.locator("#trash-btn").scrollIntoViewIfNeeded();
-      await assertTouchTarget(page.locator("#trash-btn"), 21);
+      await expectHitCorners(page.locator("#trash-btn"), 44, { scroll: false });
       const labels = await items.allTextContents();
       const panels = await page
         .locator("#pane-menu-panels .pane-menu-item")
@@ -1239,12 +1212,10 @@ export const tests: BrowserTest[] = [
   async function test_live_count_icons(browser, base) {
     const observed: { text: string; icons: number }[] = [];
     for (const width of [412, 1280]) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
+        touch: width === 412,
       });
-      const page = await context.newPage();
       await page.route(`${base}api/tree*`, (route) =>
         route.fulfill({
           json: [
@@ -1272,7 +1243,7 @@ export const tests: BrowserTest[] = [
       }));
       await gotoRoot(page, base);
       await page.locator(".live-panel .shell-chip").waitFor();
-      await screenshot(page, `${width}-live`);
+      await headerShot(page, `${width}-live`);
       for (const [selector, label] of [
         [".shell-chip", "1 active shell"],
         [".agent-chip", "4 active agents"],
@@ -1296,12 +1267,10 @@ export const tests: BrowserTest[] = [
   },
   async function test_last_turn_state_badge(browser, base) {
     for (const width of [412, 1280]) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
+        touch: width === 412,
       });
-      const page = await context.newPage();
       await page.route(`${base}api/tree*`, (route) =>
         route.fulfill({ json: [{ ...tree()[0], children: 2 }] }),
       );
@@ -1314,7 +1283,7 @@ export const tests: BrowserTest[] = [
         name: "interrupted — context kept",
       });
       await state.waitFor();
-      await screenshot(page, `${width}-state`);
+      await headerShot(page, `${width}-state`);
       expect(await state.getAttribute("id")).toBe("chip-state");
       expect((await state.innerText()).trim()).toBe("");
       expect(await state.locator("svg[aria-hidden=true]").count()).toBe(1);
@@ -1335,12 +1304,10 @@ export const tests: BrowserTest[] = [
     }
   },
   async function test_mobile_sidebar_parent_control(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
     await page.route(`${base}api/tree*`, (route) =>
       route.fulfill({
         json: [
@@ -1379,10 +1346,9 @@ export const tests: BrowserTest[] = [
   // Regression: #3354 A closed desktop Chat must have a visible way back. (also Feature #3372 closed windows reopen where they were.)
   async function test_closed_chat_reopens(browser, base) {
     const { demo } = await postFixture(base, "seed-published-sizes");
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
     const root = rootAgentId();
     await gotoRoot(page, base);
     await waitForLayout(page);
@@ -1434,7 +1400,7 @@ export const tests: BrowserTest[] = [
         );
       }),
     ).toBeTrue();
-    await screenshot(page, "1280x800-chat-closed");
+    await headerShot(page, "1280x800-chat-closed");
     await chatButton.click();
     await reopened();
     await focused("#scroll");

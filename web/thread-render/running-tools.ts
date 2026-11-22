@@ -41,9 +41,16 @@ export function runningToolLabel(row: ViewBlock): string {
   return verb ? `${verb}${target ? ` ${target}` : ""}` : "Using tool";
 }
 
-export function runningToolsLabel(tools: { row: ViewBlock }[]): string {
-  if (tools.length === 1) return runningToolLabel(tools[0]!.row);
-  return tools.every(({ row }) => row.name === "bash" || row.name === "shell")
-    ? `Running ${tools.length} commands`
-    : `Running ${tools.length} tools`;
+export function runningToolsLabel(
+  tools: { row: ViewBlock }[],
+  includeCommand = true,
+): string {
+  if (includeCommand && tools.length === 1)
+    return runningToolLabel(tools[0]!.row);
+  const kind = tools.every(
+    ({ row }) => row.name === "bash" || row.name === "shell",
+  )
+    ? "command"
+    : "tool";
+  return `Running ${tools.length} ${kind}${tools.length === 1 ? "" : "s"}`;
 }

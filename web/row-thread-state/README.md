@@ -13,9 +13,12 @@
 ## Identity and Clear
 
 Held rows own loaded turns after a successful view read; polls retain chrome.
-Read epochs fence in-flight pages across drops and eviction. Clear tombstones
-wait for a new session, not a rebuilt view instance. Context controls and thread
-consumers read these canonical maps without importing the fetch/paint owner.
+View resets keep settled rows. Recreated views keep same-session messages and
+diagrams mounted until Clear or a new session. Read epochs fence in-flight
+pages across drops and eviction. Clear tombstones wait for a new session, not a
+rebuilt view instance, and held rows keep context blank through Clear. Context
+controls and thread consumers read these canonical maps without importing the
+fetch/paint owner.
 
 ## Rules for changes
 

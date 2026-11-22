@@ -1,4 +1,6 @@
 import { join } from "node:path";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import * as artifacts from "../../../../src/artifacts";
 import { type Fixture, type Routes, hex } from "../fixture";
@@ -181,6 +183,60 @@ export function routes(fx: Fixture): Routes {
       await Bun.write(join(String(item.repo_path), "index.md"), markdown);
       const published = await artifacts.publish(dirs, agent, String(item.id));
       return { id: String(item.id), version: String(published.version) };
+    },
+    "seed-saved-app-state": async () => {
+      const owner = rootAgentId();
+      const app = await artifacts.create(dirs, {
+        owner,
+        title: "Saved counter",
+      });
+      await Bun.write(
+        join(String(app.repo_path), "index.html"),
+        Bun.file(
+          new URL("../../fixtures/saved_app_state.html", import.meta.url),
+        ),
+      );
+      return artifacts.publish(dirs, owner, String(app.id));
+    },
+    "run-artifact-state-tool": async ({ id, replacement }) => {
+      const actor = `state-tool-${hex(8)}`;
+      const scratch = await mkdtemp(join(tmpdir(), "browser-saved-app-"));
+      try {
+        await create(actor, "Saved app state tool");
+        const args: { action: string; id: string; set_file?: string } = {
+          action: "state",
+          id,
+        };
+        if (replacement !== undefined) {
+          args.set_file = join(scratch, "state.json");
+          await Bun.write(args.set_file, JSON.stringify(replacement));
+        }
+        let result: unknown;
+        script(actor).setResponses([
+          fauxAssistantMessage([fauxToolCall("artifact", args)], {
+            stopReason: "toolUse",
+          }),
+          (request) => {
+            result = request.messages.findLast(
+              (message) =>
+                message.role === "toolResult" &&
+                message.toolName === "artifact",
+            );
+            return fauxAssistantMessage(
+              "Finished using the saved app state tool.",
+            );
+          },
+        ]);
+        await submitDurable(
+          actor,
+          replacement === undefined
+            ? "Read the saved app state."
+            : "Replace the saved app state with the supplied JSON.",
+        );
+        return { result };
+      } finally {
+        await rm(scratch, { recursive: true, force: true });
+      }
     },
     "revise-artifact-app": async (body) => {
       const id = body.id;

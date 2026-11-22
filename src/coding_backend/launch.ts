@@ -9,7 +9,7 @@ import { resolvedDirectory } from "./extensions";
 
 export interface LaunchEnvInputs {
   config: Config;
-  /** workdir_git.git_env(): a fresh scrubbed copy of the process env. */
+  /** A fresh scrubbed copy of the process environment for Git. */
   gitEnv: () => Record<string, string>;
   roots: Roots;
   preparePiAgentDir: (roots: Roots) => Promise<void>;

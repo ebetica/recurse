@@ -7,6 +7,7 @@ import {
   type ConversationStoreHooks,
 } from "../../../../src/agents/storage/conversation_store";
 import { AgentStore } from "../../../../src/agents/storage/agent_store";
+import { ServiceBindings } from "../../../../src/agents/storage";
 import { Config } from "../../../../src/config";
 
 export interface ConversationCase {
@@ -30,11 +31,26 @@ export interface ConversationCase {
 export function paths(root: string): ConversationStorePaths {
   return {
     dataDir: root,
-    externalKeyDir: join(root, "external-keys"),
-    serviceBindingsDir: join(root, "service-bindings"),
     titleLockDir: join(root, "title-locks"),
     muteLockDir: join(root, "mute-locks"),
   };
+}
+export function fixtureBindings(
+  root: string,
+  store: ConversationStore,
+): ServiceBindings {
+  return new ServiceBindings(
+    {
+      externalKeyDir: join(root, "external-keys"),
+      serviceBindingsDir: join(root, "service-bindings"),
+    },
+    {
+      exists: (cid) => store.convRowExists(cid),
+      load: (cid, options) => store.load(cid, options),
+      log: store.hooks.log,
+    },
+    () => store.ids(),
+  );
 }
 export function fixtureHooks(root: string): ConversationStoreHooks {
   return {

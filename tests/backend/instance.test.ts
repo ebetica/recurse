@@ -69,9 +69,12 @@ async function world(): Promise<{ root: string; env: Record<string, string> }> {
 }
 
 const logs: string[] = [];
-async function build(env: Record<string, string>): Promise<Instance> {
+async function build(
+  env: Record<string, string>,
+  config = new Config({ env }),
+): Promise<Instance> {
   const instance = await buildInstance({
-    config: new Config({ env }),
+    config,
     sink: {
       write: (r: RuntimeLogRecord) =>
         void logs.push(
@@ -1038,33 +1041,37 @@ async function timed<T>(fn: () => Promise<T> | T): Promise<[T, number]> {
 test("warmOpen builds the shared Models and Settings' catalog, so the first open builds neither", async () => {
   const { root, env } = await world();
   seedPiModelList(join(root, "data", "config"));
-  const instance = await build(env);
+  const warnings: string[] = [];
+  const instance = await build(
+    env,
+    new Config({ env, warn: (event) => warnings.push(event) }),
+  );
   await ready(instance);
   const cid = String((await instance.create.create({ title: "warm" })).id);
   const list = join(root, "data", "config", "pi-model-list.json");
   const catalog = JSON.parse(readFileSync(list, "utf8"));
-  catalog.models[0].name += " (refreshed)";
+  catalog.models = Array.from(
+    { length: 2_001 },
+    (_, index) => catalog.models[index % catalog.models.length],
+  );
   writeFileSync(list, JSON.stringify(catalog));
-  const config = Config.prototype as unknown as Record<string, () => unknown>;
+  const models = instance.config.models;
+  const buildsBeforeWarm = models.catalogBuildCount;
   const spies = [
     // test-check-allow: T3 Call-through counts real credential store construction.
     spyOn(AuthStorage, "createLazy"),
-    // test-check-allow: T3 Call-through counts real Settings catalog file reads.
-    spyOn(config, "readPiModelList"),
-    // test-check-allow: T3 Call-through counts real catalog policy construction.
-    spyOn(config, "routePolicy"),
   ];
   try {
     await instance.durable.warmOpen();
-    expect(spies.map((spy) => spy.mock.calls.length > 0)).toEqual([
-      true,
-      true,
-      true,
-    ]);
+    expect(spies.map((spy) => spy.mock.calls.length > 0)).toEqual([true]);
+    expect(warnings).toEqual(["pi_model_list_truncated"]);
+    expect(models.catalogBuildCount).toBe(buildsBeforeWarm + 1);
     for (const spy of spies) spy.mockClear();
-    await instance.config.writeAvailableModels();
+    await instance.config.levels.writeAvailableModels();
     await instance.durable.open(cid);
-    expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0, 0, 1]);
+    expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0]);
+    expect(warnings).toEqual(["pi_model_list_truncated"]);
+    expect(models.catalogBuildCount).toBe(buildsBeforeWarm + 1);
   } finally {
     for (const spy of spies) spy.mockRestore();
   }
@@ -1132,7 +1139,7 @@ test("parallel native Settings level edits both persist", async () => {
   depsOf(instance.durable).settings = () => ["faux/faux-1", "off"];
   await ready(instance);
   const edits = [1, 2].map((level) => {
-    const entry = instance.config.effortLevels()[level]!;
+    const entry = instance.config.levels.effortLevels()[level]!;
     return {
       level,
       model: entry.model,
@@ -1194,7 +1201,7 @@ test("parallel native Settings level edits both persist", async () => {
         model: edit.model,
         reasoning: edit.reasoning,
       });
-      expect(instance.config.effortLevels()[edit.level]!.reasoning).toBe(
+      expect(instance.config.levels.effortLevels()[edit.level]!.reasoning).toBe(
         edit.reasoning,
       );
     }

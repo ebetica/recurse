@@ -4,6 +4,7 @@
 // rebuild state.
 
 import { validBackendLabel } from "../../src/backends/label/index.js";
+import { isEffortLevel } from "../../src/effort_levels.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 
 interface StoredAttachment {
@@ -67,12 +68,7 @@ const optionalTags = (value: unknown): boolean =>
 const optionalString = (value: unknown): boolean =>
   value === undefined || value === null || typeof value === "string";
 const optionalLevel = (value: unknown): boolean =>
-  value === undefined ||
-  value === null ||
-  (typeof value === "number" &&
-    Number.isInteger(value) &&
-    value >= 1 &&
-    value <= 5);
+  value === undefined || value === null || isEffortLevel(value);
 const optionalBackendLabel = (value: unknown): boolean =>
   value === undefined ||
   (typeof value === "string" && validBackendLabel(value));

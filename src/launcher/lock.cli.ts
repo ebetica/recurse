@@ -16,7 +16,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { flockExclusive, TreeLifecycleBusy } from "../utils/flock";
-import { pyResolve } from "../workdir_git";
+import { pyResolve } from "../utils";
 import { setCloseOnExec } from "./system";
 
 export const LOCK_FD_ENV = "RECURSE_DATA_DIR_LOCK_FD";

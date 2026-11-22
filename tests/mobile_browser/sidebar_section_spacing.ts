@@ -4,6 +4,8 @@ import type { Browser, BrowserContext } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   LOGIN,
+  addServerCookie,
+  expectHitCorners,
   gotoRoot,
   showAgentList,
   startServer,
@@ -19,22 +21,7 @@ export async function assertSectionSpacing(
   const remote = await startServer({ auth: true });
   const remoteContext = await browser.newContext();
   try {
-    const login = await fetch(remote.base + "login", {
-      method: "POST",
-      redirect: "manual",
-      body: new URLSearchParams({ password: LOGIN }),
-    });
-    expect(login.status).toBe(303);
-    await remoteContext.addCookies([
-      {
-        name: "chat_auth",
-        value: login.headers
-          .get("set-cookie")!
-          .split(";")[0]!
-          .slice("chat_auth=".length),
-        url: remote.base,
-      },
-    ]);
+    await addServerCookie(remoteContext, remote);
     const seeded = await remoteContext.request.post(
       remote.base + "__browser-test/seed-sidebar-sections",
     );
@@ -177,21 +164,7 @@ export async function assertSectionSpacing(
               header.locator(".tree-section-toggle"),
               header.locator("xpath=following-sibling::*[1]"),
             ]) {
-              await control.scrollIntoViewIfNeeded();
-              expect(
-                await control.evaluate((element) => {
-                  const box = element.getBoundingClientRect();
-                  return [-21, 21].every((x) =>
-                    [-21, 21].every((y) => {
-                      const hit = element.ownerDocument.elementFromPoint(
-                        box.x + box.width / 2 + x,
-                        box.y + box.height / 2 + y,
-                      );
-                      return !!hit && element.contains(hit);
-                    }),
-                  );
-                }),
-              ).toBeTrue();
+              await expectHitCorners(control);
             }
           }
         }

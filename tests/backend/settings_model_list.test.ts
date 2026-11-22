@@ -75,7 +75,7 @@ async function world(authed: string[]) {
     },
     authenticatedProviders: () => authed,
   });
-  await config.setPiModelList(LISTED);
+  await config.models.setPiModelList(LISTED);
   return { root, data, config };
 }
 
@@ -151,13 +151,14 @@ test("effort-levels carries only the ladder's own models", async () => {
     "openrouter",
   ]);
   const entry = (model: string) => ({ model, reasoning: "high" });
-  await config.setEffortLevels({
+  await config.levels.setEffortLevels({
     levels: {
       1: entry("anthropic/claude-sonnet-5"),
       2: entry("openai-codex/gpt-6-sol"),
       3: entry("anthropic/claude-opus-5-5"),
       4: entry("anthropic/claude-opus-5-5"),
       5: entry("openrouter/vendor/fresh"),
+      6: entry("anthropic/claude-opus-5-5"),
     },
     default_level: 3,
   });

@@ -19,4 +19,7 @@ export {
   startRelatedPrefetch,
 } from "./fetch.js";
 export { scrollToLatest } from "./navigation.js";
-export { configureOperatorSendScroll } from "./operator-send.js";
+export {
+  configureOperatorSendScroll,
+  sendOperatorMessage,
+} from "./operator-send.js";

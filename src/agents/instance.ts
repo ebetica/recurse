@@ -10,6 +10,7 @@ import {
   assertNoUnimportedLegacyState,
   ConversationStore,
   SET_MODEL_MARKER,
+  ServiceBindings,
 } from "./storage";
 import { pruneEmptyOwner } from "../artifacts";
 import { AgentTree } from "./agent_tree";
@@ -107,6 +108,7 @@ import {
 import * as startupMetrics from "../observability/startup_metrics";
 import { retireConversationDetails } from "../tool_details";
 import { abortable, ignoringCancelled, TaskSet } from "../utils/tasks";
+import { gitEnv } from "../git";
 import { WorkdirGit } from "../workdir_git";
 import { finishedNotice, PushNotifications } from "../push_notifications";
 
@@ -231,7 +233,7 @@ export async function buildInstance(options: InstanceOptions) {
       return roots.piAgent;
     },
     ambient: env,
-    customProviderIds: () => Object.keys(config.customModelProviders()),
+    customProviderIds: () => Object.keys(config.models.customModelProviders()),
     lifecycle: processes,
   });
   const notifiedRuns = new Map<string, string>();
@@ -272,8 +274,6 @@ export async function buildInstance(options: InstanceOptions) {
   const conversations = new ConversationStore(
     {
       dataDir: paths.DATA_DIR,
-      externalKeyDir: paths.EXTERNAL_KEY_DIR,
-      serviceBindingsDir: paths.SERVICE_BINDINGS_DIR,
       titleLockDir: paths.TITLE_LOCK_DIR,
       muteLockDir: paths.MUTE_LOCK_DIR,
     },
@@ -319,6 +319,18 @@ export async function buildInstance(options: InstanceOptions) {
       },
     },
     config,
+  );
+  const serviceBindings = new ServiceBindings(
+    {
+      externalKeyDir: paths.EXTERNAL_KEY_DIR,
+      serviceBindingsDir: paths.SERVICE_BINDINGS_DIR,
+    },
+    {
+      exists: (cid) => conversations.convRowExists(cid),
+      load: (cid, options) => conversations.load(cid, options),
+      log: conversations.hooks.log,
+    },
+    () => conversations.ids(),
   );
   retirement = new PiSessionRetirement({
     trashDir: paths.TRASH_DIR,
@@ -416,7 +428,7 @@ export async function buildInstance(options: InstanceOptions) {
 
   const launch = {
     config,
-    gitEnv: () => workdirGit.gitEnv(),
+    gitEnv: () => gitEnv(env),
     roots,
     preparePiAgentDir,
     checkoutRoot: CHECKOUT_ROOT,
@@ -454,7 +466,7 @@ export async function buildInstance(options: InstanceOptions) {
     conversationEffortLine: (conv) => agentTools.conversationEffortLine(conv),
     projectStatuses,
     effectiveWorkdir: (conv) => conversations.effectiveWorkdir(conv),
-    chatSettings: (model) => config.chatSettings(model),
+    chatSettings: (model) => config.models.chatSettings(model),
     memoryPrompt: async (cid) =>
       renderMemoryPrompt(
         await captureMemorySnapshot(
@@ -660,7 +672,7 @@ export async function buildInstance(options: InstanceOptions) {
     rowChanged: (cid) => conversations.refreshTreeRow(cid),
     prsCreated: (cid, urls, since) =>
       conversationPrs.recordCreated(cid, urls, since),
-    titleSettings: () => config.resolveEffortLevel(1),
+    titleSettings: () => config.levels.resolveEffortLevel(1),
     applyTitle: (cid, title) => {
       const current = conversations.metadataSnapshot(cid);
       if (
@@ -783,16 +795,17 @@ export async function buildInstance(options: InstanceOptions) {
           );
     },
     maximumContextWindow: () => config.maximumContextWindow(),
-    customProviders: () => config.customModelProviders(),
+    customProviders: () => config.models.customModelProviders(),
     // Invariant: Only the variable the provider itself names as env_key.
     customProviderEnvValue: (provider) => {
-      const providers = config.customModelProviders();
+      const providers = config.models.customModelProviders();
       return Object.hasOwn(providers, provider)
         ? env[providers[provider]!.env_key]
         : undefined;
     },
 
-    warmSettings: () => void (config.effortLevels(), config.chatModels()),
+    warmSettings: () =>
+      void (config.levels.effortLevels(), config.models.chatModels()),
   });
   durableHost = durable;
   const conversationPrs = new ConversationPrs({
@@ -824,6 +837,7 @@ export async function buildInstance(options: InstanceOptions) {
   create = new SupervisorCreate({
     worktrees,
     conversations,
+    serviceBindings,
     nodes,
     lifecycle: lease,
     config,
@@ -860,9 +874,9 @@ export async function buildInstance(options: InstanceOptions) {
     boundSessionFile: (sessionId, file, cwd) =>
       backend.boundSessionFile(sessionId, file, cwd),
     noteLevelTurnFailure: (level, kind, model) =>
-      config.noteLevelTurnFailure(level, kind, model),
+      config.levels.noteLevelTurnFailure(level, kind, model),
     noteLevelTurnSuccess: (level, model) =>
-      config.noteLevelTurnSuccess(level, model),
+      config.levels.noteLevelTurnSuccess(level, model),
     tasks,
     signal: shutdownController.signal,
     log: log.agents,
@@ -931,6 +945,7 @@ export async function buildInstance(options: InstanceOptions) {
   reap = new SupervisorReap({
     errors: { ProcessCleanupPending, TakenOverReapBlocked },
     conversations,
+    serviceBindings,
     nodes,
     lifecycle: lease,
     tree,
@@ -1084,6 +1099,7 @@ export async function buildInstance(options: InstanceOptions) {
     openrouter,
     agentStore,
     conversations,
+    serviceBindings,
     retirement,
     skills,
     treeView,

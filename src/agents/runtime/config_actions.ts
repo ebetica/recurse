@@ -1,7 +1,12 @@
 // Mute/safety desires park on the node while its runner owns disk state.
 // Model/effort stays pending until the next operator message is admitted.
 // Nested guards require explicit live tokens, never ambient ownership.
-import { THINKING_LEVELS, type Config, type Thinking } from "../../config";
+import {
+  THINKING_LEVELS,
+  type EffortLadder,
+  type ModelCatalog,
+  type Thinking,
+} from "../../models";
 import {
   CLEAR_PENDING_MODEL_MARKER,
   SET_MODEL_MARKER,
@@ -20,14 +25,13 @@ interface NodeCache {
 interface ConfigActionsDeps {
   store: ConversationStore;
   node(cid: string): NodeCache;
-  config: Pick<
-    Config,
-    | "chatModel"
-    | "chatSettings"
-    | "resolveEffortLevel"
-    | "ladderHome"
-    | "isFileProviderModel"
-  >;
+  config: {
+    models: Pick<
+      ModelCatalog,
+      "chatModel" | "chatSettings" | "isFileProviderModel"
+    >;
+    levels: Pick<EffortLadder, "resolveEffortLevel" | "ladderHome">;
+  };
 }
 
 const isDict = (value: unknown): value is Record<string, unknown> =>
@@ -211,19 +215,20 @@ export class ConfigActions {
       if (!pyTruthy(conv)) return null;
       let resolved: string;
       try {
-        resolved = config.chatModel(model).id;
+        resolved = config.models.chatModel(model).id;
       } catch {
         return null;
       }
       if (
-        config.isFileProviderModel(resolved) &&
+        config.models.isFileProviderModel(resolved) &&
         level === null &&
         !operatorSelectedModel
       )
         return null;
       if (level !== null) {
         if (validLevel(level) === null) return null;
-        const [levelModel, levelReasoning] = config.resolveEffortLevel(level);
+        const [levelModel, levelReasoning] =
+          config.levels.resolveEffortLevel(level);
         if (levelModel !== resolved) return null;
         if (effort === null || effort === "default") effort = levelReasoning;
       }
@@ -237,7 +242,7 @@ export class ConfigActions {
       let selectedLevel = level;
       if (selectedLevel === null) {
         const wanted = payload.effort;
-        const home = config.ladderHome(
+        const home = config.levels.ladderHome(
           resolved,
           wanted === undefined || wanted === "default" ? null : wanted,
         );
@@ -247,7 +252,7 @@ export class ConfigActions {
         }
       }
       if (payload.effort === undefined || payload.effort === "default")
-        payload.effort = config.chatSettings(resolved)[1];
+        payload.effort = config.models.chatSettings(resolved)[1];
       if (selectedLevel !== null) payload.level = selectedLevel;
       conv!.pending_model = payload;
       // Invariant: Save carries this request forward over stale runner

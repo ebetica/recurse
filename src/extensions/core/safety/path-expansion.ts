@@ -7,7 +7,7 @@ const PATH_FIELDS: Readonly<Record<string, readonly string[]>> = {
   write: ["path"],
   grep: ["path"],
   find: ["path"],
-  artifact: ["from_file"],
+  artifact: ["from_file", "set_file"],
 };
 
 function expandPath(raw: string, env: NodeJS.ProcessEnv): string {

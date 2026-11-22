@@ -18,7 +18,10 @@ import { writeFile } from "node:fs/promises";
 import { Config } from "../../../src/config";
 import { join } from "node:path";
 import { FileModelsStore } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/models-store.js";
-import * as modelCatalog from "../../../src/agents/durable/models";
+import {
+  durableModels,
+  trustedModelCatalog,
+} from "../../../src/agents/durable/models";
 import { createDurableSafety } from "../../../src/extensions/core/safety/durable";
 import {
   loadTrustedModelPolicy,
@@ -57,7 +60,7 @@ export async function run(input: {
   }) as typeof fetch;
   const warnings: string[] = [];
   const failureLogs: { event: string; fields: Record<string, unknown> }[] = [];
-  const models = modelCatalog.durableModels(input.root, () =>
+  const models = durableModels(input.root, () =>
     warnings.push("pi_model_config_invalid"),
   );
   const provider = input.cache?.provider ?? "anthropic";
@@ -291,8 +294,7 @@ export async function run(input: {
   let sameObjects: unknown;
   const views: string[] = [];
   const selected: string[] = [];
-  const trusted =
-    Reflect.get(modelCatalog, "trustedModelCatalog")?.(models) ?? models;
+  const trusted = trustedModelCatalog(models);
   registry.install(
     createDurableSafety({
       models,
@@ -369,27 +371,27 @@ export async function run(input: {
         BG,
       )
     ).wait(BG);
-    console.log(
-      "MODELS_JSON_RESULT=" +
-        JSON.stringify({
-          views,
-          sameObjects,
-          reviewBefore,
-          reviewAfter,
-          selected,
-          executed,
-          actingRemoved:
-            models.getModel(acting.provider, acting.id) === undefined,
-          transcript: JSON.stringify(await conversation.context(BG)),
-          warnings,
-          failureLogs,
-          addedFileModels: ["file-reviewer", "file-reviewer-fallback"].filter(
-            (id) => models.getModel("anthropic", id),
-          ),
-        }),
-    );
+    const result = {
+      views,
+      sameObjects,
+      reviewBefore,
+      reviewAfter,
+      selected,
+      executed,
+      actingRemoved: models.getModel(acting.provider, acting.id) === undefined,
+      transcript: JSON.stringify(await conversation.context(BG)),
+      warnings,
+      failureLogs,
+      addedFileModels: ["file-reviewer", "file-reviewer-fallback"].filter(
+        (id) => models.getModel("anthropic", id),
+      ),
+    };
+    console.log("MODELS_JSON_RESULT=" + JSON.stringify(result));
+    return result;
   } finally {
     await harness?.close(BG);
     globalThis.fetch = originalFetch;
   }
 }
+
+export type ReviewResult = Awaited<ReturnType<typeof run>>;

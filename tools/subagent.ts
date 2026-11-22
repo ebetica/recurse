@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * create --title "short-name" [--effort 1-5] [--sibling | --remote <label>] [--taken-over] [--worktree <name> [--worktree-source <path>] [--commit <ref>]] "<task>"
+ * create --title "short-name" [--effort 1-6] [--sibling | --remote <label>] [--taken-over] [--worktree <name> [--worktree-source <path>] [--commit <ref>]] "<task>"
  *     Starts in your cwd and can't see your conversation: give it the complete
  *     task. Its final message comes back to you automatically. Creation can be
  *     slow; don't repeat a pending create. --sibling: under your parent.

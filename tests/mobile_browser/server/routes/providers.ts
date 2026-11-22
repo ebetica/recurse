@@ -129,6 +129,7 @@ export function routes(fx: Fixture): Routes {
       body = body as {
         agent: string;
         model: string;
+        effort?: "default" | null;
         workdir?: string;
       };
       await create(body.agent, "Choose a model");
@@ -136,6 +137,8 @@ export function routes(fx: Fixture): Routes {
       if (body.workdir) conv.workdir = body.workdir;
       conv.level = null;
       conv.model = body.model;
+      if (body.effort === null) delete conv.effort;
+      else if (body.effort !== undefined) conv.effort = body.effort;
       conv[SET_MODEL_MARKER] = true;
       await save(conv);
       agents.set(body.agent, { model: null });
@@ -294,7 +297,7 @@ export function routes(fx: Fixture): Routes {
       return { agent: cid, entryId: entry.id };
     },
     "seed-conversation-title": async () => {
-      const [selected] = instance.config.resolveEffortLevel(1);
+      const [selected] = instance.config.levels.resolveEffortLevel(1);
       const slash = selected.indexOf("/");
       const naming = fauxProvider({
         provider: selected.slice(0, slash),
@@ -306,8 +309,8 @@ export function routes(fx: Fixture): Routes {
       return { title: titleRecording.appliedTitle };
     },
     "seed-durable-context": async () => {
-      const cid = "durable-context";
-      const model = instance.config.chatSettings(null)[0];
+      const cid = `durable-context-${crypto.randomUUID().slice(0, 8)}`;
+      const model = instance.config.models.chatSettings(null)[0];
       const [provider, ...id] = model.split("/");
       const faux = fauxProvider({
         provider,

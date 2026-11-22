@@ -1,5 +1,5 @@
 // Draft effort applies on creation; existing choices wait for the next turn.
-// The picker shows the recorded choice until the slider previews a ladder stop.
+// The focused composer's chip shows the recorded or pending choice; the popup previews it.
 // Unreachable choices explain why, without duplicate controls.
 // Context reuses tree usage for loaded history; pending Clear stays blank.
 import { backendFor } from "./backends/backend.js";
@@ -8,7 +8,7 @@ import {
   parseConversationId,
 } from "./backends/conversation-id/index.js";
 import { embeddedFrameHidden, state } from "./state.js";
-import { $, el } from "./dom.js";
+import { $, el, phoneComposerFocused } from "./dom.js";
 import { api } from "./api.js";
 import {
   conversationContextLabel,
@@ -21,16 +21,19 @@ import {
 import { effortStepForKey } from "./keymap.js";
 import { ContextFallbackGate } from "./context/fallback.js";
 import {
+  DEFAULT_EFFORT_LEVEL,
+  EFFORT_LEVELS,
+  EFFORT_MIN_LEVEL,
+  EFFORT_MAX_LEVEL,
+  LEGACY_EFFORT_MAX_LEVEL,
+  isEffortLevel,
+} from "../src/effort_levels.js";
+import {
   rowThreads,
   rowThreadContextKey,
   rowThreadClearPending,
 } from "./row-thread-state/index.js";
 import type { Conversation, PendingModel } from "./types.js";
-
-const EFFORT_LEVELS = [1, 2, 3, 4, 5] as const;
-type EffortLevel = (typeof EFFORT_LEVELS)[number];
-// Fallback until the ladder loads: new agents start capable, not expensive.
-const DEFAULT_EFFORT_LEVEL: EffortLevel = 3;
 
 interface LadderEntry {
   model: string;
@@ -63,10 +66,20 @@ const row = $("#model-row")!;
 const compactHome = controls || row.parentElement!;
 const trigger = $<HTMLButtonElement>("#model-trigger")!;
 const triggerName = $<HTMLElement>("#model-trigger .model-name")!;
+const triggerCaret = trigger.querySelector("svg");
+const triggerReasoning = el("span", "effort-reasoning-text");
+triggerName.after(triggerReasoning);
 const menu = $("#model-menu")!;
 const sliderBox = $("#effort-slider")!;
+const stops = el("div", "effort-stops");
+stops.setAttribute("aria-hidden", "true");
+sliderBox.prepend(stops);
 const range = $<HTMLInputElement>("#effort-range")!;
+range.min = String(EFFORT_MIN_LEVEL);
 const modelLine = $("#effort-model")!;
+const modelLineName = el("span");
+const modelLineReasoning = el("span", "effort-reasoning-text");
+modelLine.append(modelLineName, modelLineReasoning);
 const modelStatus = el("span", "sr-only");
 modelStatus.setAttribute("role", "status");
 modelLine.setAttribute("aria-hidden", "true");
@@ -76,7 +89,8 @@ modelLine.after(modelStatus);
 
 let mode: "draft" | "conv" = "draft";
 let conv: Conversation | null = null;
-let previewLevel: EffortLevel | null = null;
+let previewLevel: number | null = null;
+let sliderMaximum = 0;
 let touchStart: { pointerId: number; value: string } | null = null;
 let ladder: Ladder | null = null;
 // Owns `ladder`; switching backends drops it to avoid stale draft defaults.
@@ -156,36 +170,29 @@ async function fetchContextFallback(
   }
 }
 
-function isLegacyLevel(value: unknown): boolean {
-  const level = Number(value);
+function maximumLevel(): number {
   return (
-    !Number.isInteger(level) ||
-    !(EFFORT_LEVELS as readonly number[]).includes(level)
+    EFFORT_LEVELS.findLast((level) => entryFor(level)) ??
+    (ladderLabel ? LEGACY_EFFORT_MAX_LEVEL : EFFORT_MAX_LEVEL)
   );
 }
 
-function levelOf(value: unknown, fallback: number): EffortLevel {
+function levelOf(value: unknown, fallback: number): number {
   const level = Number(value);
-  if (
-    !Number.isInteger(level) ||
-    level < EFFORT_LEVELS[0] ||
-    level > EFFORT_LEVELS[EFFORT_LEVELS.length - 1]
-  )
-    return fallback as EffortLevel;
-  return level as EffortLevel;
+  return isEffortLevel(level) && level <= maximumLevel() ? level : fallback;
 }
 
-function defaultLevel(): EffortLevel {
+function defaultLevel(): number {
   return ladder
     ? levelOf(ladder.default_level, DEFAULT_EFFORT_LEVEL)
     : DEFAULT_EFFORT_LEVEL;
 }
 
-function entryFor(level: EffortLevel): LadderEntry | null {
+function entryFor(level: number): LadderEntry | null {
   return ladder?.levels[String(level)] ?? null;
 }
 
-function reachabilityFor(level: EffortLevel): LadderReachability | null {
+function reachabilityFor(level: number): LadderReachability | null {
   return ladder?.reachability[String(level)] ?? null;
 }
 
@@ -216,21 +223,41 @@ function modelLabel(id: string): string | null {
   return ladder && listed ? id : null;
 }
 
+const VARIANT =
+  /^(?:Claude|GPT|Gemini|Muse|Grok|Llama|Qwen|DeepSeek|Mistral)(?:[- ]?(V?\d[\d.]*))?\s+(?!(?:Mini|Nano|Flash|Lite|Pro|Max)\b)(?=[A-Z][a-z])/;
+
+/** A label without its vendor prefix, route suffix and brand: "Claude Opus
+ * 5.5" gives "Opus 5.5" and "GPT-6 Astra" gives "Astra" (version "6"). */
+function variantName(label: string): { name: string; version: string } {
+  const bare = label
+    .replace(/^[^:]{1,40}:\s+/, "")
+    .replace(/\s+\([^)]*\)$/, "");
+  const match = bare.match(VARIANT);
+  return match
+    ? { name: bare.slice(match[0].length), version: match[1] ?? "" }
+    : { name: bare, version: "" };
+}
+
+/** The effort button's short name, always a part of the full name that the
+ * accessible name and effort menu keep. A variant another listed model shares
+ * keeps its version ("GPT-6.2 Sol" reads "6.2 Sol"); "Grok 4.5" and size
+ * tiers ("Gemini 3.5 Flash") stay whole. */
+function shortModelName(label: string): string {
+  const { name, version } = variantName(label);
+  const shared = ladder?.models.some(
+    (m) => m.label && m.label !== label && variantName(m.label).name === name,
+  );
+  return shared && version ? `${version} ${name}` : name;
+}
+
 function pendingChoice(c: Conversation): PendingModel | null | undefined {
   return saving.get(c.id) ?? c.pending_model;
 }
 
-function pendingLevel(
-  pending: PendingModel | null | undefined,
-): EffortLevel | null {
+function pendingLevel(pending: PendingModel | null | undefined): number | null {
   if (!pending) return null;
   const direct = Number(pending.level);
-  if (
-    Number.isInteger(direct) &&
-    EFFORT_LEVELS.includes(direct as EffortLevel)
-  ) {
-    return direct as EffortLevel;
-  }
+  if (isEffortLevel(direct)) return direct;
   if (!ladder || typeof pending.model !== "string") return null;
   for (const level of EFFORT_LEVELS) {
     const entry = entryFor(level);
@@ -245,7 +272,7 @@ function pendingLevel(
   return null;
 }
 
-function pendingForLevel(level: EffortLevel): PendingModel {
+function pendingForLevel(level: number): PendingModel {
   const entry = entryFor(level);
   return {
     model: entry?.model || "",
@@ -256,7 +283,7 @@ function pendingForLevel(level: EffortLevel): PendingModel {
 
 // The committed level for the visible owner, preferring a durable pending
 // choice for existing conversations until the next composer message.
-function committedLevel(): EffortLevel | null {
+function committedLevel(): number | null {
   if (mode === "draft") {
     const stored = state.draft?.level;
     if (stored == null && !ladder) return defaultLevel();
@@ -264,14 +291,21 @@ function committedLevel(): EffortLevel | null {
   }
   if (!conv) return null;
   const pending = pendingChoice(conv);
-  return pending
-    ? pendingLevel(pending)
-    : isLegacyLevel(conv.level)
-      ? null
-      : (Number(conv.level) as EffortLevel);
+  const level = Number(conv.level);
+  return pending ? pendingLevel(pending) : isEffortLevel(level) ? level : null;
 }
 
-// The trigger names the pending model when a switch is waiting for a message.
+function reasoningText(effort: string | undefined): string {
+  return effort && effort !== "default"
+    ? effort.charAt(0).toUpperCase() + effort.slice(1)
+    : "";
+}
+
+function choiceLabel(name: string, reasoning: string): string {
+  return reasoning ? `${name} · ${reasoning}` : name;
+}
+
+// The trigger names the pending choice when a switch is waiting for a message.
 function paintTrigger(): void {
   const pending = mode === "conv" && conv && pendingChoice(conv);
   const level = committedLevel();
@@ -281,42 +315,54 @@ function paintTrigger(): void {
       : pending
         ? pending.model || (level && entryFor(level)?.model)
         : conv.model;
-  const name =
-    (model && modelLabel(model)) ||
-    (!model && level === null ? "Unknown model" : "Effort");
-  const accessibleName = level === null ? name : `Level ${level}: ${name}`;
+  const label = model ? modelLabel(model) : null;
+  const name = label || (!model && level === null ? "Unknown model" : "Effort");
+  const reasoning =
+    label && mode === "conv"
+      ? reasoningText(pending ? pending.effort : conv?.effort)
+      : "";
+  const choice = choiceLabel(name, reasoning);
+  const accessibleName = level === null ? choice : `Level ${level}: ${choice}`;
   trigger.classList.toggle("pending", !!pending);
   trigger.title = pending
     ? "Switches on your next message"
     : "Choose effort level (e or Shift+M)";
-  triggerName.textContent = name;
+  triggerName.textContent = shortModelName(name);
+  triggerReasoning.textContent = reasoning ? ` ${reasoning}` : "";
   trigger.setAttribute(
     "aria-label",
     `${accessibleName}: ${pending ? "switches on your next message; " : ""}choose effort level`,
   );
 }
 
-function syncPreview(at: EffortLevel, legacyUnpicked: boolean): void {
+function syncPreview(at: number, legacyUnpicked: boolean): void {
   const recorded =
     mode === "conv" && conv && previewLevel === null
-      ? (pendingChoice(conv) ?? conv).model
+      ? (pendingChoice(conv) ?? conv)
       : null;
-  const model = recorded || (legacyUnpicked ? null : entryFor(at)?.model);
-  const name = model
-    ? modelLabel(model)
-    : legacyUnpicked
-      ? "Unknown model"
-      : null;
+  const entry = legacyUnpicked ? null : entryFor(at);
+  const model = recorded?.model || entry?.model;
+  const label = model ? modelLabel(model) : null;
+  const name = label ?? (!model && legacyUnpicked ? "Unknown model" : null);
+  const reasoning =
+    label && mode === "conv"
+      ? reasoningText(recorded ? recorded.effort : entry?.reasoning)
+      : "";
+  const choice = name && choiceLabel(name, reasoning);
   const valueText = legacyUnpicked
-    ? (name ?? "Model loading")
-    : `Level ${at}${name ? `: ${name}` : ""}`;
+    ? (choice ?? "Model loading")
+    : `Level ${at}${choice ? `: ${choice}` : ""}`;
   range.setAttribute("aria-valuetext", valueText);
-  range.style.setProperty(
-    "--fill",
-    legacyUnpicked
-      ? "0%"
-      : `${((at - EFFORT_LEVELS[0]) / (EFFORT_LEVELS[EFFORT_LEVELS.length - 1] - EFFORT_LEVELS[0])) * 100}%`,
-  );
+  const progress = legacyUnpicked
+    ? 0
+    : (at - EFFORT_MIN_LEVEL) / (Number(range.max) - EFFORT_MIN_LEVEL);
+  range.style.setProperty("--fill", `${progress * 100}%`);
+  stops.style.setProperty("--effort-progress", String(progress));
+  for (const [i, stop] of Array.from(stops.children).entries())
+    stop.classList.toggle(
+      "filled",
+      !legacyUnpicked && i + EFFORT_MIN_LEVEL < at,
+    );
   const info = reachabilityFor(at);
   range.title = info && !info.reachable ? info.reason : "";
   const text = !ladder
@@ -324,7 +370,9 @@ function syncPreview(at: EffortLevel, legacyUnpicked: boolean): void {
       ? "Couldn't load effort levels. New agents start at level 3; retrying…"
       : "Loading effort levels…"
     : (name ?? (model ? "Loading model name…" : ""));
-  modelLine.textContent = text;
+  modelLineName.textContent = text;
+  modelLineReasoning.textContent = ladder && reasoning ? ` ${reasoning}` : "";
+  modelLine.hidden = !text;
   const status = name && ladder ? valueText : text;
   if (modelStatus.textContent !== status) modelStatus.textContent = status;
 }
@@ -332,11 +380,29 @@ function syncPreview(at: EffortLevel, legacyUnpicked: boolean): void {
 // A legacy conversation has a neutral track until the operator chooses a stop.
 function paintSlider(disabled: boolean): void {
   const current = previewLevel ?? committedLevel();
-  const at = current ?? defaultLevel();
-  range.value = String(at);
+  const maximum = maximumLevel();
+  if (sliderMaximum !== maximum) {
+    sliderMaximum = maximum;
+    range.max = String(maximum);
+    const levels = EFFORT_LEVELS.filter((level) => level <= maximum);
+    stops.replaceChildren(...levels.map(() => el("span")));
+    range.style.setProperty(
+      "--effort-ticks",
+      levels
+        .map((level) => {
+          const percent =
+            ((level - EFFORT_MIN_LEVEL) / (maximum - EFFORT_MIN_LEVEL)) * 100;
+          return `radial-gradient(circle 2.5px at clamp(1%, ${percent}%, 99%), var(--effort-tick-color) 90%, transparent)`;
+        })
+        .join(", "),
+    );
+  }
+  range.value = String(current ?? defaultLevel());
+  if (disabled && document.activeElement === range)
+    menu.focus({ preventScroll: true });
   range.disabled = disabled;
   sliderBox.classList.toggle("legacy", current === null);
-  syncPreview(at, current === null);
+  syncPreview(range.valueAsNumber, current === null);
 }
 
 function showContextTokens(c: Conversation | null): void {
@@ -412,7 +478,7 @@ function render(): void {
     const level = levelOf(stored, defaultLevel());
     // Invariant: Display the default but never stamp it: an untouched draft
     // sends no level, so its backend applies its own current default.
-    if (stored != null) draft.level = level;
+    if (stored != null && ladder) draft.level = level;
     paintTrigger();
     paintSlider(false);
     showContextTokens(null);
@@ -489,13 +555,13 @@ export function showDraftModel(initial?: number | null): void {
     controls?.classList.add("on");
   }
   row.classList.add("on");
+  row.classList.remove("conversation-effort");
+  if (triggerCaret) trigger.append(triggerCaret);
   showContextTokens(null);
   mode = "draft";
   conv = null;
   useLadderOf(draft.backendLabel ?? "");
-  if (initial != null && (draft.level == null || draft.level !== initial)) {
-    draft.level = levelOf(initial, defaultLevel());
-  }
+  if (isEffortLevel(initial)) draft.level = initial;
   render();
   void fetchLadder();
 }
@@ -527,6 +593,8 @@ export function showConversationModel(c: Conversation | null): void {
   if (row.parentElement !== compactHome) compactHome.appendChild(row);
   controls?.classList.toggle("on", show);
   row.classList.toggle("on", show);
+  row.classList.add("conversation-effort");
+  triggerCaret?.remove();
   showContextTokens(show ? c : null);
   mode = "conv";
   conv = c || null;
@@ -555,6 +623,13 @@ function closeDraftMenu(): void {
   render();
 }
 
+export function dismissEffortMenu(): boolean {
+  if (!pickerOpen()) return false;
+  if (draftInline()) closeDraftMenu();
+  else menu.hidePopover();
+  return true;
+}
+
 export function openEffortMenu(): void {
   if (!row.classList.contains("on")) return;
   // Invariant: The ladder file may have changed out-of-band (a direct file edit
@@ -572,6 +647,21 @@ export function openEffortMenu(): void {
     menu.showPopover();
   }
   menu.focus();
+}
+
+let pickerInvoker = trigger;
+let keepComposerFocus = false;
+
+export function effortMenuInvoker(): HTMLButtonElement {
+  return pickerInvoker.hidden ? trigger : pickerInvoker;
+}
+
+for (const invoker of [trigger, $<HTMLButtonElement>("#safety-warning")]) {
+  invoker?.addEventListener("click", (event) => {
+    if (pickerOpen()) return;
+    pickerInvoker = invoker;
+    keepComposerFocus = event.detail !== 0 && phoneComposerFocused();
+  });
 }
 
 trigger.addEventListener("click", (event) => {
@@ -596,25 +686,31 @@ menu.addEventListener("toggle", () => {
   const open = menu.matches(":popover-open");
   trigger.setAttribute("aria-expanded", String(open));
   if (!open) {
+    keepComposerFocus = false;
+    pickerInvoker = trigger;
     if (mode === "draft" || conv) render();
     return;
   }
   const rect = trigger.getBoundingClientRect();
   const above = mode === "conv" || rect.top > innerHeight / 2;
-  menu.style.maxHeight = `${Math.max(100, (above ? rect.top : innerHeight - rect.bottom) - 20)}px`;
+  const composerTop = $("#composer")?.getBoundingClientRect().top ?? rect.top;
+  const top =
+    mode === "conv" && composerTop >= menu.scrollHeight + 24
+      ? composerTop
+      : rect.top;
+  menu.style.maxHeight = `${Math.max(0, (above ? top : innerHeight - rect.bottom) - 20)}px`;
   menu.style.left = `${Math.max(12, Math.min(rect.left + rect.width / 2 - menu.offsetWidth / 2, innerWidth - menu.offsetWidth - 12))}px`;
   menu.style.top = above ? "auto" : `${rect.bottom + 8}px`;
-  menu.style.bottom = above ? `${innerHeight - rect.top + 8}px` : "auto";
-  menu.focus();
+  menu.style.bottom = above ? `${innerHeight - top + 8}px` : "auto";
+  if (!keepComposerFocus) menu.focus({ preventScroll: true });
 });
 
 menu.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     event.preventDefault();
     event.stopPropagation();
-    if (draftInline()) closeDraftMenu();
-    else menu.hidePopover();
-    trigger.focus();
+    effortMenuInvoker().focus({ preventScroll: true });
+    dismissEffortMenu();
     return;
   }
   if (
@@ -682,15 +778,14 @@ range.addEventListener("change", async () => {
     render();
     return;
   }
-  const level = levelOf(range.value, NaN as unknown as number);
-  if (!EFFORT_LEVELS.includes(level as EffortLevel)) {
+  const level = range.valueAsNumber;
+  if (!isEffortLevel(level)) {
     render();
     return;
   }
   previewLevel = null;
   if (mode === "draft") {
-    if (state.draft && !state.draft.creator)
-      state.draft.level = level as EffortLevel;
+    if (state.draft && !state.draft.creator) state.draft.level = level;
     render();
     return;
   }
@@ -701,7 +796,7 @@ range.addEventListener("change", async () => {
   const target = conv;
   // Invariant: In-flight choices are keyed by agent so a refreshed snapshot
   // cannot erase the preview. Only the accepted choice updates the snapshot.
-  const optimistic = pendingForLevel(level as EffortLevel);
+  const optimistic = pendingForLevel(level);
   saving.set(target.id, optimistic);
   render();
   try {

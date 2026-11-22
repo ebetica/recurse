@@ -14,6 +14,7 @@ import {
   reanchor,
   cancelSelectionComment,
   pendingFor,
+  pendingCommentVersion,
   currentCommentKey,
   commentKey,
 } from "./selection-comments.js";
@@ -174,20 +175,26 @@ function scrollLinkedSection(pane: ArtifactEl): void {
 
 export async function showArtifact(pane: ArtifactEl): Promise<void> {
   const rs = pane._rs;
-  if (rs.restoredArtifactId !== undefined || rs.revalidating) return;
+  if (
+    rs.restoredArtifactId !== undefined ||
+    rs.revalidating ||
+    rs.awaitingHistory
+  )
+    return;
   const info = selectedInfo(pane);
   if (rs.contentInfo && pendingFor(currentCommentKey(pane))) return;
   if (!info || !rs.agentId) {
     cancelSelectionComment(pane);
-    rs.imageAbort?.abort();
-    rs.imageAbort = null;
+    rs.contentAbort?.abort();
+    rs.contentAbort = null;
     const documentBody = pane.querySelector<HTMLElement>(".report-doc")!;
     documentBody.innerHTML = "";
     setPaneLoading(pane, false);
     renderComments(pane);
     return;
   }
-  if (!rs.selectedVersion) rs.selectedVersion = info.version;
+  rs.selectedVersion =
+    pendingCommentVersion(pane) ?? rs.selectedVersion ?? info.version;
   void loadVersions(pane, info);
   const revisionKey = rs.selectedVersion || `current:${info.updated_at}`;
   const key = `${rs.agentId}\n${info.id}\n${revisionKey}`;
@@ -245,10 +252,13 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
       setPaneLoading(pane, false);
       return;
     }
-    rs.contentInfo = snapshot.info;
+    rs.contentInfo = {
+      ...snapshot.info,
+      version: requestedVersion ?? snapshot.info.version,
+    };
     const displayed = await renderArtifactContent(
       pane,
-      snapshot.info,
+      rs.contentInfo,
       snapshot.content,
       changes,
     );
@@ -286,8 +296,8 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
       )
     )
       return;
-    rs.imageAbort?.abort();
-    rs.imageAbort = null;
+    rs.contentAbort?.abort();
+    rs.contentAbort = null;
     const documentBody = pane.querySelector<HTMLElement>(".report-doc")!;
     documentBody.innerHTML = "";
     rs.contentInfo = null;

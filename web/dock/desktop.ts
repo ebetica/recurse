@@ -1,9 +1,10 @@
 // The shell preloads desktop windows; phones load them lazily when widened.
 // Phone overlays remain; focus waits for visible, enabled targets until input.
 // Only operator arrangements save; unsaved fresh grids are not rebuilt.
-// Chat stays usable during discovery; unavailable panes retain saved layouts.
+// Saved windows restore before pane data; pane reads follow the focused read.
 import type { DockHost, DockPanelSpec, DockPlace } from "./host.js";
 import type { WindowCommand } from "./commands.js";
+import type { FileTabDescriptor } from "../panes/file-tabs.js";
 import { MESSAGE_ICON } from "../icons.js";
 import {
   createFullscreenControl,
@@ -12,11 +13,7 @@ import {
 import { placeFinder } from "../finder-placement.js";
 import { conversationUiState } from "../conversation-ui-state/store.js";
 import { WINDOW_LAYOUT_STATE_KEY } from "../conversation-ui-state/schema.js";
-import {
-  omitWindowPanels,
-  validWindowLayout,
-  type WindowLayout,
-} from "./layout.js";
+import { validWindowLayout } from "./layout.js";
 
 type HostModule = typeof import("./host.js");
 const CHAT_PANEL = { id: "chat", title: "Chat", icon: MESSAGE_ICON };
@@ -36,6 +33,7 @@ export class DesktopDock {
   private container: HTMLElement | null = null;
   private parking: HTMLElement | null = null;
   private enabled = false;
+  private preview = false;
   private failed = false;
   private ownerId: string | null = null;
   private hostOwnerId: string | null = null;
@@ -43,7 +41,6 @@ export class DesktopDock {
     value: unknown;
     stored: boolean;
     preferredPane?: string;
-    layout?: WindowLayout | null;
   } | null = null;
   private ownLayout = false;
   private saveRequested = false;
@@ -55,7 +52,7 @@ export class DesktopDock {
   private chatFocus: (() => void) | null = null;
   private controlFocus: {
     id: string;
-    target: HTMLElement;
+    resolve: () => HTMLElement | null;
     origin: Element | null;
   } | null = null;
   private controlObserver: MutationObserver | null = null;
@@ -77,7 +74,10 @@ export class DesktopDock {
     },
   ) {
     this.chat = document.getElementById("main")!;
-    document.addEventListener("focusin", () => this.syncFocus());
+    document.addEventListener("focusin", () => {
+      this.finishControlFocus();
+      this.syncFocus();
+    });
     document.addEventListener(
       "keydown",
       (event) => {
@@ -88,7 +88,7 @@ export class DesktopDock {
     for (const type of ["keydown", "pointerdown", "input"])
       window.addEventListener(type, () => this.clearControlFocus(), true);
     addEventListener("recurse:show-chat", (event) => {
-      if (!this.host) return;
+      if (!this.host || this.preview) return;
       event.preventDefault();
       const requested = (event as CustomEvent<() => void>).detail;
       const prior = document.activeElement;
@@ -124,6 +124,12 @@ export class DesktopDock {
     this.host?.show(CHAT_PANEL, true);
   }
 
+  hasSavedLayout(ownerId: string): boolean {
+    return !!conversationUiState.snapshot(ownerId).localPanes[
+      WINDOW_LAYOUT_STATE_KEY
+    ];
+  }
+
   private readLayout(): void {
     const state = this.ownerId
       ? conversationUiState.snapshot(this.ownerId)
@@ -139,20 +145,8 @@ export class DesktopDock {
     };
   }
 
-  prepareLayout(): void {
-    const pending = this.pendingLayout;
-    if (!pending || pending.layout !== undefined) return;
-    pending.layout = validWindowLayout(pending.value, (id, parameters) =>
-      id === "chat"
-        ? parameters === undefined
-        : this.callbacks.known(id, parameters),
-    );
-    this.ownLayout = pending.layout !== null;
-    this.callbacks.prepare(Object.keys(pending.layout?.panels || {}));
-  }
-
   userAction(): void {
-    if (!this.enabled) return;
+    if (!this.enabled || this.preview) return;
     this.pendingLayout = null;
     this.callbacks.prepare([]);
     this.ownLayout = true;
@@ -192,47 +186,30 @@ export class DesktopDock {
     return true;
   }
 
-  restoreLayout(
-    available: ReadonlySet<string>,
-    discovering: ReadonlySet<string>,
-  ): boolean {
+  // Invalid layouts use the explicit pane preference; user arrangements cancel pending restores.
+  restoreLayout(available?: ReadonlySet<string>): boolean {
     const pending = this.pendingLayout;
-    if (!pending) return this.ownLayout;
-    this.prepareLayout();
-    let layout = pending.layout ?? null;
-    const unavailableFiles = new Set(
-      Object.keys(layout?.panels || {}).filter(
-        (id) =>
-          id.startsWith("file:") && !available.has(id) && !discovering.has(id),
-      ),
-    );
-    if (layout && unavailableFiles.size)
-      layout = omitWindowPanels(layout, unavailableFiles);
-    const ids = Object.keys(layout?.panels || {}).filter((id) => id !== "chat");
     const host = this.host;
-    if (!host || !this.enabled) return this.ownLayout;
-    const missing = ids.filter((id) => !available.has(id));
-    const waiting =
-      missing.length > 0 && missing.every((id) => discovering.has(id));
-    if (missing.length && !waiting) {
-      layout = null;
-      this.ownLayout = false;
-    }
-    const replaceInvalid = pending.stored && pending.layout === null;
+    if (!pending || !host || !this.enabled || this.applyingLayout)
+      return this.ownLayout;
+    const layout = validWindowLayout(pending.value, (id, parameters) =>
+      id === "chat"
+        ? parameters === undefined
+        : this.callbacks.known(id, parameters),
+    );
+    const replaceInvalid = pending.stored && layout === null;
+    if (replaceInvalid && !available) return false;
+    this.ownLayout = layout !== null;
+    const ids = Object.keys(layout?.panels || {}).filter((id) => id !== "chat");
+    this.callbacks.prepare(ids);
     const rememberDefault = (): void => {
-      if (pending.preferredPane && available.has(pending.preferredPane))
+      if (pending.preferredPane && available?.has(pending.preferredPane))
         this.callbacks.restore([pending.preferredPane]);
       host.layout();
       this.writeLayout();
     };
     this.applyingLayout = true;
     try {
-      if (waiting) {
-        if (this.hostOwnerId !== this.ownerId) host.restore(null, CHAT_PANEL);
-        this.hostOwnerId = this.ownerId;
-        host.show(CHAT_PANEL, true);
-        return this.ownLayout;
-      }
       if (layout && !this.callbacks.restore(ids)) return this.ownLayout;
       if (layout) host.show(CHAT_PANEL, true);
       if (layout || this.hostOwnerId !== this.ownerId || replaceInvalid)
@@ -254,8 +231,23 @@ export class DesktopDock {
       console.warn("Saved windows could not be restored", error);
     } finally {
       this.applyingLayout = false;
+      if (this.preview) this.syncPreviewControls();
     }
     return this.ownLayout;
+  }
+
+  // Before the tree confirms a restored agent, its saved controls stay inactive.
+  private syncPreviewControls(): void {
+    for (const control of this.container?.querySelectorAll<HTMLElement>(
+      ".dv-tabs-and-actions-container, .dv-sash",
+    ) ?? [])
+      control.inert = this.preview;
+  }
+
+  finishPreview(): void {
+    if (!this.preview) return;
+    this.preview = false;
+    this.syncPreviewControls();
   }
 
   opening(id: string, background: boolean): void {
@@ -263,12 +255,14 @@ export class DesktopDock {
     else this.background.delete(id);
   }
 
-  sync(enabled: boolean, specs: DockPanelSpec[]): boolean {
+  sync(enabled: boolean, specs: DockPanelSpec[], preview = false): boolean {
     if (!enabled && this.enabled) {
       this.saveLayout();
       this.readLayout();
     }
     this.enabled = enabled;
+    const previewChanged = this.preview !== preview;
+    this.preview = preview;
     if (!enabled) {
       if (this.host) {
         this.module!.adopt(this.panes.parentElement!, this.chat, this.panes);
@@ -316,6 +310,7 @@ export class DesktopDock {
       this.mount(this.module);
     }
     const host = this.host!;
+    if (previewChanged) this.syncPreviewControls();
     const ids = new Set(specs.map((spec) => spec.id));
     for (const column of this.panes.querySelectorAll<HTMLElement>(
       ".pane-col",
@@ -373,13 +368,13 @@ export class DesktopDock {
         } else this.callbacks.focus(id);
       },
       closed: (id, restoreFocus) => {
-        if (id === "chat") {
-          this.userAction();
-          module.adopt(this.parking!, this.chat);
-          this.closeWindow(id);
-          this.saveLayout();
-          this.callbacks.refresh();
-        } else this.callbacks.closed(id, restoreFocus);
+        if (id !== "chat") return this.callbacks.closed(id, restoreFocus);
+        this.userAction();
+        module.adopt(this.parking!, this.chat);
+        this.closeWindow(id);
+        this.saveLayout();
+        this.callbacks.refresh();
+        return true;
       },
       shown: (id) => {
         this.finishControlFocus(id);
@@ -410,6 +405,11 @@ export class DesktopDock {
     this.host.layout();
     this.host.show(CHAT_PANEL);
     this.refreshActions();
+    if (this.preview) this.syncPreviewControls();
+  }
+
+  closeTab(id: string, close: (restoreFocus: boolean) => boolean): boolean {
+    return this.host?.closeTab(id, close) ?? close(true);
   }
 
   remove(id: string): void {
@@ -438,6 +438,10 @@ export class DesktopDock {
     return place;
   }
 
+  fileChanged(id: string, title: string, file: FileTabDescriptor): void {
+    this.host?.updateFile(id, title, file);
+  }
+
   show(id: string): void {
     if (!this.host?.has(id)) return;
     this.host.show({ id, title: id, icon: "" });
@@ -448,6 +452,7 @@ export class DesktopDock {
   }
 
   showChat(reveal = false): void {
+    if (this.preview) return;
     if (!this.host) return;
     const closed = !this.host.has("chat");
     if (reveal || closed) this.userAction();
@@ -457,13 +462,17 @@ export class DesktopDock {
     if (closed) this.callbacks.refresh();
   }
 
-  focusControl(id: string, target: HTMLElement): void {
+  focusControl(
+    id: string,
+    target: HTMLElement | (() => HTMLElement | null),
+  ): void {
     this.clearControlFocus();
-    this.controlFocus = { id, target, origin: document.activeElement };
+    const resolve = typeof target === "function" ? target : () => target;
+    this.controlFocus = { id, resolve, origin: document.activeElement };
     this.controlObserver = new MutationObserver(() =>
       this.finishControlFocus(),
     );
-    this.observeControlFocus(target.closest(".pane-col"));
+    this.observeControlFocus(resolve()?.closest(".pane-col") ?? null);
     this.observeControlFocus(this.container);
     this.background.delete(id);
     this.show(id);
@@ -475,7 +484,7 @@ export class DesktopDock {
       this.controlObserver?.observe(root, {
         attributes: true,
         subtree: true,
-        attributeFilter: ["inert", "style"],
+        attributeFilter: ["disabled", "inert", "style"],
       });
   }
 
@@ -488,25 +497,30 @@ export class DesktopDock {
   private finishControlFocus(id?: string): void {
     const request = this.controlFocus;
     if (!request || (id && request.id !== id)) return;
-    const { target, origin } = request;
+    const { resolve, origin } = request;
+    const target = resolve();
     const active = document.activeElement;
     if (
-      !target.isConnected ||
+      target?.isConnected === false ||
       (active !== origin && active !== document.body && active !== target)
     ) {
       this.clearControlFocus();
       return;
     }
     if (
+      !target ||
+      target.matches(":disabled") ||
       target.closest("[inert]") ||
       !target.checkVisibility({ checkVisibilityCSS: true })
     )
       return;
-    target.focus({ preventScroll: true });
-    if (document.activeElement === target) this.clearControlFocus();
+    // A pane can synchronously redirect focus to a control inside it.
+    this.clearControlFocus();
+    if (active !== target) target.focus({ preventScroll: true });
   }
 
   command(command: WindowCommand): boolean {
+    if (this.preview) return false;
     this.syncFocus();
     if (command === "close-all") this.showChat();
     return this.host?.command(command) ?? false;

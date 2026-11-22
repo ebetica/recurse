@@ -261,7 +261,7 @@ export async function switchoverWorld(sink: LogSink = { write: () => {} }) {
     ),
     settings: (conv) => [String(conv.model), "off"],
     models,
-    customProviders: () => instance.config.customModelProviders(),
+    customProviders: () => instance.config.models.customModelProviders(),
     customProviderEnvValue: () => "test-key",
   });
   const events: string[] = [];

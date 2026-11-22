@@ -1,11 +1,14 @@
-export const tree = (id = "main") => [
+import type { Page } from "playwright";
+import { gotoRoot, mockConversation } from "./common";
+
+export const tree = (id = "main", status = "idle") => [
   {
     id,
     parent: null,
     updated: 1,
     title: "Coordinator",
     kind: null,
-    status: "idle",
+    status,
     children: 0,
     queued: 0,
     preview: "",
@@ -25,6 +28,24 @@ export const idleConv = (rows: any[] = []) => ({
   turns: [],
   rows,
 });
+export const runConv = (
+  status = "running",
+  activeRun: string | null = "run-browser",
+) => ({ ...idleConv(), status, active_run: activeRun, pending: [] });
+
+export async function openFixtureConversation(
+  page: Page,
+  base: string,
+  conv: () => unknown,
+  status = "idle",
+): Promise<void> {
+  await page.route(`${base}api/tree*`, (route) =>
+    route.fulfill({ json: tree("main", status) }),
+  );
+  await mockConversation(page, base, "main", conv);
+  await gotoRoot(page, base);
+}
+
 export const row = (
   id: string,
   role: string,

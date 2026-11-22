@@ -6,6 +6,7 @@ import { expect as browserExpect } from "playwright/test";
 import { retire } from "../../src/utils/trash";
 import {
   LOGIN,
+  addServerCookie,
   dispatchArtifactSelection,
   postFixture,
   startServer,
@@ -34,22 +35,7 @@ export const tests: BrowserTest[] = [
       await writeFile(join(root, "remote-only.ts"), source);
       await writeFile(join(homeRoot, "home-only.ts"), "Sibling folder file\n");
       expect(await Bun.spawn(["git", "init", "-q", root]).exited).toBe(0);
-      const login = await fetch(remote.base + "login", {
-        method: "POST",
-        redirect: "manual",
-        body: new URLSearchParams({ password: LOGIN }),
-      });
-      expect(login.status).toBe(303);
-      await setup.addCookies([
-        {
-          name: "chat_auth",
-          value: login.headers
-            .get("set-cookie")!
-            .split(";")[0]!
-            .slice("chat_auth=".length),
-          url: remote.base,
-        },
-      ]);
+      await addServerCookie(setup, remote);
       const seeded = await setup.request.post(
         remote.base + "__browser-test/seed-model-selection-error",
         {

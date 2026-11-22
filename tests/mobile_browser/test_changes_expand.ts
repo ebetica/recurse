@@ -294,6 +294,7 @@ const highlightingTests: BrowserTest[] = [1280, 412].map(
         data: { theme: "Solarized Dark" },
       });
       expect(theme.status()).toBe(200);
+      let fullContents = false;
       await page.route(`**/api/conversations/${demo}/diff*`, (route) =>
         route.fulfill({
           json: {
@@ -306,11 +307,12 @@ const highlightingTests: BrowserTest[] = [1280, 412].map(
                 status: "modified",
               },
             ],
-            target: { kind: "pr", id: "python-pr", number: 42 },
+            target: fullContents
+              ? { kind: "worktree", id: "worktree" }
+              : { kind: "pr", id: "python-pr", number: 42 },
           },
         }),
       );
-      let fullContents = false;
       await page.route(`**/api/conversations/${demo}/diff/files*`, (route) =>
         route.fulfill({
           json: {

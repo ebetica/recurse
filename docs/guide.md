@@ -81,7 +81,7 @@ sign-in file, not the model-provider credentials in Pi's directory. See the
 A model generates an agent's replies. Open **Settings** and sign in to Claude
 or ChatGPT with your subscription, or add an API key.
 
-Each agent runs at an effort level from 1 to 5. A level is a model and how much
+Each agent runs at an effort level from 1 to 6. A level is a model and how much
 it reasons. Settings shows what each level means and lets you change it. New
 agents start at level 3.
 
@@ -174,7 +174,7 @@ planner with three implementers, or one agent per item in a list is something
 an agent writes and runs, and something you can write as a skill and hand to
 it. See [Examples](examples.md).
 
-Each agent runs at an effort level from 1 to 5; subagents inherit their
+Each agent runs at an effort level from 1 to 6; subagents inherit their
 parent's level unless told otherwise. Messages from other agents arrive the
 same way yours do, read at the agent's next step, and each one says who sent
 it.
@@ -269,6 +269,10 @@ to send that back, and the agent receives it as a message.
 
 Use it to ask "what did you just do?" or "would approach B be simpler?" without
 interrupting the agent or spending its context.
+
+On a phone, a side conversation opens as a bordered card over the lower part
+of the screen, with the main conversation still visible above it. Tap the main
+conversation to close the card.
 
 ### Artifacts and files
 

@@ -1,10 +1,12 @@
 // Bounded inode-pinned async history reads never block the event loop.
-// Caller supplies owner-filtered attachments/config; projection/reply policy
-// stay injected. Preserve serialization budgets and reject unsafe byte offsets.
+// Caller supplies owner-filtered attachments/config and reply policy.
+// Preserve serialization budgets and reject unsafe byte offsets.
 
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
+import type { Block } from "./entry_rows";
+import type { ConversationView } from "./conversation";
 import {
   AsyncJsonlRangeReader,
   HEADER_BYTES,
@@ -23,7 +25,6 @@ import {
   LIVE_TOOL_OUTPUT_MAX,
   TurnStats,
   truncateToolDetail,
-  type ToolStat,
 } from "../../tool_projection/__init__";
 import { containsSecret } from "../../tool_projection/redaction";
 
@@ -66,84 +67,6 @@ export interface ViewBatch {
   readonly reset: boolean;
   readonly caughtUp: boolean;
   readonly older: boolean;
-}
-
-interface ConversationBlock {
-  readonly id: string;
-  readonly kind: string;
-  readonly role: string;
-  readonly text: string;
-  readonly thinking?: string | null;
-  readonly thinking_key?: string;
-  readonly has_thinking?: true;
-  readonly thinking_title?: string | null;
-  readonly thinking_start_ms?: number;
-  readonly live_thinking?: true;
-  readonly origin: string;
-  readonly name: string | null;
-  readonly args: string;
-  readonly result: string | null;
-  readonly live: boolean;
-  readonly usage: JsonObject | null;
-  readonly meta: JsonObject | null;
-  readonly calls?: readonly JsonObject[];
-  readonly safety_usage: JsonObject | null;
-  readonly timing?: {
-    total_ms?: number;
-    safety_ms?: number;
-    command_ms?: number;
-  };
-  readonly model_time_ms?: number;
-  readonly model_response?: JsonObject;
-  readonly error: string | null;
-  readonly error_detail: string | null;
-  readonly stop_reason: string | null;
-  readonly running: boolean;
-  readonly input: string | null;
-  readonly stat: ToolStat | null;
-  readonly call_id: string | null;
-  readonly artifact_id?: string;
-  readonly order: number;
-  readonly offset: number;
-  readonly text_from?: number;
-  readonly text_hash?: number;
-}
-
-interface ConversationSnapshot {
-  readonly instance_id: string;
-  readonly revision: number;
-  readonly blocks: readonly ConversationBlock[];
-  readonly older: boolean;
-  readonly newer: boolean;
-  readonly removed: readonly string[];
-  readonly reset: boolean;
-}
-
-interface ConversationProjection {
-  readonly cid: string;
-  readonly instance_id: string;
-  readonly revision: number;
-  readonly last_access: number;
-  readonly attachments: Record<string, JsonObject[]>;
-  touch(): void;
-  idleFor(now?: number): number;
-  reset(sessionKey: string): void;
-  hasBlock(id: string): boolean;
-  unresolvedAttachments(force?: ReadonlySet<string>): string[];
-  attachFiles(attachments: Record<string, JsonObject[]>): void;
-  ingest(entries: readonly unknown[], live?: boolean): number;
-  prepend(entries: readonly unknown[]): void;
-  syncLive(entries: readonly JsonObject[], caughtUp: boolean): void;
-  changes(
-    since: number,
-    limit: number,
-    textDeltas?: boolean,
-  ): ConversationSnapshot;
-  window(options: {
-    after?: string | null;
-    before?: string | null;
-    limit?: number;
-  }): ConversationSnapshot;
 }
 
 export interface ReplyReasonPolicy {
@@ -193,74 +116,17 @@ export class ViewEntry {
   evictPending = false;
   readers = 0;
 
-  constructor(readonly projection: ConversationProjection) {}
-
-  get cid(): string {
-    return this.projection.cid;
-  }
-  get instanceId(): string {
-    return this.projection.instance_id;
-  }
-  get revision(): number {
-    return this.projection.revision;
-  }
-  get lastAccess(): number {
-    return this.projection.last_access;
-  }
-  get attachments(): Record<string, JsonObject[]> {
-    return this.projection.attachments;
-  }
-  touch(): void {
-    this.projection.touch();
-  }
-  idleFor(now?: number): number {
-    return this.projection.idleFor(now);
-  }
-  reset(sessionKey: string): void {
-    this.projection.reset(sessionKey);
-  }
-  hasBlock(id: string): boolean {
-    return this.projection.hasBlock(id);
-  }
-  unresolvedAttachments(force?: ReadonlySet<string>): string[] {
-    return this.projection.unresolvedAttachments(force);
-  }
-  attachFiles(attachments: Record<string, JsonObject[]>): void {
-    this.projection.attachFiles(attachments);
-  }
-  ingest(entries: JsonObject[]): number {
-    return this.projection.ingest(entries);
-  }
-  prepend(entries: JsonObject[]): void {
-    this.projection.prepend(entries);
-  }
-  syncLive(entries: JsonObject[], options: { caughtUp: boolean }): void {
-    this.projection.syncLive(entries, options.caughtUp);
-  }
-  changes(
-    since: number,
-    limit: number,
-    textDeltas = false,
-  ): ConversationSnapshot {
-    return this.projection.changes(since, limit, textDeltas);
-  }
-  window(options: {
-    after?: string | null;
-    before?: string | null;
-    limit?: number;
-  }): ConversationSnapshot {
-    return this.projection.window(options);
-  }
+  constructor(readonly rows: ConversationView) {}
 }
 
-/** Bounded resident projections. Callers inject the conversation port. */
+/** Bounded resident conversation views. */
 export class ViewCache {
   private readonly views = new Map<string, ViewEntry>();
   readonly maxViews: number;
   readonly idleTtl: number;
 
   constructor(
-    private readonly createProjection: (cid: string) => ConversationProjection,
+    private readonly createRows: (cid: string) => ConversationView,
     options: { maxViews?: number; idleTtl?: number } = {},
   ) {
     this.maxViews = options.maxViews ?? 200;
@@ -285,7 +151,7 @@ export class ViewCache {
   evictIdle(now = performance.now() / 1000): string[] {
     const removed: string[] = [];
     for (const [cid, view] of this.views) {
-      if (view.idleFor(now) > this.idleTtl && this.retire(cid))
+      if (view.rows.idleFor(now) > this.idleTtl && this.retire(cid))
         removed.push(cid);
     }
     return removed;
@@ -296,17 +162,17 @@ export class ViewCache {
     let view = this.views.get(cid);
     if (view === undefined) {
       const oldest = [...this.views.values()].sort(
-        (left, right) => left.lastAccess - right.lastAccess,
+        (left, right) => left.rows.last_access - right.rows.last_access,
       );
       for (const candidate of oldest) {
         if (this.views.size < this.maxViews) break;
-        this.retire(candidate.cid);
+        this.retire(candidate.rows.cid);
       }
       if (this.views.size >= this.maxViews) {
         yield null;
         return;
       }
-      view = new ViewEntry(this.createProjection(cid));
+      view = new ViewEntry(this.createRows(cid));
       this.views.set(cid, view);
     }
     // Invariant: Count lock waiters before yielding: eviction cannot replace an
@@ -315,7 +181,7 @@ export class ViewCache {
     let release: (() => void) | null = null;
     try {
       release = await view.lock.acquire();
-      view.touch();
+      view.rows.touch();
       yield view;
     } finally {
       release?.();
@@ -595,11 +461,12 @@ export function applyBatch(
   generation: string,
   batch: ViewBatch,
 ): boolean {
-  if (view.evictPending || view.instanceId !== generation) return false;
-  if (batch.reset) view.reset(batch.feed.sessionKey);
+  const { rows } = view;
+  if (view.evictPending || rows.instance_id !== generation) return false;
+  if (batch.reset) rows.reset(batch.feed.sessionKey);
   const entries = JSON.parse(batch.entries) as JsonObject[];
-  if (batch.older) view.prepend(entries);
-  else view.ingest(entries);
+  if (batch.older) rows.prepend(entries);
+  else rows.ingest(entries);
   view.feed = batch.feed;
   return true;
 }
@@ -1021,7 +888,7 @@ function blockSender(text: string): [string | null, string | null] {
 }
 
 function servedBlock(
-  block: ConversationBlock,
+  block: Block,
   files: readonly JsonObject[] = [],
 ): JsonObject {
   // Invariant: truncateToolDetail returns a result that fits unchanged, reading
@@ -1113,7 +980,7 @@ function servedBlock(
   };
 }
 
-/** Served page projection; conversation mutation remains injected. */
+/** Serialize a page of rows for the browser. */
 export function window(
   view: ViewEntry,
   inputs: ViewInputs,
@@ -1128,24 +995,25 @@ export function window(
     textDeltas?: boolean;
   } = { caughtUp: false },
 ): JsonObject {
+  const { rows } = view;
   const live = JSON.parse(inputs.live) as JsonObject[];
-  if (!options.liveSynced) view.syncLive(live, { caughtUp: options.caughtUp });
-  view.attachFiles(JSON.parse(inputs.files) as Record<string, JsonObject[]>);
+  if (!options.liveSynced) rows.syncLive(live, options.caughtUp);
+  rows.attachFiles(JSON.parse(inputs.files) as Record<string, JsonObject[]>);
   const envelope = JSON.parse(inputs.envelope) as JsonObject;
   const limit = Math.min(Math.max(options.limit ?? 50, 1), VIEW_WINDOW_MAX);
   const page =
     options.since !== null &&
     options.since !== undefined &&
-    options.instance === view.instanceId
-      ? view.changes(options.since, limit, options.textDeltas)
-      : view.window({ after: options.after, before: options.before, limit });
+    options.instance === rows.instance_id
+      ? rows.changes(options.since, limit, options.textDeltas)
+      : rows.window({ after: options.after, before: options.before, limit });
   return {
     status: "ready",
     instance_id: page.instance_id,
-    revision: view.revision,
+    revision: rows.revision,
     session: inputs.sessionId,
     blocks: page.blocks.map((block) =>
-      servedBlock(block, view.attachments[block.call_id || block.id]),
+      servedBlock(block, rows.attachments[block.call_id || block.id]),
     ),
     older: page.older || Boolean(view.feed.oldest),
     newer: page.newer,
@@ -1160,12 +1028,13 @@ export function needsOlder(
   before: string | null,
   limit: number,
 ): boolean {
+  const { rows } = view;
   return (
     Boolean(view.feed.oldest) &&
-    (view.window({ limit: 1 }).blocks.length === 0 ||
+    (rows.window({ limit: 1 }).blocks.length === 0 ||
       (before !== null &&
-        view.hasBlock(before) &&
-        !view.window({ before, limit }).older))
+        rows.hasBlock(before) &&
+        !rows.window({ before, limit }).older))
   );
 }
 

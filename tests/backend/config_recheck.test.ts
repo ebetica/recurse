@@ -53,8 +53,10 @@ test("Settings files are re-read once per window; own writes apply at once", asy
       now: () => now,
     });
     await config.refreshSettings();
-    expect(config.defaultEffortLevel()).toBe(2);
-    expect(config.customModelProviders().local?.models[0]?.id).toBe("one");
+    expect(config.levels.defaultEffortLevel()).toBe(2);
+    expect(config.models.customModelProviders().local?.models[0]?.id).toBe(
+      "one",
+    );
     edit("deleted-agent-history.json", { days: 90 });
     expect(config.deletedAgentHistoryDays()).toBe(7);
     expect(await config.refreshDeletedAgentHistoryDays()).toBe(90);
@@ -62,14 +64,18 @@ test("Settings files are re-read once per window; own writes apply at once", asy
     edit("effort-levels.json", { default_level: 4 });
     edit("model-providers.json", provider("two"));
     now += SETTINGS_RECHECK_MS - 1;
-    expect(config.defaultEffortLevel()).toBe(2);
-    expect(config.customModelProviders().local?.models[0]?.id).toBe("one");
+    expect(config.levels.defaultEffortLevel()).toBe(2);
+    expect(config.models.customModelProviders().local?.models[0]?.id).toBe(
+      "one",
+    );
 
     expect(await config.setMaximumContextWindow(200_000)).toBe(200_000);
     expect(config.maximumContextWindow()).toBe(200_000);
     await config.refreshSettings();
-    expect(config.defaultEffortLevel()).toBe(4);
-    expect(config.customModelProviders().local?.models[0]?.id).toBe("two");
+    expect(config.levels.defaultEffortLevel()).toBe(4);
+    expect(config.models.customModelProviders().local?.models[0]?.id).toBe(
+      "two",
+    );
 
     edit("maximum-context-window.json", { maximum_context_window: 300_000 });
     expect(config.maximumContextWindow()).toBe(200_000);
@@ -78,29 +84,29 @@ test("Settings files are re-read once per window; own writes apply at once", asy
     await config.refreshSettings();
     expect(config.maximumContextWindow()).toBe(300_000);
 
-    const model = config.effortLevels()[3]!.model;
+    const model = config.levels.effortLevels()[3]!.model;
     edit("available-models.json", {
       turn_marks: { "3": { model, reason: "provider unavailable" } },
     });
     await config.refreshSettings();
-    expect(config.effortLevelReachability()[3]!.reason).toContain(
+    expect(config.levels.effortLevelReachability()[3]!.reason).toContain(
       "provider unavailable",
     );
     edit("available-models.json", {});
-    expect(config.effortLevelReachability()[3]!.reachable).toBe(false);
+    expect(config.levels.effortLevelReachability()[3]!.reachable).toBe(false);
     await config.refreshSettings();
-    expect(config.effortLevelReachability()[3]!.reachable).toBe(true);
-    await config.noteLevelTurnFailure(3, "request failed");
-    expect(config.effortLevelReachability()[3]!.reason).toContain(
+    expect(config.levels.effortLevelReachability()[3]!.reachable).toBe(true);
+    await config.levels.noteLevelTurnFailure(3, "request failed");
+    expect(config.levels.effortLevelReachability()[3]!.reason).toContain(
       "request failed",
     );
-    await config.noteLevelTurnSuccess(3);
-    expect(config.effortLevelReachability()[3]!.reachable).toBe(true);
-    const spec = { ...config.customModelProviders().local! };
+    await config.levels.noteLevelTurnSuccess(3);
+    expect(config.levels.effortLevelReachability()[3]!.reachable).toBe(true);
+    const spec = { ...config.models.customModelProviders().local! };
     expect(
       await Promise.all(
         ["first", "second"].map((name) =>
-          config!.upsertCustomProvider(name, spec),
+          config!.models.upsertCustomProvider(name, spec),
         ),
       ),
     ).toEqual([true, true]);
@@ -111,8 +117,8 @@ test("Settings files are re-read once per window; own writes apply at once", asy
       ).sort(),
     ).toEqual(["first", "local", "second"]);
     await Promise.all([
-      config.noteLevelTurnFailure(2, "first failure"),
-      config.noteLevelTurnFailure(3, "second failure"),
+      config.levels.noteLevelTurnFailure(2, "first failure"),
+      config.levels.noteLevelTurnFailure(3, "second failure"),
     ]);
     const marks = JSON.parse(
       readFileSync(config.paths.AVAILABLE_MODELS_FILE, "utf8"),

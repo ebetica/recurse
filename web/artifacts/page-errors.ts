@@ -9,6 +9,7 @@ import {
   type ArtifactInfo,
 } from "./model.js";
 import { DRAFT } from "../state.js";
+import { reloadAppFrame } from "./app-state-bridge.js";
 import type { ArtifactEl } from "./artifact-state.js";
 
 interface Watch {
@@ -75,7 +76,7 @@ function reload(watch: Watch): void {
   watch.errorsSeq++;
   watch.send = "idle";
   renderStrip(watch);
-  watch.frame.setAttribute("src", watch.frame.getAttribute("src") ?? "");
+  reloadAppFrame(watch.frame);
 }
 
 function renderStrip(watch: Watch): void {

@@ -238,6 +238,25 @@ export async function copyText(
   return fallback(text);
 }
 
+const copyLinkTimers = new WeakMap<HTMLElement, number>();
+
+/** Copy a link and briefly announce the result beside the control. */
+export async function copyLink(
+  href: string,
+  notice: HTMLElement,
+): Promise<void> {
+  const copied = await copyText(href);
+  notice.textContent = copied ? "Link copied" : "Could not copy link";
+  notice.hidden = false;
+  clearTimeout(copyLinkTimers.get(notice));
+  copyLinkTimers.set(
+    notice,
+    window.setTimeout(() => {
+      notice.hidden = true;
+    }, 1800),
+  );
+}
+
 function copyControl(text: string, label: string): TemplateResult {
   const copy = async (event: Event) => {
     const button = event.currentTarget as HTMLButtonElement;

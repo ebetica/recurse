@@ -1,0 +1,33 @@
+<!doctype html>
+<title>Saved counter</title>
+<output id="count">Loading…</output>
+<button id="move" disabled>Move attendee</button>
+<button id="oversize">Save too much</button>
+<button id="invalid">Save invalid value</button>
+<output id="status"></output>
+<script>
+  const count = document.getElementById("count");
+  const move = document.getElementById("move");
+  const feedback = document.getElementById("status");
+  const show = (state) => {
+    count.value = String(state?.attendees ?? 0);
+    move.disabled = false;
+  };
+  const save = async (value) => {
+    try {
+      await window.recurse.setState(value);
+      show(await window.recurse.getState());
+      feedback.value = "Saved";
+    } catch (error) {
+      feedback.value = error.message;
+    }
+  };
+  window.addEventListener("recurse:statechange", ({ detail }) => show(detail));
+  window.recurse.getState().then(show, (error) => {
+    feedback.value = error.message;
+  });
+  move.onclick = () => save({ attendees: Number(count.value) + 1 });
+  document.getElementById("oversize").onclick = () => save("ä".repeat(131072));
+  document.getElementById("invalid").onclick = () =>
+    save({ attendee: undefined });
+</script>

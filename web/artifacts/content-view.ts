@@ -1,6 +1,6 @@
 // Artifacts-pane content preview. This module owns turning a fetched artifact
 // revision into inert DOM: the URL-stripping static policy, Markdown with
-// math/mermaid/images, sandboxed HTML embeds, and image reveal.
+// math/mermaid/images, sandboxed HTML embeds and their saved-state bridge.
 import {
   artifactFileUrl,
   artifactImagePreviewTarget,
@@ -13,22 +13,22 @@ import {
   renderDocumentMarkdown,
 } from "../document-markdown.js";
 import { watchReview, type DocumentChanges } from "../document-review.js";
+import { registerInlineBoxFrame } from "../comments/box/index.js";
 import { setNotice } from "./artifact-detail.js";
 import { artifactRelativePath, openArtifactFile } from "./file-links.js";
 import { invalidatePaneCache } from "../panes.js";
 import { watchPageErrors } from "./page-errors.js";
+import { attachAppState, reloadAppFrame } from "./app-state-bridge.js";
 import { cancelSelectionComment } from "./selection-comments.js";
 import type { ArtifactInfo } from "./model.js";
-import type { ArtifactEl } from "./artifact-state.js";
+import { artifactMount, type ArtifactEl } from "./artifact-state.js";
 
 window.addEventListener("recurse:theme-changed", () => {
   invalidatePaneCache("report");
-  // Spec: Theme changes reload pages, resetting app input/scroll/counters.
   for (const frame of document.querySelectorAll<HTMLIFrameElement>(
     "iframe.artifact-embed-page[src]",
   ))
-    // oxlint-disable-next-line no-self-assign -- Reload each Artifact embed with the new theme.
-    frame.src = frame.src;
+    reloadAppFrame(frame);
 });
 
 function refreshUrl(pane: ArtifactEl, url: string): string {
@@ -67,6 +67,7 @@ function appendLiveEmbed(
   body: HTMLElement,
   info: ArtifactInfo,
   pane: ArtifactEl,
+  signal: AbortSignal,
 ): void {
   // Invariant: The live preview is the app page the server built at publish:
   // its sandboxing CSP plus this iframe's sandbox give scripts an opaque origin
@@ -80,10 +81,22 @@ function appendLiveEmbed(
   frame.setAttribute("sandbox", "allow-scripts");
   frame.title = `${info.title} live preview`;
   frame.setAttribute("aria-describedby", description.id);
-  frame.src = refreshUrl(
-    pane,
-    artifactPageUrl(pane._rs.agentId || "", info.id, pane._rs.selectedVersion),
-  );
+  const agent = pane._rs.agentId!;
+  const version = pane._rs.selectedVersion;
+  frame.src =
+    refreshUrl(pane, artifactPageUrl(agent, info.id, version)) +
+    attachAppState(
+      frame,
+      agent,
+      info.id,
+      signal,
+      () =>
+        artifactMount.current === pane &&
+        !pane._rs.awaitingHistory &&
+        pane._rs.agentId === agent &&
+        pane._rs.selId === info.id &&
+        pane._rs.selectedVersion === version,
+    );
   const errors = document.createElement("div");
   errors.className = "artifact-errors";
   errors.setAttribute("aria-live", "polite");
@@ -114,9 +127,9 @@ export async function renderContent(
   changes: { changes: DocumentChanges; previous: string } | null = null,
 ): Promise<boolean> {
   cancelSelectionComment(pane);
-  pane._rs.imageAbort?.abort();
+  pane._rs.contentAbort?.abort();
   const controller = new AbortController();
-  pane._rs.imageAbort = controller;
+  pane._rs.contentAbort = controller;
   const body = pane.querySelector<HTMLElement>(".report-doc")!;
   body.innerHTML = "";
   pane._rs.changes = changes?.changes ?? null;
@@ -130,6 +143,7 @@ export async function renderContent(
       agentId: pane._rs.agentId!,
       documentPath: info.entry || info.filename,
       artifactId: info.id,
+      onImageFrame: registerInlineBoxFrame,
       previous: changes?.previous,
       openRelative: (path, fragment) =>
         !!version &&
@@ -154,7 +168,7 @@ export async function renderContent(
       },
     });
   } else if (info.format === "html") {
-    appendLiveEmbed(body, info, pane);
+    appendLiveEmbed(body, info, pane, controller.signal);
   } else if (info.format === "text" || info.format === "code") {
     const pre = document.createElement("pre");
     pre.className = "artifact-plain";

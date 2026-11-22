@@ -18,7 +18,7 @@ import {
   revealActivityBoundary,
   revealRowMessage,
 } from "./disclosure.js";
-import { liveBarEl, msgsEl, scrollEl } from "../dom.js";
+import { $, msgsEl, scrollEl } from "../dom.js";
 import { phoneNavigation } from "../phone-nav.js";
 import {
   BOTTOM_FOLLOW_THRESHOLD_PX,
@@ -81,6 +81,7 @@ import { userBubble } from "../thread-render/index.js";
 import {
   clearLivePanel,
   queuedT,
+  renderLivePanel,
   shellUnavailableT,
   waitingPanelT,
   workingT,
@@ -142,14 +143,16 @@ msgsEl.addEventListener("dragstart", (event) => {
 msgsEl.addEventListener("click", async (e) => {
   const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".copy-btn");
   if (!btn) return;
-  const pre = btn.parentElement?.querySelector("pre");
+  const code =
+    btn.closest<HTMLElement>(".mermaid-host")?.dataset.mermaidSource ??
+    btn.parentElement?.querySelector("pre")?.innerText;
   const scope =
     btn.closest<HTMLElement>("[data-copy-scope]")?.dataset.copyScope;
-  if (!pre || !scope) return;
+  if (code === undefined || !scope) return;
   const attempt = beginCopyFeedback(btn, scope);
   btn.textContent = "Copy";
   btn.classList.remove("copied");
-  const copied = await copyText(pre.innerText);
+  const copied = await copyText(code);
   const currentScope = () =>
     btn.closest<HTMLElement>("[data-copy-scope]")?.dataset.copyScope;
   if (!copyFeedbackIsCurrent(attempt, btn.isConnected, currentScope())) return;
@@ -569,10 +572,18 @@ scrollEl.addEventListener(
 );
 
 if (typeof ResizeObserver !== "undefined") {
-  const bottomFollowResize = new ResizeObserver(() => {
+  const controls = $("#conv-controls");
+  let controlsHeight = 0;
+  const bottomFollowResize = new ResizeObserver((entries) => {
     // Invariant: Scroll events precede layout in a frame, so an unrecorded
     // offset seen here is the layout's clamp.
     recordThreadScroll();
+    const height = controls?.offsetHeight ?? 0;
+    const controlsResized = height !== controlsHeight;
+    controlsHeight = height;
+    // Opening the composer row alone doesn't move the reading position.
+    if (controlsResized && entries.every(({ target }) => target === scrollEl))
+      return;
     applySendPin();
     if (pinHeld()) return;
     if (disclosureHold) {
@@ -753,31 +764,29 @@ function threadTemplate(
   const currentTurnOpen = loaded.some((turn) => turn.open);
   // Invariant: Inbox steers wait for a request boundary, not run end.
   // The run remains authoritative even between rendered response rows.
-  const queuedPanel = queued && !running;
-  const tailShells = running ? 0 : activeShells(conv).shellCount;
-  const tailAgents = running ? 0 : activeDescendantCount(state.nodes, conv.id);
-  // Invariant: Stopped with continued background work but no rendered response
-  // to hold the waiting panel (an empty thread): the panel tails the thread
-  // instead. A queued next turn owns the single live surface instead.
-  const tailWaiting =
-    !running &&
-    !queued &&
-    blocks.length === 0 &&
-    activityStatusKind(false, tailShells, tailAgents) === "waiting";
-  const liveBar =
+  const workingPanel =
     running && (liveBlock || !currentTurnOpen) ? workingT(conv) : null;
-  if (!liveBar) clearLivePanel();
+  if (!workingPanel) clearLivePanel();
+  const liveBar = running
+    ? workingPanel
+    : queued
+      ? queuedT(conv)
+      : activityStatusKind(
+            false,
+            activeShells(conv).shellCount,
+            activeDescendantCount(state.nodes, conv.id),
+          ) === "waiting"
+        ? waitingPanelT(conv)
+        : null;
   const thread = html` ${promptBanner(conv, paint)} ${piHistoryNotice}
   ${repeat(
     blocks,
     (block) => `${renderedLogGeneration}:${block.key}`,
     (block, index) =>
       html`${index === acceptedBefore ? acceptedT : nothing}
-      ${activityBoundaryT(conv, block, { current: index === last, queued })}`,
+      ${activityBoundaryT(conv, block, { current: index === last })}`,
   )}
   ${acceptedBefore < 0 ? acceptedT : nothing}
-  ${tailWaiting ? waitingPanelT(conv) : nothing}
-  ${queuedPanel ? queuedT(conv) : nothing}
   ${running ? nothing : shellUnavailableT(conv)}
   ${pendingActionT(
     conv,
@@ -880,8 +889,7 @@ export function paint(conv: Conversation): void {
   // committed thinking step recorded while building the thread template.
   const [threadT, liveBar] = threadTemplate(conv);
   render(threadT, msgsEl);
-  render(liveBar ?? nothing, liveBarEl);
-  liveBarEl.hidden = !liveBar;
+  renderLivePanel(liveBar);
   for (const image of msgsEl.querySelectorAll<HTMLImageElement>("img")) {
     const paused = pausedImages.get(image);
     if (!paused) continue;
@@ -991,7 +999,6 @@ export function takeToolDetailConversation(): string | null {
   if (current) saveViewport(current);
   toolDetailConversation = null;
   clearLivePanel();
-  render(nothing, liveBarEl);
-  liveBarEl.hidden = true;
+  renderLivePanel(null);
   return current;
 }

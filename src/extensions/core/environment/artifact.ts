@@ -1,10 +1,20 @@
-// Native Artifact discovery and creation reuse the Git-backed Artifact store.
+// The native Artifact tool reads and replaces saved app state as ordinary tool output.
 import { Type } from "typebox";
 import { resolve } from "node:path";
 import {} from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
 import type { ArtifactContext } from "../../../artifacts";
-import { create, listArtifacts, rename } from "../../../artifacts";
+import {
+  create,
+  listArtifacts,
+  rename,
+  resolveOwner,
+} from "../../../artifacts";
+import {
+  readAppState,
+  readAppStateFile,
+  writeAppState,
+} from "../../../artifact_app_state";
 import { artifactWorkingPath } from "../../../artifacts/working_path";
 
 export function createArtifact(context: ArtifactContext, owner: string) {
@@ -17,13 +27,15 @@ export function createArtifact(context: ArtifactContext, owner: string) {
           "Create only on explicit operator request; update requested Artifacts instead of duplicating them. Create/list/rename return ids, titles and working paths. " +
           "Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. " +
           "File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. " +
-          "Apps have no network/browser storage; use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). " +
+          "Apps have no network/browser storage. Saved app state uses window.recurse.getState(), window.recurse.setState(value) and the recurse:statechange event. " +
+          "Use state with id to read the saved JSON; provide set_file to replace it. Use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). " +
           "Commit output reports publication/app checks; fix problems and recommit. Read wide/narrow screenshots. Link [Title](#artifact=ID); add &section=heading-slug to open a section.",
         parameters: Type.Object({
           action: Type.Union([
             Type.Literal("create"),
             Type.Literal("list"),
             Type.Literal("rename"),
+            Type.Literal("state"),
           ]),
           title: Type.Optional(
             Type.String({ description: "For create/rename." }),
@@ -33,7 +45,13 @@ export function createArtifact(context: ArtifactContext, owner: string) {
               description: "Source .md/.html for create; relative to cwd.",
             }),
           ),
-          id: Type.Optional(Type.String({ description: "For rename." })),
+          id: Type.Optional(Type.String({ description: "For rename/state." })),
+          set_file: Type.Optional(
+            Type.String({
+              description:
+                "JSON file to replace saved app state; relative to cwd.",
+            }),
+          ),
           all: Type.Optional(
             Type.Boolean({
               description: "List all Artifacts (default: this agent only).",
@@ -42,6 +60,22 @@ export function createArtifact(context: ArtifactContext, owner: string) {
         }),
         executionMode: "sequential",
         async execute(args, api) {
+          if (args.action === "state") {
+            if (!args.id) throw new Error("id is required for state");
+            const artifactOwner = await resolveOwner(context, args.id);
+            const text =
+              args.set_file === undefined
+                ? await readAppState(context, artifactOwner, args.id)
+                : await writeAppState(
+                    context,
+                    artifactOwner,
+                    args.id,
+                    await readAppStateFile(
+                      resolve(api.env!.cwd, args.set_file),
+                    ),
+                  );
+            return { output: [{ type: "text", text }] };
+          }
           if (args.action === "list") {
             const listed = await listArtifacts(
               context,

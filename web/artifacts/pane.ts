@@ -12,15 +12,26 @@ import {
   ARTIFACTS_ICON,
   BACK_ICON,
   REFRESH_ICON,
+  SHARE_ICON,
 } from "../icons.js";
-import { openPane, registerPane, setPaneLoading } from "../panes.js";
+import {
+  deferPaneOpenUntilRead,
+  openPane,
+  registerPane,
+  setPaneLoading,
+} from "../panes.js";
 import { panePowerbar, renderPowerbarControls } from "../panes/powerbar.js";
 import { paneItem } from "../panes/navigation.js";
-import { copyText } from "../tool_details.js";
-import { readAgentLink, readArtifactLink } from "../deep-link.js";
+import { copyLink, copyText } from "../tool_details.js";
+import {
+  artifactLinkUrl,
+  readAgentLink,
+  readArtifactLink,
+} from "../deep-link.js";
 import { artifactGeneration } from "../panes/autoopen.js";
 import { DRAFT, state } from "../state.js";
 import { registerCommentSource } from "../comments.js";
+import { installBoxComments } from "../comments/box/index.js";
 import { changesHeader, reviewedFooter } from "../document-review.js";
 import { artifactFileUrl, isFullVersion, versionLabel } from "./model.js";
 import type { PaneContext, PaneNavigation } from "../types.js";
@@ -133,6 +144,14 @@ function startArtifactTrail(open: () => void): void {
   if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
   const depth = readArtifactHistory(state.selectedId)?.depth || 0;
   if (depth) {
+    const rs = artifactMount.current?._rs;
+    if (rs) {
+      rs.awaitingHistory = true;
+      rs.contentAbort?.abort();
+      rs.shownKey = null;
+      rs.loadingKey = null;
+      rs.requestSeq++;
+    }
     pendingArtifactOpen = open;
     history.go(-depth);
   } else open();
@@ -142,6 +161,8 @@ export function openArtifactLink(hash = location.hash): void {
   if (pendingArtifactOpen) {
     const open = pendingArtifactOpen;
     pendingArtifactOpen = null;
+    if (artifactMount.current)
+      artifactMount.current._rs.awaitingHistory = false;
     open();
     return;
   }
@@ -178,6 +199,8 @@ function openArtifact(
   returning?: ArtifactHistory,
 ): void {
   if (!state.selectedId || state.draft) return;
+  if (deferPaneOpenUntilRead(() => openArtifact(id, section, returning)))
+    return;
   if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
   linkedAgent = state.selectedId;
   entry(state.selectedId).invalidated = true;
@@ -214,7 +237,13 @@ function openArtifact(
       ? undefined
       : { artifact: id, fragment: `#${encodeURIComponent(section)}` };
   pane._rs.restoredArtifactId = id;
-  if (pane._rs.selId !== id || !pane._rs.followCurrent) {
+  if (
+    pane._rs.selId !== id ||
+    (returning?.version
+      ? returning.version !== pane._rs.selectedVersion
+      : !pane._rs.followCurrent)
+  ) {
+    pane._rs.contentAbort?.abort();
     pane._rs.selectedVersion = null;
     pane._rs.followCurrent = true;
     pane._rs.shownKey = null;
@@ -343,6 +372,7 @@ function applyRestoredArtifactSelection(pane: ArtifactEl): boolean {
     rs.followCurrent = returning.followCurrent;
   }
   if (nextId === rs.selId) return true;
+  rs.contentAbort?.abort();
   rs.selId = nextId;
   const next = selectedInfo(pane);
   rs.selectedVersion = returning?.version || next?.version || null;
@@ -381,8 +411,8 @@ function showSelected(pane: ArtifactEl, focus: boolean): void {
 
 function resetContent(pane: ArtifactEl): void {
   const rs = pane._rs;
-  rs.imageAbort?.abort();
-  rs.imageAbort = null;
+  rs.contentAbort?.abort();
+  rs.contentAbort = null;
   rs.sendSeq++;
   rs.restoreSeq++;
   rs.deleteSeq++;
@@ -525,6 +555,20 @@ function navigateArtifact(pane: ArtifactEl, command: PaneNavigation): boolean {
   return browsing && command !== "top" && command !== "bottom";
 }
 
+async function copyArtifactLink(
+  pane: ArtifactEl,
+  button: HTMLButtonElement,
+): Promise<void> {
+  const { agentId, selId } = pane._rs;
+  if (!agentId || !selId) return;
+  const notice = panePowerbar(pane).querySelector<HTMLElement>(
+    ".artifact-copy-status",
+  )!;
+  await copyLink(artifactLinkUrl(location.href, agentId, selId), notice);
+  if (button.isConnected && document.activeElement === document.body)
+    button.focus({ preventScroll: true });
+}
+
 function renderShell(pane: ArtifactEl): void {
   const rs = pane._rs,
     cache = rs.agentId ? entry(rs.agentId) : null;
@@ -540,6 +584,7 @@ function renderShell(pane: ArtifactEl): void {
     !rs.linkedArtifactId &&
     !list.some((item) => item.id === rs.selId)
   ) {
+    rs.contentAbort?.abort();
     rs.selId = list[0]?.id || null;
     rs.selectedVersion = list[0]?.version || null;
     rs.contentInfo = null;
@@ -559,6 +604,7 @@ function renderShell(pane: ArtifactEl): void {
     !holding &&
     rs.selectedVersion !== currentInfo.version
   ) {
+    rs.contentAbort?.abort();
     rs.selectedVersion = currentInfo.version;
     rs.contentInfo = null;
     rs.shownKey = null;
@@ -640,11 +686,12 @@ function renderShell(pane: ArtifactEl): void {
     ? `Download original ${info.filename}${rs.selectedVersion ? `, version ${rs.selectedVersion.slice(0, 8)}` : ""}`
     : "Download original";
   const coldList = !!cache?.fetching && !cache.loaded;
+  const missingLink = rs.linkedArtifactId && selectionReady && !currentInfo;
   const noticeText = coldList
     ? "Loading artifacts…"
     : cache?.error ||
-      (rs.linkedArtifactId && cache?.loaded && !currentInfo
-        ? "Artifact not found"
+      (missingLink
+        ? "Artifact not found. Check the link or ask for a new one."
         : holding &&
             rs.followCurrent &&
             rs.selectedVersion !== currentInfo?.version
@@ -732,6 +779,19 @@ function renderShell(pane: ArtifactEl): void {
                     : nothing}
                 </button>`
               : nothing}
+            <button
+              type="button"
+              class="artifact-icon-btn artifact-copy-btn"
+              aria-label="Copy link"
+              title="Copy link"
+              @click=${(event: MouseEvent) =>
+                void copyArtifactLink(
+                  pane,
+                  event.currentTarget as HTMLButtonElement,
+                )}
+            >
+              ${unsafeHTML(SHARE_ICON)}
+            </button>
             <a
               class="artifact-icon-btn artifact-download"
               href=${download}
@@ -741,6 +801,11 @@ function renderShell(pane: ArtifactEl): void {
               >${DOWNLOAD_ICON}</a
             >
           </div>
+          <div
+            class="menu menu-note artifact-copy-status"
+            role="status"
+            hidden
+          ></div>
           ${rs.versionMenuOpen && hasVersions
             ? html`<div
                 class="menu artifact-version-menu"
@@ -797,7 +862,7 @@ function renderShell(pane: ArtifactEl): void {
         ${info ? info.title : "Artifacts"}
       </h2>
       <div
-        class=${`artifact-notice ${noticeText ? "on" : ""} ${cache?.error || rs.noticeError ? "error" : ""}`}
+        class=${`artifact-notice ${noticeText ? "on" : ""} ${cache?.error || missingLink || rs.noticeError ? "error" : ""}`}
         role="status"
         aria-live="polite"
       >
@@ -867,6 +932,7 @@ function retarget(pane: ArtifactEl, agentId: string): boolean {
   if (rs.agentId === agentId) return false;
   cancelSelectionComment(pane);
   rs.agentId = agentId;
+  rs.awaitingHistory = false;
   rs.browsing = false;
   rs.filter = "";
   rs.selId = null;
@@ -901,8 +967,8 @@ function retarget(pane: ArtifactEl, agentId: string): boolean {
   rs.noticeError = false;
   rs.contentInfo = null;
   rs.versionMenuOpen = false;
-  rs.imageAbort?.abort();
-  rs.imageAbort = null;
+  rs.contentAbort?.abort();
+  rs.contentAbort = null;
   const documentBody = pane.querySelector<HTMLElement>(".report-doc")!;
   documentBody.innerHTML = "";
   setPaneLoading(pane, false);
@@ -1019,6 +1085,8 @@ registerPane({
           rs.contentInfo?.version !== rs.selectedVersion ||
           !rs.shownKey
         ) {
+          rs.contentAbort?.abort();
+          rs.contentAbort = null;
           pane.querySelector<HTMLElement>(".report-doc")!.innerHTML = "";
           rs.contentInfo = null;
           rs.shownKey = null;
@@ -1032,8 +1100,8 @@ registerPane({
       const pane = element as ArtifactEl;
       pane._rs.requestSeq++;
       pane._rs.versionsSeq++;
-      pane._rs.imageAbort?.abort();
-      pane._rs.imageAbort = null;
+      pane._rs.contentAbort?.abort();
+      pane._rs.contentAbort = null;
       if (artifactMount.current === pane) {
         cancelSelectionComment(pane);
         artifactMount.current = null;
@@ -1060,8 +1128,13 @@ registerPane({
     },
     restore(element: HTMLElement, _ctx: PaneContext, value: unknown): void {
       const pane = element as ArtifactEl;
-      pane._rs.restoredArtifactId =
-        parseArtifactPaneViewState(value).artifactId;
+      const rs = pane._rs;
+      const id = parseArtifactPaneViewState(value).artifactId;
+      if (id && id !== rs.selId) {
+        rs.contentAbort?.abort();
+        rs.shownKey = null;
+      }
+      rs.restoredArtifactId = id;
       renderShell(pane);
       void showArtifact(pane);
     },
@@ -1071,6 +1144,7 @@ registerPane({
     pane.renderShell = () => renderShell(pane);
     pane.showArtifact = () => showArtifact(pane);
     pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div><div class="doc-review-foot"></div></article><div class="report-comments"></div><div class="report-bar"></div>`;
+    installBoxComments(pane.querySelector<HTMLElement>(".report-doc")!);
     pane._rs = {
       agentId: null,
       browsing: false,
@@ -1102,7 +1176,7 @@ registerPane({
       noticeError: false,
       contentInfo: null,
       versionMenuOpen: false,
-      imageAbort: null,
+      contentAbort: null,
     };
     artifactMount.current = pane;
     claimComments(pane, commentRendering);

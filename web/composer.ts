@@ -5,6 +5,7 @@
 import { hasCommentSends } from "./artifacts/comment-outbox.js";
 import { treeOf } from "./backends/tree.js";
 import { backendFor } from "./backends/backend.js";
+import { LEGACY_EFFORT_MAX_LEVEL } from "../src/effort_levels.js";
 import {
   conversationId,
   parseConversationId,
@@ -898,6 +899,28 @@ async function runJobAttempt(job: SendJob): Promise<void> {
           ? conversationId(job.backendLabel, DRAFT)
           : job.parent || "",
       );
+      let refused: Response | null = null;
+      if (
+        backend.label &&
+        job.level != null &&
+        job.level > LEGACY_EFFORT_MAX_LEVEL
+      ) {
+        const ladder = await backend.api(
+          "/api/settings/effort-levels",
+          {},
+          {
+            availability: "core",
+          },
+        );
+        if (!ladder.ok) refused = ladder;
+        else if (!(await ladder.json()).levels?.[job.level]) {
+          job.inFlight = false;
+          job.failed = true;
+          job.error = `${backend.label} does not support effort level ${job.level}. Update the backend, then retry.`;
+          renderSendStatus();
+          return;
+        }
+      }
       const body = conversationCreationBody({
         ...job,
         parent: job.parent ? parseConversationId(job.parent).cid : job.parent,
@@ -908,10 +931,12 @@ async function runJobAttempt(job: SendJob): Promise<void> {
       // Invariant: Creating an agent is not idempotent. Browser/network failure
       // and 5xx still feed health, but no client timer may abort a request that
       // the server could commit before our retry creates a duplicate.
-      const cr = await backend.jpost("/api/conversations", body, {
-        availability: "core",
-        timeoutMs: 0,
-      });
+      const cr =
+        refused ??
+        (await backend.jpost("/api/conversations", body, {
+          availability: "core",
+          timeoutMs: 0,
+        }));
       if (cr.status === 401) {
         job.inFlight = false;
         job.failed = true;
@@ -1189,6 +1214,8 @@ sendEl.onclick = (event: MouseEvent) => {
   // Invariant: A long-press only peeked at the tip; it must neither send nor
   // arm.
   if (consumeComposerStopHold()) return;
+  if (event.detail && sendEl.classList.contains("stop"))
+    sendEl.focus({ preventScroll: true });
   const intent = activateComposerControl();
   if (intent === "send") send();
   else if (intent === "prepare-stop") {

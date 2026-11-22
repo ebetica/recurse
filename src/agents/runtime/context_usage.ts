@@ -47,7 +47,7 @@ interface ContextUsageDeps {
     conv: Conv,
     currentTurn: boolean,
   ): Promise<string | null>;
-  config: Pick<Config, "chatSettings" | "contextBarWindow" | "modelPolicy">;
+  config: Pick<Config, "models" | "contextBarWindow">;
 }
 
 const isDict = (value: unknown): value is JsonObject =>
@@ -146,11 +146,15 @@ export function assistantContextUsage(
 export function agentContext(
   row: Readonly<Record<string, unknown>>,
   sample: Record<string, unknown> | null,
-  config: Pick<Config, "chatSettings" | "contextBarWindow">,
+  config: Pick<Config, "models" | "contextBarWindow">,
 ): { tokens: number; window: number | null; session?: string } | null {
   if (sample === null) return null;
   const model = typeof row.model === "string" ? row.model : null;
-  const usage = contextOccupancy(sample, config.chatSettings(model)[0], config);
+  const usage = contextOccupancy(
+    sample,
+    config.models.chatSettings(model)[0],
+    config,
+  );
   return usage.tokens === null
     ? null
     : {
@@ -505,7 +509,7 @@ export class ContextUsage {
     if (rawModel !== null && typeof rawModel !== "string")
       throw new Error(`unsupported chat model: ${pyStr(rawModel)}`);
     const { config } = this.deps;
-    const [model] = config.chatSettings(rawModel);
+    const [model] = config.models.chatSettings(rawModel);
     let usage = conv.latest_context_usage;
     let used = promptTokens(usage);
     const durable = conv.backend === "durable";
@@ -524,7 +528,7 @@ export class ContextUsage {
     const { window: capacity } = contextOccupancy(usage, model, config);
     return {
       model,
-      model_label: config.modelPolicy(model).label,
+      model_label: config.models.modelPolicy(model).label,
       used_tokens: used,
       usage_model: usageModel,
       context_window: capacity,

@@ -37,6 +37,7 @@ import { tests as conversationTitle } from "./test_conversation_title";
 import { tests as mobileLayout } from "./test_mobile_layout";
 import { tests as panesArtifacts } from "./test_panes_artifacts";
 import { tests as artifactVisit } from "./test_artifact_visit";
+import { tests as artifactAppState } from "./test_artifact_app_state";
 import { tests as files } from "./test_files";
 import { tests as filesNavigation } from "./test_files_navigation";
 import { tests as filesViewers } from "./test_files_viewers";
@@ -51,6 +52,7 @@ import { tests as selectionComments } from "./test_selection_comments";
 import { tests as longSelection } from "./test_long_selection";
 import { tests as platformCommands } from "./test_platform_commands";
 import { tests as sideHistory } from "./test_side_history";
+import { tests as sideCard } from "./test_side_card";
 import { tests as waitingTakeover } from "./test_waiting_takeover";
 import { tests as steers } from "./test_steers";
 import { tests as turns } from "./test_turns";
@@ -66,6 +68,7 @@ import { tests as providerReplay } from "./test_provider_replay";
 import { tests as imageSwipe } from "./test_image_swipe";
 import { tests as threadEdges } from "./test_thread_edges";
 import { tests as durable } from "./test_durable";
+import { tests as thinking } from "./test_thinking";
 import { tests as liveTools } from "./test_live_tools";
 import { tests as artifactCheck } from "./test_artifact_check";
 
@@ -104,7 +107,10 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["new-agent-focus", newAgentFocus],
   ["conversation-title", conversationTitle],
   ["mobile-layout", mobileLayout],
-  ["panes-artifacts", [...panesArtifacts, ...artifactVisit]],
+  [
+    "panes-artifacts",
+    [...panesArtifacts, ...artifactVisit, ...artifactAppState],
+  ],
   ["files", [...files, ...filesNavigation]],
   ["files-viewers", [...filesViewers, ...filesDocuments]],
   ["files-comments", filesComments],
@@ -114,7 +120,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["visible-attachments", visibleAttachments],
   ["line-comments", lineComments],
   ["selection-comments", [...selectionComments, ...longSelection]],
-  ["platform-commands", [...platformCommands, ...sideHistory]],
+  ["platform-commands", [...platformCommands, ...sideHistory, ...sideCard]],
   ["waiting-takeover", waitingTakeover],
   ["steers", steers],
   ["turns", turns],
@@ -128,13 +134,20 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["image-swipe", imageSwipe],
   ["thread-edges", threadEdges],
   ["durable", durable],
+  ["thinking", thinking],
   ["model-response", modelResponse],
   ["provider-replay", providerReplay],
   ["live-tools", liveTools],
   ["artifact-check", artifactCheck],
 ];
 if (import.meta.main) {
-  const { workers, names } = browserArguments(process.argv.slice(2));
+  const args = process.argv.slice(2);
+  if (args.length === 1 && args[0] === "--help") {
+    console.log(`Usage: bun tests/mobile_browser/index.ts [--workers N] [group ...]
+  RECURSE_BROWSER_SCREENSHOT_DIR=<directory> saves opt-in PNGs from supported tests.`);
+    process.exit(0);
+  }
+  const { workers, names } = browserArguments(args);
   const unknown = names.filter(
     (name) => !groups.some(([label]) => label === name),
   );

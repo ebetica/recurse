@@ -6,6 +6,7 @@ import {
 import {
   captureErrors,
   closeWithRoutes,
+  focusComposer,
   gotoRoot,
   routeArtifacts,
   runBrowserTests,
@@ -421,6 +422,17 @@ export const tests: BrowserTest[] = [
       await browserExpect(effortLevel(page, 1).model).toHaveAccessibleName(
         `Level 1 ${luna.name} ChatGPT subscription`,
       );
+      const safetyBadge = (await lunaRow
+        .getByText("ChatGPT subscription", {
+          exact: true,
+        })
+        .boundingBox())!;
+      const safetyModel = (await lunaRow
+        .getByText(luna.name, {
+          exact: true,
+        })
+        .boundingBox())!;
+      expect(safetyBadge.x + safetyBadge.width).toBeLessThan(safetyModel.x);
       await openLevel(page, 1);
       await closeDetails(page);
       await expectHitCorners(lunaRow);
@@ -903,8 +915,19 @@ export const tests: BrowserTest[] = [
     const page = await context.newPage();
     const errors = captureErrors(page);
     const opus = { model: LIST_OPUS.id, reasoning: "high" };
+    const models = [
+      LIST_OPUS,
+      LIST_OPUS,
+      LIST_SOL,
+      LIST_SONNET,
+      LIST_FRESH,
+      LIST_SOL,
+    ];
     const routes = await routeLadder(page, base, {
-      levels: [opus, opus, opus, opus, opus],
+      levels: models.map(({ id }) => ({
+        model: id,
+        reasoning: id === LIST_FRESH.id ? "off" : "high",
+      })),
       list: [LIST_OPUS, LIST_SONNET, LIST_SOL, LIST_FRESH],
     });
     await routeArtifacts(page, base);
@@ -914,10 +937,57 @@ export const tests: BrowserTest[] = [
     await page.locator("#settings-overlay.on").waitFor();
     await page.locator('#settings-nav button[data-cat="models"]').tap();
     await expectLevelOneHelp(page);
+    const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+    for (const width of [1280, 921, 920, 412, 390]) {
+      await page.setViewportSize({ width, height: 915 });
+      const columns: [number, number, number][] = [];
+      for (const [i, { label, route }] of models.entries()) {
+        const { model, reasoning } = effortLevel(page, i + 1);
+        await browserExpect(model).toHaveAccessibleName(
+          `Level ${i + 1} ${label} ${route}`,
+        );
+        const badge = (await model
+          .getByText(route, { exact: true })
+          .boundingBox())!;
+        const name = model.getByText(label, { exact: true });
+        const nameStart = await name.evaluate((el) => {
+          const text = el.firstChild!;
+          const range = el.ownerDocument.createRange();
+          range.setStart(text, 0);
+          range.setEnd(text, 1);
+          return range.getBoundingClientRect().left;
+        });
+        const slider = (await reasoning.boundingBox())!;
+        expect(badge.x + badge.width).toBeLessThan(nameStart);
+        expect(
+          await name.evaluate((el) => el.scrollWidth <= el.clientWidth),
+        ).toBeTrue();
+        columns.push([badge.x, nameStart, slider.x]);
+        if (width === 920 || width === 921) {
+          const button = (await model.boundingBox())!;
+          if (width === 920) {
+            expect(
+              slider.y,
+              "Slider below the model at 920 px",
+            ).toBeGreaterThanOrEqual(button.y + button.height);
+          } else {
+            expect(
+              slider.x,
+              "Slider after the model at 921 px",
+            ).toBeGreaterThanOrEqual(button.x + button.width);
+            expect(slider.y).toBeLessThan(button.y + button.height);
+            expect(slider.y + slider.height).toBeGreaterThan(button.y);
+          }
+        }
+      }
+      expect(
+        columns,
+        `Aligned badge, name text, and slider at ${width} px`,
+      ).toEqual(models.map(() => columns[0]));
+      if (shots)
+        await page.screenshot({ path: `${shots}/effort-levels-${width}.png` });
+    }
     const two = effortLevel(page, 2);
-    await browserExpect(two.model).toHaveAccessibleName(
-      `Level 2 ${LIST_OPUS.label} ${LIST_OPUS.route}`,
-    );
     await browserExpect(
       two.row.getByText("Reasoning", { exact: true }),
     ).toBeVisible();
@@ -928,8 +998,8 @@ export const tests: BrowserTest[] = [
     const sheet = page.getByRole("region", { name: "Level 2", exact: true });
     const box = sheet.getByRole("combobox", { name: "Model for level 2" });
     await box.waitFor();
+    await expectHitCorners(box);
     const bounds = (await box.boundingBox())!;
-    expect(bounds.height).toBeGreaterThanOrEqual(44);
     expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
     expect(await box.evaluate(fontSize)).toBe("16px");
     expect(await box.getAttribute("autocapitalize")).toBe("off");
@@ -940,10 +1010,7 @@ export const tests: BrowserTest[] = [
     const freshRow = `.model-box-option[data-id="${LIST_FRESH.id}"]`;
     const option = listbox.locator(freshRow);
     await option.waitFor();
-    const [listBox, optionBox] = await Promise.all([
-      listbox.boundingBox(),
-      option.boundingBox(),
-    ]);
+    const listBox = await listbox.boundingBox();
     expect(
       await listbox.evaluate(
         (el) => (globalThis as any).getComputedStyle(el).position,
@@ -953,9 +1020,9 @@ export const tests: BrowserTest[] = [
     expect(listBox!.y).toBeGreaterThanOrEqual(
       scrolledInputBox!.y + scrolledInputBox!.height,
     );
-    expect(optionBox!.height).toBeGreaterThanOrEqual(44);
     expect(await listCapacity(listbox)).toBeGreaterThanOrEqual(4);
     await visibleAndUncovered(page, `${freshRow}:visible`);
+    await expectHitCorners(option);
     await option.tap();
     await browserExpect(two.model).toHaveAccessibleName(
       `Level 2 ${LIST_FRESH.label} ${LIST_FRESH.route}`,
@@ -970,8 +1037,82 @@ export const tests: BrowserTest[] = [
       reasoning: "off",
     });
     expect(routes.saved[0]!.levels["1"]).toEqual(opus);
+    expect(routes.saved[0]!.levels).not.toHaveProperty("6");
     expect(errors).toEqual([]);
     await context.close();
+  },
+  // Feature: #3544 Setting and selecting a sixth effort level works through the first turn.
+  async function test_effort_six_in_settings_and_new_agent(browser, base) {
+    for (const width of [1280, 412, 390]) {
+      const context = await browser.newContext({
+        viewport: { width, height: 844 },
+        isMobile: width !== 1280,
+        hasTouch: width !== 1280,
+      });
+      const page = await context.newPage();
+      await gotoRoot(page, base);
+      await openLadderSettings(page);
+      const sixth = effortLevel(page, 6).model;
+      await browserExpect(
+        effortLevels(page).locator(".row.effort"),
+      ).toHaveCount(6);
+      await sixth.scrollIntoViewIfNeeded();
+      const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+      if (shots)
+        await page.screenshot({
+          path: `${shots}/effort-six-settings-${width}.png`,
+        });
+      await page.locator("#settings-close").click();
+      await startNewAgent(page);
+      const trigger = page.locator("#model-trigger");
+      await browserExpect(trigger).toHaveAttribute(
+        "aria-label",
+        /^Level 3: (?!Effort:)/,
+      );
+      await trigger.click();
+      const slider = page.getByRole("slider", {
+        name: "Effort level",
+        exact: true,
+      });
+      await slider.press("End");
+      await browserExpect(slider).toHaveValue("6");
+      await slider.press("Home");
+      await browserExpect(slider).toHaveValue("1");
+      for (const level of [2, 3, 4, 5, 6]) {
+        await slider.press("ArrowRight");
+        await browserExpect(slider).toHaveValue(String(level));
+      }
+      await browserExpect(trigger).toHaveAttribute("aria-label", /^Level 6:/);
+      if (shots)
+        await page.screenshot({
+          path: `${shots}/effort-six-draft-${width}.png`,
+        });
+      await slider.press("Escape");
+      await page.locator("#input").fill("Reply only Sixth level confirmed.");
+      const created = page.waitForResponse(
+        (response) =>
+          response.url() === `${base}api/conversations` &&
+          response.request().method() === "POST",
+      );
+      await page.locator("#send").click();
+      const response = await created;
+      expect(response.ok()).toBe(true);
+      const { id, level } = await response.json();
+      expect(level).toBe(6);
+      await browserExpect(
+        page
+          .locator("#messages")
+          .getByText("Sixth level confirmed.", { exact: true }),
+      ).toBeVisible();
+      const turn = await page.request.get(
+        `${base}api/conversations/${id}/prompt`,
+      );
+      expect(turn.ok()).toBe(true);
+      expect(JSON.stringify((await turn.json()).request)).toContain(
+        "This conversation runs at effort level 6",
+      );
+      await context.close();
+    }
   },
   // Regression: #2357 loading friendly model metadata never flashes a raw id or resizes its slot.
   async function test_composer_names_a_model_outside_the_ladder(browser, base) {
@@ -1017,17 +1158,17 @@ export const tests: BrowserTest[] = [
         .locator('.agent.selected[data-id="model-name-outside"]')
         .waitFor({ state: "attached" });
       await started;
-      const model = page.locator("#model-trigger .model-name");
-      await browserExpect(model).toBeVisible();
+      const pill = page.locator("#model-trigger");
+      const model = pill.locator(".model-name");
+      await focusComposer(page);
+      await visibleAndUncovered(page, "#model-trigger .model-name");
       await browserExpect(model).toHaveText("Effort");
-      const width = await model.evaluate(
-        (node) => node.getBoundingClientRect().width,
-      );
+      const width = () =>
+        pill.evaluate((node) => node.getBoundingClientRect().width);
+      const loadingWidth = await width();
       release();
       await browserExpect(model).toHaveText(outside.label);
-      expect(
-        await model.evaluate((node) => node.getBoundingClientRect().width),
-      ).toBe(width);
+      expect(await width()).toBe(loadingWidth);
       expect(errors).toEqual([]);
     } finally {
       release();

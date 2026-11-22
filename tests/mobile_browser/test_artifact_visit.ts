@@ -2,6 +2,7 @@ import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import { tests as artifactHistory } from "./test_artifact_history";
 import {
+  expectHitCorners,
   gotoRoot,
   postFixture,
   rootAgentId,
@@ -21,7 +22,7 @@ export const tests: BrowserTest[] = [
     ).join("");
     const { agent, id } = await postFixture(base, "seed-artifact-sections", {
       markdown:
-        "# Section links\n\n" +
+        "# Section links\n\nFind the browser control examples below.\n\n" +
         "[First](#browser-control-first) · [Second](#browser-control-first-1) · [Named](#named-anchor) · [Explicit](#explicit-anchor)\n\n" +
         paragraphs +
         "## Browser Control: First!\n\n[Top](#section-links) · [Open second](#artifact=$ARTIFACT&section=browser-control-first-1)\n\n" +
@@ -30,12 +31,24 @@ export const tests: BrowserTest[] = [
         '<a name="named-anchor"></a>\n\n### Named destination\n\n<p id="explicit-anchor">Explicit destination</p>\n\n' +
         paragraphs,
     });
-    for (const width of [1280, 412]) {
-      const context = await browser.newContext({
+    for (const width of [1280, 390]) {
+      const phone = width === 390;
+      const options = {
         viewport: { width, height: 844 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
-      });
+        isMobile: phone,
+        hasTouch: phone,
+      };
+      const missing = await browser.newPage(options);
+      await missing.goto(`${base}#agent=${agent}&artifact=unknown-artifact`);
+      await browserExpect(
+        missing.locator(".artifact-notice", {
+          hasText: "Artifact not found. Check the link or ask for a new one.",
+        }),
+      ).toBeVisible();
+      await missing.close();
+
+      const context = await browser.newContext(options);
+      await context.grantPermissions(["clipboard-read", "clipboard-write"]);
       const page = await context.newPage();
       const errors = captureErrors(page);
       await page.goto(`${base}#agent=${agent}`);
@@ -72,6 +85,73 @@ export const tests: BrowserTest[] = [
       await second.waitFor();
       await inScroller(second);
       expect(page.url()).toBe(originalUrl);
+      const copy = page.getByRole("button", { name: "Copy link", exact: true });
+      await copy.waitFor();
+      await browserExpect(copy).toHaveAttribute("title", "Copy link");
+      if (phone) {
+        await doc.getByRole("link", { name: "Top", exact: true }).last().tap();
+        await browserExpect(page.locator("body")).not.toHaveClass(
+          /\bpane-chrome-hidden\b/,
+        );
+        await expectHitCorners(copy);
+      }
+      if (process.env.ARTIFACT_LINK_SHOTS)
+        await page.screenshot({
+          path: `${process.env.ARTIFACT_LINK_SHOTS}/artifact-toolbar-${width}.png`,
+        });
+      await page.evaluate(
+        (value) => navigator.clipboard.writeText(value),
+        `Clipboard before copying at ${width}px`,
+      );
+      if (phone) await copy.tap();
+      else await copy.press("Enter");
+      await browserExpect(
+        page.locator(".artifact-copy-status", { hasText: "Link copied" }),
+      ).toBeInViewport();
+      const copied = await page.evaluate(() => navigator.clipboard.readText());
+      expect(copied).toBe(`${base}#agent=${agent}&artifact=${id}`);
+      const recipient = await browser.newContext(options);
+      const linked = await recipient.newPage();
+      const listGate = Promise.withResolvers<void>();
+      await linked.route(/\/api\/artifacts\?/, async (route) => {
+        await listGate.promise;
+        await route.continue();
+      });
+      try {
+        await linked.goto(copied);
+        await linked
+          .locator(`.agent.selected[data-id="${agent}"]`)
+          .waitFor({ state: "attached" });
+        await linked
+          .locator(
+            `#messages a[href="#artifact=${id}&section=browser-control-first-1"]`,
+          )
+          .waitFor({ state: "attached" });
+      } finally {
+        listGate.resolve();
+      }
+      const picker = linked.locator("#artifact-picker");
+      await browserExpect(picker).toBeVisible();
+      await browserExpect(picker.locator("option:checked")).toHaveText(
+        "Section links",
+      );
+      await linked
+        .locator(".report-doc")
+        .getByText("Find the browser control examples below.", { exact: true })
+        .waitFor();
+      const section = await recipient.newPage();
+      await section.goto(`${copied}&section=browser-control-first-1`);
+      await inScroller(
+        section
+          .locator(".report-doc")
+          .getByRole("heading", {
+            name: "Browser Control: First!",
+            exact: true,
+          })
+          .nth(1),
+      );
+      await recipient.close();
+      await page.bringToFront();
       if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
         await page.screenshot({
           path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/artifact-section-${width}.png`,

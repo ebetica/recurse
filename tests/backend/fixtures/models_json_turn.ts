@@ -68,7 +68,7 @@ export async function run(input: {
       () => ["c1"],
     ),
     settings: () => [selected, "off"],
-    customProviders: () => config.customModelProviders(),
+    customProviders: () => config.models.customModelProviders(),
     log: (event, fields) => {
       warnings.push(event);
       logs.push(recordMessage(event, fields));
@@ -122,27 +122,27 @@ export async function run(input: {
     }
     await writeFile(join(input.root, "auth.json"), "{}");
     const signedOut = (await models.getAuth("anthropic")) === undefined;
-    console.log(
-      "MODELS_JSON_RESULT=" +
-        JSON.stringify({
-          views,
-          captures,
-          logs,
-          selectedModels,
-          warnings,
-          signedOut,
-          modelIds: models
-            .getProvider("anthropic")!
-            .getModels()
-            .map((model) => model.id),
-          jsonOnlyProviderLoaded:
-            models.getProvider("json-only-provider") !== undefined,
-          openaiAuthenticated: (await models.getAuth("openai")) !== undefined,
-        }),
-    );
+    const result = {
+      views,
+      captures,
+      logs,
+      selectedModels,
+      warnings,
+      signedOut,
+      modelIds: models
+        .getProvider("anthropic")!
+        .getModels()
+        .map((model) => model.id),
+      jsonOnlyProviderLoaded:
+        models.getProvider("json-only-provider") !== undefined,
+    };
+    console.log("MODELS_JSON_RESULT=" + JSON.stringify(result));
+    return result;
   } finally {
     await host.close();
     globalThis.fetch = originalFetch;
     globalThis.WebSocket = originalWebSocket;
   }
 }
+
+export type TurnResult = Awaited<ReturnType<typeof run>>;

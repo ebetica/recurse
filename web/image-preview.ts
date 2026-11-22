@@ -1,5 +1,5 @@
 // URL allowlist for composer image thumbnails: same-origin uploaded images
-// only. Image clicks use the shared Files image pop-out (files.ts).
+// only. Image clicks use the shared Files image dialog.
 
 interface PreviewTarget {
   url: string;

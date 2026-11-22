@@ -1,7 +1,7 @@
-// Selection comments own quote offers and snapshots; viewers supply rendering.
-// Cmd/Ctrl+Enter stages a draft and focuses the viewer; the next press sends.
-// Adding a comment focuses its rendered card before any later reader input.
-// Pre-gesture queued scrolls do not cancel the selection's comment offer.
+// Selection comments own quote offers and snapshots; pre-gesture scrolls do not cancel offers.
+// Cmd/Ctrl+Enter stages and focuses the viewer, then sends. Adding a comment focuses its card.
+// Artifact highlight controls never nest in links or buttons.
+// Overlapping highlights can share an inline Tab stop; use cards to edit the others.
 import { selectionCommentRange } from "../comments/selection-text/index.js";
 import {
   commentMount,
@@ -12,8 +12,11 @@ import {
   type SelectionSource,
 } from "../comments/selection-draft/index.js";
 import { resizeTextarea } from "../composer/textarea.js";
-import { placeBox } from "../files/index.js";
-import { PEN_ICON } from "../icons.js";
+import {
+  findBoxFrame,
+  inlineBoxSource,
+  placeBox,
+} from "../comments/box/index.js";
 import { prepareCommentCrop } from "./comment-crops.js";
 import { displayedInfo } from "./artifact-state.js";
 import type {
@@ -24,6 +27,9 @@ import type {
 } from "./artifact-state.js";
 
 // ---- selection comments --------------------------------------------------
+const MAX_QUOTE_CHARS = 600;
+const normalizeQuote = (text: string): string =>
+  text.replace(/\s+/g, " ").trim();
 export const comments = new Map<string, Map<string, Comment>>();
 /** Discard a document's staged comments and their crop resources. */
 export function dropComments(id: string): void {
@@ -62,6 +68,19 @@ export const commentKey = (
   agentId && artifactId ? `${agentId}\n${artifactId}` : null;
 export const currentCommentKey = (pane: CommentPane): string | null =>
   commentKey(pane._rs.agentId, pane._rs.selId);
+/** A remounted viewer returns to the revision that owns its staged comments. */
+export function pendingCommentVersion(pane: CommentPane): string | undefined {
+  const key = currentCommentKey(pane);
+  return key ? comments.get(key)?.values().next().value?.version : undefined;
+}
+export function notifyCommentChange(pane: CommentPane): void {
+  pane.dispatchEvent(
+    new CustomEvent("recurse:comments-changed", {
+      bubbles: true,
+      detail: currentCommentKey(pane),
+    }),
+  );
+}
 let selectionRoot: Element | null = null;
 function reportRoot(pane: CommentPane): Element | null {
   return pane.querySelector(".report-doc");
@@ -112,13 +131,6 @@ function markRange(range: Range, cid: string): HTMLElement[] {
   }
   return marks;
 }
-/** The image or PDF page frame in `root` that a box on `page` belongs to. */
-function boxFrame(root: Element, page?: number): HTMLElement | null {
-  const selector = `.report-box-frame${page ? `[data-page="${page}"]` : ""}`;
-  return root.matches(selector)
-    ? (root as HTMLElement)
-    : root.querySelector(selector);
-}
 function unwrapMark(mark: Element): void {
   const parent = mark.parentNode!;
   while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
@@ -127,12 +139,10 @@ function unwrapMark(mark: Element): void {
   // Invariant: Normalizing an image frame removes Lit's empty text nodes.
   if (!box) parent.normalize();
 }
-const commentMarkers = ":is(mark.report-cmark, .report-comment-anchor)";
+const commentMarkers = "mark.report-cmark";
 function removeMarkers(doc: Element | null, selector: string): void {
-  for (const marker of doc?.querySelectorAll(selector) ?? []) {
-    if (marker.matches("mark")) unwrapMark(marker);
-    else marker.remove();
-  }
+  for (const marker of doc?.querySelectorAll(selector) ?? [])
+    unwrapMark(marker);
 }
 export function unmark(doc: Element | null, cid: string): void {
   removeMarkers(doc, `${commentMarkers}[data-cid="${cid}"]`);
@@ -140,16 +150,21 @@ export function unmark(doc: Element | null, cid: string): void {
 export function unmarkAll(doc: Element | null): void {
   removeMarkers(doc, commentMarkers);
 }
-const interactiveText = 'a[href], button, summary, [role="button"]';
-function appendEditAnchor(mark: HTMLElement, cid: string): void {
-  const button = mark.ownerDocument.createElement("button");
-  button.type = "button";
-  button.className = "btn sm quiet report-comment-anchor";
-  button.dataset.cid = cid;
-  button.title = "Edit highlighted comment";
-  button.setAttribute("aria-label", button.title);
-  button.innerHTML = PEN_ICON;
-  (mark.closest(interactiveText) ?? mark).after(button);
+const interactiveText =
+  'a[href], button, summary, [role="button"]:not(.report-cmark)';
+const highlightControl = 'mark.report-cmark[role="button"]';
+function makeHighlightFocusable(marks: HTMLElement[], quote: string): void {
+  const mark = marks.find(
+    (part) =>
+      part.textContent?.trim() &&
+      !part.closest(`${interactiveText}, ${highlightControl}`) &&
+      !part.querySelector(highlightControl),
+  );
+  if (!mark) return;
+  mark.tabIndex = 0;
+  mark.setAttribute("role", "button");
+  mark.setAttribute("aria-label", `Edit comment: ${quote}`);
+  mark.setAttribute("aria-haspopup", "dialog");
 }
 export function orderedComments(
   id: string | null,
@@ -318,7 +333,9 @@ function positionPopover(): void {
   popoverLabel.className = draft.edit ? "" : "sr-only";
   popoverLabel.textContent = draft.edit
     ? "Edit comment"
-    : "Comment on selected text";
+    : draft.box
+      ? "Comment on selected area"
+      : "Comment on selected text";
   popoverComment.textContent = draft.edit ? "Save" : "Comment";
   popoverComment.disabled = !!draft.edit && !popoverInput.value.trim();
   popover.hidden = false;
@@ -416,11 +433,10 @@ function offerSelectionComment(source: SelectionSource): void {
   if (!selected || !pane || !id || !displayed || pane._rs.deleting) return;
   const version = displayed.version;
   if (!version) return;
-  const quote = selected.range
-    .toString()
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 600);
+  const quote = normalizeQuote(selected.range.toString()).slice(
+    0,
+    MAX_QUOTE_CHARS,
+  );
   if (!quote) return;
   const previousPane = selectionDraft?.pane;
   const same =
@@ -489,9 +505,16 @@ export function offerBoxComment(
     mark.remove();
     return;
   }
+  if (box.image && !canReplaceDraft()) {
+    mark.remove();
+    return;
+  }
   if (selectionDraft?.mark !== mark) cancelSelectionComment();
   const range = frame.ownerDocument.createRange();
   range.selectNode(mark);
+  const alt = box.image
+    ? frame.querySelector("img")?.alt.replace(/\s+/g, " ").trim().slice(0, 80)
+    : null;
   setSelectionDraft({
     pane,
     key: id,
@@ -499,9 +522,13 @@ export function offerBoxComment(
     root: frame,
     source: mainSelectionSource,
     range,
-    quote: box.page ? `Box on page ${box.page}` : "Box on image",
+    quote: box.page
+      ? `Box on page ${box.page}`
+      : alt
+        ? `Box on image: ${alt}`
+        : "Box on image",
     box,
-    crop: prepareCommentCrop(pane, box),
+    crop: prepareCommentCrop(frame, box),
     mark,
   });
   positionPopover();
@@ -513,6 +540,16 @@ export function canEditPendingComment(
   comment: Comment,
 ): boolean {
   return pane.dataset.pane === "report" && !comment.box;
+}
+
+function canReplaceDraft(): boolean {
+  if (
+    !editorHasChanges() ||
+    confirm("Discard what you typed in the open comment box?")
+  )
+    return true;
+  popoverInput.focus({ preventScroll: true });
+  return false;
 }
 
 /** Open the same editor from the highlighted text or its pending card. */
@@ -532,14 +569,7 @@ export function editPendingComment(
   )
     return false;
   const same = selectionDraft?.edit?.comment === comment;
-  if (
-    !same &&
-    editorHasChanges() &&
-    !confirm("Discard what you typed in the open comment box?")
-  ) {
-    popoverInput.focus({ preventScroll: true });
-    return true;
-  }
+  if (!same && !canReplaceDraft()) return true;
   const value = same ? popoverInput.value : comment.text;
   cancelSelectionComment();
   commentMount.current = pane;
@@ -553,7 +583,8 @@ export function editPendingComment(
     quote: comment.quote,
     edit: { comment, anchor },
   });
-  if (anchor.matches("mark")) anchor.tabIndex = -1;
+  if (anchor.matches("mark") && !anchor.hasAttribute("tabindex"))
+    anchor.tabIndex = -1;
   popoverInput.value = value;
   commentPanes.get(pane)!.renderBar(pane);
   positionPopover();
@@ -587,6 +618,38 @@ export function handleCommentShortcut(
   event.stopPropagation();
   button.click();
 }
+function editHighlightedText(
+  pane: CommentPane,
+  event: MouseEvent | KeyboardEvent,
+): void {
+  if (
+    event.defaultPrevented ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    !(event.target instanceof Element)
+  )
+    return;
+  const mark = event.target.closest<HTMLElement>(
+    `.report-doc ${commentMarkers}[data-cid]:not(.report-cbox)`,
+  );
+  if (!mark || mark.closest(interactiveText)) return;
+  if (event instanceof KeyboardEvent) {
+    if (
+      event.isComposing ||
+      event.repeat ||
+      event.target !== mark ||
+      !mark.matches(highlightControl)
+    )
+      return;
+  } else if (!window.getSelection()?.isCollapsed) return;
+  const cid = mark.dataset.cid;
+  if (cid && editPendingComment(pane, cid, mark)) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+}
 const commentPanes = new WeakMap<Element, CommentRendering>();
 /** Let `pane` take selection comments when a press starts in it, and now
  * unless another shown pane holds them. */
@@ -596,39 +659,21 @@ export function claimComments(
 ): void {
   if (!commentPanes.has(pane)) {
     commentPanes.set(pane, rendering);
-    pane.addEventListener("keydown", (event) =>
-      handleCommentShortcut(event, pane),
-    );
+    pane.addEventListener("keydown", (event) => {
+      handleCommentShortcut(event, pane);
+      if (
+        pane.dataset.pane === "report" &&
+        (event.key === "Enter" || event.key === " ")
+      )
+        editHighlightedText(pane, event);
+    });
     if (pane.dataset.pane === "report")
       pane.addEventListener(
         "click",
-        (event) => {
-          if (
-            event.defaultPrevented ||
-            event.altKey ||
-            event.ctrlKey ||
-            event.metaKey ||
-            event.shiftKey ||
-            !(event.target instanceof Element)
-          )
-            return;
-          const anchor = event.target.closest<HTMLElement>(
-            `.report-doc ${commentMarkers}[data-cid]`,
-          );
-          if (
-            !anchor ||
-            (anchor.matches("mark") &&
-              (anchor.closest(interactiveText) ||
-                !window.getSelection()?.isCollapsed))
-          )
-            return;
-          const cid = anchor.dataset.cid;
-          if (cid && editPendingComment(pane, cid, anchor)) {
-            event.preventDefault();
-            event.stopPropagation();
-          }
+        (event) => editHighlightedText(pane, event),
+        {
+          capture: true,
         },
-        { capture: true },
       );
   }
   if (!commentMount.current?.isConnected) commentMount.current = pane;
@@ -782,6 +827,9 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
     return;
   }
   const cid = `ac${++cidSeq}`;
+  const textRange = draft.box
+    ? undefined
+    : textOffsets(draft.range, commentRoot(pane));
   const marks = draft.mark ? [draft.mark] : markRange(draft.range, cid);
   if (draft.mark) draft.mark.dataset.cid = cid;
   draft.mark = undefined;
@@ -790,7 +838,7 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
     return;
   }
   if (pane.dataset.pane === "report" && !draft.box)
-    appendEditAnchor(marks[0]!, cid);
+    makeHighlightFocusable(marks, draft.quote);
   cmap(id).set(cid, {
     cid,
     agentId: pane._rs.agentId!,
@@ -798,6 +846,7 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
     version: displayed.version,
     range: draft.range.cloneRange(),
     quote: draft.quote,
+    textRange,
     text: note,
     box: draft.box,
     crop: draft.crop,
@@ -805,6 +854,7 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
   draft.crop = undefined;
   cancelSelectionComment();
   commentPanes.get(pane)!.renderComments(pane);
+  notifyCommentChange(pane);
   if (focusCard)
     pane
       .querySelector<HTMLElement>(
@@ -812,37 +862,73 @@ function stageSelectionComment(allowEmpty = false, focusCard = true): void {
       )
       ?.focus({ preventScroll: true });
 }
-function findQuote(doc: Element, quote: string): Range | null {
-  const want = quote.replace(/\s+/g, " ").trim();
-  if (!want) return null;
-  const owner = doc.ownerDocument || document;
-  const walker = owner.createTreeWalker(doc, NodeFilter.SHOW_TEXT, null);
-  const nodes: { node: Text; start: number; text: string }[] = [];
-  let full = "";
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    const text = node.textContent || "";
-    nodes.push({ node: node as Text, start: full.length, text });
-    full += text;
-  }
-  const normalized: string[] = [],
-    offsets: number[] = [];
+const boxHintSelector = ".files-box-hint";
+function textOffsets(range: Range, root: Element | null): Comment["textRange"] {
+  if (!root?.contains(range.commonAncestorContainer)) return;
+  const hints = root.querySelectorAll(boxHintSelector);
+  const textLength = (part: Range) => {
+    let length = part.toString().length;
+    for (const hint of hints) {
+      if (!part.intersectsNode(hint)) continue;
+      const overlap = part.cloneRange();
+      overlap.selectNodeContents(hint);
+      if (overlap.compareBoundaryPoints(Range.START_TO_START, part) < 0)
+        overlap.setStart(part.startContainer, part.startOffset);
+      if (overlap.compareBoundaryPoints(Range.END_TO_END, part) > 0)
+        overlap.setEnd(part.endContainer, part.endOffset);
+      length -= overlap.toString().length;
+    }
+    return length;
+  };
+  const prefix = range.cloneRange();
+  prefix.selectNodeContents(root);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const start = textLength(prefix);
+  return { start, end: start + textLength(range) };
+}
+
+function uniqueQuoteOffsets(full: string, quote: string): Comment["textRange"] {
+  if (!quote || quote.length >= MAX_QUOTE_CHARS) return;
+  const normalized: string[] = [];
+  const offsets: number[] = [];
   let space = false;
   for (let i = 0; i < full.length; i++) {
     if (/\s/.test(full[i])) {
       if (space) continue;
       normalized.push(" ");
-      offsets.push(i);
       space = true;
     } else {
       normalized.push(full[i]);
-      offsets.push(i);
       space = false;
     }
+    offsets.push(i);
   }
-  const at = normalized.join("").indexOf(want);
-  if (at < 0) return null;
-  const start = offsets[at],
-    end = offsets[at + want.length - 1] + 1;
+  const text = normalized.join("");
+  const at = text.indexOf(quote);
+  if (at < 0 || text.indexOf(quote, at + 1) >= 0) return;
+  return { start: offsets[at], end: offsets[at + quote.length - 1] + 1 };
+}
+
+function findQuote(doc: Element, { quote, textRange }: Comment): Range | null {
+  const owner = doc.ownerDocument || document;
+  const walker = owner.createTreeWalker(doc, NodeFilter.SHOW_TEXT, null);
+  const nodes: { node: Text; start: number; text: string }[] = [];
+  let full = "";
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.parentElement?.closest(boxHintSelector)) continue;
+    const text = node.textContent || "";
+    nodes.push({ node: node as Text, start: full.length, text });
+    full += text;
+  }
+  const verified =
+    textRange &&
+    textRange.end <= full.length &&
+    normalizeQuote(full.slice(textRange.start, textRange.end)).slice(
+      0,
+      MAX_QUOTE_CHARS,
+    ) === quote;
+  const offsets = verified ? textRange : uniqueQuoteOffsets(full, quote);
+  if (!offsets) return null;
   const locate = (offset: number) => {
     for (const segment of nodes)
       if (
@@ -852,8 +938,8 @@ function findQuote(doc: Element, quote: string): Range | null {
         return { node: segment.node, offset: offset - segment.start };
     return null;
   };
-  const first = locate(start),
-    last = locate(end);
+  const first = locate(offsets.start),
+    last = locate(offsets.end);
   if (!first || !last) return null;
   const range = owner.createRange();
   range.setStart(first.node, first.offset);
@@ -862,32 +948,65 @@ function findQuote(doc: Element, quote: string): Range | null {
 }
 /** Re-place or hide the open popover after the shown document changed. */
 export const syncSelectionDraft = (): void => positionPopover();
-export function reanchor(pane: CommentPane, id: string): void {
+export function reanchor(
+  pane: CommentPane,
+  id: string,
+  { pruneStale = false } = {},
+): void {
   positionPopover();
   const key = commentKey(pane._rs.agentId, id);
   const map = key ? comments.get(key) : null;
-  if (!map) return;
+  if (!map && !pruneStale) return;
+  const roots = commentRoots(pane);
+  if (pruneStale)
+    for (const root of roots)
+      for (const marker of root.querySelectorAll<HTMLElement>(
+        `${commentMarkers}[data-cid]`,
+      ))
+        if (!map?.has(marker.dataset.cid!)) unwrapMark(marker);
+  if (!map || !key) return;
+  const version = displayedInfo(pane)?.version;
   for (const comment of map.values()) {
-    if (
-      commentRoots(pane).some((root) =>
-        root.querySelector(`mark[data-cid="${comment.cid}"]`),
-      )
-    )
-      continue;
-    const { box } = comment;
-    if (box) {
-      const frame = commentRoots(pane)
-        .map((root) => boxFrame(root, box.page))
-        .find(Boolean);
-      if (frame) placeBox(frame, box).dataset.cid = comment.cid;
+    if (comment.version !== version) continue;
+    const marker = `mark[data-cid="${comment.cid}"]`;
+    const editable = canEditPendingComment(pane, comment);
+    if (roots.some((root) => root.querySelector(marker))) {
+      if (editable) {
+        const marks = roots.flatMap((root) => [
+          ...root.querySelectorAll<HTMLElement>(marker),
+        ]);
+        if (!marks.some((mark) => mark.matches(highlightControl)))
+          makeHighlightFocusable(marks, comment.quote);
+      }
       continue;
     }
-    for (const doc of commentRoots(pane)) {
-      const range = findQuote(doc, comment.quote);
+    const { box } = comment;
+    if (box) {
+      const frame = roots.map((root) => findBoxFrame(root, box)).find(Boolean);
+      if (!frame) continue;
+      if (!box.image) placeBox(frame, box).dataset.cid = comment.cid;
+      else
+        void Promise.all([
+          comment.crop?.inlineSource,
+          inlineBoxSource(frame),
+        ]).then(([saved, current]) => {
+          if (
+            saved &&
+            saved === current &&
+            pane.contains(frame) &&
+            comments.get(key)?.get(comment.cid) === comment &&
+            displayedInfo(pane)?.version === comment.version &&
+            !frame.querySelector(marker)
+          )
+            placeBox(frame, box).dataset.cid = comment.cid;
+        });
+      continue;
+    }
+    for (const doc of roots) {
+      const range = findQuote(doc, comment);
       if (range) {
-        const first = markRange(range, comment.cid)[0];
-        if (first && canEditPendingComment(pane, comment))
-          appendEditAnchor(first, comment.cid);
+        const marks = markRange(range, comment.cid);
+        if (editable) makeHighlightFocusable(marks, comment.quote);
         break;
       }
     }

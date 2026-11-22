@@ -21,7 +21,11 @@ import {
   phaseFor,
 } from "./freshness.js";
 import { inputEl } from "../dom.js";
-import { notePaneConversationRendered, syncPanes } from "../panes.js";
+import {
+  notePaneConversationRendered,
+  notePaneConversationRequested,
+  syncPanes,
+} from "../panes.js";
 import {
   configurePendingMessageRefresh,
   optPending,
@@ -342,9 +346,8 @@ export function showSelectedConversation(
   retargetFocusedEvents(id);
 }
 
-// Paints a cached thread immediately and seeds its reconciliation hash. Panels
-// sync only after selectAgent starts the focused read, never before the
-// thread's data. Returns false on first visit.
+// Paints a cached thread immediately and seeds its reconciliation hash.
+// Returns false on first visit.
 function showCached(id: string): boolean {
   const conv = state.convCache.view(id);
   if (!conv) return false;
@@ -421,13 +424,9 @@ export async function refreshConv(
   const blocksPromise = directRowRead
     ? refreshRowThread(id)
     : Promise.resolve(false);
-  const { status, conv } = await fetchConvView(
-    id,
-    true,
-    generation,
-    purpose,
-    undefined,
-  )
+  const view = fetchConvView(id, true, generation, purpose, undefined);
+  const settlePaneRead = notePaneConversationRequested(id);
+  const { status, conv } = await view
     .then(async (result) => {
       const current = state.currentConv;
       const next = result.conv;
@@ -466,12 +465,12 @@ export async function refreshConv(
       release();
       focusedPathReady();
     });
+  const stillSelected = () =>
+    (generation === null || generation === pollGeneration) &&
+    id === state.selectedId;
+  if (stillSelected()) settlePaneRead?.(!conv);
   const blocksChanged = (await blocksPromise) || settledRowsChanged;
-  if (
-    (generation !== null && generation !== pollGeneration) ||
-    id !== state.selectedId
-  )
-    return false;
+  if (!stillSelected()) return false;
   // Invariant: A read 404 never navigates; two tree misses confirm absence.
   // Keep the chosen thread. Failed cached reads end refreshing; cold switches
   // keep loading until the correct thread exists.

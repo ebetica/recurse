@@ -1,6 +1,7 @@
-// One typed source of truth for Recurse's desktop keyboard behavior. The pure
-// reducer owns modal/chord semantics; app.ts performs the returned DOM actions,
-// and the shortcuts pane renders the same binding metadata used for dispatch.
+// Defines desktop bindings for dispatch and Keyboard shortcuts. The reducer
+// owns modes and chords; app.ts runs the DOM actions. In Normal, Shift+J/K and
+// Page Down/Up scroll visible Chat by half a page without moving focus from
+// the agents list.
 import type { PaneNavigation } from "./types.js";
 import type { WindowCommand } from "./dock/commands.js";
 
@@ -55,7 +56,10 @@ export type KeyCommand =
   | "cancel-local"
   | "take-over"
   | "choose-effort"
+  | "view-context"
   | "toggle-latest-turn"
+  | "scroll-chat-down"
+  | "scroll-chat-up"
   | "scroll-bottom"
   | "invalid-chord"
   | "unavailable-stop";
@@ -97,6 +101,7 @@ export interface KeyContext {
   paneAvailable: boolean;
   chatFullscreen?: boolean;
   textSelected: boolean;
+  insideDialog?: boolean;
   commentAvailable?: boolean;
 }
 
@@ -154,10 +159,21 @@ const NORMAL_BINDINGS: readonly Binding[] = [
     command: "choose-effort",
     description: "choose effort level",
   },
+  { keys: ["C"], command: "view-context", description: "view context details" },
   {
     keys: ["v"],
     command: "toggle-latest-turn",
     description: "toggle all response details",
+  },
+  {
+    keys: ["J", "PageDown"],
+    command: "scroll-chat-down",
+    description: "scroll chat half a page down",
+  },
+  {
+    keys: ["K", "PageUp"],
+    command: "scroll-chat-up",
+    description: "scroll chat half a page up",
   },
   {
     keys: ["G"],
@@ -383,7 +399,7 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
       {
         keys: ["q"],
         command: "close-pane",
-        description: "close pane / back to agents",
+        description: "close pane",
       },
       {
         keys: ["H"],
@@ -743,8 +759,13 @@ export function reduceKeymap(
   if (!binding) return result(state, null, false);
   if (binding.command === "open-pane-finder" && !context.paneAvailable)
     return result(state, null, true);
+  const chatScroll =
+    binding.command === "scroll-chat-down" ||
+    binding.command === "scroll-chat-up";
+  if (chatScroll && context.insideDialog) return result(state, null, false);
   if (
     event.repeat &&
+    !chatScroll &&
     !["parent", "next", "previous", "open"].includes(binding.command)
   )
     return result(state, null, true);
@@ -822,6 +843,8 @@ export function formatShortcutKey(key: string): string {
     ArrowDown: "↓",
     ArrowUp: "↑",
     ArrowRight: "→",
+    PageDown: "Page Down",
+    PageUp: "Page Up",
     Enter: "Enter",
     Escape: "Esc",
   };

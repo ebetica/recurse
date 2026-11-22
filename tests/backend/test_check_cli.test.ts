@@ -674,13 +674,13 @@ test("CLI requires a recorded architecture sweep for oversized source and Markdo
     const docs = (count: number) => put(readme, "🐾".repeat(count));
     await put("docs/agents/repository-map.md", "# Code map\n");
     await put(ledger, "[]\n");
-    await source(2399);
+    await source(1499);
     await docs(14999);
     const base = await baseline();
     expect((await run("size_check")).exitCode).toBe(0);
     expect((await run("docs_check")).exitCode).toBe(0);
 
-    await source(2400);
+    await source(1500);
     await docs(15000);
     const head = await baseline();
     await put("body.txt", "");
@@ -699,7 +699,7 @@ test("CLI requires a recorded architecture sweep for oversized source and Markdo
     const sourceFailure = await run("size_check");
     expect(sourceFailure.exitCode).toBe(1);
     expect(sourceFailure.stderr.toString()).toContain(
-      `${file}: 2400 lines. Stop: do not trim or delete content to fit.`,
+      `${file}: 1500 lines. Stop: do not trim or delete content to fit.`,
     );
     expect(sourceFailure.stderr.toString()).toContain(
       "Report this to the Coordinator for an effort-4 architecture sweep",
@@ -714,28 +714,28 @@ test("CLI requires a recorded architecture sweep for oversized source and Markdo
     );
 
     const records = [
-      { path: file, head, size: 2400 },
+      { path: file, head, size: 1500 },
       { path: readme, head, size: 15000 },
     ];
     await put(ledger, JSON.stringify(records));
     expect((await run("size_check")).exitCode).toBe(0);
     expect((await run("docs_check")).exitCode).toBe(0);
 
-    await source(2402);
+    await source(1502);
     await docs(15002);
     const largerHead = await baseline();
     await put(
       ledger,
       JSON.stringify([
-        { path: file, head: largerHead, size: 2402 },
+        { path: file, head: largerHead, size: 1502 },
         { path: readme, head: largerHead, size: 15002 },
       ]),
     );
-    await source(2401);
+    await source(1501);
     await docs(15001);
     expect((await run("size_check")).exitCode).toBe(0);
     expect((await run("docs_check")).exitCode).toBe(0);
-    await source(2403);
+    await source(1503);
     await docs(15003);
     expect((await run("size_check")).exitCode).toBe(1);
     expect((await run("docs_check")).exitCode).toBe(1);

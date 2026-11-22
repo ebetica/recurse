@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   LOGIN,
+  addServerCookie,
   rootAgentId,
   runBrowserTests,
   startServer,
@@ -15,11 +16,11 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
-  // Feature: #2769 Signed-in remotes retain agents and credentials through offline periods. (also #2814 A hung remote read held back home tree updates, and removing a remote left its read running.; #2819 A remote tree read dropped a pending rename of a remote agent.; #3000 Revoked sign-in remains visible in Settings; #3034 Legacy remote fixtures omit API headers and newer fixtures advertise consistent versions.)
+  // Regression: #3555 A remote that recovers with unchanged rows shows connected again. (also Feature #2769 Signed-in remotes retain agents and credentials through offline periods.; #2814 A hung remote read held back home tree updates, and removing a remote left its read running.; #2819 A remote tree read dropped a pending rename of a remote agent.; #3000 Revoked sign-in remains visible in Settings; #3034 Legacy remote fixtures omit API headers and newer fixtures advertise consistent versions.)
   async function test_remotes(browser, base, data) {
     const remote = await startServer({ auth: true });
     type Held = {
-      kind: "tree" | "conversation" | "rename";
+      kind: "tree" | "events" | "conversation" | "rename";
       state: "pending" | "answered" | "aborted";
       release: () => void;
     };
@@ -31,7 +32,7 @@ export const tests: BrowserTest[] = [
     };
     let treeReads = 0;
     let explorerRequests = 0;
-    let flaky = false;
+    let flakyStatuses: number[] = [];
     let versionOverride: "older" | "incompatible" | null = null;
     let directMismatch = false;
     let revoked = false;
@@ -53,9 +54,11 @@ export const tests: BrowserTest[] = [
                 : null
               : url.pathname === "/api/tree"
                 ? "tree"
-                : /^\/api\/conversations\/[^/]+$/.test(url.pathname)
-                  ? "conversation"
-                  : null;
+                : url.pathname === "/api/tree/events"
+                  ? "events"
+                  : /^\/api\/conversations\/[^/]+$/.test(url.pathname)
+                    ? "conversation"
+                    : null;
           if (kind && holding.has(kind)) {
             const entry: Held = { kind, state: "pending", release: () => {} };
             held.push(entry);
@@ -74,9 +77,11 @@ export const tests: BrowserTest[] = [
               return new Response(null, { status: 503 });
             entry.state = "answered";
           }
-          if (kind === "tree" && flaky && ++treeReads % 2)
-            return new Response("flaky", { status: 502 });
-          if (kind === "tree" && !flaky) treeReads++;
+          if (kind === "tree") treeReads++;
+          const flakyStatus = kind === "tree" && flakyStatuses.shift();
+          if (flakyStatus && !flakyStatuses.length) holding.add("tree");
+          if (flakyStatus && flakyStatus !== 200)
+            return new Response("flaky", { status: flakyStatus });
           const mismatch =
             directMismatch &&
             request.headers.get("accept-encoding") === "identity";
@@ -460,8 +465,8 @@ export const tests: BrowserTest[] = [
         has: page.getByRole("heading", { name: "Effort levels", exact: true }),
       });
       await browserExpect(
-        ladder.getByRole("button", { name: /^Level [1-5] / }),
-      ).toHaveCount(5);
+        ladder.getByRole("button", { name: /^Level [1-6] / }),
+      ).toHaveCount(6);
       const safetyRows = ladder.getByRole("button", {
         name: /^Safety review\b/,
         includeHidden: true,
@@ -476,7 +481,7 @@ export const tests: BrowserTest[] = [
         .evaluateAll((labels) =>
           labels.map((label) => label.getBoundingClientRect().left),
         );
-      expect(labelLefts).toHaveLength(8);
+      expect(labelLefts).toHaveLength(9);
       expect(new Set(labelLefts).size).toBe(1);
       await page.locator('#settings-nav button[data-cat="agents"]').click();
       await page.getByRole("button", { name: /^MCP servers / }).click();
@@ -493,9 +498,7 @@ export const tests: BrowserTest[] = [
         );
       expect(new Set(mcpInsets).size).toBe(1);
       await page.locator('#settings-nav button[data-cat="remotes"]').click();
-      await context.request.post(remote.base + "login", {
-        form: { password: LOGIN },
-      });
+      await addServerCookie(context, remote);
       const incomingPage = await context.newPage();
       await incomingPage.setViewportSize({ width: 1280, height: 1000 });
       await incomingPage.goto(remote.base);
@@ -629,14 +632,38 @@ export const tests: BrowserTest[] = [
       await browserExpect
         .poll(() => treeReads - unchangedFrom, { timeout: 20_000 })
         .toBeGreaterThanOrEqual(3);
-      flaky = true;
-      const flakyFrom = treeReads;
+      const recovering = held.length;
+      const recoveryReads = () =>
+        held.slice(recovering).filter((entry) => entry.kind === "tree");
+      holding.add("events");
+      flakyStatuses = [502, 200, 502];
       await remoteSection.getByText(/^Offline · last seen /).waitFor();
       await browserExpect
-        .poll(() => treeReads - flakyFrom, { timeout: 30_000 })
-        .toBeGreaterThanOrEqual(4);
-      flaky = false;
-      await remoteSection.getByText("connected", { exact: true }).waitFor();
+        .poll(() => recoveryReads().length, { timeout: 30_000 })
+        .toBe(1);
+      let releaseListings = () => {};
+      const listingsHeld = new Promise<void>(
+        (resolve) => (releaseListings = resolve),
+      );
+      await page.route(`${base}api/backends`, async (route) => {
+        await listingsHeld;
+        await route.fallback();
+      });
+      const recovered = page.waitForResponse(
+        (response) =>
+          new URL(response.url()).pathname === "/api/backends/Requested/tree",
+      );
+      recoveryReads()[0]!.release();
+      expect((await recovered).status()).toBe(200);
+      await browserExpect.poll(() => recoveryReads().length).toBe(2);
+      expect(await remoteSection.locator(".backend-status").textContent()).toBe(
+        "connected",
+      );
+      releaseListings();
+      await page.unroute(`${base}api/backends`);
+      release("tree");
+      release("events");
+      held.splice(recovering);
       expect(await page.evaluate(() => (globalThis as any).rowMutations)).toBe(
         0,
       );

@@ -3,22 +3,23 @@
 import { backendFor, resolveUrl } from "../backends/backend.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 import { holdPdfPage } from "../pdf-view.js";
+import { inlineBoxSource } from "../comments/box/index.js";
 import { encodeRasterCrop } from "./crop-encoder.js";
 import type { CommentBox } from "./artifact-state.js";
 
-function boxFrame(pane: HTMLElement, box: CommentBox): Element | null {
-  return pane.querySelector(
-    `.report-box-frame${box.page ? `[data-page="${box.page}"]` : ""}`,
-  );
+interface ImagePixels {
+  width: number;
+  height: number;
+  fromLocalPath: boolean;
 }
+
 export function commentBoxCoordinates(
-  pane: HTMLElement,
   box: CommentBox,
+  pixels?: ImagePixels | null,
 ): string {
-  const image = boxFrame(pane, box)?.querySelector("img");
-  if (image?.naturalWidth && image.naturalHeight) {
-    const { naturalWidth: width, naturalHeight: height } = image;
-    return `x=${Math.round(box.x * width)} y=${Math.round(box.y * height)} w=${Math.round(box.w * width)} h=${Math.round(box.h * height)} px in the ${width}×${height} original (x,y = top-left)`;
+  if (pixels) {
+    const { width, height, fromLocalPath } = pixels;
+    return `x=${Math.round(box.x * width)} y=${Math.round(box.y * height)} w=${Math.round(box.w * width)} h=${Math.round(box.h * height)} px in the ${width}×${height} ${fromLocalPath ? "preview" : "original"} (x,y = top-left)`;
   }
   const at = (value: number) => value.toFixed(2);
   return `x=${at(box.x)} y=${at(box.y)} w=${at(box.w)} h=${at(box.h)} (fractions of width and height; x,y = top-left)`;
@@ -29,15 +30,17 @@ interface ImageSource {
 }
 const images = new WeakMap<HTMLImageElement, ImageSource>();
 export interface PreparedCrop {
+  readonly pixels: ImagePixels | null;
+  readonly inlineSource?: Promise<string | null>;
   prepare(): Promise<Blob>;
+  preview(): Promise<string | null>;
   release(): void;
 }
 /** Snapshot and start a crop while its viewer is still mounted. */
 export function prepareCommentCrop(
-  pane: HTMLElement,
+  frame: Element | null,
   box: CommentBox,
 ): PreparedCrop {
-  const frame = boxFrame(pane, box);
   const image = frame?.querySelector("img");
   const page = frame?.querySelector("canvas");
   let pdf: ReturnType<typeof holdPdfPage> | null = null;
@@ -52,6 +55,8 @@ export function prepareCommentCrop(
   }
   if (source) source.refs++;
   let preparing: Promise<Blob> | null = null;
+  let preview: Promise<string | null> | undefined;
+  let previewUrl: string | undefined;
   let released = false;
   const prepare = (): Promise<Blob> => {
     if (preparing) return preparing;
@@ -76,10 +81,24 @@ export function prepareCommentCrop(
     return preparing;
   };
   const crop: PreparedCrop = {
+    inlineSource: box.image && frame ? inlineBoxSource(frame) : undefined,
+    pixels:
+      image?.naturalWidth && image.naturalHeight
+        ? {
+            width: image.naturalWidth,
+            height: image.naturalHeight,
+            fromLocalPath: !!box.image && !!image.dataset.pathImage,
+          }
+        : null,
     prepare,
+    preview: () =>
+      (preview ??= prepare().then((blob) =>
+        released ? null : (previewUrl = URL.createObjectURL(blob)),
+      )),
     release: () => {
       if (released) return;
       released = true;
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
       const done = preparing?.catch(() => {}) ?? Promise.resolve();
       void done.then(() => {
         pdf?.release();

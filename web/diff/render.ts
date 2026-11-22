@@ -8,7 +8,7 @@ import type {
   DiffSplitContentLineItem,
 } from "@git-diff-view/core";
 
-export type ViewKind = "add" | "del" | "ctx" | "hunk";
+type ViewKind = "add" | "del" | "ctx" | "hunk";
 
 export interface ViewLine {
   kind: ViewKind;
@@ -42,7 +42,7 @@ export const MAX_RENDER_ROWS = 2000;
 type Core = typeof import("@git-diff-view/core");
 
 let library: Promise<Core> | null = null;
-function loadCore(): Promise<Core> {
+export function loadCore(): Promise<Core> {
   library ??= import("@git-diff-view/core");
   return library;
 }
@@ -306,7 +306,7 @@ export function splitView(core: Core, file: DiffFileType): SplitRow[] {
   return rows;
 }
 
-export interface FileContents {
+interface FileContents {
   oldContent: string;
   newContent: string;
 }
@@ -459,16 +459,4 @@ export async function renderPatch(
   } catch {
     return null;
   }
-}
-
-// The new-side line a comment anchors to, or null when the row is not
-// commentable. Removed lines are gone from the current file, hunk headers
-// and placeholders are not lines at all, and split old-side lines mirror
-// the removed rule.
-export function commentLineFor(row: {
-  kind: ViewKind;
-  newNo: number | null;
-}): number | null {
-  if (row.kind !== "add" && row.kind !== "ctx") return null;
-  return row.newNo;
 }

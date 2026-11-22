@@ -1,5 +1,6 @@
 // File tabs use the existing pane lifecycle and native conversation layout.
 // Only registered sources decode descriptors; metadata never supplies URLs.
+// A tab keeps its id when stepping; its descriptor identifies the shown file.
 // Definitions, open tabs and retained pane bodies have separate live bounds.
 import { validBoundedString } from "../conversation-ui-state/schema.js";
 import type { PaneDef } from "../types.js";
@@ -9,7 +10,7 @@ export interface FileTabDescriptor {
   key: string;
 }
 interface FileTabPane extends PaneDef {
-  guardClose(element: HTMLElement): boolean;
+  guardClose(element: HTMLElement, preserveComments: boolean): boolean;
   prepare?(value: unknown): void;
   release?(): void;
 }
@@ -17,6 +18,32 @@ type Factory = (key: string, id: string) => FileTabPane | null;
 const sources = new Map<string, Factory>();
 export const MAX_OPEN_FILE_TABS = 8;
 const MAX_DEFINITIONS = 32;
+const MAX_KEY_LENGTH = 8192;
+
+/** Decode a canonical key before the source checks the identities in it. */
+export function decodeFileTabKey(
+  key: string,
+  parts: number,
+  maxLength = MAX_KEY_LENGTH,
+): string[] | null {
+  let values: unknown;
+  try {
+    values = JSON.parse(key);
+  } catch {
+    return null;
+  }
+  if (
+    !Array.isArray(values) ||
+    values.length !== parts ||
+    values.some(
+      (value) =>
+        !validBoundedString(value, maxLength) || /[\x00-\x1f]/.test(value),
+    ) ||
+    JSON.stringify(values) !== key
+  )
+    return null;
+  return values;
+}
 
 export function registerFileTabSource(source: string, factory: Factory): void {
   if (!sources.has(source)) sources.set(source, factory);
@@ -44,7 +71,7 @@ export function fileTabDescriptor(
     !Object.hasOwn(descriptor, "key") ||
     typeof descriptor.source !== "string" ||
     !sources.has(descriptor.source) ||
-    !validBoundedString(descriptor.key, 8192)
+    !validBoundedString(descriptor.key, MAX_KEY_LENGTH)
   )
     return null;
   return { source: descriptor.source, key: descriptor.key };
@@ -88,6 +115,10 @@ export class FileTabs {
         this.entries.get(id)?.pane.release?.();
     this.wanted = next;
   }
+  closed(id: string): void {
+    this.wanted.delete(id);
+    this.entries.get(id)?.pane.release?.();
+  }
   descriptor(id: string): FileTabDescriptor | undefined {
     return this.entries.get(id)?.descriptor;
   }
@@ -111,15 +142,15 @@ export class FileTabs {
     const descriptor = fileTabDescriptor(id, parameters);
     if (!descriptor) return false;
     const existing = this.entries.get(id);
-    if (
-      existing &&
-      (existing.descriptor.source !== descriptor.source ||
-        existing.descriptor.key !== descriptor.key)
-    )
+    if (existing && existing.descriptor.source !== descriptor.source)
       return false;
-    const pane =
-      existing?.pane || sources.get(descriptor.source)!(descriptor.key, id);
+    const matching = existing?.descriptor.key === descriptor.key;
+    if (existing && !matching && this.opened.has(id)) return false;
+    const pane = matching
+      ? existing.pane
+      : sources.get(descriptor.source)!(descriptor.key, id);
     if (!pane || pane.id !== id) return false;
+    if (!matching) existing?.pane.release?.();
     this.entries.delete(id);
     this.entries.set(id, { descriptor, pane });
     while (this.entries.size > MAX_DEFINITIONS) {
@@ -136,8 +167,26 @@ export class FileTabs {
     }
     return true;
   }
-  guardClose(id: string, element: HTMLElement | undefined): boolean {
-    return !!element && !!this.entries.get(id)?.pane.guardClose(element);
+  replace(
+    id: string,
+    key: string,
+    initial: unknown,
+    detach: () => void,
+  ): { descriptor: FileTabDescriptor; pane: FileTabPane } | null {
+    const current = this.entries.get(id);
+    if (!current || !this.opened.has(id) || current.descriptor.key === key)
+      return null;
+    const descriptor = fileTabDescriptor(id, {
+      file: { source: current.descriptor.source, key },
+    });
+    const pane = descriptor && sources.get(descriptor.source)!(key, id);
+    if (!descriptor || !pane || pane.id !== id) return null;
+    pane.prepare?.(initial);
+    detach();
+    current.pane.release?.();
+    const entry = { descriptor, pane };
+    this.entries.set(id, entry);
+    return entry;
   }
   canOpen(id?: string): boolean {
     return (

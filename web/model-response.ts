@@ -120,6 +120,10 @@ chip?.addEventListener("click", () => {
   if (!current || !chip || !popover) return;
   document.cookie = `${COOKIE}=${encodeURIComponent(current.id)}; Path=/; SameSite=Lax`;
   paint();
+});
+
+popover?.addEventListener("toggle", () => {
+  if (!chip || !popover.matches(":popover-open")) return;
   const bounds = chip.getBoundingClientRect();
   popover.style.left = `${Math.max(8, Math.min(bounds.left, innerWidth - 308))}px`;
   popover.style.bottom = `${innerHeight - bounds.top + 6}px`;

@@ -2,7 +2,7 @@ This page is written for agents running inside Recurse; see the [human docs](../
 
 # Architecture sweeps
 
-The static gate requires a sweep for a tracked source file at 2,400 lines or a
+The static gate requires a sweep for a tracked source file at 1,500 lines or a
 tracked Markdown file at 15,000 characters. When the check fails, stop and
 report the path and size to the Coordinator. Do not trim or delete content to
 fit, pad code, or mechanically split a file to pass the check. An oversized

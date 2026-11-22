@@ -1,6 +1,7 @@
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -24,9 +25,11 @@ import { ISOLATED_PATH_ENV } from "../../src/local_roots";
 import { ShellRegistry } from "../../src/pi_bg_shell";
 import { ProcessLifecycle } from "../../src/process_lifecycle";
 import { RecurseUpdates } from "../../src/recurse_update";
+import { TaskSet } from "../../src/utils/tasks";
 import { Router } from "../../src/web/router";
 import { registerSettingsRoutes } from "../../src/web/settings";
 import { UsageLimits } from "../../src/extensions/extra/usage-limits/usage-limits.ts";
+import { captureFixture } from "./fixture_subprocess";
 import { Refs, runRefCases, type RefCase } from "./http_refs";
 import { serveOpen } from "./http_open_app";
 import corpus from "./fixtures/http_settings/cases.json";
@@ -137,7 +140,8 @@ describe("corpus", () => {
     const store = new OAuthStore({
       piAgentDir: async () => agent,
       ambient,
-      customProviderIds: () => Object.keys(config.customModelProviders()),
+      customProviderIds: () =>
+        Object.keys(config.models.customModelProviders()),
       lifecycle: new ProcessLifecycle({
         registry: new ShellRegistry({
           enabled: true,
@@ -169,7 +173,7 @@ describe("corpus", () => {
     const codex = createCodex();
     const muse = new MuseAuth({
       store,
-      config,
+      models: config.models,
       env: ambient,
       userAgent: "recurse-fixture/1",
       timeoutMs: 30_000,
@@ -186,45 +190,58 @@ describe("corpus", () => {
       codex,
       muse,
       openrouter,
-      customProviderNames: () => Object.keys(config.customModelProviders()),
+      customProviderNames: () =>
+        Object.keys(config.models.customModelProviders()),
       storedApiKey: (name) => store.storedApiKey(name),
     });
     await snapshot.refresh();
-    const updates = new RecurseUpdates({
-      sourceRoot: root,
-      cacheFile: join(root, "update-check.json"),
-      release: { version: "0.1.0", commit: null },
+    const checkTasks = new TaskSet();
+    const checkSpawns: string[] = [];
+    const serveSettings = (
+      dataDir: string,
+      overrides: Partial<ConstructorParameters<typeof RecurseUpdates>[0]>,
+    ) => {
+      const router = new Router();
+      registerSettingsRoutes(router, {
+        config,
+        anthropic,
+        codex,
+        muse,
+        openrouter,
+        credentials: store,
+        providers: snapshot,
+        usageLimits: new UsageLimits(join(agent, "usage-limits.json")),
+        piAgentDir: async () => agent,
+        mutateExternalStorage: (work) => work(),
+        modelUpdates: {
+          status: () => {
+            throw new Error("not in the recorded corpus");
+          },
+          start: () => {
+            throw new Error("not in the recorded corpus");
+          },
+        },
+        recurseUpdates: new RecurseUpdates({
+          sourceRoot: root,
+          cacheFile: join(dataDir, "update-check.json"),
+          release: { version: "0.1.0", commit: null },
+          env: {},
+          send: () => {
+            throw new Error("a refused installation must not update");
+          },
+          spawn: (name, work) => {
+            checkSpawns.push(name);
+            return checkTasks.spawn(name, work);
+          },
+          ...overrides,
+        }),
+      });
+      return serveOpen(router, dataDir);
+    };
+    const data = join(root, "data");
+    const { running } = await serveSettings(data, {
       env: { RECURSE_ISOLATED_ROOT: root },
-      send: () => {
-        throw new Error("isolated installs must not update");
-      },
-      spawn: async () => {
-        throw new Error("isolated installs must not check for updates");
-      },
     });
-    const router = new Router();
-    registerSettingsRoutes(router, {
-      config,
-      anthropic,
-      codex,
-      muse,
-      openrouter,
-      credentials: store,
-      providers: snapshot,
-      usageLimits: new UsageLimits(join(agent, "usage-limits.json")),
-      piAgentDir: async () => agent,
-      mutateExternalStorage: (work) => work(),
-      modelUpdates: {
-        status: () => {
-          throw new Error("not in the recorded corpus");
-        },
-        start: () => {
-          throw new Error("not in the recorded corpus");
-        },
-      },
-      recurseUpdates: updates,
-    });
-    const { running } = await serveOpen(router, join(root, "data"));
     const refs = new Refs();
     refs.put("fake", fake.url);
     const expectedFiles: Rec = {
@@ -328,20 +345,91 @@ describe("corpus", () => {
       );
       expect(problems).toEqual([]);
       expect(checked).toBe(90);
-      const url = `http://127.0.0.1:${running.port}/api/settings/update`;
-      const status = await fetch(url);
-      expect(status.status).toBe(200);
-      expect(await status.json()).toMatchObject({
-        skipped: "Updates are unavailable in test installations.",
-        checking: false,
-        checked_at: null,
-      });
-      const apply = await fetch(url, { method: "POST" });
-      expect(apply.status).toBe(409);
-      expect(await apply.json()).toMatchObject({
-        detail: "Updates are unavailable in test installations.",
-      });
-      expect(existsSync(join(root, "update-check.json"))).toBe(false);
+      const expectUpdatesRefused = async (base: string, reason: string) => {
+        const url = `${base}/api/settings/update`;
+        const status = await fetch(url);
+        expect(status.status).toBe(200);
+        expect(await status.json()).toMatchObject({
+          skipped: reason,
+          checking: false,
+          checked_at: null,
+        });
+        for (const endpoint of [url, `${url}/check`]) {
+          const response = await fetch(endpoint, { method: "POST" });
+          expect(response.status).toBe(409);
+          expect(await response.json()).toMatchObject({ detail: reason });
+        }
+      };
+      await expectUpdatesRefused(
+        running.url,
+        "Updates are unavailable in test installations.",
+      );
+      expect(checkSpawns).toEqual([]);
+      expect(existsSync(join(data, "update-check.json"))).toBe(false);
+      for (const [dir, overrides, reason] of [
+        [
+          "self-deploy-off",
+          { env: { RECURSE_SELF_DEPLOY: "off" } },
+          "Updates are managed outside Settings.",
+        ],
+        [
+          "unsupervised",
+          { send: null },
+          "Update this installation manually, then restart Recurse.",
+        ],
+      ] as const) {
+        const { running: refused } = await serveSettings(
+          join(root, dir),
+          overrides,
+        );
+        try {
+          await expectUpdatesRefused(refused.url, reason);
+          expect(checkSpawns).toEqual([]);
+        } finally {
+          await refused.close();
+        }
+      }
+      const checkout = join(root, "no-channel-checkout");
+      mkdirSync(checkout);
+      for (const args of [
+        ["init", "-q"],
+        [
+          "-c",
+          "user.name=Fixture",
+          "-c",
+          "user.email=fixture@example.invalid",
+          "commit",
+          "--allow-empty",
+          "-qm",
+          "Untagged checkout",
+        ],
+      ]) {
+        const git = await captureFixture(["git", ...args], { cwd: checkout });
+        expect(git.exitCode, git.stderr.toString()).toBe(0);
+      }
+      copyFileSync(
+        join(import.meta.dir, "../../install.sh"),
+        join(checkout, "install.sh"),
+      );
+      const { running: channelLess } = await serveSettings(
+        join(root, "no-channel"),
+        { sourceRoot: checkout },
+      );
+      try {
+        const check = await fetch(
+          `${channelLess.url}/api/settings/update/check`,
+          { method: "POST" },
+        );
+        expect(check.status).toBe(202);
+        await checkTasks.drain();
+        await expectUpdatesRefused(
+          channelLess.url,
+          "No update channel configured. Update this installation manually.",
+        );
+        expect(checkSpawns).toEqual(["recurse-update-check"]);
+      } finally {
+        await channelLess.close();
+      }
       const idleUrl = `http://127.0.0.1:${running.port}/api/settings/idle-compaction`;
       expect(await (await fetch(idleUrl)).json()).toEqual({
         enabled: false,
@@ -389,6 +477,7 @@ describe("corpus", () => {
       await reloaded.close();
     } finally {
       await running.close();
+      await checkTasks.drain();
       fake.server.stop(true);
     }
   }, 120_000);

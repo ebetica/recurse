@@ -59,8 +59,8 @@ export async function renderPromptBudget(
   });
   let host: DurableHost | undefined;
   try {
-    await config.setPiModelList(fixture.models);
-    await config.setEffortLevels(fixture.ladder);
+    await config.models.setPiModelList(fixture.models);
+    await config.levels.setEffortLevels(fixture.ladder);
     const tools = await AgentTools.create({
       config,
       skills: new SkillContext(() => makeSkillRegistry(config)),
@@ -86,7 +86,7 @@ export async function renderPromptBudget(
       boundSessionFile: async () => null,
       now: () => 0,
     });
-    const [model, effort] = config.resolveEffortLevel(3);
+    const [model, effort] = config.levels.resolveEffortLevel(3);
     const row = {
       id: "budget",
       backend: "durable",

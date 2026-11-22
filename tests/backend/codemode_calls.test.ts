@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { codemodeCalls } from "../../src/agents/view/conversation";
+import { codemodeCalls } from "../../src/agents/view";
 
 // test-check-allow: T9 Security: untrusted call fields strip controls
 test("bounds and cleans untrusted nested-call fields", () => {

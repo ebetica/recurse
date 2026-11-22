@@ -1,6 +1,7 @@
 // Core CLI help and external Pi skills for every agent.
 import { join } from "node:path";
-import { type Config, EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL } from "../config";
+import type { Config } from "../config";
+import { EFFORT_LEVELS, isEffortLevel } from "../effort_levels";
 import { skillHelp, type SkillContext } from "../skill_context";
 const CORE_TOOLS = ["subagent", "worktree"] as const;
 
@@ -74,7 +75,7 @@ export class AgentTools {
     }
     let options: unknown[];
     try {
-      options = this.config.chatModels();
+      options = this.config.models.chatModels();
     } catch {
       return modelId;
     }
@@ -94,8 +95,8 @@ export class AgentTools {
     let ladder: Record<number, Record<string, unknown>>;
     let defaultLevel: number;
     try {
-      ladder = this.config.effortLevels();
-      defaultLevel = this.config.defaultEffortLevel();
+      ladder = this.config.levels.effortLevels();
+      defaultLevel = this.config.levels.defaultEffortLevel();
     } catch {
       ladder = {};
       defaultLevel = 0;
@@ -103,7 +104,7 @@ export class AgentTools {
     let labels: Record<string, unknown>;
     try {
       labels = {};
-      for (const option of this.config.chatModels())
+      for (const option of this.config.models.chatModels())
         if (typeof option.id === "string") labels[option.id] = option.label;
     } catch {
       labels = {};
@@ -117,7 +118,7 @@ export class AgentTools {
         "  (no levels available — configure them in Settings to enable subagents)",
       );
     } else {
-      for (let level = EFFORT_MIN_LEVEL; level <= EFFORT_MAX_LEVEL; level++) {
+      for (const level of EFFORT_LEVELS) {
         const entry = ladder[level];
         if (typeof entry !== "object" || entry === null) continue;
         const { model, reasoning } = entry;
@@ -134,12 +135,7 @@ export class AgentTools {
   /** The per-turn effort line for this conversation, or null. */
   conversationEffortLine(conv: Conv): string | null {
     const level = conv.level;
-    if (
-      typeof level !== "number" ||
-      !Number.isInteger(level) ||
-      level < EFFORT_MIN_LEVEL ||
-      level > EFFORT_MAX_LEVEL
-    ) {
+    if (!isEffortLevel(level)) {
       const model = conv.model;
       if (typeof model !== "string" || !model) return null;
       const thinking = conv.effort;

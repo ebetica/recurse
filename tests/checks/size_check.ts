@@ -4,7 +4,7 @@ import { basename, dirname } from "node:path";
 
 const SOURCE =
   /\.(?:[cm]?[jt]sx?|py|sh|bash|html?|css|scss|sass|less|vue|svelte|c|h|cc|cpp|hpp|rs|go|java|rb)$/i;
-const SOURCE_SWEEP = 2400;
+const SOURCE_SWEEP = 1500;
 const SOURCE_CAP = 2500;
 const MARKDOWN_SWEEP = 15_000;
 const WARN_LINES = 1000;

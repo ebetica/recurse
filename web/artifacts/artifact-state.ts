@@ -25,8 +25,10 @@ export interface ListCache {
   readAt: number;
 }
 export interface CommentBox {
-  /** One-based PDF page. Coordinates are fractions of the image/page. */
+  /** One-based PDF page. */
   page?: number;
+  /** One-based image position within the Markdown revision. */
+  image?: number;
   x: number;
   y: number;
   w: number;
@@ -39,6 +41,8 @@ export interface Comment {
   version: string;
   range: Range;
   quote: string;
+  /** The full selection in the original document's text, before quote truncation. */
+  textRange?: { start: number; end: number };
   text: string;
   box?: CommentBox;
   crop?: PreparedCrop;
@@ -56,6 +60,8 @@ export interface ArtifactState {
   linkedDepth?: number;
   linkedVisit?: number;
   returningVersion?: { version: string | null; followCurrent: boolean };
+  // Blocks content while history traverses back before opening a new Artifact.
+  awaitingHistory?: boolean;
   selectedVersion: string | null;
   shownKey: string | null;
   loadingKey: string | null;
@@ -82,7 +88,7 @@ export interface ArtifactState {
   noticeError: boolean;
   contentInfo: ArtifactInfo | null;
   versionMenuOpen: boolean;
-  imageAbort: AbortController | null;
+  contentAbort: AbortController | null;
   refreshKey?: number;
   /** Set while the shown document highlights what is new. */
   changes?: DocumentChanges | null;

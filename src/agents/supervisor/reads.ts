@@ -598,7 +598,7 @@ export class SupervisorReads {
       let inputs = this.viewInputs(cid, claim.conv, node, claim.binding);
       let caughtUp = false;
       for (const older of [false, true, null] as const) {
-        const callIds = older === null ? view.unresolvedAttachments() : [];
+        const callIds = older === null ? view.rows.unresolvedAttachments() : [];
         if (
           (older === true && !needsOlder(view, before, limit)) ||
           (older === null && callIds.length === 0)
@@ -607,7 +607,7 @@ export class SupervisorReads {
         const snapshot = callIds.length ? this.snapshotOf(claim.conv) : null;
         const collection: [string, string] | null =
           snapshot !== null ? [snapshot.collection, snapshot.owner] : null;
-        const generation = view.instanceId;
+        const generation = view.rows.instance_id;
         let batch: ViewBatch | null;
         let files: string;
         try {
@@ -627,7 +627,7 @@ export class SupervisorReads {
         if (
           !this.alive(claim) ||
           view.evictPending ||
-          view.instanceId !== generation
+          view.rows.instance_id !== generation
         ) {
           this.viewCache.drop(cid);
           return unavailable("stale");

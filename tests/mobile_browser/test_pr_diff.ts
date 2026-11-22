@@ -297,6 +297,7 @@ async function test_changes_base(browser: Browser, base: string) {
 
 export const tests: BrowserTest[] = [false, true].map(
   (mobile) =>
+    // Regression: #3568 a narrow PR description wraps Markdown tables before scrolling.
     async function test_pr_diff(browser, base) {
       const context = await browser.newContext({
         viewport: { width: mobile ? 412 : 1280, height: 844 },
@@ -316,7 +317,11 @@ export const tests: BrowserTest[] = [false, true].map(
       expect(theme.status()).toBe(200);
       const delivered: string[] = [];
       let contents = 0;
-      let body = captured.pr.body;
+      const evidence =
+        "Check that the activity pill shows the latest summary throughout a turn, including while a tool is running. The summary should stay visible without pushing the composer down.";
+      let body =
+        captured.pr.body +
+        `\n| Check | Evidence |\n| --- | --- |\n| Activity | ${evidence} |\n`;
       const { body: _body, ...pr } = captured.pr;
       await page.route(`**/api/conversations/${demo}/**`, (route) => {
         const url = new URL(route.request().url());
@@ -491,6 +496,13 @@ export const tests: BrowserTest[] = [false, true].map(
       expect((await description.boundingBox())!.height).toBeGreaterThan(
         height.collapsed,
       );
+      const table = description.locator(".table-scroll");
+      await table.getByText(evidence, { exact: true }).waitFor();
+      const { scrollWidth, clientWidth } = await table.evaluate((element) => ({
+        scrollWidth: element.scrollWidth,
+        clientWidth: element.clientWidth,
+      }));
+      expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
       await pane.getByLabel("Changes options", { exact: true }).click();
       await pane.getByRole("button", { name: "Split", exact: true }).click();
       expect(await less.getAttribute("aria-expanded")).toBe("true");

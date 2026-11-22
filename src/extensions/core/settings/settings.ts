@@ -13,7 +13,12 @@ import {
 } from "../../../branding";
 import {} from "@earendil-works/pi-ai";
 import { defineExtension, defineTool } from "@earendil-works/pi-durable";
-import { Config, EFFORT_MAX_LEVEL, EFFORT_MIN_LEVEL } from "../../../config";
+import { Config } from "../../../config";
+import {
+  EFFORT_LEVELS,
+  EFFORT_MAX_LEVEL,
+  EFFORT_MIN_LEVEL,
+} from "../../../effort_levels";
 import {
   readThemeSettings,
   MAX_THEME_CSS_LENGTH,
@@ -24,12 +29,11 @@ import {
 import type { SidebarScript } from "../../../sidebar_script";
 
 function levels(config: Config) {
-  const ladder = config.effortLevels();
-  const reachability = config.effortLevelReachability();
+  const ladder = config.levels.effortLevels();
+  const reachability = config.levels.effortLevelReachability();
   return {
     levels: Object.fromEntries(
-      Array.from({ length: EFFORT_MAX_LEVEL }, (_, index) => {
-        const level = index + EFFORT_MIN_LEVEL;
+      EFFORT_LEVELS.map((level) => {
         const flag = reachability[level];
         return [
           String(level),
@@ -42,7 +46,7 @@ function levels(config: Config) {
         ];
       }),
     ),
-    default_level: config.defaultEffortLevel(),
+    default_level: config.levels.defaultEffortLevel(),
   };
 }
 
@@ -283,7 +287,7 @@ export function createSettings(
             );
           } else if (args.action === "levels") result = levels(config);
           else if (args.action === "set_level") {
-            result = await config.setEffortLevel(
+            result = await config.levels.setEffortLevel(
               required(args.level, "level"),
               required(args.model, "model"),
               required(args.reasoning, "reasoning"),

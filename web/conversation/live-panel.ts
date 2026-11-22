@@ -1,15 +1,16 @@
 // Renders the live panel outside the thread; owns title/tool-label timers.
-// A running turn keeps its latest thought here until a newer one arrives,
-// even when it is also visible in the thread. Waiting and idle clear it.
-import { html, nothing, type TemplateResult } from "lit";
+// A running turn keeps its latest thought beside long-running tools.
+// Only readable prose expands the thought; the end of the turn clears it.
+import { html, nothing, render, type TemplateResult } from "lit";
 import {
   containsSecret,
   oneLine,
 } from "../../src/tool_projection/redaction.js";
 import { activeAgentSummary, activeDescendantCount } from "../active-agents.js";
+import { liveBarEl } from "../dom.js";
 import { rowThreads } from "../row-thread-state/index.js";
 import { state } from "../state.js";
-import { disclosureCaret, thinkingStore } from "./thinking.js";
+import { thinkingStore } from "./thinking.js";
 import {
   shellSummary,
   shouldShowShellUnavailable,
@@ -32,9 +33,7 @@ import { thinkingElapsedT } from "./live-elapsed.js";
 import { activeShells, agentChipT, shellChipT } from "./shell-surface.js";
 import { paint } from "../thread-render/index.js";
 
-// The one thinking banner's shared box: pulsing dot, label slot, and the
-// shell/agent chips on the right. Streaming and waiting states render the
-// same component in the same position and differ only in label and mood.
+// Streaming, queued and waiting share one panel with the shell/agent chips.
 function panelBoxT(
   conv: Conversation,
   mood: string,
@@ -42,6 +41,7 @@ function panelBoxT(
   ariaLabel: string,
   stopping = false,
   summary: TemplateResult | typeof nothing = nothing,
+  toolControl: TemplateResult | typeof nothing = nothing,
 ): TemplateResult {
   const { shellCount } = activeShells(conv);
   const shellLabel = shellSummary(shellCount);
@@ -57,13 +57,16 @@ function panelBoxT(
     >
       <div class="live-panel-box ${mood}" role="group">
         <div class="live-panel-head">
-          <span class="live-dot" aria-hidden="true"></span>
           ${label}
-          ${shellChipT(conv, shellLabel, paint)}${agentChipT(
-            conv,
-            agentLabel,
-            paint,
-          )}
+          ${toolControl !== nothing || shellLabel || agentLabel
+            ? html`<div class="live-panel-actions">
+                ${toolControl}${shellChipT(
+                  conv,
+                  shellLabel,
+                  paint,
+                )}${agentChipT(conv, agentLabel, paint)}
+              </div>`
+            : nothing}
         </div>
         ${summary}
       </div>
@@ -111,11 +114,9 @@ function liveActivityFor(conv: Conversation) {
 export function liveToolLabelVisible(
   conv: Conversation,
   elapsedMs: number,
-  panel = liveActivityFor(conv),
 ): boolean {
   return (
     elapsedMs >= TOOL_LABEL_DELAY_MS &&
-    !panel.thinkingRow &&
     conv.status === "running" &&
     state.stopPostInFlightId !== conv.id &&
     !conv.retry_notice
@@ -148,43 +149,29 @@ export function workingT(conv: Conversation): TemplateResult {
   const stopping =
     conv.status === "interrupting" || state.stopPostInFlightId === conv.id;
   const overlay = stopping ? "Interrupting this turn…" : null;
-  const pillKey = thinkingStore.syncPill(conv, panel.thinkingRow);
-  const thinkingEntry =
-    pillKey === null ? undefined : thinkingStore.get(pillKey);
-  const thinkingFull = thinkingEntry?.text;
-  const thinkingBody =
-    typeof thinkingFull === "string"
-      ? thinkingSummaryBody(thinkingFull, panel.title)
-      : "";
-  const thinkingCanToggle =
-    !overlay &&
-    !retryNotice &&
-    panel.kind === "thinking" &&
-    pillKey !== null &&
-    !!panel.thinkingRow?.thinking_title;
-  const thinkingExpanded = thinkingCanToggle && !!thinkingStore.pill?.expanded;
-  const thinkingText = thinkingExpanded
-    ? thinkingBody ||
-      (thinkingEntry?.loading ||
-      thinkingFull === undefined ||
-      thinkingEntry?.source !== thinkingStore.pill?.entry.offset
-        ? "Loading…"
-        : thinkingFull === null
-          ? "Thinking unavailable."
-          : "No additional thinking.")
-    : "";
-  const label = overlay ?? retryNotice ?? panel.label;
-  const showTools = liveToolLabelVisible(conv, longest, panel);
+  const pill = thinkingStore.syncPill(conv, panel.thinkingRow, (text) =>
+    thinkingSummaryBody(text, panel.title),
+  );
+  const toggleThinking =
+    !overlay && !retryNotice && pill?.text
+      ? () => thinkingStore.togglePill(pill.key)
+      : null;
+  const thinkingText = toggleThinking && pill?.expanded ? pill.text : "";
+  const showTools = liveToolLabelVisible(conv, longest);
+  const separateTools =
+    showTools && !!panel.thinkingRow?.thinking_title?.trim();
+  const mainShowsTools = showTools && !separateTools;
+  const toolLabel = showTools ? runningToolsLabel(tools, !separateTools) : "";
   const title =
-    overlay ??
-    retryNotice ??
-    (showTools ? runningToolsLabel(tools) : panel.title);
+    overlay ?? retryNotice ?? (mainShowsTools ? toolLabel : panel.title);
+  const label =
+    overlay ?? retryNotice ?? (mainShowsTools ? toolLabel : panel.label);
   const toolsKey = `${conv.id}\0${conv.active_run ?? panel.key.split("\0", 1)[0]}`;
   if (!tools.length) expandedToolsKey = null;
   const toolsExpanded = showTools && expandedToolsKey === toolsKey;
   const titleState = (() => {
     if (title === "Waiting") return { title, changed: false };
-    if (panel.kind !== "thinking" || overlay || retryNotice || showTools)
+    if (panel.kind !== "thinking" || overlay || retryNotice || mainShowsTools)
       return { title, changed: false };
     const now = typeof performance === "undefined" ? 0 : performance.now();
     const turnKey = panel.key.split("\0", 1)[0] ?? panel.key;
@@ -200,25 +187,19 @@ export function workingT(conv: Conversation): TemplateResult {
   const elapsed =
     overlay === null &&
     !retryNotice &&
-    panel.kind === "thinking" &&
-    (showTools || panel.thinkingElapsedMs !== undefined)
+    (mainShowsTools || panel.thinkingElapsedMs !== undefined)
       ? thinkingElapsedT(
-          showTools ? longest : panel.thinkingElapsedMs!,
-          showTools || titleState.title !== "Thinking",
+          mainShowsTools ? longest : panel.thinkingElapsedMs!,
+          mainShowsTools || titleState.title !== "Thinking",
         )
       : nothing;
-  const toggle = showTools
-    ? () => {
-        expandedToolsKey = toolsExpanded ? null : toolsKey;
-        paint(conv);
-      }
-    : pillKey !== null
-      ? () => thinkingStore.togglePill(pillKey)
-      : null;
-  const canToggle = showTools || thinkingCanToggle;
+  const toggleTools = () => {
+    expandedToolsKey = toolsExpanded ? null : toolsKey;
+    paint(conv);
+  };
   const thinkingPrefix =
     panel.kind === "thinking" &&
-    !showTools &&
+    !mainShowsTools &&
     !overlay &&
     !retryNotice &&
     !["Thinking", "Waiting"].includes(titleState.title)
@@ -229,24 +210,47 @@ export function workingT(conv: Conversation): TemplateResult {
       >${titleState.title}</span
     >${elapsed}</span
   >`;
-  const labelT = canToggle
+  const labelT =
+    mainShowsTools || toggleThinking
+      ? html`<button
+          class="live-label${mainShowsTools
+            ? ""
+            : " live-thinking-copy"}${titleState.changed
+            ? " live-title-changing"
+            : ""}"
+          type="button"
+          title=${titleState.title}
+          aria-expanded=${String(
+            mainShowsTools ? toolsExpanded : !!thinkingText,
+          )}
+          @click=${mainShowsTools ? toggleTools : toggleThinking}
+        >
+          ${head}
+        </button>`
+      : html`<span
+          class="live-label${titleState.changed ? " live-title-changing" : ""}"
+          title=${titleState.title}
+          >${head}</span
+        >`;
+  const toolControl = separateTools
     ? html`<button
-        class="live-label live-thinking-copy${titleState.changed
-          ? " live-title-changing"
-          : ""}"
+        class="live-label live-tool-status"
         type="button"
-        title=${titleState.title}
-        aria-expanded=${String(showTools ? toolsExpanded : thinkingExpanded)}
-        @click=${() => toggle?.()}
+        aria-expanded=${String(toolsExpanded)}
+        @click=${toggleTools}
       >
-        ${disclosureCaret}${head}
+        ${toolLabel}
       </button>`
-    : html`<span
-        class="live-label${titleState.changed ? " live-title-changing" : ""}"
-        title=${titleState.title}
-        >${head}</span
-      >`;
-  const summary = toolsExpanded
+    : nothing;
+  const summary = html`${thinkingText
+    ? html`<div
+        class="live-thinking-summary"
+        tabindex="0"
+        role="region"
+        aria-label="Live thinking"
+        .textContent=${thinkingText}
+      ></div>`
+    : nothing}${toolsExpanded
     ? html`<div class="live-tool-body">
         ${tools.map(({ row, elapsedMs }) => {
           const command =
@@ -265,9 +269,7 @@ export function workingT(conv: Conversation): TemplateResult {
           </div>`;
         })}
       </div>`
-    : thinkingText
-      ? html`<div class="live-thinking-summary">${thinkingText}</div>`
-      : nothing;
+    : nothing}`;
   const mood = overlay
     ? "is-overlay"
     : retryNotice
@@ -277,7 +279,26 @@ export function workingT(conv: Conversation): TemplateResult {
           ? "is-thinking has-thinking-summary is-expanded"
           : "is-thinking"
         : "";
-  return panelBoxT(conv, mood, labelT, label, stopping, summary);
+  return panelBoxT(conv, mood, labelT, label, stopping, summary, toolControl);
+}
+
+/** Follow new thinking until the reader scrolls away from the bottom. */
+export function renderLivePanel(panel: TemplateResult | null): void {
+  const selector = ".live-thinking-summary";
+  const previous = liveBarEl.querySelector<HTMLElement>(selector);
+  const follow =
+    !previous ||
+    previous.scrollHeight - previous.clientHeight - previous.scrollTop <= 1;
+  const previousText = previous?.textContent;
+  render(panel ?? nothing, liveBarEl);
+  liveBarEl.hidden = !panel;
+  const summary = liveBarEl.querySelector<HTMLElement>(selector);
+  if (
+    summary &&
+    follow &&
+    (summary !== previous || summary.textContent !== previousText)
+  )
+    summary.scrollTop = summary.scrollHeight;
 }
 
 export function clearLivePanel(): void {

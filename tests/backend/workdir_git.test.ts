@@ -10,7 +10,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { WorkdirGit, cleanBaseRef, gitEnv } from "../../src/workdir_git";
+import { gitEnv, runBounded } from "../../src/git";
+import { WorkdirGit, cleanBaseRef } from "../../src/workdir_git";
 import prDiff from "./fixtures/pull_request_diff.json";
 import { pullRequestFiles } from "../../src/pull_request/index";
 import { measure } from "../../src/observability/startup_metrics";
@@ -99,6 +100,84 @@ function setupRoot(gh?: string): [string, Record<string, string>] {
   }
   return [root, { PATH: join(root, "bin"), HOME: join(root, "home") }];
 }
+
+function probeProcess(pid: number): string | undefined {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code;
+  }
+  return undefined;
+}
+
+// Regression: #3572 timeout and abort settle even when a background child holds stdout.
+test.each([
+  ["timeout", "same-group"],
+  ["abort", "same-group"],
+  ["abort", "detached"],
+])("Git runner settles on %s with a %s stdout holder", async (stop, group) => {
+  const detached = group === "detached";
+  const [root, env] = setupRoot();
+  const pids = Bun.file(join(root, "pids"));
+  const controller = new AbortController();
+  const script = `
+    const holder = \`
+      await Bun.write("pids", \${process.pid} + " " + process.pid);
+      while (!(await Bun.file("release").exists())) await Bun.sleep(10);
+    \`;
+    const child = Bun.spawn([process.execPath, "-e", holder], { stdout: "inherit", detached: ${detached} });
+    if (${stop === "timeout"}) await child.exited;
+    process.exit(0);
+  `;
+  const call = runBounded(
+    [process.execPath, "-e", script],
+    root,
+    gitEnv(env),
+    4096,
+    stop === "timeout" ? 1 : 10,
+    controller.signal,
+  );
+  let leader = 0;
+  let holder = 0;
+  const groupState = () => [probeProcess(-leader), probeProcess(holder)];
+  let beforeRelease: ReturnType<typeof groupState> | undefined;
+  const release = () => {
+    beforeRelease ??= groupState();
+    return Bun.write(join(root, "release"), "");
+  };
+  const watchdog = setTimeout(() => void release().catch(() => {}), 3500);
+  try {
+    while (!beforeRelease && !(holder > 1)) {
+      const text = await pids.text().catch(() => "");
+      [leader = 0, holder = 0] = text.split(" ").map(Number);
+      if (!(holder > 1)) await Bun.sleep(10);
+    }
+    expect(leader).toBeGreaterThan(1);
+    expect(holder).toBeGreaterThan(1);
+    if (stop === "abort") {
+      while (!beforeRelease && probeProcess(leader) !== "ESRCH")
+        await Bun.sleep(10);
+      expect(probeProcess(leader)).toBe("ESRCH");
+    }
+    expect(probeProcess(holder)).toBeUndefined();
+    if (stop === "abort") controller.abort();
+    expect(await call).toBeNull();
+    expect(beforeRelease).toBeUndefined();
+    expect(probeProcess(leader)).toBe("ESRCH");
+    if (detached) {
+      expect(probeProcess(holder)).toBeUndefined();
+    } else {
+      while (!beforeRelease && probeProcess(-leader) !== "ESRCH")
+        await Bun.sleep(10);
+      expect(beforeRelease ?? groupState()).toEqual(["ESRCH", "ESRCH"]);
+    }
+  } finally {
+    clearTimeout(watchdog);
+    await release();
+    controller.abort();
+    await call;
+  }
+});
 
 // Regression: #2878 preserve Git config and explicit environment identity in agent shells.
 test("agent Git environment preserves configured and explicit commit identity", async () => {
@@ -636,6 +715,14 @@ test("default diffs meet the base branch and typed refs select committed work", 
     untracked: [],
   });
   expect((await git.diffFile(wt, "a", "main")).patch).toContain("+branch");
+  await run([["big", "r/a", 2_000_000, "oversized patch"]]);
+  const capped = await git.worktreeDiff(wt, "HEAD");
+  expect(capped).toMatchObject({ available: true, truncated: true });
+  const notice = "\n... [diff truncated at the 1 MiB server cap]\n";
+  expect(capped.diff.endsWith(notice)).toBe(true);
+  expect(Buffer.byteLength(capped.diff.slice(0, -notice.length))).toBe(
+    1_000_000,
+  );
 });
 
 // Regression: #2142 Git 2.55 ambiguous ref names must remain selectable

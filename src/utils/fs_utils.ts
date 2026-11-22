@@ -4,10 +4,10 @@
 // Lock spans time filesystem invocation prefixes, not promise waits.
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { lstat, mkdir, open, rename, unlink } from "node:fs/promises";
+import { lstat, mkdir, open, readlink, rename, unlink } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { lstatAt, openAt } from "./dir_fd";
 import { parsePythonJson, pyCompactJson } from "./python-json";
 import { slowSpan } from "../observability";
@@ -138,6 +138,46 @@ export async function openPinnedDirectory(
     await handle.close();
     throw error;
   }
+}
+
+/** Python `Path.resolve()` (non-strict `os.path.realpath`). */
+export async function pyResolve(
+  path: string,
+  cwd = process.cwd(),
+): Promise<string> {
+  const seen = new Map<string, string | null>();
+  async function join1(base: string, rest: string): Promise<string> {
+    let cur = isAbsolute(rest) ? "/" : base;
+    for (const name of rest.split("/")) {
+      if (!name || name === ".") continue;
+      if (name === "..") {
+        cur = dirname(cur);
+        continue;
+      }
+      const next = cur === "/" ? `/${name}` : `${cur}/${name}`;
+      if (seen.has(next)) {
+        const known = seen.get(next);
+        cur = known ?? next;
+        continue;
+      }
+      let target: string;
+      try {
+        if (!(await lstat(next)).isSymbolicLink()) {
+          cur = next;
+          continue;
+        }
+        target = await readlink(next);
+      } catch {
+        cur = next;
+        continue;
+      }
+      seen.set(next, null);
+      cur = await join1(cur, target);
+      seen.set(next, cur);
+    }
+    return cur;
+  }
+  return join1(resolve(cwd), path);
 }
 
 /** Read a pinned regular JSON object, returning null for any unsafe leaf. */

@@ -1,9 +1,7 @@
-// Supervise crashes with capped backoff; HEAD-watch never fetches. Defer under
-// Git operations; build/validate while the old generation serves. Settings'
-// IPC update request runs install.sh --update first. At zero active turns, stop
-// old server groups before re-exec; exit keeps the lock until cleanup is done.
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+// Restart crashes with capped backoff. Watch HEAD without fetching or building
+// during Git operations. Settings runs install.sh --update first. Build while
+// the old server serves, then stop it normally under the lock and re-exec.
+// Startup resumes unfinished durable turns.
 import { buildCurrentGeneration } from "./build.cli";
 import { gitOperationInProgress, headSha, prepareCodeSource } from "./git";
 import {
@@ -24,93 +22,10 @@ const BACKOFF_START = 1;
 const BACKOFF_MAX = 30;
 const HEALTHY_UPTIME = 30;
 const LOOP_ERROR_BACKOFF = 1;
-const QUIESCENCE_NOTICE = 30;
-const STATUS_TIMEOUT = 2;
 const UPDATE_TIMEOUT = 600;
 
 interface Stopping {
   flag: boolean;
-}
-
-type AppStatus = [ready: boolean | null, activeAgents: number | null];
-
-const LOOPBACK_NO_PROXY = "127.0.0.1,localhost,::1";
-
-async function getJson(port: number, token: string): Promise<unknown> {
-  if (/[\u0000\r\n]/.test(token)) throw new Error("invalid loopback token");
-
-  // Invariant: Preserve operator NO_PROXY entries and add loopback, keeping
-  // probe credentials away from HTTP(S)_PROXY. Probes run serially so scoped
-  // process-env changes cannot overlap.
-  const upper = process.env.NO_PROXY;
-  const lower = process.env.no_proxy;
-  const append = (value: string | undefined) =>
-    [value, LOOPBACK_NO_PROXY].filter(Boolean).join(",");
-  process.env.NO_PROXY = append(upper);
-  process.env.no_proxy = append(lower);
-  try {
-    const response = await fetch(`http://127.0.0.1:${port}/api/status`, {
-      headers: {
-        "x-loopback-token": token,
-        "x-recurse-bundled-tool": "supervisor",
-      },
-      redirect: "error",
-      signal: AbortSignal.timeout(STATUS_TIMEOUT * 1000),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    return await response.json();
-  } finally {
-    if (upper === undefined) delete process.env.NO_PROXY;
-    else process.env.NO_PROXY = upper;
-    if (lower === undefined) delete process.env.no_proxy;
-    else process.env.no_proxy = lower;
-  }
-}
-
-// Probe readiness/activity over authenticated loopback. Any missing auth,
-// timeout, HTTP/redirect or malformed response means unknown, never idle.
-export async function queryAppStatus(
-  port: number,
-  dataDir: string,
-): Promise<AppStatus> {
-  let token: string;
-  try {
-    const record = JSON.parse(
-      await readFile(join(dataDir, "server.json"), "utf8"),
-    );
-    token = String(record?.token || "");
-  } catch {
-    return [null, null];
-  }
-  if (!token) return [null, null];
-  let body: unknown;
-  try {
-    body = await getJson(port, token);
-  } catch {
-    return [null, null];
-  }
-  if (typeof body !== "object" || body === null || Array.isArray(body))
-    return [null, null];
-  const { ready, active_agents: active } = body as Record<string, unknown>;
-  if (typeof ready !== "boolean") return [null, null];
-  if (active === undefined || active === null) return [ready, null];
-  if (typeof active !== "number" || !Number.isSafeInteger(active) || active < 0)
-    return [null, null];
-  return [ready, active];
-}
-
-// Deferred restarts pass when idle or their wait cap expires.
-// Supervisor re-exec additionally requires known zero active turns.
-async function reloadGate(
-  dataDir: string,
-  port: number,
-  pendingSince: number,
-  cap: number,
-  now: number = monotonic(),
-  query: typeof queryAppStatus = queryAppStatus,
-): Promise<[ready: boolean, inflight: number | null]> {
-  const [, inflight] = await query(port, dataDir);
-  return [inflight === 0 || now - pendingSince >= cap, inflight];
 }
 
 interface Clock {
@@ -155,7 +70,6 @@ export interface SupervisorDeps {
   ) => Promise<ServerChild>;
   terminate: (child: ServerChild, codeDir: string) => Promise<boolean>;
   reconcile: (codeDir: string) => Promise<boolean>;
-  reloadGate: typeof reloadGate;
   headSha: (codeDir: string) => Promise<string | null>;
   gitOperationInProgress: (codeDir: string) => Promise<boolean>;
   prepareUpdateRuntime: (codeDir: string, sha: string) => Promise<boolean>;
@@ -181,7 +95,6 @@ function supervisorDeps(): SupervisorDeps {
       }),
     terminate: (child, codeDir) => terminate(child, codeDir),
     reconcile: (codeDir) => reconcileServerProcesses(codeDir),
-    reloadGate,
     headSha: (codeDir) => headSha(codeDir),
     gitOperationInProgress: (codeDir) => gitOperationInProgress(codeDir),
     prepareUpdateRuntime: (codeDir, sha) => prepareUpdateRuntime(codeDir, sha),
@@ -217,8 +130,6 @@ export class Supervisor {
   backoff = BACKOFF_START;
   nextCheck = 0;
   pendingReexecSha: string | null = null;
-  pendingSince: number | null = null;
-  lastWaitNotice = -Infinity;
   /** The running install.sh --update; HEAD is not watched meanwhile. */
   updating: Promise<void> | null = null;
   private readonly stopUpdate = new AbortController();
@@ -371,21 +282,6 @@ export class Supervisor {
       !cleanupComplete
     )
       return;
-    if (this.pendingReexecSha !== null) {
-      const [, inflight] = await deps.reloadGate(
-        this.dataDir,
-        this.port,
-        this.pendingSince ?? deps.monotonic(),
-        0,
-      );
-      if (inflight === 0) {
-        const target = this.pendingReexecSha;
-        this.pendingReexecSha = null;
-        if (!(await deps.execUpdatedSupervisor(this.codeDir, target)))
-          this.stopping.flag = true;
-        return;
-      }
-    }
     this.started = deps.monotonic();
     try {
       this.child = await this.spawnChild();
@@ -423,7 +319,6 @@ export class Supervisor {
     this.report("building", current.slice(0, 7));
     if (!(await deps.prepareUpdateRuntime(this.codeDir, current))) {
       this.pendingReexecSha = null;
-      this.pendingSince = null;
       this.report(
         "failed",
         `Building ${current.slice(0, 7)} failed, so the current version keeps running. The terminal running recurse shows why; fix it, then restart Recurse.`,
@@ -431,39 +326,17 @@ export class Supervisor {
       return;
     }
     this.pendingReexecSha = current;
-    this.pendingSince = now;
   }
 
-  async fireUpdateIfReady(now: number): Promise<void> {
+  async restartForUpdate(): Promise<void> {
     const deps = this.deps;
     const target = this.pendingReexecSha;
-    const pendingSince = this.pendingSince;
-    if (target === null || pendingSince === null) return;
-    const [, inflight] = await deps.reloadGate(
-      this.dataDir,
-      this.port,
-      pendingSince,
-      0,
-      now,
-    );
-    // Invariant: A supervisor re-exec never interrupts or guesses about a
-    // durable turn.
-    if (inflight !== 0) {
-      this.report("waiting", inflight === null ? null : String(inflight));
-      if (now - this.lastWaitNotice >= QUIESCENCE_NOTICE) {
-        const waiting = inflight === null ? "unknown" : String(inflight);
-        say(
-          `[supervisor] redeploy pending — waiting for ${waiting} running ` +
-            "turn(s) to finish",
-        );
-        this.lastWaitNotice = now;
-      }
-      return;
-    }
+    if (target === null || this.stopping.flag) return;
     this.report("restarting", target.slice(0, 7));
-    if (!(await deps.terminate(this.child, this.codeDir))) return;
+    // Invariant: Stop normally before re-exec; startup resumes durable turns.
+    if (!(await deps.terminate(this.child, this.codeDir)) || this.stopping.flag)
+      return;
     this.pendingReexecSha = null;
-    this.pendingSince = null;
     if (!(await deps.execUpdatedSupervisor(this.codeDir, target)))
       this.stopping.flag = true;
   }
@@ -475,13 +348,12 @@ export class Supervisor {
       while (!this.stopping.flag) {
         try {
           const rc = this.child.poll();
-          if (rc !== null) {
+          if (rc !== null && this.pendingReexecSha === null) {
             await this.restartCrashedChild(rc);
             continue;
           }
-          const now = deps.monotonic();
-          await this.pollHead(now);
-          await this.fireUpdateIfReady(now);
+          await this.pollHead(deps.monotonic());
+          await this.restartForUpdate();
           if (await deps.sleepInterruptible(LOOP_INTERVAL, this.stopping))
             break;
         } catch (error) {

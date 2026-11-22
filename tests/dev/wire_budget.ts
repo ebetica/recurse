@@ -1152,7 +1152,11 @@ async function main(): Promise<void> {
       {
         name: "streaming-reply",
         focused: world.stream,
-        setup: open(world.stream),
+        setup: async () => {
+          await open(world.stream)();
+          await page.locator("#input:enabled").click();
+          await meter.settle();
+        },
         run: async () => {
           const text = markdown(20_000, "stream");
           await turn(world.stream, {
@@ -1172,8 +1176,7 @@ async function main(): Promise<void> {
             .waitFor();
           await page
             .getByRole("button", {
-              name: "Latest provider context: 2k tokens. Open context details.",
-              exact: true,
+              name: /^Latest provider context: 2,000 (?:of [\d,]+ )?tokens used\b/,
             })
             .waitFor();
           return { reply_bytes: text.length };

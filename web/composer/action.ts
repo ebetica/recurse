@@ -42,6 +42,12 @@ const stopHold = attachHoldTip(sendEl, document, {
     controlState.stopAvailable && !controlState.hasPayload && !sendEl.disabled,
 });
 
+sendEl.addEventListener("mousedown", (event) => {
+  // A hold only peeks: leave focus and the tip anchor where they are.
+  if (event.button === 0 && sendEl.classList.contains("stop"))
+    event.preventDefault();
+});
+
 /** True once when the press that just ended was a hold: skip the tap action. */
 export function consumeComposerStopHold(): boolean {
   return stopHold.takeHoldConsumed();

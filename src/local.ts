@@ -28,7 +28,7 @@ import { acquireSupervisorLock, LOCK_FD_ENV } from "./launcher/lock.cli";
 import { Supervisor } from "./launcher/supervisor.cli";
 import { execReplacing, logError, say } from "./launcher/system";
 import { versionLine } from "./release";
-import { pyResolve } from "./workdir_git";
+import { pyResolve } from "./utils";
 
 export { HERE };
 const BUN_MIN_VERSION = "1.4.0";
@@ -72,7 +72,8 @@ options:
 commands of ./recurse (run before any setup):
   update                update this checkout in place on the channel it
                         was installed with (install.sh --update); a
-                        running supervisor rebuilds and restarts into it
+                        running supervisor rebuilds and restarts into it;
+                        unfinished turns resume after restart
   update --check        print the channel and the installed and available
                         versions; changes nothing
 

@@ -19,6 +19,7 @@ With no configured identity or GitHub account, identity stays unset and a warnin
 in `recurse.log` asks the operator to set `user.name` and `user.email` or configure
 a GitHub token; Git refuses commits until an identity is supplied.
 HTTP drain and runtime shutdown run together; maintenance is best-effort.
+PR links never block reads.
 `GET /api/version` advertises the configured sleep check-in URL as `check_url`
 so connected homes can persist it before their first relay poll.
 Responses advertise the API major/revision in `X-Recurse-API` and request-to-header
@@ -81,7 +82,7 @@ execution, so the next status read sees the check or its completed result.
 Raw file-provider model selections on create, spawn and model changes require
 operator authentication and reject agent markers. Agents use these models only
 through a saved Settings effort level. Spawn receipts retain server-owned model
-authorization; request bodies cannot grant it.
+authorization; request bodies cannot grant it. Effort levels run from 1 to 6.
 The sidebar's `/api/sidebar/*` tag route (`tags.ts`) refuses all agent markers
 the same way; agents change their own tags through the bundled-tool
 `/api/conversations/{cid}/tags` route.

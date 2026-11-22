@@ -2,7 +2,14 @@ import { expect } from "bun:test";
 import { mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { captureErrors, runBrowserTests, type BrowserTest } from "./common";
+import type { Locator } from "playwright";
+import { expect as browserExpect } from "playwright/test";
+import {
+  captureErrors,
+  expectHitCorners,
+  runBrowserTests,
+  type BrowserTest,
+} from "./common";
 declare const getComputedStyle: any;
 declare const localStorage: any;
 declare const Storage: any;
@@ -10,11 +17,50 @@ declare const window: any;
 declare const navigator: any;
 declare const dispatchEvent: any;
 
+async function expectDraftActions(pane: Locator, size: number) {
+  const buttons = pane.locator(".report-comment-popover-actions button");
+  expect(
+    await buttons.evaluateAll((elements: any[]) => {
+      const view = elements[0].ownerDocument.defaultView.visualViewport;
+      return elements.map((element, index) => {
+        const box = element.getBoundingClientRect();
+        const range = element.ownerDocument.createRange();
+        range.selectNodeContents(element);
+        const text = range.getBoundingClientRect();
+        const before = elements[index - 1]?.getBoundingClientRect();
+        return {
+          name: element.textContent,
+          inside:
+            box.left >= view.offsetLeft &&
+            box.top >= view.offsetTop &&
+            box.right <= view.offsetLeft + view.width &&
+            box.bottom <= view.offsetTop + view.height,
+          apart: !before || box.left - before.right >= 8,
+          text:
+            text.left >= box.left &&
+            text.right <= box.right &&
+            Math.abs(text.left + text.right - box.left - box.right) < 2 &&
+            Math.abs(text.top + text.bottom - box.top - box.bottom) < 2,
+        };
+      });
+    }),
+  ).toEqual(
+    ["Cancel", "Comment"].map((name) => ({
+      name,
+      inside: true,
+      apart: true,
+      text: true,
+    })),
+  );
+  for (const button of await buttons.all())
+    await expectHitCorners(button, size);
+}
+
 export const tests: BrowserTest[] = [
-  // Regression: #3101 Cmd+Enter stages each box before sending the batch; #2887 fitted tall phone images stay above the compact comment bar.
+  // Regression: #3101 Cmd+Enter stages each box before sending the batch; #2887 fitted tall phone images stay above the compact comment bar; #3606 Cancel and Comment stay inside the viewport and readable, with or without the keyboard.
   async function test_tall_phone_image_fit(browser, base) {
     const page = await browser.newPage({
-      viewport: { width: 390, height: 844 },
+      viewport: { width: 412, height: 915 },
       isMobile: true,
       hasTouch: true,
     });
@@ -66,6 +112,36 @@ export const tests: BrowserTest[] = [
       const input = draft.locator("textarea");
       await input.pressSequentially("Keep this region");
       expect(await image.boundingBox()).toEqual(fitted);
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/image-comment-draft-phone.png`,
+        });
+      await expectDraftActions(pane, 44);
+      const draftBottomInset = () =>
+        draft.evaluate((element) => {
+          const view = element.ownerDocument.defaultView!.visualViewport!;
+          return (
+            view.offsetTop +
+            view.height -
+            element.getBoundingClientRect().bottom
+          );
+        });
+      const originalInset = await draftBottomInset();
+      const waitForDraftToFollowViewport = () =>
+        browserExpect
+          .poll(async () =>
+            Math.abs((await draftBottomInset()) - originalInset),
+          )
+          .toBeLessThanOrEqual(1);
+      await page.setViewportSize({ width: 412, height: 560 });
+      await waitForDraftToFollowViewport();
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/image-comment-draft-keyboard-phone.png`,
+        });
+      await expectDraftActions(pane, 44);
+      await page.setViewportSize({ width: 412, height: 915 });
+      await waitForDraftToFollowViewport();
       await input.press("Meta+Enter");
       await draft.waitFor({ state: "hidden" });
       expect(
@@ -117,10 +193,10 @@ export const tests: BrowserTest[] = [
       await page.close();
     }
   },
-  // Regression: #3213 reveal the lazy crop preview's frame before waiting for its image.
+  // Regression: #3213 reveal the lazy crop preview's frame before waiting for its image; #3606 desktop Cancel and Comment labels fit their buttons.
   async function test_published_image_box_crop(browser, base) {
     const page = await browser.newPage({
-      viewport: { width: 1200, height: 844 },
+      viewport: { width: 1280, height: 844 },
     });
     const errors = captureErrors(page);
     try {
@@ -339,6 +415,11 @@ export const tests: BrowserTest[] = [
       const input = popover.locator("textarea");
       await input.fill("Only the green region");
       expect((await popover.boundingBox())!.y).toBeGreaterThan(844 / 2);
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR)
+        await page.screenshot({
+          path: `${process.env.RECURSE_BROWSER_SCREENSHOT_DIR}/image-comment-draft-desktop.png`,
+        });
+      await expectDraftActions(pane, 36);
       await input.click();
       expect(
         await input.evaluate(

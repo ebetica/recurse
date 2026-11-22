@@ -1220,6 +1220,47 @@ export const liveTests: BrowserTest[] = [
         expect(pinned.jump).toBe(true);
         expect(pinned.bar!.top).toBeGreaterThanOrEqual(pinned.scroll!.bottom);
         expect(pinned.bar!.bottom).toBeLessThanOrEqual(pinned.composer!.top);
+        if (mobile) {
+          const edges = () =>
+            page.evaluate(() => {
+              const box = (selector: string) =>
+                document.querySelector(selector)!.getBoundingClientRect();
+              return {
+                barTop: box("#live-bar .live-panel-box").top,
+                bar: box("#live-bar .live-panel-box").bottom,
+                staged: box("#attachments"),
+                composer: box("#composer").top,
+              };
+            });
+          await visibleAndUncovered(page, "#live-bar .live-panel-head");
+          await visibleAndUncovered(page, "#input");
+          const fused = await edges();
+          expect(fused.composer - fused.bar).toBeLessThanOrEqual(1);
+          await page.locator("#file-input").setInputFiles({
+            name: "notes.txt",
+            mimeType: "text/plain",
+            buffer: Buffer.from("Staged while the turn runs."),
+          });
+          await page
+            .locator("#attachments .attach-chip:not(.uploading):not(.failed)")
+            .waitFor();
+          await waitForLayout(page);
+          const withAttachment = await edges();
+          expect(withAttachment.staged.height).toBeGreaterThan(0);
+          expect(withAttachment.staged.bottom).toBeLessThanOrEqual(
+            withAttachment.barTop,
+          );
+          expect(
+            Math.abs(withAttachment.composer - withAttachment.bar),
+          ).toBeLessThanOrEqual(1);
+          await visibleAndUncovered(page, "#live-bar .live-panel-head");
+          await visibleAndUncovered(page, "#input");
+          await page.locator("#attachments .attach-chip .rm").click();
+          await page
+            .locator("#attachments .attach-chip")
+            .waitFor({ state: "detached" });
+          await waitForLayout(page);
+        }
         await releaseParagraph("Second");
         const held = await geometry();
         expect(held.scrollTop).toBe(pinned.scrollTop);

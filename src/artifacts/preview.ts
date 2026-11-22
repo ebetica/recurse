@@ -1,15 +1,16 @@
 // Served HTML previews report their natural document height to the owning
-// iframe. This changes neither immutable artifact bytes nor the sandbox/CSP.
-// Inline scripts are already permitted; the parent validates the message
-// source.
+// iframe and expose the saved app state API. Neither relay changes immutable
+// bytes or the sandbox/CSP; the owning viewer validates message sources.
 import { themedHtml } from "./theme";
 import { prependToHead } from "./page/index";
 import { ARTIFACT_KEY_RELAY } from "./key_relay";
+import { APP_STATE_SCRIPT } from "./app_state_script";
 
 export function artifactPreview(html: string, css: string): string {
   return prependToHead(
     themedHtml(html, css),
-    ARTIFACT_KEY_RELAY +
+    APP_STATE_SCRIPT +
+      ARTIFACT_KEY_RELAY +
       `<script id="recurse-preview-size">(()=>{
       if(parent===window)return;
       const start=()=>{

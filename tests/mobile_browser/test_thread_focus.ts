@@ -1,8 +1,89 @@
 import { expect } from "bun:test";
-import { postFixture, runBrowserTests, type BrowserTest } from "./common";
+import { expect as browserExpect } from "playwright/test";
+import {
+  postFixture,
+  rootAgentId,
+  runBrowserTests,
+  waitForLayout,
+  type BrowserTest,
+} from "./common";
 declare const getComputedStyle: any;
 
 export const tests: BrowserTest[] = [
+  // Feature: #3558 Scroll Chat by half a page without leaving the agents list.
+  async function test_chat_scroll_from_agents(browser, base) {
+    const { marker } = await postFixture(base, "seed-bulk-thread");
+    const agent = rootAgentId();
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 800 },
+    });
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      await page.getByText(marker, { exact: true }).waitFor();
+      await waitForLayout(page);
+      const thread = page.locator("#scroll");
+      const row = page.locator(`#agent-list .agent[data-id="${agent}"]`);
+      await row.focus();
+      await browserExpect(row).toBeFocused();
+      await thread.evaluate((el) => {
+        el.scrollTop = el.scrollHeight - 3 * el.clientHeight;
+      });
+      await waitForLayout(page);
+      const halfPage = await thread.evaluate((el) => el.clientHeight / 2);
+      const offset = () => thread.evaluate((el) => el.scrollTop);
+      const scrollTwice = async (key: string, distance: number) => {
+        for (let press = 0; press < 2; press++) {
+          const before = await offset();
+          await page.keyboard.down(key);
+          expect(
+            Math.abs((await offset()) - before - distance),
+          ).toBeLessThanOrEqual(1);
+          await browserExpect(row).toBeFocused();
+        }
+        await page.keyboard.up(key);
+      };
+      await page.keyboard.down("Shift");
+      await scrollTwice("KeyJ", halfPage);
+      await scrollTwice("KeyK", -halfPage);
+      await page.keyboard.up("Shift");
+      await scrollTwice("PageDown", halfPage);
+      await scrollTwice("PageUp", -halfPage);
+      const beforeDelete = await offset();
+      await page.keyboard.press("d");
+      await browserExpect(page.locator("#key-mode")).toHaveText("d … delete");
+      await browserExpect(row).toBeFocused();
+      await browserExpect(row).toHaveClass(/\barmed\b/);
+      expect(await offset()).toBe(beforeDelete);
+      await page.keyboard.press("Escape");
+      await page.keyboard.press("i");
+      const composer = page.locator("#input");
+      await browserExpect(composer).toBeFocused();
+      await waitForLayout(page);
+      const beforeTyping = await offset();
+      for (const [key, draft] of [
+        ["Shift+J", "J"],
+        ["Shift+K", "JK"],
+        ["d", "JKd"],
+        ["PageDown", "JKd"],
+        ["PageUp", "JKd"],
+      ]) {
+        await page.keyboard.press(key);
+        await browserExpect(composer).toBeFocused();
+        await browserExpect(composer).toHaveValue(draft);
+        expect(await offset()).toBe(beforeTyping);
+      }
+      await composer.press("Escape");
+      const closeChat = page.getByRole("button", { name: "Close Chat" });
+      await closeChat.click();
+      await browserExpect(thread).toBeHidden();
+      await row.focus();
+      await page.keyboard.press("Shift+J");
+      await browserExpect(thread).toBeHidden();
+      await browserExpect(row).toBeFocused();
+    } finally {
+      await page.close();
+    }
+  },
   // Feature: #2595 viewport focus rings, native image drags and boxed idle footer icons.
   async function test_thread_focus_and_compact_footer(browser, base) {
     const { agent } = await postFixture(base, "seed-visible-attachments");

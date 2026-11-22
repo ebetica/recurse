@@ -1,1 +1,32 @@
-[]
+[
+  {
+    "path": "tests/mobile_browser/test_panes_artifacts.ts",
+    "head": "dae43b1f84bcebff0732e6130ac63163b7169fdc",
+    "size": 2214
+  },
+  {
+    "path": "tests/mobile_browser/test_composer.ts",
+    "head": "dae43b1f84bcebff0732e6130ac63163b7169fdc",
+    "size": 2039
+  },
+  {
+    "path": "tests/mobile_browser/test_sidebar.ts",
+    "head": "dae43b1f84bcebff0732e6130ac63163b7169fdc",
+    "size": 1862
+  },
+  {
+    "path": "tests/mobile_browser/test_pane_hotkeys.ts",
+    "head": "dae43b1f84bcebff0732e6130ac63163b7169fdc",
+    "size": 1763
+  },
+  {
+    "path": "tests/mobile_browser/test_platform_commands.ts",
+    "head": "dae43b1f84bcebff0732e6130ac63163b7169fdc",
+    "size": 1575
+  },
+  {
+    "path": "tests/mobile_browser/test_mobile_layout.ts",
+    "head": "dae43b1f84bcebff0732e6130ac63163b7169fdc",
+    "size": 1513
+  }
+]

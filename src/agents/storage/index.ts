@@ -3,10 +3,8 @@ export {
   CID_RE,
   CLEAR_PENDING_MODEL_MARKER,
   ConversationStore,
-  ExternalKeyConflict,
   SET_MODEL_MARKER,
   SET_PENDING_MODEL_MARKER,
-  ServiceStorageUnavailable,
   activeRunId,
   assertNoUnimportedLegacyState,
   canonicalMetadata,
@@ -15,9 +13,14 @@ export {
   freshTakenOverOrder,
   stripPendingKeys,
   validLevel,
-  validateExternalKey,
   type ConversationGuardToken,
   type ConversationRecord,
   type ConversationStoreHooks,
   type LiveInputs,
 } from "./conversation_store";
+export {
+  ExternalKeyConflict,
+  ServiceBindings,
+  ServiceStorageUnavailable,
+  validateExternalKey,
+} from "./service_bindings";

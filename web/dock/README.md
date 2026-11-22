@@ -67,7 +67,6 @@ or pointer event, before keyboard input, or on context menus, native dragging an
 visibility changes. These recovery listeners exist only during the gesture;
 pointer capture is not used. Editors are never excluded. Keyboard and programmatic
 selection, double/triple clicks and native Select All remain available at rest.
-Phones are unchanged.
 
 Dockview activation is not keyboard focus. Its tabs and wrappers are not Tab
 stops. Clicking Chat returns to Normal mode without adding a focusable chat
@@ -82,8 +81,10 @@ after mounting still advances the caret and opens command suggestions. Dragging
 preserves the composer's focus, draft and selection. Moving an already-focused pane
 updates its window ownership without requiring a new focus event. Content temporarily
 parked during layout changes keeps its keyboard focus targets.
-Pane focus waits for a visible window and enabled controls. New keyboard,
-pointer or input actions cancel an unfinished focus request. Closing a pane
+Pane focus waits for a visible window and enabled controls. A pane can then
+hand focus to a control inside it, as Changes does with its file list. New
+keyboard, pointer or input actions cancel an unfinished focus request.
+Active tab close focuses its neighbour. Closing a pane
 restores its opener only if focus has not moved elsewhere. Submitting Artifact comments
 keeps its tab visible and active without saving a new layout. Other comment viewers
 close on submission and stay closed through refreshes until reopened; other panes
@@ -111,22 +112,18 @@ layouts fall back to the usual view. File panels alone may carry validated
 source/key parameters; static panes still reject native parameters. File keys
 identify the working folder and relative path, never a URL. Opening resolves the
 server's current folder rather than trusting an older tree listing. File reads on
-restoration must match the saved folder; unavailable file tabs are omitted only
-from the live grid, retaining other windows and the original saved snapshot.
+restoration must match the saved folder. Tabs show loading or unavailable files.
 
 Only operator window arrangements save: opening, closing, moving, resizing,
-splitting, selecting tabs, balancing and Only mode. Automatic pane opens, content
-controls and viewport changes leave the last operator snapshot unchanged. Pending
+splitting, selecting tabs, balancing and Only mode. Files steps also save.
+Automatic pane opens, other content controls and viewport changes leave the last
+operator snapshot unchanged. Pending
 operator changes are captured before pane teardown or page hiding. A fresh
 default grid is not saved. An existing visible, unmaximized Chat-only grid is
-reused for the default view. Incoming restoration waits for that conversation's
-rendered view and offered panes without delaying
-its thread. Chat stays usable during discovery. A settled unavailable pane uses
-the usual view for this visit but retains the saved snapshot for a later visit;
-a corrupt or incompatible snapshot is replaced by the default, including the
-existing explicit pane preference. Operator arrangements cancel a pending
-restore. Restoration preserves connected content, keyboard focus and editing
-selection across the whole replacement, including temporary parking; a pane
+reused for the default view. The incoming grid, including its active tabs,
+restores from browser state in the same frame as the conversation switch.
+Restoration preserves connected content, keyboard focus and editing selection
+across the whole replacement, including temporary parking; a pane
 comment draft is never displaced.
 Window focus history, merge directions and one-shot opening hints do not cross
 conversation visits.
@@ -156,8 +153,8 @@ Arrow keys select, Enter opens, and Escape returns focus.
 Already-open panes, including Chat, are labelled Open. `g1`–`g9` open panes in rail order, starting with Chat;
 rail tooltips show the keys. `q` closes the focused pane, `i` focuses the
 composer, and other printable keys never start a draft from a pane. `wQ` closes
-all panes and leaves Chat open, preserving its draft and caret. Plain `p` no
-longer changes focus.
+all panes and leaves Chat open, preserving its draft and caret. Plain `p` does
+not move focus.
 In a pane, `j`/`k` move through items or scroll, `d`/`u` scroll half a page,
 and `gg`/`G` go to the top/bottom. Normal-mode `G` still jumps to the latest
 message. [../panes/navigation.ts](../panes/navigation.ts) shares the neutral item

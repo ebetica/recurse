@@ -268,7 +268,7 @@ async function run(): Promise<void> {
     field("--baseline") ??
     new Config({
       authenticatedProviders: () => authenticatedProviders,
-    }).effortLevels()[1]!.model;
+    }).levels.effortLevels()[1]!.model;
   if (
     prior &&
     (prior.baselineId !== baselineId ||

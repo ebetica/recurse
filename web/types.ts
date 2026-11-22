@@ -488,7 +488,7 @@ export interface Conversation {
   msg_count: number;
   // Persisted reasoning effort for the next turn.
   effort?: string;
-  // Instance ladder level 1-5, matching stored model and effort.
+  // Instance ladder level, matching stored model and effort.
   level?: number | null;
   /** Composer selection to apply when the next operator message is admitted. */
   pending_model?: PendingModel | null;
@@ -533,7 +533,7 @@ export interface Draft {
   uiStateId?: string;
   model?: string | null;
   effort?: string;
-  // effort level 1-5, applied at create time
+  // Effort level applied at create time.
   level?: number | null;
   // snapshot the browser preference once
   muted?: boolean;
@@ -647,6 +647,8 @@ export interface PaneDef {
   navigate?(el: HTMLElement, command: PaneNavigation): boolean;
   // Poll refresh detects changes to avoid rebuilding steady panes.
   refresh?(el: HTMLElement, ctx: PaneContext): void;
+  /** Confirm discards on user close. Preserving comments still checks edits. */
+  guardClose?(el: HTMLElement, preserveComments: boolean): boolean;
   /** Called just before the open body leaves the page. */
   leave?(el: HTMLElement): void;
 }

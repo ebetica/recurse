@@ -1,7 +1,7 @@
-// Desktop windows use dockview for tabs, drag/drop and split sizing. DOM focus
-// belongs to the content, never dockview's synthetic tabs or render wrappers.
-// Content moves preserve focus, editing selection and scroll through parking.
-// Pointer drags stay in their source until release or interruption.
+// Desktop dockview adapter: content moves preserve focus, editing selection and scroll.
+// Focus skips synthetic tabs and wrappers. Pointer drags stay in their source until release or interruption.
+// Active tab close selects and focuses the right neighbour, then the left, then a surviving window or the usual fallback.
+// Inactive tab close keeps selection and keyboard focus. Bulk and phone closes keep their existing rules.
 import {
   createDockview,
   themeAbyssSpaced,
@@ -39,7 +39,7 @@ type GridNode =
 export interface DockCallbacks {
   element(id: string): HTMLElement | null;
   action(id: string): HTMLElement | null;
-  closed(id: string, restoreFocus?: boolean): void;
+  closed(id: string, restoreFocus?: boolean): boolean;
   focus(id: string): void;
   keyboardFocus(id: string): void;
   moved(): void;
@@ -199,8 +199,11 @@ export function createDockHost(
   let waited = 0;
   const place = (): void => {
     if (restoring) return;
+    let waitingForBounds = false;
     for (const [element, id] of pending) {
       if (!element.isConnected) continue;
+      const content = callbacks.element(id);
+      if (!content) continue;
       const visible =
         element.getBoundingClientRect().width > 0 &&
         getComputedStyle(element).visibility !== "hidden";
@@ -208,14 +211,14 @@ export function createDockHost(
         (id === "chat" || api.getPanel(id)?.api.isVisible) &&
         !visible &&
         waited < 30
-      )
+      ) {
+        waitingForBounds = true;
         continue;
-      const content = callbacks.element(id);
-      if (content) {
-        adopt(element, content);
-        pending.delete(element);
-        if (visible) callbacks.shown(id);
       }
+      element.querySelector(":scope > .dock-loading")?.remove();
+      adopt(element, content);
+      pending.delete(element);
+      if (visible) callbacks.shown(id);
     }
     refreshActions();
     if (!pending.size) {
@@ -224,7 +227,7 @@ export function createDockHost(
         parking?.remove();
         parking = null;
       }
-    } else if (!placing)
+    } else if (waitingForBounds && !placing)
       placing = requestAnimationFrame(() => {
         placing = 0;
         waited++;
@@ -281,8 +284,18 @@ export function createDockHost(
       return {
         element,
         init: (parameters) => {
-          element.dataset.dockPanel = parameters.api.id;
-          pending.set(element, parameters.api.id);
+          const id = parameters.api.id;
+          element.dataset.dockPanel = id;
+          if (id !== "chat" && !callbacks.element(id)) {
+            const loading = document.createElement("div");
+            loading.className = "dock-loading";
+            loading.setAttribute("role", "status");
+            loading.textContent = id.startsWith("file:")
+              ? "Loading file…"
+              : "Loading pane…";
+            element.append(loading);
+          }
+          pending.set(element, id);
           place();
         },
       };
@@ -292,25 +305,23 @@ export function createDockHost(
       element.className = "dv-default-tab";
       return {
         element,
-        init: ({ api: panel, title: name }) => {
+        init: ({ api: panel }) => {
           element.dataset.dockPanel = panel.id;
           const title = document.createElement("span");
           title.className = "dv-default-tab-content";
-          title.textContent = name || panel.id;
-          element.title = name || panel.id;
           const close = document.createElement("button");
           close.className = "dv-default-tab-action";
           close.type = "button";
-          close.setAttribute("aria-label", `Close ${title.textContent}`);
           close.addEventListener("pointerdown", (event) =>
             event.stopPropagation(),
           );
-          close.addEventListener("mousedown", (event) =>
-            event.stopPropagation(),
-          );
+          close.addEventListener("mousedown", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+          });
           close.addEventListener("click", (event) => {
             event.stopPropagation();
-            callbacks.closed(panel.id);
+            closeTab(panel.id);
           });
           element.append(title, close);
         },
@@ -326,20 +337,59 @@ export function createDockHost(
   const tabElement = (panel: IDockviewPanel): HTMLElement =>
     panel.view.tab.element.closest<HTMLElement>(".dv-tab") ||
     panel.view.tab.element;
+  const closeTab = (
+    id: string,
+    close: (restoreFocus: boolean) => boolean = (restoreFocus) =>
+      callbacks.closed(id, restoreFocus),
+  ): boolean | undefined => {
+    const panel = api.getPanel(id);
+    if (!panel) return;
+    const group = panel.group;
+    if (group.activePanel !== panel) {
+      const hadFocus = tabElement(panel).contains(document.activeElement);
+      const closed = close(false);
+      if (closed && hadFocus && api.activePanel)
+        callbacks.keyboardFocus(api.activePanel.id);
+      return closed;
+    }
+    const index = group.panels.indexOf(panel);
+    const neighbour = group.panels[index + 1] ?? group.panels[index - 1];
+    const lastTab = api.panels.length === 1;
+    if (!close(lastTab)) return false;
+    const next =
+      (neighbour && api.getPanel(neighbour.id)) ??
+      api.activePanel ??
+      api.panels[0];
+    if (next) {
+      const changed = api.activePanel !== next;
+      next.api.setActive();
+      callbacks.keyboardFocus(next.id);
+      if (changed) callbacks.arranged();
+    }
+    return true;
+  };
   const label = (panel: IDockviewPanel): void => {
     const tab = tabElement(panel);
     tab.dataset.dockPanel = panel.id;
-    tab.setAttribute("aria-label", panel.title || panel.id);
+    const title = panel.title || panel.id;
+    tab.setAttribute("aria-label", title);
     tab.removeAttribute("tabindex");
     const renderer = panel.view.tab.element;
     const content = renderer.matches(".dv-default-tab")
       ? renderer
       : renderer.querySelector(".dv-default-tab");
-    if (content && !content.querySelector(".dock-tab-icon")) {
-      const icon = document.createElement("span");
-      icon.className = "dock-tab-icon";
-      icon.innerHTML = specs.get(panel.id)?.icon || "";
-      content.prepend(icon);
+    if (content) {
+      content.setAttribute("title", title);
+      content.querySelector(".dv-default-tab-content")!.textContent = title;
+      content
+        .querySelector(".dv-default-tab-action")!
+        .setAttribute("aria-label", `Close ${title}`);
+      if (!content.querySelector(".dock-tab-icon")) {
+        const icon = document.createElement("span");
+        icon.className = "dock-tab-icon";
+        icon.innerHTML = specs.get(panel.id)?.icon || "";
+        content.prepend(icon);
+      }
     }
     place();
   };
@@ -560,7 +610,9 @@ export function createDockHost(
     "pointerdown",
     (event) => {
       const target = event.target as Element;
-      if (!target.closest(".dv-tab") || target.closest("button")) return;
+      if (!target.closest(".dv-tab")) return;
+      if (event.button === 1) event.preventDefault();
+      if (event.button !== 0 || target.closest("button")) return;
       held =
         document.activeElement instanceof HTMLElement
           ? document.activeElement
@@ -569,6 +621,14 @@ export function createDockHost(
     true,
   );
   container.addEventListener("dragend", refocus);
+  container.addEventListener("auxclick", (event) => {
+    if (event.button !== 1) return;
+    const id = (event.target as Element).closest<HTMLElement>(".dv-tab")
+      ?.dataset.dockPanel;
+    if (!id) return;
+    event.preventDefault();
+    closeTab(id);
+  });
   container.addEventListener("click", (event) => {
     const target = event.target as Element;
     if (
@@ -635,7 +695,8 @@ export function createDockHost(
   };
   commands = createWindowCommands(api, {
     focus: callbacks.keyboardFocus,
-    close: callbacks.closed,
+    close: (id, restoreFocus = true) =>
+      restoreFocus ? closeTab(id) : callbacks.closed(id, false),
     fullscreen: callbacks.fullscreen,
     leaveFullscreen: callbacks.leaveFullscreen,
     restore: restoreLayout,
@@ -648,6 +709,7 @@ export function createDockHost(
     background: boolean,
   ): void => {
     const next = structuredClone(layout);
+    Object.assign(next.panels, api.toJSON().panels);
     const shown = new Map(
       api.groups.map((group) => [group.id, group.activePanel?.id]),
     );
@@ -776,8 +838,16 @@ export function createDockHost(
       )
         active.focus({ preventScroll: true });
     },
+    updateFile(id: string, title: string, file: FileTabDescriptor): void {
+      const panel = api.getPanel(id);
+      if (!panel) return;
+      panel.api.updateParameters({ file });
+      panel.api.setTitle(title);
+      label(panel);
+    },
     layout,
-    refreshActions,
+    refreshActions: place,
+    closeTab,
     remove(id: string): DockPlace | undefined {
       for (const action of actionOrigins.keys())
         if (action.dataset.pane === id) restoreAction(action);

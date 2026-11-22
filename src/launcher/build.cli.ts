@@ -1,7 +1,6 @@
 // Stage frontend builds; two renames publish only a successful current build.
 // Failures/source changes keep the last good UI; restart restores killed-swap
 // backups. One build per checkout at a time publishes one stamp for HEAD/dirty.
-// Like package.json build:assets, app.css includes theme and powerbar rules.
 import {
   mkdir,
   mkdtemp,

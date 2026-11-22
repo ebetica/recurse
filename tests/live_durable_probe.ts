@@ -124,7 +124,7 @@ async function recurseSections(
       updated: NOW - 5,
     });
   const ladder = Object.fromEntries(
-    Object.entries(settings.effortLevels()).map(([level, entry]) => [
+    Object.entries(settings.levels.effortLevels()).map(([level, entry]) => [
       level,
       { ...entry, reachable: true },
     ]),
@@ -138,7 +138,7 @@ async function recurseSections(
     },
     effortLevelReachability: () => ladder,
     defaultEffortLevel: () => 3,
-    chatModels: () => settings.chatModels(),
+    chatModels: () => settings.models.chatModels(),
     resolveEffortLevel: (level: number) => [
       ladder[level]!.model,
       ladder[level]!.reasoning,

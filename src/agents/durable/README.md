@@ -156,8 +156,9 @@ Codex uses SSE. Safety uses shipped/Settings models, never file-backed catalogs
 or cached lists. Settings keeps pins. Policy follows stored identity each run.
 Invalid reviewer configuration tries trusted fallbacks, then allows with a warning
 and failure log. Provider failures also allow; invalid optional rules still block. File models remain available for non-security requests. Fable's UA
-fallback is unchanged. Anthropic disables message threads: captures and replays
-are self-contained. Pi's credential store reads lazily during async auth. Credential/catalog checks
+fallback stays. Anthropic disables message threads and uses Pi's summarized
+thinking and catalog fallbacks. Pi reads credentials lazily during async auth.
+Credential/catalog checks
 and locked I/O are asynchronous, retaining cross-process locking and Settings
 update visibility. The
 [cache-warming extension](../../extensions/extra/cache-warm/README.md) replays

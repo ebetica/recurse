@@ -1,14 +1,33 @@
 // @tla specs/tla/send/OperatorSend.tla: Admit deduplicates before interrupt.
 // One content delivery path for the composer, remote sends and API v1.
 // Startup rejects admission with a retryable response before resolving ids.
-import { pyStrip } from "../auth/provider_store";
+import { pyStrip } from "../auth";
 import { deliverRelayed, CLIENT_KEY_RE } from "../agents/supervisor/delivery";
-import { pyTruthy } from "../agents/runtime/turn_prep";
+import { pyTruthy } from "../agents/runtime";
 import { HttpError } from "./router";
 import type { ConversationsRoutesDeps } from "./conversations";
 
 type Rec = Record<string, unknown>;
 type Relay = { sender: string; title: string | null } | null;
+
+export interface LiveSteerDeps {
+  readonly nodes: { node(cid: string): { piStatus(): string | null } };
+  liveRunId(cid: string): string | null;
+}
+
+/** Read the live run state before admitting a message. */
+export function createLiveSteerCheck(deps: LiveSteerDeps) {
+  const messageIsLiveSteer = (cid: string): boolean => {
+    if (deps.liveRunId(cid) === null) return false;
+    try {
+      const status = deps.nodes.node(cid).piStatus();
+      return status !== null && status !== "interrupting";
+    } catch {
+      return false;
+    }
+  };
+  return messageIsLiveSteer;
+}
 
 /** Reuse the same admission, interrupt and sender rules on both HTTP routes. */
 export function createMessageSender(

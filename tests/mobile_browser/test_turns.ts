@@ -11,6 +11,9 @@ import {
   runBrowserTests,
   shellSurfaceBounds,
   waitForLayout,
+  summary,
+  turn,
+  TURN_TOTAL_USAGE as usage,
   type BrowserTest,
 } from "./common";
 
@@ -24,62 +27,6 @@ const channels = (css: string) => {
     : `rgb(${r}, ${g}, ${b})`;
 };
 
-const usage = {
-  output: 75,
-  input: 300,
-  cacheRead: 1900,
-  cacheWrite: 40,
-  calls: 2,
-  replies: 2,
-  partial: false,
-};
-const summary = (extra: Record<string, unknown> = {}) => ({
-  tools: 0,
-  shell: 0,
-  read_files: 0,
-  edit_files: 0,
-  added: 0,
-  removed: 0,
-  write_files: 0,
-  agents: 0,
-  searches: 0,
-  web: 0,
-  prs: [],
-  truncated: false,
-  ...extra,
-});
-const turn = (id: string, ask: string, reply: string, cursor = 0): any => ({
-  turn_id: id,
-  cursor,
-  started_at: 1,
-  ended_at: 2,
-  open: false,
-  status: "idle",
-  partial: false,
-  summary: summary(),
-  segments: [
-    {
-      user: [
-        {
-          kind: "user",
-          offset: cursor + 10,
-          role: "user",
-          content: ask,
-          ts: 1,
-        },
-      ],
-      tools: [],
-      assistant: {
-        kind: "assistant",
-        offset: cursor + 90,
-        role: "assistant",
-        content: reply,
-        usage: { input: 120, output: 40, cacheRead: 900, cacheWrite: 60 },
-      },
-      summary: summary(),
-    },
-  ],
-});
 const openThread = async (page: Page, base: string, thread: any) => {
   await mockConversation(page, base, "main", () => thread);
   await gotoRoot(page, base);
@@ -714,7 +661,10 @@ async function test_background_completion_renders_as_platform_message(
 ) {
   const completion =
     "[Background shell completion] shell `done`: killed by SIGTERM.";
-  const t = turn("shell-completion", "Run it", "Finished.", 100);
+  const t = turn("shell-completion", "Run it", "Finished.", {
+    cursor: 100,
+    includeRows: false,
+  });
   t.segments.push({
     user: [],
     tools: [],
@@ -729,7 +679,10 @@ async function test_background_completion_renders_as_platform_message(
   });
   const noticeOnlyCompletion =
     "[Background shell completion] shell `only`: killed by SIGTERM.";
-  const only = turn("only-shell-completion", "Wait", "", 200);
+  const only = turn("only-shell-completion", "Wait", "", {
+    cursor: 200,
+    includeRows: false,
+  });
   only.segments.at(-1).assistant.notices = [noticeOnlyCompletion];
   const thread = {
     id: "main",
@@ -801,7 +754,7 @@ function expandable(
   reply: string,
   cursor: number,
 ): any {
-  const t = turn(id, ask, reply, cursor);
+  const t = turn(id, ask, reply, { cursor, includeRows: false });
   t.segments = [
     {
       user: [
@@ -907,7 +860,7 @@ async function test_response_eyes_keyboard_shortcut(
     "latest-plain",
     "Latest plain question",
     "Latest plain answer.",
-    200,
+    { cursor: 200, includeRows: false },
   );
   const plainThread = { ...thread, msg_count: 3, turns: [older, plain] };
   context = await browser.newContext({

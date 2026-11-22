@@ -190,7 +190,7 @@ if [ "$MODE" != install ]; then
   if [ "$(git -C "$dir" rev-parse HEAD)" = "$head" ]; then
     log "already up to date at $INSTALL_REF"
   else
-    log "updated to $INSTALL_REF; a running recurse restarts into it once no turn is running"
+    log "updated to $INSTALL_REF; a supervised Recurse rebuilds and restarts, then resumes unfinished turns"
   fi
   exit 0
 fi

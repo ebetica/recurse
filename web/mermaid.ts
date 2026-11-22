@@ -2,6 +2,9 @@
 // through a dynamic import — the main bundle never pays for it, and the
 // diagram module is only fetched when a ```mermaid fence first appears.
 // Connected staging stays outside the app's flex layout and is always removed.
+import { CLOSE_ICON } from "./icons.js";
+import { installFrameZoom } from "./image-preview/index.js";
+import { viewerHistoryDismiss } from "./phone-nav.js";
 
 // Recognizes bare and MIME-style Mermaid fence language names.
 const LANG_RE =
@@ -78,11 +81,13 @@ function renderOne(host: HTMLElement, code: string): Promise<void> {
   return chain
     .then(({ svg }) => {
       if (host.dataset.renderId !== id) return;
-      host.innerHTML = svg;
+      host.querySelector(".mermaid-render")!.innerHTML = svg;
+      host.classList.remove("mermaid-error");
       host.classList.add("mermaid-done");
     })
     .catch((err) => {
       if (host.dataset.renderId !== id) return;
+      host.classList.remove("mermaid-done");
       host.classList.add("mermaid-error");
       const note = document.createElement("code");
       note.textContent = mermaidErrorMessage(err);
@@ -92,7 +97,7 @@ function renderOne(host: HTMLElement, code: string): Promise<void> {
       const src = document.createElement("code");
       src.textContent = code;
       pre.appendChild(src);
-      host.replaceChildren(note, pre);
+      host.querySelector(".mermaid-render")!.replaceChildren(note, pre);
     });
 }
 
@@ -110,6 +115,60 @@ if (typeof window !== "undefined") {
     .addEventListener("change", repaintDiagrams);
 }
 
+function openDiagram(svg: SVGSVGElement, opener: HTMLButtonElement): void {
+  const { width, height } = svg.viewBox.baseVal;
+  const box = svg.getBoundingClientRect();
+  const diagramWidth = width || box.width;
+  const diagramHeight = height || box.height;
+  const dialog = document.createElement("dialog");
+  dialog.className = "image-popout mermaid-viewer";
+  dialog.setAttribute("aria-label", "Diagram viewer");
+  dialog.innerHTML = `<div class="image-popout-body">
+    <header class="viewer-topbar image-popout-bar">
+      <span class="files-name">Diagram</span>
+      <button type="button" class="icon-btn lg" aria-label="Zoom out" title="Zoom out">−</button>
+      <button type="button" class="icon-btn lg" aria-label="Zoom in" title="Zoom in">+</button>
+      <button type="button" class="btn sm" aria-label="Fit diagram">Fit</button>
+      <button type="button" class="icon-btn lg" aria-label="Close diagram" title="Close diagram" autofocus>${CLOSE_ICON}</button>
+    </header>
+    <div class="image-zoom-viewport" tabindex="0" role="region" aria-label="Diagram canvas">
+      <div class="files-image-frame"></div>
+    </div>
+  </div>`;
+  const frame = dialog.querySelector<HTMLElement>(".files-image-frame")!;
+  frame.style.setProperty(
+    "--image-aspect",
+    String(diagramWidth / diagramHeight),
+  );
+  frame.style.maxWidth = `min(100%, ${diagramWidth}px)`;
+  // Move the SVG rather than duplicate Mermaid's IDs and fragment references.
+  const placeholder = document.createElement("div");
+  placeholder.style.height = `${box.height}px`;
+  svg.replaceWith(placeholder);
+  frame.append(svg);
+  installFrameZoom(frame, {
+    zoomIn: dialog.querySelector('[aria-label="Zoom in"]')!,
+    zoomOut: dialog.querySelector('[aria-label="Zoom out"]')!,
+    fit: dialog.querySelector('[aria-label="Fit diagram"]')!,
+    maxScale: () => Math.max(8, diagramWidth / (frame.offsetWidth || 1)),
+  });
+  const dismiss = viewerHistoryDismiss(() => dialog.close());
+  dialog
+    .querySelector('[aria-label="Close diagram"]')!
+    .addEventListener("click", dismiss);
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    dismiss();
+  });
+  dialog.addEventListener("close", () => {
+    placeholder.replaceWith(svg);
+    dialog.remove();
+    opener.focus({ preventScroll: true });
+  });
+  document.body.append(dialog);
+  dialog.showModal();
+}
+
 /** Replace every `language-mermaid` code block under `root` with a diagram. */
 export function renderMermaidIn(root: ParentNode): void {
   const blocks = [...root.querySelectorAll<HTMLElement>("pre > code")].filter(
@@ -123,7 +182,24 @@ export function renderMermaidIn(root: ParentNode): void {
     const host = document.createElement("div");
     host.className = "mermaid-host";
     host.dataset.mermaidSource = code;
-    host.textContent = "Diagram…";
+    const drawing = document.createElement("div");
+    drawing.className = "mermaid-render";
+    drawing.textContent = "Diagram…";
+    const actions = document.createElement("div");
+    actions.className = "mermaid-actions";
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "btn sm mermaid-open";
+    open.textContent = "Open diagram";
+    open.onclick = () => {
+      const svg = drawing.querySelector("svg");
+      if (svg) openDiagram(svg, open);
+    };
+    actions.append(open);
+    const copy = pre.nextElementSibling;
+    if (copy?.matches(".copy-btn") && pre.parentElement?.matches(".code-wrap"))
+      actions.append(copy);
+    host.append(actions, drawing);
     pre.replaceWith(host);
     void renderOne(host, code);
   }

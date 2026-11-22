@@ -12,6 +12,7 @@ type Snapshot = {
   text: string | undefined;
   value: unknown;
   checkedAt: number;
+  revision: number;
 };
 
 function parsed(text: string | undefined): unknown {
@@ -26,6 +27,10 @@ function parsed(text: string | undefined): unknown {
 
 export class ConfigFiles {
   private readonly files = new Map<string, Snapshot>();
+  private readonly synchronousVersions = new Map<
+    string,
+    Pick<Snapshot, "text" | "revision">
+  >();
   private readonly pending = new Map<string, Promise<void>>();
   private readonly queued = new Map<string, Promise<void>>();
   private readonly writes = new Map<string, Promise<unknown>>();
@@ -46,7 +51,7 @@ export class ConfigFiles {
           fs.readFileSync(path, "utf8"),
         );
       } catch {}
-      return { text, value: parsed(text), checkedAt: this.now() };
+      return { text, value: parsed(text), checkedAt: this.now(), revision: 0 };
     }
     const cached = this.files.get(path);
     if (
@@ -59,8 +64,21 @@ export class ConfigFiles {
         text: undefined,
         value: undefined,
         checkedAt: this.now(),
+        revision: 0,
       }
     );
+  }
+
+  /** Monotonic per-file version, including external edits in zero-window mode. */
+  versioned(path: string): Readonly<Snapshot> {
+    const snapshot = this.snapshot(path);
+    if (this.recheckMs > 0) return snapshot;
+    const previous = this.synchronousVersions.get(path);
+    const revision =
+      (previous?.revision ?? 0) + Number(previous?.text !== snapshot.text);
+    if (revision !== previous?.revision)
+      this.synchronousVersions.set(path, { text: snapshot.text, revision });
+    return { ...snapshot, revision };
   }
 
   text(path: string): string | undefined {
@@ -72,8 +90,27 @@ export class ConfigFiles {
   }
 
   private set(path: string, text: string): void {
-    this.files.set(path, { text, value: parsed(text), checkedAt: this.now() });
+    this.files.set(path, {
+      text,
+      value: parsed(text),
+      checkedAt: this.now(),
+      revision: (this.files.get(path)?.revision ?? 0) + 1,
+    });
     this.changed(path);
+  }
+
+  writeJson(
+    path: string,
+    value: unknown | (() => unknown),
+    sort = true,
+  ): Promise<void> {
+    return this.write<void>(path, () => {
+      const next = typeof value === "function" ? value() : value;
+      return {
+        value: undefined,
+        ...(next === undefined ? {} : { text: pythonJson(next, sort) }),
+      };
+    });
   }
 
   write<T>(
@@ -139,6 +176,7 @@ export class ConfigFiles {
       text: undefined,
       value: undefined,
       checkedAt: this.now(),
+      revision: 0,
     };
     this.files.set(path, entry);
     const work = readFile(path, {
@@ -153,6 +191,7 @@ export class ConfigFiles {
         if (entry.text === text) return;
         entry.text = text;
         entry.value = parsed(text);
+        entry.revision += 1;
         this.changed(path);
       })
       .finally(() => {
@@ -166,4 +205,58 @@ export class ConfigFiles {
     this.controller.abort();
     await Promise.allSettled([...this.writes.values()]);
   }
+}
+
+export type Dict = Record<string, unknown>;
+
+export function isObject(value: unknown): value is Dict {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+export function valueError(message: string): Error {
+  const error = new Error(message);
+  error.name = "ValueError";
+  return error;
+}
+
+function asciiJsonString(value: string): string {
+  return JSON.stringify(value).replace(
+    /[^\x00-\x7f]/g,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+export function pythonJson(
+  value: unknown,
+  sortKeys = false,
+  compact = false,
+): string {
+  const encode = (item: unknown): string => {
+    if (typeof item === "string") return asciiJsonString(item);
+    if (
+      item === null ||
+      typeof item === "boolean" ||
+      typeof item === "number"
+    ) {
+      return JSON.stringify(item);
+    }
+    if (Array.isArray(item)) {
+      return `[${item.map(encode).join(compact ? "," : ", ")}]`;
+    }
+    if (isObject(item)) {
+      const separator = compact ? "," : ", ";
+      const colon = compact ? ":" : ": ";
+      const entries = Object.entries(item);
+      if (sortKeys)
+        entries.sort(([left], [right]) =>
+          left < right ? -1 : left > right ? 1 : 0,
+        );
+      return `{${entries
+        .map(
+          ([key, member]) => `${asciiJsonString(key)}${colon}${encode(member)}`,
+        )
+        .join(separator)}}`;
+    }
+    return "null";
+  };
+  return encode(value);
 }

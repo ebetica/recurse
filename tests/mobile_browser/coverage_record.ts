@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, normalize, relative } from "node:path";
 import type { Browser, BrowserContext, Page } from "playwright";
+import { APP_CSS_SOURCES } from "../../src/launcher/frontend_assets";
 import {
   cssRules,
   decodeMappings,
@@ -10,8 +11,8 @@ import {
 
 const ROOT = join(import.meta.dir, "../..");
 const DIST = join(ROOT, "web/dist");
-const CSS_SOURCES: Record<string, string[]> = {
-  "/static/app.css": ["web/theme.css", "web/panes/powerbar.css", "web/app.css"],
+const CSS_SOURCES: Record<string, readonly string[]> = {
+  "/static/app.css": APP_CSS_SOURCES,
   "/static/dockview.css": [
     "node_modules/dockview/dist/styles/dockview.css",
     "web/dock/style.css",

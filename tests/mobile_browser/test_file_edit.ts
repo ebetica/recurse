@@ -13,12 +13,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as artifacts from "../../src/artifacts";
 import { filesSurface, openListedFile, showFilesList } from "./files_support";
-import type { Locator, Request } from "playwright";
+import type { Browser, Locator, Request } from "playwright";
 import { expect as browserExpect } from "playwright/test";
+import { waitForPaneTransition } from "./pane_layout";
 import {
   drainedServerLog,
   dispatchArtifactSelection,
   postFixture,
+  waitForLayout,
   type BrowserTest,
 } from "./common";
 
@@ -82,7 +84,360 @@ async function pathEndsHit(target: Locator): Promise<boolean> {
   });
 }
 
+async function assertSavedFileTabLayouts(
+  browser: Browser,
+  base: string,
+  data: string,
+) {
+  const workdir = await mkdtemp(join(data, "data", "file-tab-layout-"));
+  const agent = "file-tab-layout";
+  const content = "export const value = 42;\n";
+  const explorerFiles = ["first.txt", "second.txt"];
+  for (const name of explorerFiles)
+    await writeFile(join(workdir, name), content);
+  await postFixture(base, "seed-file-edit", { agent, workdir });
+  await postFixture(base, "publish-source-previews", { agent, text: content });
+  const store = {
+    artifactsDir: join(data, "data", "artifact_repos"),
+    trashDir: join(data, "data", "trash"),
+  };
+  const artifact = await artifacts.create(store, {
+    owner: agent,
+    title: "Saved file tabs",
+  });
+  const repo = String(artifact.repo_path);
+  const artifactFiles = ["notes-a.txt", "notes-b.txt"];
+  await writeFile(
+    join(repo, "index.md"),
+    artifactFiles.map((name) => `[${name}](${name})`).join("\n\n"),
+  );
+  for (const name of artifactFiles) await writeFile(join(repo, name), content);
+  await artifacts.publish(store, agent, String(artifact.id));
+
+  for (const [source, pane, names] of [
+    ["explorer", "explorer", explorerFiles],
+    ["files", "files", ["configuration.ts", "configuration.txt"]],
+    ["artifact", "report", artifactFiles],
+  ] as const) {
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      await waitForLayout(page);
+      const dock = page.locator("#dock");
+      const organizer = dock.locator(`.dv-tab[data-dock-panel="${pane}"]`);
+      if (!(await organizer.count()))
+        await page.locator(`.rail-btn[data-pane="${pane}"]`).click();
+      if (source === "artifact") {
+        const card = page.locator(
+          `.artifact-list-item[data-artifact-id="${artifact.id}"]`,
+        );
+        const link = page.getByRole("link", { name: names[0], exact: true });
+        await card.or(link).first().waitFor();
+        if (await card.isVisible()) await card.click();
+      }
+      for (const name of names) {
+        await organizer.click();
+        if (source === "files") await openListedFile(page, name);
+        else if (source === "artifact")
+          await page.getByRole("link", { name, exact: true }).click();
+        else await page.locator(`.explorer-row[data-path="${name}"]`).click();
+        await dock.getByRole("tab", { name, exact: true }).waitFor();
+      }
+      await organizer.hover();
+      await organizer.locator(".dv-default-tab-action").click();
+      const saved = await page.waitForFunction(
+        ({ agent, source }) => {
+          const changes: Array<{ slot: string; raw: string }> = [];
+          for (const slot of Object.keys(localStorage)) {
+            if (!slot.startsWith("recurse.conversationUiState.local.v1.slot."))
+              continue;
+            const record = JSON.parse(localStorage.getItem(slot)!);
+            if (record.owner !== agent) continue;
+            const layout =
+              record.panes?.["window-layout"]?.value ||
+              (record.key === "window-layout" ? record.value : null);
+            const panels = Object.values(layout?.panels ?? {}) as Array<{
+              params?: { file: { source: string; key: string } };
+            }>;
+            const tabs = panels.filter((p) => p.params?.file.source === source);
+            if (panels.length !== 3 || tabs.length !== 2) continue;
+            const file = tabs[0]!.params!.file;
+            const parts = JSON.parse(file.key) as string[];
+            if (source === "explorer") parts[1] += "\u001f";
+            else if (source === "files") parts[1] += ".txt";
+            else parts[2] = "A" + parts[2]!.slice(1);
+            file.key = JSON.stringify(parts);
+            changes.push({ slot, raw: JSON.stringify(record) });
+          }
+          return changes.length ? changes : null;
+        },
+        { agent, source },
+      );
+      const corrupted = await saved.jsonValue();
+      if (!corrupted) throw Error("Saved layout with both file tabs not found");
+      await page.reload();
+      for (const name of names) {
+        const tab = dock.getByRole("tab", { name, exact: true });
+        await tab.click();
+        const id = await tab.getAttribute("data-dock-panel");
+        await browserExpect(
+          dock.locator(`.file-tab[data-pane="${id}"]`),
+        ).toContainText(content.trim());
+      }
+      await page.addInitScript((records) => {
+        for (const { slot, raw } of records) localStorage.setItem(slot, raw);
+      }, corrupted);
+      await page.reload();
+      await browserExpect
+        .poll(
+          () =>
+            page.evaluate(
+              (slots) =>
+                slots.map((slot) => {
+                  const record = JSON.parse(localStorage.getItem(slot)!);
+                  const layout =
+                    record?.panes?.["window-layout"]?.value ||
+                    (record?.key === "window-layout" ? record.value : null);
+                  return Object.keys(layout?.panels ?? {});
+                }),
+              corrupted.map(({ slot }) => slot),
+            ),
+          {
+            message: `${source}: replace the invalid saved layout with the default Chat-only layout`,
+          },
+        )
+        .toEqual(corrupted.map(() => ["chat"]));
+      await browserExpect(dock.getByRole("tab")).toHaveCount(1);
+      await browserExpect(
+        dock.getByRole("tab", { name: "Chat", exact: true }),
+      ).toHaveAttribute("aria-selected", "true");
+    } finally {
+      await page.close();
+    }
+  }
+}
+
 export const tests: BrowserTest[] = [
+  async function test_file_tab_keys_restore_only_canonical_identities(
+    browser,
+    base,
+    data,
+  ) {
+    await assertSavedFileTabLayouts(browser, base, data);
+    const files = await postFixture(base, "seed-files-pane");
+    const published = await postFixture(base, "seed-published-markdown");
+    const artifact = await postFixture(base, "seed-artifact-app", {
+      agent: files.demo,
+    });
+    const keys = {
+      explorer: [artifact.cwd, "app.ts"],
+      files: [files.demo, `upload:${files.text}`],
+      artifact: [
+        files.demo,
+        artifact.id,
+        artifact.version,
+        "app.ts",
+        files.demo,
+      ],
+    };
+    const rejected: Array<[string, string]> = [];
+    for (const [source, parts] of Object.entries(keys)) {
+      const canonical = JSON.stringify(parts);
+      for (const key of [
+        canonical.slice(0, -1),
+        JSON.stringify({ ...parts }),
+        JSON.stringify(parts.slice(1)),
+        JSON.stringify([...parts, parts[0]]),
+        JSON.stringify([42, ...parts.slice(1)]),
+        JSON.stringify(["", ...parts.slice(1)]),
+        JSON.stringify([`${parts[0]}\u001f`, ...parts.slice(1)]),
+        `${canonical} `,
+      ])
+        rejected.push([source, key]);
+    }
+    const rejectPart = (
+      source: keyof typeof keys,
+      index: number,
+      value: string,
+    ) => {
+      const parts = [...keys[source]];
+      parts[index] = value;
+      rejected.push([source, JSON.stringify(parts)]);
+    };
+    rejectPart("explorer", 0, "relative");
+    rejectPart("explorer", 0, "/" + "x".repeat(8192));
+    for (const path of [
+      "/app.ts",
+      "dir//app.ts",
+      "./app.ts",
+      "../app.ts",
+      "dir\\app.ts",
+      "app\u001f.ts",
+    ])
+      rejectPart("explorer", 1, path);
+    rejectPart("files", 0, "c".repeat(1025));
+    const uploadId = String(files.text).split(".")[0]!;
+    rejectPart("files", 1, `upload:${uploadId.slice(1)}.txt`);
+    rejectPart("files", 1, `upload:${uploadId}.TXT`);
+    const publishedKey = `published:${published.id}`;
+    rejected.push([
+      "files",
+      JSON.stringify([published.demo, `${publishedKey}.txt`]),
+    ]);
+    rejectPart("artifact", 4, "o".repeat(2049));
+    const versionTail = String(artifact.version).slice(1);
+    rejectPart("artifact", 2, versionTail);
+    rejectPart("artifact", 2, `A${versionTail}`);
+    rejectPart("artifact", 3, "/app.ts");
+    const valid = Object.entries(keys).map(([source, parts]) => [
+      source,
+      JSON.stringify(parts),
+    ]);
+    valid.push(["files", JSON.stringify([published.demo, publishedKey])]);
+    const bundle = await Bun.build({
+      entrypoints: [join(import.meta.dir, "file_tab_key_entry.ts")],
+      target: "browser",
+      define: { "process.env.NODE_ENV": '"production"' },
+    });
+    if (!bundle.success) throw Error(bundle.logs.map(String).join("\n"));
+    const body = await bundle.outputs[0]!.text();
+    const page = await browser.newPage();
+    try {
+      await page.route("**/static/app.js?*", (route) =>
+        route.fulfill({ contentType: "application/javascript", body }),
+      );
+      await page.goto(base);
+      const restored = await page.evaluate(
+        async (candidates) => {
+          const url = document.querySelector<HTMLScriptElement>(
+            'script[type="module"][src]',
+          )!.src;
+          const { FileTabs } = (await import(
+            url
+          )) as typeof import("./file_tab_key_entry.js");
+          return candidates.filter(([source, key]) =>
+            new FileTabs(new Set(), () => false).restore(
+              `file:${crypto.randomUUID()}`,
+              { file: { source, key } },
+            ),
+          );
+        },
+        [...valid, ...rejected],
+      );
+      expect(restored).toEqual(valid);
+    } finally {
+      await page.close();
+    }
+  },
+  // Regression: #3571 phone Back and Close must not discard unsaved Explorer edits silently.
+  async function test_explorer_confirms_before_discarding_file_edits(
+    browser,
+    base,
+    data,
+  ) {
+    const workdir = await mkdtemp(join(data, "data", "explorer-discard-"));
+    const file = "notes.txt";
+    const original = "Original notes";
+    const draft = "Unsaved notes";
+    await writeFile(join(workdir, file), original);
+    const fixture = await postFixture(base, "seed-file-edit", {
+      agent: "explorer-discard",
+      workdir,
+    });
+    const observed: Record<string, unknown> = {};
+    const expected: Record<string, unknown> = {};
+    for (const path of ["desktop close", "phone Back", "phone close"]) {
+      const mobile = path !== "desktop close";
+      const context = await browser.newContext({
+        viewport: { width: mobile ? 390 : 1280, height: 844 },
+        isMobile: mobile,
+        hasTouch: mobile,
+      });
+      try {
+        const page = await context.newPage();
+        const selector = '.pane-col[data-pane="explorer"]';
+        const explorer = page.locator(selector);
+        const viewer = mobile ? explorer : page.locator(".pane-col.file-tab");
+        const editor = viewer.getByRole("textbox", { name: "File text" });
+        const tap = async (control: Locator) => {
+          await control.scrollIntoViewIfNeeded();
+          await browserExpect.poll(() => edgesHit(control)).toBe(true);
+          await control.tap();
+        };
+        const open = async () => {
+          if (mobile) {
+            await tap(page.getByRole("button", { name: "More actions" }));
+            await tap(page.getByRole("menuitem", { name: "Explorer" }));
+            await waitForPaneTransition(page, selector);
+            await page.waitForFunction("history.state?.phonePane");
+          } else if (!(await explorer.isVisible())) {
+            await page.locator('.rail-btn[data-pane="explorer"]').click();
+          }
+          const row = explorer.getByRole("button", { name: file, exact: true });
+          if (mobile) await tap(row);
+          else await row.click();
+          await browserExpect(viewer.locator(".explorer-source")).toHaveText(
+            original,
+          );
+        };
+        const close = async () => {
+          if (path === "phone Back") await page.goBack();
+          else {
+            const button = page.getByRole("button", {
+              name: `Close ${mobile ? "Explorer" : file}`,
+              exact: true,
+            });
+            if (mobile) await tap(button);
+            else await button.click();
+          }
+        };
+        let discard = false;
+        const prompts: string[] = [];
+        page.on("dialog", async (dialog) => {
+          prompts.push(`${dialog.type()}: ${dialog.message()}`);
+          if (discard) await dialog.accept();
+          else await dialog.dismiss();
+        });
+        await page.goto(`${base}#agent=${fixture.agent}`);
+        await open();
+        const edit = viewer.getByRole("button", { name: "Edit", exact: true });
+        if (mobile) {
+          await tap(edit);
+          await tap(editor);
+        } else await edit.click();
+        await editor.fill(draft);
+        await close();
+        await browserExpect
+          .poll(async () => prompts.length > 0 || (await editor.count()) === 0)
+          .toBe(true);
+        if (mobile && prompts.length)
+          await page.waitForFunction("history.state?.phonePane");
+        const afterCancel = (await editor.count())
+          ? await editor.inputValue()
+          : null;
+        if (afterCancel !== null) {
+          await browserExpect(editor).toBeEditable();
+          discard = true;
+          await close();
+        }
+        await viewer.waitFor({ state: "detached" });
+        if (mobile)
+          await page.waitForFunction(
+            "history.state?.phoneScreen === 'conversation' && !history.state.phonePane",
+          );
+        await open();
+        const confirm = `confirm: Discard your unsaved changes to ${file}?`;
+        observed[path] = { prompts, afterCancel };
+        expected[path] = { prompts: [confirm, confirm], afterCancel: draft };
+      } finally {
+        await context.close();
+      }
+    }
+    expect(observed).toEqual(expected);
+    expect(await readFile(join(workdir, file), "utf8")).toBe(original);
+  },
   // Regression: #3391 read-only source viewers share safe syntax tokens without changing file text.
   async function test_source_file_viewers_highlight_without_interpreting_html(
     browser,
@@ -545,9 +900,14 @@ export async function loadConfiguration(path: string): Promise<string> {
               await symlink(workdir, directoryAlias);
             }
           }
+          if (requested === directoryFile)
+            page.once("dialog", (dialog) => dialog.accept());
           await view
             .getByRole("button", { name: "Cancel", exact: true })
             .click();
+          await browserExpect(
+            view.getByRole("textbox", { name: "File text" }),
+          ).toHaveCount(0);
           if (width === 1280) await page.keyboard.press("i");
           else await page.goBack();
         }

@@ -84,7 +84,6 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
   bottom: 0; height: 1.5em; pointer-events: none;
   background: linear-gradient(transparent, var(--panel)); }
 .diff-pr-body > :first-child { margin-top: 0; }
-.diff-pr-body .table-scroll { overflow-x: auto; }
 .btn.diff-pr-more { min-height: 44px; padding-left: 0; }
 .diff-pr-more svg { flex: none; width: 16px; height: 16px; transform: rotate(90deg); }
 .diff-pr-more[aria-expanded="true"] svg { transform: rotate(-90deg); }
