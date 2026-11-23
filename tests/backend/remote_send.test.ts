@@ -226,7 +226,9 @@ test("home agents send text to connected remote agents", async () => {
       apps[i]!.instance.durable.runningCount() === 0 &&
       apps[i]!.instance.durable.metadata(cid).pending.length === 0;
     fixtures[0]!.faux.setResponses([fauxAssistantMessage("home ready")]);
-    await home!.instance.nodes.node(x).setSafety(true);
+    await (
+      await home!.instance.nodes.node(x).setSafety(true)
+    )[1];
     await until(async () =>
       JSON.stringify(await home!.instance.durable.view(x)).includes(
         "home ready",
@@ -1142,7 +1144,9 @@ test("home agents send text to connected remote agents", async () => {
     fixtures[1]!.faux.setResponses([
       fauxAssistantMessage("reply worker ready"),
     ]);
-    await remote!.instance.nodes.node(createdId).setSafety(true);
+    await (
+      await remote!.instance.nodes.node(createdId).setSafety(true)
+    )[1];
     await until(async () =>
       JSON.stringify(await remote!.instance.durable.view(createdId)).includes(
         "reply worker ready",

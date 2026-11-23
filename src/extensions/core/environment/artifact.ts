@@ -17,6 +17,7 @@ import {
 } from "../../../artifact_app_state";
 import { artifactWorkingPath } from "../../../artifacts/working_path";
 
+/** Markdown documents may link to other files in the Artifact with relative links. */
 export function createArtifact(context: ArtifactContext, owner: string) {
   return defineExtension({
     name: "recurse-artifact",
@@ -27,6 +28,7 @@ export function createArtifact(context: ArtifactContext, owner: string) {
           "Create only on explicit operator request; update requested Artifacts instead of duplicating them. Create/list/rename return ids, titles and working paths. " +
           "Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. " +
           "File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. " +
+          "Markdown documents may link to other files in the Artifact with relative links. " +
           "Apps have no network/browser storage. Saved app state uses window.recurse.getState(), window.recurse.setState(value) and the recurse:statechange event. " +
           "Use state with id to read the saved JSON; provide set_file to replace it. Use theme CSS vars (var(--bg), var(--text), var(--accent), var(--chart-1)). " +
           "Commit output reports publication/app checks; fix problems and recommit. Read wide/narrow screenshots. Link [Title](#artifact=ID); add &section=heading-slug to open a section.",

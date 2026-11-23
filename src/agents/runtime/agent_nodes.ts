@@ -1,13 +1,11 @@
 // Live AgentNode registry: one owner per conversation; Durable owns Harnesses.
-// Await-free check/insert prevents duplicate owners; expose desired
-// mute/safety.
+// Await-free check/insert prevents duplicate owners; expose desired mute.
 import type { ConversationRecord } from "../storage";
 
 interface RegistryNode<S> {
   store: S | null;
   readonly reaping: boolean;
   muteDesired: boolean | null;
-  safetyDesired: boolean | null;
   readonly turnTask: Promise<void> | null;
   submit(
     kind: string,

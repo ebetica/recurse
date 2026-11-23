@@ -150,6 +150,31 @@ export function normalizeArtifactVersions(payload: unknown): ArtifactVersion[] {
   );
 }
 
+export const isMarkdownPath = (path: string): boolean =>
+  /\.(md|markdown)$/i.test(path);
+
+export function artifactRelativePath(
+  entry: string,
+  path: string,
+): string | null {
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(path.split(/[?#]/)[0]!);
+  } catch {
+    return null;
+  }
+  if (!pathname || pathname.startsWith("/") || pathname.includes("\\"))
+    return null;
+  const parts = entry.split("/").slice(0, -1);
+  for (const part of pathname.split("/")) {
+    if (part === "..") {
+      if (!parts.length) return null;
+      parts.pop();
+    } else if (part && part !== ".") parts.push(part);
+  }
+  return parts.join("/") || null;
+}
+
 function artifactPath(id: string, suffix = ""): string {
   return `/api/artifacts/${encodeURIComponent(id)}${suffix}`;
 }

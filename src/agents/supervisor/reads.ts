@@ -8,7 +8,6 @@ import {
   providerStartingOverlay,
   readMuted,
   readSafetyEffectiveOff,
-  readSafetyOff,
 } from "./conversation_status";
 import {
   activeRunId,
@@ -812,7 +811,6 @@ export class SupervisorReads {
     const node = claim.node as
       | (ReadNode & {
           muteDesired: boolean | null;
-          safetyDesired: boolean | null;
         })
       | null;
 
@@ -830,16 +828,13 @@ export class SupervisorReads {
     conv.pending_actions = this.deps.pendingActions(cid);
     conv.restart_parked =
       !!conv.restart_parked && conv.status === "interrupted";
-    const desires =
-      node !== null
-        ? { muteDesired: node.muteDesired, safetyDesired: node.safetyDesired }
-        : null;
+    const desires = node !== null ? { muteDesired: node.muteDesired } : null;
     conv.muted = readMuted(conv, desires);
     // Spec: Tabs opened before the taken_over rename read `pinned`; keep it
     // for one release.
     conv.pinned = conv.taken_over === true;
-    conv.safety_off = readSafetyOff(conv, desires);
-    conv.safety_off_active = readSafetyEffectiveOff(conv, desires);
+    conv.safety_off = conv.safety_off === true;
+    conv.safety_off_active = readSafetyEffectiveOff(conv);
     delete conv.external_key;
     delete conv.service_principal;
     delete conv.title_order;

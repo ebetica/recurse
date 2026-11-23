@@ -321,7 +321,7 @@ export async function buildInstance(options: InstanceOptions) {
     records: conversations,
     node: (cid) => nodes.existing(cid),
     liveStatus,
-    durableSafetyOff: (cid) => durableHost?.safetyReviewOff(cid),
+    durableSafetyOff: (cid) => durableHost?.safetyOffActive(cid) ?? false,
     hasLiveShell: (cid) => (durableHost?.shells(cid).active_count ?? 0) > 0,
     logCaptureFailure: conversations.hooks.log,
     skills: {
@@ -476,7 +476,9 @@ export async function buildInstance(options: InstanceOptions) {
     runtime: piRuntimeErrors,
     agentStore,
     importFinalized,
-    setSafetyReviewOff: (cid, off) => durableHost!.setSafetyReviewOff(cid, off),
+    setSafetyReviewOff: (cid, off, rev, admits) =>
+      durableHost!.setSafetyReviewOff(cid, off, rev, admits),
+    durableSafetyOff: (cid) => durableHost?.safetyOffActive(cid) ?? false,
     modelChanged: (cid) => durableHost?.invalidatePromptCache(cid),
     actionRequest: (kind, cid) => parked.actionRequest(kind, cid),
     requestRun: (cid) => delivery.requestRun(cid),
@@ -538,6 +540,7 @@ export async function buildInstance(options: InstanceOptions) {
     usageLimits,
     load: (cid, fields) =>
       conversations.load(cid, { withPending: false, fields }),
+    newestSafetyRev: (cid) => conversations.newestSafety(cid)?.rev,
     uploadParts: (cid, text, attachmentIds) => {
       const conv = conversations.load(cid, { withPending: false });
       return turnPrep.uploadParts(
@@ -1037,7 +1040,6 @@ export async function buildInstance(options: InstanceOptions) {
     reconciler,
     logins: {
       importClaudeCodeLogin: () => anthropic.importClaudeCodeLogin(),
-      importCodexCliLogin: () => codex.importCodexCliLogin(),
     },
     agentTemp,
     processes,

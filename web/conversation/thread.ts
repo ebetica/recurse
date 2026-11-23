@@ -920,6 +920,8 @@ export function convHash(conv: Conversation): string {
     conv.core_reused,
     conv.title,
     conv.muted,
+    conv.safety_off,
+    conv.safety_off_active,
     conv.safety_unavailable,
     conv.shells?.status,
     conv.shells?.agent_title,

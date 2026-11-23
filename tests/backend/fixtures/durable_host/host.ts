@@ -255,15 +255,21 @@ export async function switchoverWorld(sink: LogSink = { write: () => {} }) {
   models.setProvider(faux.provider);
   const load = (cid: string) =>
     instance.conversations.load(cid, { withPending: false });
-  const host = new DurableHost({
-    ...testDeps(data, load, () =>
-      instance.conversations.allConvs().map((c) => String(c.id)),
-    ),
-    settings: (conv) => [String(conv.model), "off"],
-    models,
-    customProviders: () => instance.config.models.customModelProviders(),
-    customProviderEnvValue: () => "test-key",
-  });
+  const hosts: DurableHost[] = [];
+  const hostOver = (load: (cid: string) => Record<string, unknown> | null) => {
+    const opened = new DurableHost({
+      ...testDeps(data, load, () =>
+        instance.conversations.allConvs().map((c) => String(c.id)),
+      ),
+      settings: (conv) => [String(conv.model), "off"],
+      models,
+      customProviders: () => instance.config.models.customModelProviders(),
+      customProviderEnvValue: () => "test-key",
+    });
+    hosts.push(opened);
+    return opened;
+  };
+  const host = hostOver(load);
   const events: string[] = [];
   let now = 1000;
   const move = new PiSwitchover({
@@ -322,6 +328,8 @@ export async function switchoverWorld(sink: LogSink = { write: () => {} }) {
     root,
     instance,
     host,
+    /** A host whose records come from `load` alone. */
+    hostOver,
     faux,
     move,
     load,
@@ -347,7 +355,7 @@ export async function switchoverWorld(sink: LogSink = { write: () => {} }) {
       now += 1000;
     },
     close: async () => {
-      await host.close();
+      for (const opened of hosts) await opened.close();
       await instance.shutdown();
       server.stop(true);
       await rm(root, { recursive: true, force: true });

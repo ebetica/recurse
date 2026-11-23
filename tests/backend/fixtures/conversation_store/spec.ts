@@ -83,7 +83,7 @@ export function fixtureTreeView(store: ConversationStore): TreeView {
     records: store,
     node: () => null,
     liveStatus: () => ["idle", null],
-    durableSafetyOff: () => undefined,
+    durableSafetyOff: () => false,
     hasLiveShell: () => false,
     skills: {
       contextForWorkdirLoopSafe: (w) => (w === null ? null : `loop:${w}`),

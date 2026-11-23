@@ -10,7 +10,7 @@ export interface ArtifactHistory {
   visit: number;
   version: string | null;
   followCurrent: boolean;
-  scrollTop: number;
+  scrollTop: number | null;
 }
 
 /** The existing pane layout moves phone scrolling onto the column. */
@@ -30,8 +30,8 @@ export function readArtifactHistory(
     saved.depth >= 0 &&
     (saved.version === null || typeof saved.version === "string") &&
     typeof saved.followCurrent === "boolean" &&
-    Number.isFinite(saved.scrollTop) &&
-    saved.scrollTop >= 0
+    (saved.scrollTop === null ||
+      (Number.isFinite(saved.scrollTop) && saved.scrollTop >= 0))
     ? saved
     : null;
 }

@@ -309,6 +309,7 @@ export async function run(input: {
         home: join(input.root, "home"),
       }),
       shells: () => [],
+      reviewOffAllowed: () => true,
       agent: async () => ({
         id: "c1",
         env: {},

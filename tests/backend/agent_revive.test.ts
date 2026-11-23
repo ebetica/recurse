@@ -46,6 +46,7 @@ import { ReviveDoc } from "../../src/agents/durable/revive_doc";
 import { runtime } from "../../src/agents/durable/host/load";
 import { openShellHarness } from "../extensions/core/shells/fixtures/durable_harness";
 import { RegistryStore } from "../../src/extensions/core/shells/persist";
+import { KeyError, ValueError } from "../../src/agents/runtime/agent_node";
 
 const root = mkdtempSync(join(tmpdir(), "agent-revive-"));
 const data = join(root, "data");
@@ -219,6 +220,8 @@ test("agent scratch and effective cwd survive restart and retire on reap", async
   let cid = "";
   let scratch = "";
   let local = "";
+  let late: Promise<unknown> | undefined;
+  let restore = () => {};
   try {
     await current.start();
     await until(() => current.lifecycle.readinessSnapshot().ready);
@@ -233,8 +236,13 @@ test("agent scratch and effective cwd survive restart and retire on reap", async
     await mkdir(directory);
     await writeFile(join(scratch, "sentinel"), "scratch survives");
     await writeFile(join(directory, "sentinel"), "cwd survives");
-    const opened = await current.durable.open(cid);
-    await setSafetyReviewOff(opened.conversation, true, context);
+    const { rev } = current.conversations.writeSafety(
+      cid,
+      true,
+      Date.now() / 1000,
+    )!;
+    expect(await current.conversations.agentStore.flush(cid)).toBe(true);
+    await current.durable.setSafetyReviewOff(cid, true, rev);
     await current.delivery.deliver(
       cid,
       `PERSIST-SCRATCH ${JSON.stringify(directory)}`,
@@ -273,12 +281,25 @@ test("agent scratch and effective cwd survive restart and retire on reap", async
       "cwd survives",
     );
     expect(await current.durable.effectiveCwd(cid)).toBe(directory);
+    const { agentStore } = current.conversations;
+    const forget = agentStore.forget;
+    restore = () => (agentStore.forget = forget);
+    agentStore.forget = (id: string) => {
+      forget.call(agentStore, id);
+      if (id !== cid || late) return;
+      late = current.nodes.node(cid).setSafety(false);
+      late.catch(() => undefined);
+    };
+    current.nodes.dropNode(cid);
     await current.reap.requestReap(cid, null);
     await until(() => current.conversations.load(cid) === null);
+    expect(late).toBeDefined();
+    await expect(late!).rejects.toBeInstanceOf(KeyError);
     await until(() => !existsSync(scratch) && !existsSync(local));
     expect(existsSync(scratch)).toBe(false);
     expect(existsSync(local)).toBe(false);
   } finally {
+    restore();
     await current.shutdown();
   }
 }, 60_000);
@@ -376,52 +397,118 @@ test("a reaped agent loses its files and revives passive with history and takes 
     String(instance.conversations.load(cid)!.tmp_key),
   );
   expect(existsSync(join(collection, `${file.id}.blob`))).toBe(true);
-  await instance.reap.requestReap(cid, null);
-  await until(() => instance.conversations.load(cid) === null);
-  expect(existsSync(collection)).toBe(false);
-  expect(existsSync(join(data, "conversations", cid))).toBe(false);
-  const [row] = await instance.durable.archive.search("rvvmplease", 0, 5);
-  expect(row).toMatchObject({
+  const { rev } = instance.conversations.writeSafety(
     cid,
-    reason: "reap",
-    title: "Revive me please",
-    parent: parent.id,
-    parent_title: "boss",
-    top_level: false,
-    model,
-  });
-  expect(
-    existsSync(join(data, "agent-archive", row!.archive_id, "session.sqlite")),
-  ).toBe(true);
-  await until(() =>
-    asked.some((text) =>
-      text.includes(`Revive the agent via subagent revive ${cid}.`),
-    ),
-  );
-  await until(idle);
-  await (await instance.durable.open(String(parent.id))).reporter?.kick();
-  await until(idle);
-  const before = asked.length;
-
-  const revived = await instance.revive.revive(cid, String(parent.id));
-  expect(revived).toMatchObject({
-    id: cid,
-    parent: parent.id,
-    reason: "reap",
-    notes: [],
-  });
-  await (await instance.durable.open(String(revived.id))).reporter?.kick();
-  await until(idle);
-  expect(asked.length).toBe(before);
-  expect(idle()).toBe(true);
-  const history = await transcript(cid);
-  expect(history).toContain("first question");
-  expect(history).toContain("ANSWER-1");
-  expect(history).toContain("Revived from the agent archive");
-  expect(history).toContain("third, still queued");
-  expect(instance.durable.metadata(cid).pending).toEqual([]);
-  expect(await instance.durable.archive.search("rvvmplease", 0, 5)).toEqual([]);
-  expect(await refusal(row!.archive_id)).toContain(`already revived as ${cid}`);
+    true,
+    Date.now() / 1000,
+  )!;
+  expect(await instance.conversations.agentStore.flush(cid)).toBe(true);
+  await instance.durable.setSafetyReviewOff(cid, true, rev);
+  expect(instance.durable.metadata(cid).safety_off_active).toBe(true);
+  const setter = instance.durable.setSafetyReviewOff;
+  const committing = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const reviver = instance.revive as unknown as {
+    note: (...args: unknown[]) => Promise<void>;
+  };
+  const note = reviver.note;
+  let stale: Promise<unknown> = Promise.resolve();
+  try {
+    instance.durable.setSafetyReviewOff = (async (
+      ...args: Parameters<typeof setter>
+    ) => {
+      instance.durable.setSafetyReviewOff = setter;
+      committing.resolve();
+      await release.promise;
+      return setter.apply(instance.durable, args);
+    }) as typeof setter;
+    stale = instance.nodes
+      .node(cid)
+      .setSafety(true)
+      .then(
+        () => null,
+        (error: unknown) => error,
+      );
+    await Promise.race([
+      committing.promise,
+      stale.then(() => {
+        throw new Error("the stale request settled before its commit");
+      }),
+    ]);
+    const staleRev = Number(instance.conversations.load(cid)!.safety_rev);
+    await instance.reap.requestReap(cid, null);
+    await until(() => instance.conversations.load(cid) === null);
+    expect(existsSync(collection)).toBe(false);
+    expect(existsSync(join(data, "conversations", cid))).toBe(false);
+    const [row] = await instance.durable.archive.search("rvvmplease", 0, 5);
+    expect(row).toMatchObject({
+      cid,
+      reason: "reap",
+      title: "Revive me please",
+      parent: parent.id,
+      parent_title: "boss",
+      top_level: false,
+      model,
+    });
+    expect(
+      existsSync(
+        join(data, "agent-archive", row!.archive_id, "session.sqlite"),
+      ),
+    ).toBe(true);
+    await until(() =>
+      asked.some((text) =>
+        text.includes(`Revive the agent via subagent revive ${cid}.`),
+      ),
+    );
+    await until(idle);
+    await (await instance.durable.open(String(parent.id))).reporter?.kick();
+    await until(idle);
+    const before = asked.length;
+    reviver.note = (...args: unknown[]) => {
+      reviver.note = note;
+      expect(
+        instance.conversations.writeSafety(cid, true, rev / 1000)!.rev,
+      ).toBe(rev);
+      return note.apply(reviver, args);
+    };
+    const revived = await instance.revive.revive(cid, String(parent.id));
+    expect(revived).toMatchObject({
+      id: cid,
+      parent: parent.id,
+      reason: "reap",
+      notes: [],
+    });
+    await (await instance.durable.open(String(revived.id))).reporter?.kick();
+    await until(idle);
+    expect(asked.length).toBe(before);
+    expect(idle()).toBe(true);
+    const history = await transcript(cid);
+    expect(history).toContain("first question");
+    expect(history).toContain("ANSWER-1");
+    expect(history).toContain("Revived from the agent archive");
+    expect(history).toContain("third, still queued");
+    expect(instance.durable.metadata(cid).pending).toEqual([]);
+    expect(await instance.durable.archive.search("rvvmplease", 0, 5)).toEqual(
+      [],
+    );
+    expect(await refusal(row!.archive_id)).toContain(
+      `already revived as ${cid}`,
+    );
+    expect(instance.durable.metadata(cid).safety_off_active).toBe(false);
+    expect(
+      instance.conversations.writeSafety(cid, true, staleRev / 1000)!.rev,
+    ).toBe(staleRev);
+    release.resolve();
+    expect(await stale).toBeInstanceOf(ValueError);
+    expect(instance.durable.safetyReviewOff(cid)).toBe(false);
+    expect(instance.durable.metadata(cid).safety_off_active).toBe(false);
+  } finally {
+    instance.durable.setSafetyReviewOff = setter;
+    reviver.note = note;
+    release.resolve();
+    await stale;
+  }
+  instance.conversations.writeSafety(cid, false, Date.now() / 1000);
 
   await send(cid, "after revive");
   const turn = () => asked.findIndex((t) => t.includes("after revive"));

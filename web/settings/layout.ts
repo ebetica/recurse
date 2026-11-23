@@ -88,7 +88,12 @@ document.addEventListener(
       return;
     event.preventDefault();
     event.stopImmediatePropagation();
-    openSheets.at(-1)?.close();
+    const sheet = openSheets.at(-1)!;
+    const modal =
+      event.target instanceof Element
+        ? event.target.closest<HTMLDialogElement>("dialog:modal")
+        : null;
+    (modal && sheet.contains(modal) ? modal : sheet).close();
   },
   true,
 );

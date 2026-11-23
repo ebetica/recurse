@@ -143,6 +143,7 @@ try {
         home: root,
       }),
       shells: () => [],
+      reviewOffAllowed: () => true,
       loadConfig: () => ({
         additionalRules: [],
         path: join(root, "pi-safety.json"),

@@ -251,8 +251,13 @@ text(await tools.publish({paths:[${JSON.stringify(source)}]}));
       return fauxAssistantMessage("Artifact is ready.");
     },
   ]);
+  const { rev } = instance.conversations.writeSafety(
+    cid,
+    true,
+    Date.now() / 1000,
+  )!;
   const opened = await instance.durable.open(cid);
-  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT, rev);
   await instance.delivery.deliver(
     cid,
     "Create a report Artifact and revise it",
@@ -347,8 +352,13 @@ test("settings and Artifacts have native schemas and remain discoverable and cal
       return fauxAssistantMessage("Settings are available on demand.");
     },
   ]);
+  const { rev } = instance.conversations.writeSafety(
+    cid,
+    true,
+    Date.now() / 1000,
+  )!;
   const opened = await instance.durable.open(cid);
-  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT, rev);
   await instance.delivery.deliver(
     cid,
     "List effort levels and follow the device theme",
@@ -513,8 +523,13 @@ test("native publications remain in Files after scratch removal and restart", as
     ),
     fauxAssistantMessage("Published the report."),
   ]);
+  const { rev } = instance.conversations.writeSafety(
+    cid,
+    true,
+    Date.now() / 1000,
+  )!;
   const opened = await instance.durable.open(cid);
-  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT, rev);
   await instance.delivery.deliver(cid, "Publish the report", {
     origin: "operator",
     messageId: "publish",
@@ -629,8 +644,13 @@ test("failed publication scans once and delayed views use current run state", as
   const cid = String(
     (await instance.create.create({ title: "Failed publication" })).id,
   );
+  const { rev } = instance.conversations.writeSafety(
+    cid,
+    true,
+    Date.now() / 1000,
+  )!;
   const opened = await instance.durable.open(cid);
-  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+  await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT, rev);
   const host = instance.durable as any;
   const scan = host.publishedFiles;
   let attempts = 0;
@@ -940,8 +960,18 @@ test("a child's report waits while its subagents work, then wakes the parent onc
     }
 
     const s = await family("shell");
+    const { rev } = instance.conversations.writeSafety(
+      s.grandchild,
+      true,
+      Date.now() / 1000,
+    )!;
     const opened = await instance.durable.open(s.grandchild);
-    await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+    await setSafetyReviewOff(
+      opened.conversation,
+      true,
+      BACKGROUND_CONTEXT,
+      rev,
+    );
     await send(s.grandchild, "SHELL", s.child);
     expect(await onlyReport(s)).toBe(
       "(turn started by an agent message)\nchild reply",
@@ -1178,8 +1208,18 @@ test("parallel native Settings level edits both persist", async () => {
     const cid = String(
       (await instance.create.create({ title: edit.marker })).id,
     );
+    const { rev } = instance.conversations.writeSafety(
+      cid,
+      true,
+      Date.now() / 1000,
+    )!;
     const opened = await instance.durable.open(cid);
-    await setSafetyReviewOff(opened.conversation, true, BACKGROUND_CONTEXT);
+    await setSafetyReviewOff(
+      opened.conversation,
+      true,
+      BACKGROUND_CONTEXT,
+      rev,
+    );
     conversations.push({ cid, opened, edit });
   }
   let release!: () => void;

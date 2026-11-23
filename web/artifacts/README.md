@@ -9,7 +9,7 @@
   manage comment drafts and cards. [comment-outbox.ts](comment-outbox.ts) persists
   sends, [crop-store.ts](crop-store.ts) stores crop bytes, and [send-lock](send-lock/README.md)
   coordinates sends across tabs.
-- [file-links.ts](file-links.ts) resolves version-pinned siblings.
+- [file-links.ts](file-links.ts) previews version-pinned non-Markdown siblings.
 
 ## Comments
 
@@ -38,9 +38,11 @@ crop storage. Pending requests keep transaction ownership, not an expiring lease
 The outbox rechecks ownership after awaits; server idempotency handles crash
 recovery.
 
-Discovery never opens the Artifacts pane; clicks and saved layouts do. Sibling
-links reuse viewers and preserve phone Back at the selected version. [Files](../files/README.md)
-shares link handling.
+Discovery never opens the Artifacts pane; clicks and saved layouts do. Markdown
+pages share the Artifact pane and its browser history, so a page link does not
+change the selected Artifact. A historical page link identifies its published
+version so it opens the same revision in another tab. Other files use the shared
+[Files](../files/README.md) viewers.
 
 ## Rules for changes
 

@@ -1,4 +1,5 @@
 import { expect } from "bun:test";
+import { writeFile } from "node:fs/promises";
 import { expect as browserExpect } from "playwright/test";
 
 declare const getComputedStyle: any;
@@ -7,12 +8,207 @@ import {
   expectHitCorners,
   gotoRoot,
   mockConversation,
+  postFixture,
   waitForLayout,
   type BrowserTest,
 } from "./common";
 import { row } from "./fixtures";
 import recorded from "./fixtures/activity-lines.json";
 import thinking from "./fixtures/activity-thinking.json";
+
+// Regression: #3672 expanded activity has even single-line rows on phones and desktops and folds shell completions into command details.
+export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
+  const phone = {
+    viewport: { width: 390, height: 844 },
+    isMobile: true,
+    hasTouch: true,
+  };
+  const page = await browser.newPage(phone);
+  const desktop = await browser.newPage({
+    viewport: { width: 1280, height: 800 },
+  });
+  const { agent, gate } = await postFixture(base, "seed-activity-card");
+  const readView = async (id: string) =>
+    (
+      await page.request.get(`${base}api/conversations/${id}/view?limit=100`)
+    ).json();
+  try {
+    await page.goto(`${base}#agent=${agent}`);
+    await page.locator("#input").fill("Check the sample results.");
+    await page.locator("#send").click();
+    await browserExpect
+      .poll(async () => {
+        const { blocks } = await readView(agent);
+        return blocks.some(
+          (block: { name: string | null }) => block.name === "wait",
+        );
+      })
+      .toBe(true);
+    await writeFile(gate, "ready");
+    await page
+      .getByText("The sample results agree.", { exact: true })
+      .waitFor();
+    await page.locator(".activity-group-toggle").tap();
+    await page.mouse.move(0, 0);
+    await desktop.goto(`${base}#agent=${agent}`);
+    await desktop.locator(".activity-group-toggle").click();
+    await desktop.mouse.move(0, 0);
+    for (const [screen, width] of [
+      [page, 390],
+      [page, 412],
+      [desktop, 1280],
+      [desktop, 390],
+    ] as const) {
+      await screen.setViewportSize({
+        width,
+        height: width === 1280 ? 800 : 844,
+      });
+      await waitForLayout(screen);
+      const card = screen.locator(".activity-group-body");
+      const rows = card.locator(
+        ":scope > .turn-thinking > button, :scope > .turn-series > button",
+      );
+      expect(
+        await rows
+          .allTextContents()
+          .then((labels) => labels.map((text) => text.trim())),
+      ).toEqual([
+        expect.stringMatching(/^Thought for \d+s$/),
+        "Ran 1 command, waited, 1 background shell finished",
+        expect.stringMatching(/^Thought for \d+s$/),
+        "Ran 1 command",
+      ]);
+      await browserExpect(
+        card.getByText(/Background shell finished · /),
+      ).toHaveCount(0);
+      const styles = await rows.evaluateAll((buttons) =>
+        buttons.map((button) => {
+          const label = button.lastElementChild!;
+          const range = button.ownerDocument.createRange();
+          range.selectNodeContents(label);
+          const { color, fontWeight, height } = getComputedStyle(button);
+          const { lineHeight, textOverflow } = getComputedStyle(label);
+          return {
+            style: { color, fontWeight, height, lineHeight },
+            lines: new Set(
+              Array.from(range.getClientRects(), (rect) => rect.top),
+            ).size,
+            overflow: textOverflow,
+          };
+        }),
+      );
+      expect(
+        styles.every((row) => row.lines === 1 && row.overflow === "ellipsis"),
+      ).toBe(true);
+      expect(styles.map((row) => row.style)).toEqual(
+        styles.map(() => styles[0]!.style),
+      );
+      const { edges, gaps } = await rows.evaluateAll((buttons) => {
+        const boxes = buttons.map((button) => button.getBoundingClientRect());
+        const card = buttons[0]!
+          .closest(".activity-group-body")!
+          .getBoundingClientRect();
+        return {
+          edges: [boxes[0]!.top - card.top, card.bottom - boxes.at(-1)!.bottom],
+          gaps: boxes
+            .slice(1)
+            .map((box, index) => box.top - boxes[index]!.bottom),
+        };
+      });
+      const gap = gaps[0]!;
+      expect(gap).toBeGreaterThan(0);
+      expect(gaps).toEqual(gaps.map(() => gap));
+      expect(edges).toEqual(width === 1280 ? [gap, gap] : [0, 0]);
+      if (width === 1280) {
+        const { height, lineHeight } = styles[0]!.style;
+        expect(
+          Math.abs(Number.parseFloat(height) - Number.parseFloat(lineHeight)),
+        ).toBeLessThanOrEqual(2);
+      } else {
+        for (const row of await rows.all()) await expectHitCorners(row);
+        await expectHitCorners(
+          card.getByRole("button", { name: "Hide activity" }),
+        );
+      }
+    }
+    const card = page.locator(".activity-group-body");
+    await card
+      .getByRole("button", {
+        name: /Ran 1 command, waited, 1 background shell finished/,
+      })
+      .tap();
+    await browserExpect(
+      card.getByText(/Background shell finished.*· exit 0 · \d+s/),
+    ).toBeVisible();
+    await browserExpect(card.locator("pre")).toContainText(
+      "Sample comparison complete",
+    );
+
+    const isolated = await postFixture(base, "seed-activity-card", {
+      isolated: true,
+    });
+    const isolatedPage = await browser.newPage(phone);
+    try {
+      await isolatedPage.goto(`${base}#agent=${isolated.agent}`);
+      await isolatedPage
+        .locator("#input")
+        .fill("Start the background comparison.");
+      await isolatedPage.locator("#send").click();
+      const reply = isolatedPage.getByText(
+        "The background comparison is running.",
+        {
+          exact: true,
+        },
+      );
+      await reply.waitFor();
+      await browserExpect
+        .poll(async () => (await readView(isolated.agent)).turn_status)
+        .toBe("idle");
+      await writeFile(isolated.gate, "ready");
+      await isolatedPage
+        .getByRole("button", {
+          name: /Ran 1 command, 1 background shell finished/,
+        })
+        .tap();
+      const standalone = isolatedPage.getByRole("button", {
+        name: /^Show details: Background shell finished · exit 0 · (?:\d+[hm])*\d+s/,
+      });
+      await browserExpect(standalone).toBeVisible();
+      expect(
+        await standalone
+          .locator("span")
+          .last()
+          .evaluate((label) => {
+            const range = label.ownerDocument.createRange();
+            range.selectNodeContents(label);
+            const style = getComputedStyle(label);
+            return {
+              lines: new Set(
+                Array.from(range.getClientRects(), (rect) => rect.top),
+              ).size,
+              clipped:
+                label.scrollWidth > label.clientWidth &&
+                style.overflowX === "hidden",
+              ellipsis: style.textOverflow === "ellipsis",
+            };
+          }),
+      ).toEqual({ lines: 1, clipped: true, ellipsis: true });
+      await expectHitCorners(standalone);
+      await standalone.tap();
+      const output = isolatedPage.locator(".shell-notice pre");
+      await browserExpect(output).toBeVisible();
+      await browserExpect(output).toContainText(
+        "Background comparison finished",
+      );
+    } finally {
+      await writeFile(isolated.gate, "ready");
+      await isolatedPage.close();
+    }
+  } finally {
+    await writeFile(gate, "ready");
+    await Promise.all([page.close(), desktop.close()]);
+  }
+};
 
 export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
   for (const mobile of [false, true]) {

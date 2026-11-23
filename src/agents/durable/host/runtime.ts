@@ -101,4 +101,5 @@ export {
   setSafetyReviewOff,
   safetyReviewOff,
   safetyReviewUnavailable,
+  submitReviewed,
 } from "../../../extensions/core/safety/durable.ts";

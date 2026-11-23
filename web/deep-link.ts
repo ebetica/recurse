@@ -11,15 +11,19 @@ const TREE_LINK_KEY = "trees";
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 // Rejects oversized fragments before parsing; they are not recognized links.
 const MAX_FRAGMENT_LENGTH = 512;
+const VERSION_PARAMETER_LENGTH = 49; // &version= followed by a full SHA
+const PAGE_PARAMETER_LENGTH = 5 + 3 * 240;
 const MAX_SHARED_FRAGMENT_LENGTH = 8192;
 
 function fragmentTooLong(raw: string): boolean {
-  return (
-    raw.length >
-    (raw.startsWith("trees=")
-      ? MAX_SHARED_FRAGMENT_LENGTH
-      : MAX_FRAGMENT_LENGTH)
-  );
+  if (raw.length <= MAX_FRAGMENT_LENGTH) return false;
+  if (raw.startsWith("trees=")) return raw.length > MAX_SHARED_FRAGMENT_LENGTH;
+  if (!/(^|&)artifact=/.test(raw)) return true;
+  const pageLength = /(^|&)page=/.test(raw) ? PAGE_PARAMETER_LENGTH : 0;
+  const versionLength = /(^|&)version=/.test(raw)
+    ? VERSION_PARAMETER_LENGTH
+    : 0;
+  return raw.length > MAX_FRAGMENT_LENGTH + pageLength + versionLength;
 }
 
 function validAgentId(id: string): boolean {
@@ -47,15 +51,37 @@ export function treeLinkUrl(href: string, roots: string[]): string {
   return url.href;
 }
 
-/** Opens the Artifact in its owning conversation without sharing view state. */
+/** Opens an Artifact in its owning conversation, optionally at a published version. */
 export function artifactLinkUrl(
   href: string,
   agent: string,
   artifact: string,
+  page: string | null = null,
+  section: string | null = null,
+  version: string | null = null,
 ): string {
   const url = new URL(href);
-  url.hash = new URLSearchParams({ agent, artifact }).toString();
+  const params = new URLSearchParams({ agent });
+  setArtifactTarget(params, artifact, page, section, version);
+  url.hash = params.toString();
   return url.href;
+}
+
+/** Replace the Artifact address without disturbing other fragment parameters. */
+export function setArtifactTarget(
+  params: URLSearchParams,
+  artifact: string,
+  page: string | null,
+  section: string | null,
+  version: string | null,
+): void {
+  params.set("artifact", artifact);
+  if (page) params.set("page", page);
+  else params.delete("page");
+  if (section !== null) params.set("section", section);
+  else params.delete("section");
+  if (version !== null) params.set("version", version);
+  else params.delete("version");
 }
 
 interface AgentLinkRead {
@@ -90,7 +116,9 @@ export function agentLinkUrl(
   const params = new URLSearchParams(
     url.hash.startsWith("#") ? url.hash.slice(1) : url.hash,
   );
-  if (!keepArtifact) params.delete("artifact");
+  if (!keepArtifact)
+    for (const key of ["artifact", "page", "section", "version"])
+      params.delete(key);
   if (agent && validAgentId(agent)) params.set(AGENT_LINK_KEY, agent);
   else params.delete(AGENT_LINK_KEY);
   const fragment = params.toString();

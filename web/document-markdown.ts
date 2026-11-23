@@ -147,7 +147,11 @@ export async function revealArtifactImage(
 }
 
 interface DocumentMarkdownOptions {
-  resolveRelative: (path: string, image: boolean) => string | null;
+  resolveRelative: (
+    path: string,
+    image: boolean,
+    fragment: string,
+  ) => string | null;
   openRelative: (path: string, fragment: string) => boolean;
   signal: AbortSignal;
   title: string;
@@ -200,13 +204,13 @@ function markdownFragment(
     }
     const fallback = referenceImageUrl(
       source,
-      options.agentId,
+      options.artifactId ? null : options.agentId,
       options.documentPath,
-      options.artifactId,
     );
     const resolved =
-      (isRelative(source) ? options.resolveRelative(source!, true) : null) ||
-      fallback;
+      (isRelative(source)
+        ? options.resolveRelative(source!, true, "")
+        : null) || fallback;
     if (resolved) {
       if (!(image.alt || "").trim()) image.alt = "Image without a description";
       image.classList.add("artifact-image");
@@ -251,14 +255,26 @@ function markdownFragment(
     }
     image.replaceWith(imageFailure(source || ""));
   }
-  for (const { link, href } of links) {
+  for (const { link, href: original } of links) {
     if (!link.isConnected && !template.content.contains(link)) continue;
-    if (!href?.trim()) continue;
+    const href = original?.trim();
+    if (!href) continue;
     const relative = isRelative(href);
     const separator = href.indexOf("#");
     const path = separator < 0 ? href : href.slice(0, separator);
     const fragment = separator < 0 ? "" : href.slice(separator);
-    const resolved = relative ? options.resolveRelative(path, false) : null;
+    const resolved = relative
+      ? options.resolveRelative(path, false, fragment)
+      : null;
+    if (resolved?.startsWith("#")) {
+      link.href = resolved;
+      if (
+        link.parentElement?.matches("p") &&
+        link.parentElement.textContent?.trim() === link.textContent?.trim()
+      )
+        link.classList.add("artifact-page-link");
+      continue;
+    }
     if (resolved) {
       link.href = resolved + fragment;
       link.target = "_blank";
@@ -275,6 +291,13 @@ function markdownFragment(
         )
           event.preventDefault();
       });
+      continue;
+    }
+    if (
+      options.artifactId &&
+      (relative || (href.startsWith("/") && !href.startsWith("//")))
+    ) {
+      link.classList.add("artifact-blocked-link");
       continue;
     }
     if (href.startsWith("#")) {

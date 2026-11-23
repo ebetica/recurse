@@ -64,10 +64,13 @@ export function pendingTotal(): number {
 export const commentKey = (
   agentId: string | null,
   artifactId: string | null,
+  page?: string | null,
 ): string | null =>
-  agentId && artifactId ? `${agentId}\n${artifactId}` : null;
+  agentId && artifactId
+    ? `${agentId}\n${artifactId}${page ? `\n${page}` : ""}`
+    : null;
 export const currentCommentKey = (pane: CommentPane): string | null =>
-  commentKey(pane._rs.agentId, pane._rs.selId);
+  commentKey(pane._rs.agentId, pane._rs.selId, pane._rs.selectedPage);
 /** A remounted viewer returns to the revision that owns its staged comments. */
 export function pendingCommentVersion(pane: CommentPane): string | undefined {
   const key = currentCommentKey(pane);
@@ -954,7 +957,7 @@ export function reanchor(
   { pruneStale = false } = {},
 ): void {
   positionPopover();
-  const key = commentKey(pane._rs.agentId, id);
+  const key = commentKey(pane._rs.agentId, id, pane._rs.selectedPage);
   const map = key ? comments.get(key) : null;
   if (!map && !pruneStale) return;
   const roots = commentRoots(pane);

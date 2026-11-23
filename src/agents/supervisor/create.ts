@@ -84,7 +84,7 @@ export interface CreateDeps {
   >;
   configActions: Pick<
     ConfigActions,
-    "withMuteGuard" | "withConfigurationMetadataGuard"
+    "withMuteGuard" | "withConfigurationMetadataGuard" | "requestMute"
   >;
   serviceBindings: Pick<
     ServiceBindings,
@@ -518,34 +518,39 @@ export class SupervisorCreate {
       throw new ValueError((error as Error).message);
     }
     return conversations.withTitleGuard(cid, (titleToken) =>
-      this.deps.configActions.withMuteGuard(cid, async () => {
-        try {
-          const draftClaim = conv.attachment_draft;
-          if (draftClaim)
-            await this.deps.drafts.claimAttachmentDraft(draftClaim, cid);
-          nodes.node(cid).muteDesired = conv.muted ? true : null;
+      this.deps.configActions.withMuteGuard(
+        cid,
+        async (_muteToken, nodeToken) => {
           try {
-            await conversations.save(conv, titleToken);
+            const draftClaim = conv.attachment_draft;
+            if (draftClaim)
+              await this.deps.drafts.claimAttachmentDraft(draftClaim, cid);
+            this.deps.configActions.requestMute(conv, !!conv.muted, nodeToken);
+            try {
+              await conversations.save(conv, titleToken);
+            } catch (error) {
+              await this.rollbackConversation(conv);
+              throw error;
+            }
+            if (draftClaim)
+              await this.deps.drafts.transferAttachmentDraft(
+                draftClaim,
+                conv,
+                titleToken,
+              );
+            else
+              await this.deps.agentTemp.ensureAgentTemp(conv, {
+                persist: false,
+              });
+            conv.pending = [];
+            return { conversation: conv, created: true };
           } catch (error) {
-            await this.rollbackConversation(conv);
+            if (conversations.load(cid, { withPending: false }) === null)
+              nodes.dropNode(cid);
             throw error;
           }
-          if (draftClaim)
-            await this.deps.drafts.transferAttachmentDraft(
-              draftClaim,
-              conv,
-              titleToken,
-            );
-          else
-            await this.deps.agentTemp.ensureAgentTemp(conv, { persist: false });
-          conv.pending = [];
-          return { conversation: conv, created: true };
-        } catch (error) {
-          if (conversations.load(cid, { withPending: false }) === null)
-            nodes.dropNode(cid);
-          throw error;
-        }
-      }),
+        },
+      ),
     );
   }
 
@@ -735,7 +740,7 @@ export class SupervisorCreate {
       () =>
         this.deps.configActions.withConfigurationMetadataGuard(
           cid,
-          async (titleToken) => {
+          async (titleToken, _muteToken, nodeToken) => {
             const conv = conversations.load(cid);
             if (conv === null) throw new KeyError(cid);
             const controlChanged = !!conv.taken_over !== takenOver;
@@ -745,8 +750,7 @@ export class SupervisorCreate {
               this.deps.freshTakenOverOrder ?? freshTakenOverOrder
             )();
             conv.updated = this.deps.now();
-            nodes.node(cid).muteDesired =
-              conv.status === "running" ? takenOver : null;
+            this.deps.configActions.requestMute(conv, takenOver, nodeToken);
             await conversations.save(conv, titleToken);
             if (controlChanged) this.notifyControlChange(cid, conv);
             const found = nodes.existing(cid);

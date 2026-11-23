@@ -1,0 +1,37 @@
+/* Document page navigation in the shared Artifact pane. */
+.artifact-page-nav {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  color: var(--muted);
+}
+.artifact-page-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding-inline: var(--space-2);
+  flex: none;
+  gap: var(--space-2);
+  color: var(--accent);
+}
+.artifact-page-nav svg {
+  width: 16px;
+  height: 16px;
+}
+@media (max-width: 700px) {
+  #panes.overlay .pane-col[data-pane="report"] {
+    scroll-padding-top: calc(
+      var(--mobile-shell-height) + var(--pane-powerbar-height)
+    );
+  }
+}
+@media (pointer: coarse) {
+  .artifact-page-nav a,
+  .artifact-markdown .artifact-page-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    min-width: 44px;
+  }
+}

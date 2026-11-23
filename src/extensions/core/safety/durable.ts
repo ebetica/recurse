@@ -18,6 +18,8 @@ import {
   GenerationTask,
   type Harness,
   hook,
+  type SubmissionDraft,
+  type SubmissionId,
   type HookApi,
   type JsonObject,
   LiveDoc,
@@ -72,7 +74,12 @@ import {
 } from "./transcript.ts";
 
 /** Review escape hatch/availability; display state never gates tools. */
-const SafetyDoc = defineDoc<{ off: boolean; unavailable?: string }>({
+const SafetyDoc = defineDoc<{
+  off: boolean;
+  /** The record's request revision (ConversationStore.writeSafety). */
+  rev?: number;
+  unavailable?: string;
+}>({
   kind: "recurse.safety",
   version: 1,
   scope: "conversation",
@@ -125,17 +132,53 @@ export const DeniedReviewDoc = defineDoc<DeniedReviewState>({
   checkpointWhen: () => false,
 });
 
-// Write the escape hatch only for the host's authenticated toggle route.
-export async function setSafetyReviewOff(
+// Write the escape hatch only for the host's authenticated toggle route. An
+// OFF skips review only with the revision of a matching record OFF, and an ON
+// never replaces an OFF of a newer revision. `admits` runs inside the commit:
+// false writes nothing and returns false.
+export function setSafetyReviewOff(
   conversation: Conversation,
   off: boolean,
   context: Context,
-): Promise<void> {
-  await conversation.commit(async (tx) => {
+  rev?: number,
+  admits?: () => boolean,
+): Promise<boolean> {
+  return conversation.commit(async (tx) => {
     const doc = await tx.doc(SafetyDoc, conversation.id);
+    if (admits?.() === false) return false;
+    if (!off && doc.off && rev !== undefined && (doc.rev ?? 0) > rev)
+      return false;
     doc.off = off;
+    if (rev === undefined) delete doc.rev;
+    else doc.rev = rev;
     if (off) delete doc.unavailable;
+    return true;
   }, context);
+}
+
+class Refused extends Error {}
+
+// Admit input only while the document says ON and `refuse()` is false, checked
+// in the admission's own commit before and after the submission, which rolls
+// back if an OFF was requested meanwhile. Null when refused.
+export async function submitReviewed(
+  conversation: Conversation,
+  draft: SubmissionDraft,
+  refuse: () => boolean,
+  context: Context,
+): Promise<SubmissionId | null> {
+  try {
+    return await conversation.commit(async (tx) => {
+      if ((await tx.doc(SafetyDoc, conversation.id)).off || refuse())
+        return null;
+      const id = await conversation.submit(tx, draft);
+      if (refuse()) throw new Refused();
+      return id;
+    }, context);
+  } catch (error) {
+    if (error instanceof Refused) return null;
+    throw error;
+  }
 }
 
 // Read conversation review status for the host's display.
@@ -147,6 +190,17 @@ export async function safetyReviewOff(
   return (
     (await harness.snapshot(SafetyDoc, conversation.id, context))?.off === true
   );
+}
+
+// The request revision of an OFF document, for the host's display; undefined
+// while ON or without a revision.
+export async function safetyOffRevision(
+  harness: Pick<Harness, "snapshot">,
+  conversation: Conversation,
+  context: Context,
+): Promise<number | undefined> {
+  const state = await harness.snapshot(SafetyDoc, conversation.id, context);
+  return state?.off === true ? state.rev : undefined;
 }
 
 /** Current bounded, credential-free explanation for the composer. */
@@ -222,6 +276,8 @@ type SafetyOptions = {
   shells(): readonly ProcessRoot[] | undefined;
   /** Resolve the conversation of a hook; a throw blocks the call. */
   agent(api: HookApi, context: Context): Promise<DurableSafetyAgent>;
+  /** Whether conversation `id`'s record requests OFF under revision `rev`. */
+  reviewOffAllowed(id: string, rev: number): boolean;
   mcpServer?(name: string): string | undefined;
   log?(event: string, fields: Record<string, unknown>): void;
   reviewAction?: typeof reviewAction;
@@ -724,7 +780,14 @@ export function createDurableSafety(host: SafetyOptions): Extension {
     if (settingsView || (!mcp && !REVIEWED_TOOLS.has(call.name)))
       return allow();
     if (run.config.error) return { block: invalidConfigMessage() };
-    if ((await api.snapshot(SafetyDoc, api.conversationId, context))?.off)
+    // Invariant: Review is skipped only while the document and the record
+    // say OFF under the same request revision.
+    const safety = await api.snapshot(SafetyDoc, api.conversationId, context);
+    if (
+      safety?.off === true &&
+      safety.rev !== undefined &&
+      host.reviewOffAllowed(agent.id, safety.rev)
+    )
       return allow();
     if (context.abortSignal?.aborted) return { block: CANCELLED };
     if (allowedByPathScope(call.name, args, agent.cwd, run.pathScope))

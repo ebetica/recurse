@@ -194,6 +194,9 @@ function failureProvider(
   );
 }
 
+const CHATGPT_SIGN_IN =
+  "Sign in again in Codex CLI or sign in with ChatGPT in Settings.";
+
 /** The fixed sentence for a provider HTTP status, if one is mapped. */
 function apiStatusSentence(
   text: string,
@@ -204,6 +207,8 @@ function apiStatusSentence(
   const provider = () => failureProvider(text, apiProvider, context);
   if (status === 401 || status === 403) {
     const name = provider();
+    if (name === "openai-codex")
+      return `ChatGPT rejected the sign-in. ${CHATGPT_SIGN_IN}`;
     return name
       ? `Provider ${name} rejected the API key. Check it in Settings.`
       : "The configured API key was rejected. Check it in Settings.";
@@ -291,6 +296,8 @@ function describe(
     return "The provider's content filter blocked this reply.";
   if (hasAny(lowered, AUTH_MARKERS)) {
     const provider = failureProvider(text, null, context);
+    if (provider === "openai-codex")
+      return `ChatGPT sign-in failed. ${CHATGPT_SIGN_IN}`;
     if (hasAny(lowered, REJECTED_KEY_MARKERS)) {
       return provider
         ? `The API key for provider ${provider} was rejected. Check it in Settings.`

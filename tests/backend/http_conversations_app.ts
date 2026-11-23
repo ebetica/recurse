@@ -158,12 +158,14 @@ class ScriptedWorld {
     );
     return cid === "conv-gone" ? null : this.next("msg");
   }
-  async setSafety(cid: string, off: boolean): Promise<[Rec, boolean]> {
+  async setSafety(cid: string, off: boolean, onNoticed: () => void) {
     this.log("set_safety", cid, off);
     if (cid === "conv-gone") throw new ValueError("a reap is in progress");
     const conv = this.convs.get(cid)!;
     conv.safety_off = off;
-    return [copy(conv), cid === "conv-run"];
+    conv.safety_rev = Number(conv.safety_rev ?? 0) + 1;
+    if (cid === "conv-run") onNoticed();
+    return [copy(conv)];
   }
   rename(cid: string, title: string) {
     this.log("rename_title", cid, title);
@@ -264,7 +266,9 @@ export async function buildConversationsApp(
   });
   const levels = seed.levels as unknown as Record<string, [string, string]>;
   const node = (cid: string) => ({
-    setSafety: (off: boolean) => world.setSafety(cid, off),
+    setSafety: (off: boolean, onNoticed: () => void) =>
+      world.setSafety(cid, off, onNoticed),
+    safetyState: () => world.load(cid),
     renameTitle: (title: string) => world.rename(cid, title),
     piStatus: () => (cid === "conv-run" ? "running" : null),
   });

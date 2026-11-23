@@ -139,9 +139,11 @@ export function replayProvider(
   {
     timeScale = 1,
     sseRequestText,
+    verifyHeaders,
   }: {
     timeScale?: number;
     sseRequestText?: WeakMap<Record<string, unknown>, string>;
+    verifyHeaders?: (headers: Pick<Headers, "has" | "get">) => void;
   } = {},
 ) {
   if (!Number.isFinite(timeScale) || timeScale < 0)
@@ -168,6 +170,7 @@ export function replayProvider(
     if (path !== exchange.path)
       throw new Error(`request mismatch: path ${path}`);
     checkRequest(exchange.request, body);
+    verifyHeaders?.(headers);
     const actualHeaders = protocolHeaders(headers);
     for (const [name, value] of Object.entries(exchange.requestHeaders))
       if (actualHeaders[name] !== value)

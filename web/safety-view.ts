@@ -23,3 +23,31 @@ export function deriveSafetyView(
     (pending ? " \u00b7 next turn" : "");
   return { desired, effective, pending, label };
 }
+
+interface SafetyFields {
+  safety_off?: boolean;
+  safety_off_active?: boolean;
+  safety_rev?: number | null;
+}
+
+const repliedAt = new Map<string, number>();
+
+/** Note that a safety reply for conversation `id` arrived now. */
+export function noteSafetyReply(id: string): void {
+  repliedAt.set(id, performance.now());
+}
+
+// Invariant: A read sent before a safety reply arrived may predate that reply's
+// commit, so `next` keeps the shown safety fields. A read sent later carries
+// every change since, including a clear that keeps the revision.
+export function keepRepliedSafety(
+  id: string,
+  sentAt: number,
+  shown: SafetyFields | undefined,
+  next: SafetyFields,
+): void {
+  if (!shown || sentAt >= (repliedAt.get(id) ?? -Infinity)) return;
+  next.safety_off = shown.safety_off;
+  next.safety_off_active = shown.safety_off_active;
+  next.safety_rev = shown.safety_rev;
+}

@@ -53,6 +53,7 @@ const DURABLE_METADATA_KEYS: ReadonlySet<string> = new Set([
   "taken_over",
   "taken_over_order",
   "safety_off",
+  "safety_rev",
   "session_id",
   "session_file",
   "session_cwd",
@@ -77,7 +78,15 @@ const DURABLE_METADATA_KEYS: ReadonlySet<string> = new Set([
   "side_of",
   "promoting",
   "promotion_error",
+  "revived_from",
 ]);
+const MODEL_CHOICE_KEYS = [
+  "model",
+  "effort",
+  "level",
+  "pending_model",
+  "model_choice_version",
+] as const;
 const PIGGYBACK_METADATA_KEYS: ReadonlySet<string> = new Set([
   "updated",
   "last_interaction",
@@ -260,11 +269,25 @@ export interface RowReservation {
   readonly cid: string;
 }
 
+interface SafetyRequest {
+  /** Newer than every earlier request's revision for the record. */
+  rev: number;
+  /** Whether it changes the recorded request. */
+  changed: boolean;
+  /** False when its record write was refused. */
+  recorded: boolean;
+  /** Shared by the requests for one record; a revived record gets a new one. */
+  life: object;
+}
+
 export class ConversationStore {
   private readonly mutex = new CidMutex();
   private readonly projection = new Map<string, ConversationRecord>();
   private readonly lastSaved = new Map<string, ConversationRecord>();
   private readonly reservedRows = new Map<string, RowReservation>();
+  // Retired agent databases whose record is not yet discarded.
+  private readonly ended = new Set<string>();
+  private readonly safetyRequests = new Map<string, SafetyRequest>();
   private lastScanComplete = false;
   private projectionReadyState = true;
   private readonly guardTokens = new WeakMap<
@@ -325,6 +348,8 @@ export class ConversationStore {
     this.projection.clear();
     for (const [cid, row] of Object.entries(snapshot))
       this.projection.set(cid, row);
+    for (const cid of this.ended)
+      if (!this.projection.has(cid)) this.ended.delete(cid);
     this.notifyRowsChanged(null);
   }
   private notifyRowsChanged(cid: string | null): void {
@@ -385,14 +410,28 @@ export class ConversationStore {
       rows: this.projection,
       config: this.config,
       save: async (cid, row) => {
+        // Invariant: Only the model choice is merged, into the row current at
+        // each write, so a change made during the flush is kept.
+        const merged = (base: ConversationRecord) => {
+          const next = { ...base };
+          for (const key of MODEL_CHOICE_KEYS)
+            if (key in row) next[key] = row[key];
+          return next;
+        };
+        const current = this.projection.get(cid);
+        if (!current) return;
         if (
-          !this.enqueueDurableMetadata(cid, row) ||
+          !this.enqueueDurableMetadata(cid, merged(current)) ||
           !(await this.agentStore.flush(cid, 30))
         )
           throw new Error(
             "conversation model choices incomplete; restart to retry",
           );
-        this.projection.set(cid, row);
+        const latest = this.projection.get(cid);
+        if (!latest) return;
+        const next = merged(latest);
+        this.enqueueDurableMetadata(cid, next);
+        this.projection.set(cid, next);
         this.notifyRowsChanged(cid);
       },
     });
@@ -449,6 +488,47 @@ export class ConversationStore {
     this.projection.set(cid, next);
     this.notifyRowsChanged(cid);
     return true;
+  }
+  /**
+   * Accept and record a safety request at once, without a guard, under a newer
+   * revision; null when `cid` has no writable record.
+   */
+  writeSafety(cid: string, off: boolean, now: number): SafetyRequest | null {
+    const current = this.projection.get(cid);
+    if (!current || this.ended.has(cid)) return null;
+    const rev = Math.max(
+      (Number(current.safety_rev) || 0) + 1,
+      (this.safetyRequests.get(cid)?.rev ?? 0) + 1,
+      Math.floor(now * 1000),
+    );
+    const request = {
+      rev,
+      changed: !!current.safety_off !== off,
+      recorded: false,
+      life: this.safetyRequests.get(cid)?.life ?? {},
+    };
+    // Invariant: A request supersedes older ones on acceptance, before its
+    // record write, which may be refused. Tokens are objects, so a request
+    // from before a reap never matches one for a revived record, even with an
+    // equal revision.
+    this.safetyRequests.set(cid, request);
+    try {
+      request.recorded = this.patch(cid, {
+        safety_off: off,
+        safety_rev: rev,
+        updated: now,
+      });
+    } catch (error) {
+      this.hooks.log?.("safety_record_write_refused", {
+        conversation_id: cid,
+        error: String(error),
+      });
+    }
+    return request;
+  }
+  /** The newest safety request accepted for `cid` since its record loaded. */
+  newestSafety(cid: string): SafetyRequest | undefined {
+    return this.safetyRequests.get(cid);
   }
   /** Caller holds configuration guards and has committed the import marker. */
   publishImportedBackend(cid: string): void {
@@ -575,7 +655,14 @@ export class ConversationStore {
       typeof cid === "string" && CID_RE.test(cid) && this.projection.has(cid)
     );
   }
+  /** Refuse guard-free record writes once `cid`'s agent database is retired. */
+  endRecordWrites(cid: string): void {
+    this.ended.add(cid);
+    this.safetyRequests.delete(cid);
+  }
   discardConvProjection(cid: string): void {
+    this.ended.delete(cid);
+    this.safetyRequests.delete(cid);
     this.projection.delete(cid);
     this.lastSaved.delete(cid);
     this.notifyRowsChanged(cid);
@@ -812,6 +899,12 @@ export class ConversationStore {
       async () => {
         const current = this.projection.get(cid);
         if (!current || setModel) record.model_choice_version = 1;
+        // Invariant: A published Durable backend is final; a stale snapshot
+        // never restores the Pi backend.
+        if (current?.backend === "durable") {
+          record.backend = "durable";
+          delete record.backend_change;
+        }
         if (current) {
           this.carryForwardChoice(
             current,
@@ -854,6 +947,11 @@ export class ConversationStore {
           if (current && key in current)
             record[key] = structuredClone(current[key]);
           else if (current || key !== "tags") delete record[key];
+        // Invariant: Only writeSafety changes a stored safety request.
+        if (current)
+          for (const key of ["safety_off", "safety_rev"])
+            if (key in current) record[key] = current[key];
+            else delete record[key];
         if (typeof current?.operator_message_at === "number")
           record.operator_message_at = current.operator_message_at;
         if (clearPending) delete record.pending_model;

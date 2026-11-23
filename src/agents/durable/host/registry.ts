@@ -399,6 +399,7 @@ export function installHooks(
         }
       : {}),
     shells: () => host.shells(cid).items,
+    reviewOffAllowed: (id, rev) => host.safetyOffAllowed(id, rev),
     agent: async (api?: { conversationId: Conversation["id"] }) => {
       const id = owner(target, api?.conversationId);
       const title = (host.deps.load(id, ["title"]) ?? conv).title;

@@ -594,7 +594,7 @@ describe("codemode on Durable", () => {
     }
   });
   test("native nested calls retain the complete result and bound displayed rows", async () => {
-    const { host, faux } = setup("cm-progress");
+    const { host, faux, records } = setup("cm-progress");
     const last = held(fauxAssistantMessage("done"));
     const count = 105;
     script(faux, [
@@ -604,7 +604,9 @@ describe("codemode on Durable", () => {
       last.step,
     ]);
     const { conversation } = await host.open("c1");
-    await host.setSafetyReviewOff("c1", true);
+    records.c1!.safety_off = true;
+    records.c1!.safety_rev = 1;
+    await host.setSafetyReviewOff("c1", true, 1);
     try {
       await host.send("c1", "go", "r1");
       await last.started;

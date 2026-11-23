@@ -233,10 +233,14 @@ function composeMessage(
       (comment) => comment.text.trim() && comment.version === displayed.version,
     );
   if (!notes.length) return "";
+  const workingPath = artifactWorkingPath(
+    displayed.owner_agent_id ?? parseConversationId(pane._rs.agentId!).cid,
+    displayed.id,
+  );
   const lines = [
     displayed.noun === "file"
       ? `Comments on file "${displayed.title}" (${displayed.path ? `path: ${displayed.path}` : `id: ${displayed.id}`}):`
-      : `Comments on artifact "${displayed.title}" (id: ${displayed.id}, version: ${displayed.version}, path: ${artifactWorkingPath(displayed.owner_agent_id ?? parseConversationId(pane._rs.agentId!).cid, displayed.id)}):`,
+      : `Comments on artifact "${displayed.title}" (id: ${displayed.id}, version: ${displayed.version}, path: ${workingPath}${displayed.page ? `/${displayed.page}` : ""}):`,
     "",
   ];
   let boxNumber = 0;
@@ -609,7 +613,11 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
     const cache = entry(requestedAgent);
     cache.list = cache.list.filter((item) => item.id !== requestedId);
     const artifactKey = commentKey(requestedAgent, requestedId);
-    if (artifactKey) dropComments(artifactKey);
+    if (artifactKey)
+      for (const key of comments.keys()) {
+        if (key === artifactKey || key.startsWith(`${artifactKey}\n`))
+          dropComments(key);
+      }
     if (!currentRequest()) {
       await refreshList(requestedAgent, true);
       return;
@@ -622,6 +630,7 @@ export async function deleteSelected(pane: ArtifactEl): Promise<void> {
     rs.sending = false;
     rs.sendFailed = false;
     rs.selId = cache.list[0]?.id || null;
+    rs.selectedPage = null;
     const next = selectedInfo(pane);
     rs.selectedVersion = next?.version || null;
     rs.followCurrent = true;

@@ -1,10 +1,23 @@
 import { expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rmdir,
+  rm,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { createModels, fauxProvider } from "@earendil-works/pi-ai";
 import { DurableHost } from "../../src/agents/durable/host";
+import { Config } from "../../src/config";
+import { CodexAuth } from "../../src/auth/codex";
+import { OAuthStore } from "../../src/auth/oauth";
+import { ShellRegistry } from "../../src/pi_bg_shell";
+import { ProcessLifecycle } from "../../src/process_lifecycle";
 import {
   replayProvider,
   type Recording,
@@ -102,38 +115,140 @@ test("a stored Pi catalog update runs through the built-in provider", async () =
     ).pathname,
   ).json()) as Recording;
   recording.exchanges[0]!.request.model = catalogModel.id;
-  const replay = replayProvider(recording, { timeScale: 0 });
+  recording.exchanges.push(recording.exchanges[0]!);
+  let expectedBearer: string;
+  const replay = replayProvider(recording, {
+    timeScale: 0,
+    verifyHeaders(headers) {
+      if (headers.get("authorization") !== expectedBearer)
+        throw new Error("wrong replay bearer token");
+    },
+  });
+  const cliAccess = (account: string, lifetime: number) => {
+    const payload = Buffer.from(
+      JSON.stringify({
+        exp: Math.floor(Date.now() / 1000) + lifetime,
+        "https://api.openai.com/auth": { chatgpt_account_id: account },
+      }),
+    ).toString("base64url");
+    return `test.${payload}.test`;
+  };
   const record = { id: "c1", backend: "durable", workdir: root };
-  const host = new DurableHost({
+  const codexHome = join(root, "codex");
+  const ambient = {
+    PATH: process.env.PATH,
+    HOME: root,
+    CODEX_HOME: codexHome,
+    CHAT_DATA_DIR: root,
+    RECURSE_HOME: join(root, "settings"),
+  };
+  const config = new Config({ env: ambient });
+  const shellStateDir = join(root, "shell-state");
+  const tokenRequests: string[] = [];
+  const oauth = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      tokenRequests.push(new URL(request.url).pathname);
+      return new Response(null, { status: 400 });
+    },
+  });
+  const fetch = globalThis.fetch;
+  globalThis.fetch = ((...args: Parameters<typeof fetch>) => {
+    const [input, init] = args;
+    const url = input instanceof Request ? input.url : String(input);
+    return url === "https://auth.openai.com/oauth/token"
+      ? fetch(`${oauth.url.origin}/oauth/token`, init)
+      : fetch(...args);
+  }) as typeof globalThis.fetch;
+  const store = new OAuthStore({
+    ambient,
+    piAgentDir: async () => root,
+    lifecycle: new ProcessLifecycle({
+      registry: new ShellRegistry({
+        enabled: true,
+        stateDir: shellStateDir,
+        processStartedMs: Date.now(),
+      }),
+      shellStateDir,
+      termGraceMs: 200,
+      killGraceMs: 500,
+    }),
+  });
+  const codex = new CodexAuth({ store, ambient });
+  const deps = {
     ...testDeps(
       root,
       () => record,
       () => ["c1"],
     ),
-    settings: () => [`openai-codex/${catalogModel.id}`, "low"],
-  });
+    config,
+    settings: (): [string, string] => [
+      `openai-codex/${catalogModel.id}`,
+      "low",
+    ],
+  };
+  let host = new DurableHost(deps);
   try {
+    await mkdir(codexHome);
+    await mkdir(shellStateDir);
+    const path = join(codexHome, "auth.json");
+    const settingsAuth = join(root, "auth.json");
+    await writeFile(settingsAuth, "{}");
     const models = await host.models();
     expect(models.getModel("openai-codex", catalogModel.id)?.baseUrl).not.toBe(
       replay.baseUrl + "/backend-api",
     );
-    await writeFile(
-      join(root, "auth.json"),
-      JSON.stringify({
-        "openai-codex": {
-          type: "oauth",
-          access: `test.${Buffer.from(JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "recorded-test" } })).toString("base64url")}.test`,
-          refresh: "recorded-test-refresh",
-          expires: Date.now() + 3600_000,
-          accountId: "recorded-test",
-        },
-      }),
-    );
     catalogModel.baseUrl = replay.baseUrl + "/backend-api";
     stored["openai-codex"].lastModified = Date.now();
     await writeFile(join(root, "models-store.json"), JSON.stringify(stored));
-    await host.send("c1", "Reply without tools", "catalog-update");
-    await until(idle(host));
+    const send = async (id: string) => {
+      await host.send("c1", "Reply without tools", id);
+      await until(idle(host));
+    };
+    let expectedConnections = 0;
+    const assertRequests = (number: number) => {
+      expect(replay.requests).toHaveLength(number);
+      expect(replay.websocketConnections).toBe(expectedConnections);
+      expect(replay.failures).toEqual([]);
+      expect(tokenRequests).toEqual([]);
+    };
+    await writeFile(
+      path,
+      JSON.stringify({ tokens: { access_token: cliAccess("first", 3600) } }),
+    );
+    await writeFile(settingsAuth, '{"anthropic":null}');
+    await send("invalid-settings-credential");
+    assertRequests(0);
+    await unlink(settingsAuth);
+    await mkdir(settingsAuth);
+    await send("unreadable-settings-auth");
+    assertRequests(0);
+    await rmdir(settingsAuth);
+    await writeFile(settingsAuth, "{}");
+    await unlink(path);
+    await mkdir(path);
+    await send("non-regular-cli-auth");
+    assertRequests(0);
+    await rmdir(path);
+    for (const account of ["first", "rotated"]) {
+      const access = cliAccess(account, 3600);
+      expectedBearer = `Bearer ${access}`;
+      const cliAuth = JSON.stringify({
+        tokens: {
+          access_token: access,
+          refresh_token: `test-refresh-${account}`,
+        },
+      });
+      await writeFile(path, cliAuth);
+      expect(
+        (await models.getAuth("openai-codex"))?.auth.apiKey === access,
+      ).toBe(true);
+      expect(await host.providerToken("openai-codex")).toBeUndefined();
+      await send(account);
+      expect((await readFile(path, "utf8")) === cliAuth).toBe(true);
+      expect((await readFile(settingsAuth, "utf8")) === "{}").toBe(true);
+    }
     replay.assertComplete();
     expect(await host.models()).toBe(models);
     expect(models.getModel("openai-codex", catalogModel.id)).toMatchObject({
@@ -148,8 +263,90 @@ test("a stored Pi catalog update runs through the built-in provider", async () =
         (row) => row.role === "assistant",
       )?.text,
     ).toContain("RECORDED_PROVIDER_OK");
-  } finally {
+
+    const signedInCli = await readFile(path, "utf8");
+    const recorded = replay.requests.length;
+    expectedConnections = replay.websocketConnections;
+    const corruptUnrelatedCredential = async () => {
+      const auth = await Bun.file(settingsAuth).json();
+      await writeFile(
+        settingsAuth,
+        JSON.stringify({ ...auth, anthropic: null }),
+      );
+    };
+    const signedInSettings = cliAccess("settings", 3600);
+    await codex.startLogin();
+    await codex.completeLoginWithToken(
+      JSON.stringify({
+        access_token: signedInSettings,
+        refresh_token: "test-settings-refresh",
+        expires_in: 3600,
+      }),
+    );
+    await corruptUnrelatedCredential();
+    expect(
+      (await models.getAuth("openai-codex"))?.auth.apiKey === signedInSettings,
+    ).toBe(true);
+    expect(
+      (await host.providerToken("openai-codex")) === signedInSettings,
+    ).toBe(true);
+    await writeFile(settingsAuth, "{}");
+    await codex.setApiKey("test-platform-key");
+    expect(await codex.authStatus()).toEqual({
+      subscription: null,
+      api_key: "saved",
+    });
+    await send("saved-settings-api-key");
+    assertRequests(recorded);
+    expect((await readFile(path, "utf8")) === signedInCli).toBe(true);
+    await corruptUnrelatedCredential();
+    expect(await codex.authStatus()).toEqual({
+      subscription: null,
+      api_key: "saved",
+    });
+
+    await writeFile(settingsAuth, "{}");
+    expect(await codex.authStatus()).toEqual({
+      subscription: "codex_cli",
+      api_key: null,
+    });
+    await codex.logout();
+    expect(await codex.authStatus()).toEqual({
+      subscription: null,
+      api_key: null,
+    });
+    await send("disconnected-by-settings");
+    assertRequests(recorded);
     await host.close();
+    host = new DurableHost(deps);
+    await send("still-disconnected-after-reopen");
+    assertRequests(recorded);
+    expect((await readFile(path, "utf8")) === signedInCli).toBe(true);
+
+    await writeFile(settingsAuth, "{}");
+    const nearExpiry = JSON.stringify({
+      tokens: {
+        access_token: cliAccess("rotated", 240),
+        refresh_token: "test-refresh-near-expiry",
+      },
+    });
+    await writeFile(path, nearExpiry);
+    await send("expired-cli-login");
+    assertRequests(recorded);
+    expect((await readFile(path, "utf8")) === nearExpiry).toBe(true);
+    expect((await readFile(settingsAuth, "utf8")) === "{}").toBe(true);
+    const failed = (await host.view("c1", {})).blocks as Record<
+      string,
+      unknown
+    >[];
+    expect(failed.findLast((row) => row.role === "assistant")?.error).toContain(
+      "Sign in again in Codex CLI or sign in with ChatGPT in Settings.",
+    );
+  } finally {
+    globalThis.fetch = fetch;
+    oauth.stop(true);
+    await host.close();
+    await config.close();
     replay.server.stop(true);
     await rm(root, { recursive: true, force: true });
   }

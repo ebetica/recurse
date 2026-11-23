@@ -80,6 +80,7 @@ async function serve(config: Config, root: string) {
   const router = new Router();
   registerSettingsRoutes(router, {
     config,
+    providers: { refreshOpenAI: async () => {} },
   } as unknown as Parameters<typeof registerSettingsRoutes>[1]);
   return (await serveOpen(router, join(root, "data"))).running;
 }

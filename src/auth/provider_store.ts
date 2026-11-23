@@ -4,6 +4,40 @@
 /** Reserved auth.json marker, not a provider ID. */
 export const OPENAI_CHOICE_MARKER = "$recurse.openai-choice";
 
+export function validCredential(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const { type, access, refresh, expires, key, env } = value as Record<
+    string,
+    unknown
+  >;
+  if (type === "oauth")
+    return (
+      typeof access === "string" &&
+      access.length > 0 &&
+      typeof refresh === "string" &&
+      refresh.length > 0 &&
+      typeof expires === "number" &&
+      Number.isFinite(expires)
+    );
+  return (
+    type === "api_key" &&
+    ((typeof key === "string" && key.length > 0) ||
+      (env !== null && typeof env === "object" && Object.keys(env).length > 0))
+  );
+}
+
+/** Validate the whole Pi auth file for Settings writes and live fallback reads. */
+export function validCredentials(
+  data: unknown,
+): data is Record<string, unknown> {
+  return (
+    !!data &&
+    typeof data === "object" &&
+    !Array.isArray(data) &&
+    Object.values(data).every(validCredential)
+  );
+}
+
 export interface ProviderCredentialStore {
   /** oauth.stored_api_key: [whether a selection exists, its usable key]. */
   storedApiKey(provider: string): Promise<[boolean, string | null]>;

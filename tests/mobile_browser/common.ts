@@ -91,19 +91,21 @@ export async function expectHitCorners(
     label = String(control),
     scroll = true,
     horizontalInset,
+    verticalInset,
     centerOnHitArea = false,
     exact = false,
   }: {
     label?: string;
     scroll?: boolean;
     horizontalInset?: number;
+    verticalInset?: number;
     centerOnHitArea?: boolean;
     exact?: boolean;
   } = {},
 ) {
   if (scroll) await control.scrollIntoViewIfNeeded();
   const hits = await control.evaluate(
-    (el, { size, horizontalInset, centerOnHitArea, exact }) => {
+    (el, { size, horizontalInset, verticalInset, centerOnHitArea, exact }) => {
       const r = el.getBoundingClientRect();
       const offset = (size - 2) / 2;
       const centerX = r.left + r.width / 2;
@@ -125,11 +127,13 @@ export async function expectHitCorners(
         horizontalInset === undefined
           ? [centerX - offset, centerX + offset]
           : [r.left + horizontalInset, r.right - horizontalInset];
-      return xs.flatMap((x) =>
-        [-offset, offset].map((y) => hitAt(x, targetY + y)),
-      );
+      const ys =
+        verticalInset === undefined
+          ? [targetY - offset, targetY + offset]
+          : [r.top + verticalInset, r.bottom - verticalInset];
+      return xs.flatMap((x) => ys.map((y) => hitAt(x, y)));
     },
-    { size, horizontalInset, centerOnHitArea, exact },
+    { size, horizontalInset, verticalInset, centerOnHitArea, exact },
   );
   expect(hits, label).toEqual([true, true, true, true]);
 }

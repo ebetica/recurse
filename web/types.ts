@@ -60,6 +60,8 @@ export interface TreeNode {
   safety_off?: boolean;
   // Effective launched review-off state for the in-flight turn.
   safety_off_active?: boolean;
+  // Revision of the newest safety request; a larger one is newer.
+  safety_rev?: number | null;
   // Opaque instance/workdir/config partition for persisted skills.
   skill_context?: string | null;
   // The parent of a side conversation, which the tree never shows.
@@ -481,6 +483,8 @@ export interface Conversation {
   safety_off?: boolean;
   // Effective launched review-off state for this in-flight turn.
   safety_off_active?: boolean;
+  // Revision of the newest safety request; a larger one is newer.
+  safety_rev?: number | null;
   safety_unavailable?: string | null;
   status: AgentStatus;
   // Restart-interrupted; active parked work may resume automatically.

@@ -28,7 +28,7 @@ describe("durableModels", () => {
     writeFileSync(join(dir, "auth.json"), "{}");
     process.env.ANTHROPIC_API_KEY = "sk-ant-stray";
     process.env.OPENAI_API_KEY = "sk-stray";
-    const models = durableModels(dir);
+    const models = durableModels(dir, undefined, undefined, { HOME: dir });
     expect(await models.getAuth("anthropic")).toBeUndefined();
     expect(await models.getAuth("openai")).toBeUndefined();
     expect(await models.getAuth("openai-codex")).toBeUndefined();

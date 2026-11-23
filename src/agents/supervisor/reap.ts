@@ -101,7 +101,11 @@ export interface ReapDeps {
   errors: ReapErrors;
   conversations: Pick<
     ConversationStore,
-    "load" | "save" | "convRowExists" | "discardConvProjection"
+    | "load"
+    | "save"
+    | "convRowExists"
+    | "discardConvProjection"
+    | "endRecordWrites"
   >;
   configActions: Pick<ConfigActions, "withConfigurationMetadataGuard">;
   serviceBindings: Pick<
@@ -568,6 +572,9 @@ export class SupervisorReap {
             return [false, releaseFailure, null, tempEntry];
           if (!(await this.retireAgentStoreFiles(d)))
             return [false, "agent database retirement failed", null, tempEntry];
+          // Invariant: Guard-free writers stop before the forgotten agent
+          // database could be recreated by a write.
+          conversations.endRecordWrites(d);
           agentStore.forget(d);
           await this.deps.retireToolDetails(d);
           await this.retireReviewerJournal(d);

@@ -1,4 +1,6 @@
 import { expect } from "bun:test";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import {
   captureErrors,
   gotoRoot,
@@ -13,6 +15,7 @@ import { expect as browserExpect } from "playwright/test";
 const subscriptionToken = () => ({
   access_token: `h.${Buffer.from(
     JSON.stringify({
+      exp: Math.floor(Date.now() / 1000) + 7200,
       "https://api.openai.com/auth": { chatgpt_account_id: "acct" },
     }),
   ).toString("base64url")}.s`,
@@ -25,6 +28,7 @@ export const tests: BrowserTest[] = [
   async function test_subscription_sign_in_pastes_the_redirect_address(
     browser,
     base,
+    data,
   ) {
     const context = await browser.newContext({
       viewport: { width: 412, height: 915 },
@@ -91,8 +95,45 @@ export const tests: BrowserTest[] = [
           chatgpt: `${tokens.url}codex/token`,
         },
       });
+      const codexHome = join(data, "home", ".codex");
+      await mkdir(codexHome);
+      const cliFile = Bun.file(join(codexHome, "auth.json"));
+      const cliJson = JSON.stringify({ tokens: subscriptionToken() });
+      await Bun.write(cliFile, cliJson);
       await openSettingsPanel(page);
       await page.locator('#settings-nav button[data-cat="providers"]').tap();
+      await openDetail(page, /^OpenAI /);
+      const cliSection = page.getByRole("region", {
+        name: "OpenAI",
+        exact: true,
+      });
+      await browserExpect(
+        cliSection.getByText("Signed in through Codex CLI"),
+      ).toBeVisible();
+      const disconnect = cliSection.getByRole("button", {
+        name: "Disconnect Codex",
+        exact: true,
+      });
+      await expectHitCorners(disconnect);
+      await disconnect.tap();
+      const confirm = page.getByRole("dialog", {
+        name: "Disconnect Codex from Recurse?",
+      });
+      const cancel = confirm.getByRole("button", { name: "Cancel" });
+      await browserExpect(cancel).toBeFocused();
+      await cancel.press("Enter");
+      await browserExpect(confirm).toBeHidden();
+      await browserExpect(disconnect).toBeFocused();
+      await disconnect.tap();
+      await cancel.press("Escape");
+      await browserExpect(confirm).toBeHidden();
+      await browserExpect(disconnect).toBeFocused();
+      await disconnect.tap();
+      await confirm.getByRole("button", { name: "Disconnect Codex" }).tap();
+      await browserExpect(
+        cliSection.locator(".openai-subscription .credential-status"),
+      ).toHaveText("Not signed in");
+      expect(await cliFile.text()).toBe(cliJson);
       const signIn = async (title: string, name: string) => {
         await closeDetails(page);
         await page

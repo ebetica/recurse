@@ -277,6 +277,7 @@ async function openSteps(
     );
   timing.phase("recover");
   timing.begin("resume");
+  await restoreRecordedOn(host, rt, cid, harness, conversation);
   if (target.clear?.rotated)
     await submitHeld(host, cid, target.clear, conversation);
   const inspection = await awaitedSpan("pi_inspect", cid, () =>
@@ -284,7 +285,16 @@ async function openSteps(
   );
   await showShells(host, rt, target, inspection);
   opened.activity.start(inspection);
-  if (typeof target.conv.revived_from === "string")
+  if (typeof target.conv.revived_from === "string") {
+    // Invariant: A revived store never keeps its archived OFF document, whose
+    // revision a new record could repeat; a later OFF commits after this open.
+    const revive = await harness.snapshot(
+      rt.ReviveDoc,
+      conversation.id,
+      context,
+    );
+    if (revive?.archive !== target.conv.revived_from)
+      await rt.setSafetyReviewOff(conversation, false, context);
     await rt.settleRevive(
       harness,
       conversation,
@@ -292,6 +302,7 @@ async function openSteps(
       target.conv.revived_from,
       target.cwd,
     );
+  }
   slowSpan("durable_resume", cid, () => harness.resume());
   timing.phase("resume");
   timing.log(host, cid);
@@ -614,6 +625,26 @@ function handle(
   };
 }
 
+// Invariant: An open document follows a record that requests ON, for a root
+// and each side fork, so service input is admitted again after a restart or a
+// failed commit left an older OFF document. Checked inside the commit.
+async function restoreRecordedOn(
+  host: DurableHost,
+  rt: Runtime,
+  cid: string,
+  harness: Opened["harness"],
+  conversation: Conversation,
+): Promise<void> {
+  if (await rt.safetyReviewOff(harness, conversation, context))
+    await rt.setSafetyReviewOff(
+      conversation,
+      false,
+      context,
+      undefined,
+      () => !host.safetyRequestedOff(cid),
+    );
+}
+
 /** Follow every stored side fork, or drop it if its side conversation is
  * gone. */
 async function attachForks(
@@ -758,6 +789,7 @@ async function attachSide(
   main.followed.set(String(conversation.id), conversation);
   main.owners.set(String(conversation.id), cid);
   await rt.ensureReportGeneration(main.harness, conversation);
+  await restoreRecordedOn(host, rt, cid, main.harness, conversation);
   const row: LiveRow = { pending: [], shells: new Map() };
   let stopTracking = () => undefined as void;
   const opened: Opened = {

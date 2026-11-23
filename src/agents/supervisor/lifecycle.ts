@@ -96,10 +96,8 @@ export interface LifecycleDeps {
     recoverAtStartup(signal?: AbortSignal): Promise<void>;
     watchOnce(signal?: AbortSignal): Promise<void>;
   };
-  /** auth.anthropic.import_claude_code_login / codex.import_codex_cli_login. */
   logins: {
     importClaudeCodeLogin(): Promise<unknown>;
-    importCodexCliLogin(): Promise<unknown>;
   };
   agentTemp: {
     migrateUploads(): Promise<void>;
@@ -373,24 +371,17 @@ export class SupervisorLifecycle {
       }
     };
     this.openLoadWindow();
-    for (const [importLogin, event] of [
-      [
-        () => deps.logins.importClaudeCodeLogin(),
-        "claude_code_login_import_failed",
-      ],
-      [
-        () => deps.logins.importCodexCliLogin(),
-        "codex_cli_login_import_failed",
-      ],
-    ] as const) {
-      try {
-        await step(event.replace("_failed", ""), importLogin);
-      } catch (error) {
-        rethrowCancelled(error);
-        logException(log, event, error, { level: WARNING });
-      }
-      checkAbort(signal);
+    try {
+      await step("claude_code_login_import", () =>
+        deps.logins.importClaudeCodeLogin(),
+      );
+    } catch (error) {
+      rethrowCancelled(error);
+      logException(log, "claude_code_login_import_failed", error, {
+        level: WARNING,
+      });
     }
+    checkAbort(signal);
     await this.retireFileWorldResidue();
     checkAbort(signal);
     await this.retireProcessRegistryResidue();

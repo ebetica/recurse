@@ -28,7 +28,7 @@ import {
 import { showModelResponse } from "../model-response.js";
 import { beginPaneVisit, syncPanes } from "../panes.js";
 import { resetThreadView } from "../row-thread-state.js";
-import { deriveSafetyView } from "../safety-view.js";
+import { deriveSafetyView, noteSafetyReply } from "../safety-view.js";
 import { updateScrollBtn } from "../thread-scroll/index.js";
 import { closeAgentSurface, closeShellSurface } from "./shell-surface.js";
 import { refreshSidebarTree, renderAgentList } from "../sidebar/index.js";
@@ -53,14 +53,12 @@ const unavailable = $("#safety-reason")!;
 let busy = false;
 
 // DESIRED state (what the operator has set): an optimistic pending value wins,
-// then the shown conversation, then the sidebar snapshot.
-function desiredOff(conv: Conversation): boolean {
+// then the shown conversation, then the sidebar snapshot; undefined until the
+// server has reported one.
+function desiredOff(conv: Conversation): boolean | undefined {
   const id = conv.id;
   return (
-    state.pendingSafety[id] ??
-    conv.safety_off ??
-    state.nodes[id]?.safety_off ??
-    false
+    state.pendingSafety[id] ?? conv.safety_off ?? state.nodes[id]?.safety_off
   );
 }
 
@@ -81,12 +79,13 @@ function showConversationSafety(conv: Conversation | null): void {
     btn.disabled = true;
     return;
   }
+  const known = desiredOff(conv);
   const {
     desired,
     effective,
     pending,
     label: text,
-  } = deriveSafetyView(desiredOff(conv), activeOff(conv));
+  } = deriveSafetyView(known ?? false, activeOff(conv));
   row.classList.toggle("off", desired);
   row.classList.toggle("pending", pending);
   const reason = !desired ? conv.safety_unavailable : null;
@@ -98,8 +97,14 @@ function showConversationSafety(conv: Conversation | null): void {
   warning.title = status;
   warning.setAttribute("aria-label", status);
   warning.hidden = !(desired || effective || reason);
-  unavailable.hidden = !reason;
-  unavailable.textContent = reason ? status : "";
+  const note =
+    known === undefined
+      ? "Checking whether safety review is on…"
+      : reason
+        ? status
+        : "";
+  unavailable.hidden = !note;
+  unavailable.textContent = note;
   btn.setAttribute("aria-checked", String(!desired));
   btn.setAttribute(
     "aria-label",
@@ -107,7 +112,7 @@ function showConversationSafety(conv: Conversation | null): void {
       (pending ? ", next turn" : "") +
       (reason ? `, unavailable: ${reason}` : ""),
   );
-  btn.disabled = busy;
+  btn.disabled = busy || known === undefined;
   label.textContent = text;
   btn.classList.toggle("unavailable", Boolean(reason));
   btn.title =
@@ -184,13 +189,57 @@ function confirmSafetyOff(): Promise<boolean> {
   });
 }
 
+type SafetyReply = {
+  safety_off?: unknown;
+  safety_off_active?: unknown;
+  safety_rev?: unknown;
+};
+
+// Invariant: A reply changes the objects shown now for `id`, never one captured
+// at click time, and only when its revision is newer than theirs. Otherwise
+// the state is unknown until a fresh read reports it.
+function applySafetyReply(id: string, data: SafetyReply | null): void {
+  noteSafetyReply(id);
+  const shown = [
+    state.currentConv?.id === id ? state.currentConv : null,
+    state.nodes[id],
+  ].filter((item) => !!item);
+  const rev = data?.safety_rev;
+  if (
+    typeof rev === "number" &&
+    typeof data!.safety_off === "boolean" &&
+    shown.every((item) => !(Number(item.safety_rev) >= rev))
+  ) {
+    for (const item of shown) {
+      item.safety_off = data!.safety_off;
+      item.safety_off_active = data!.safety_off_active === true;
+      item.safety_rev = rev;
+    }
+    if (data!.safety_off && state.currentConv?.id === id)
+      state.currentConv.safety_unavailable = null;
+    return;
+  }
+  for (const item of shown) {
+    delete item.safety_off;
+    delete item.safety_off_active;
+  }
+  void refreshSidebarTree().finally(() =>
+    showConversationSafety(state.currentConv),
+  );
+}
+
 btn.onclick = async () => {
   const conv = state.currentConv;
   const id = conv?.id;
   if (busy || !conv || !id || id === DRAFT) return;
   const previous = desiredOff(conv);
+  if (previous === undefined) return;
   if (!previous && !(await confirmSafetyOff())) return;
-  if (busy || state.currentConv?.id !== id || desiredOff(conv) !== previous)
+  if (
+    busy ||
+    state.currentConv?.id !== id ||
+    desiredOff(state.currentConv) !== previous
+  )
     return;
   const desired = !previous;
   busy = true;
@@ -198,33 +247,20 @@ btn.onclick = async () => {
   // is owned by the server so a mid-turn toggle never falsely claims review is
   // off.
   state.pendingSafety[id] = desired;
-  conv.safety_off = desired;
-  if (state.nodes[id]) state.nodes[id].safety_off = desired;
-  showConversationSafety(conv);
+  showConversationSafety(state.currentConv);
   renderAgentList();
+  let data: SafetyReply | null = null;
   try {
     const r = await backendFor(id).jpost(`/api/conversations/${id}/safety`, {
       off: desired,
     });
-    if (!r.ok) throw new Error("safety toggle failed");
-    const data = (await r.json()) as {
-      safety_off: boolean;
-      safety_off_active?: boolean;
-    };
-    conv.safety_off = data.safety_off;
-    if (data.safety_off) conv.safety_unavailable = null;
-    conv.safety_off_active = data.safety_off_active;
-    if (state.nodes[id]) {
-      state.nodes[id].safety_off = data.safety_off;
-      state.nodes[id].safety_off_active = data.safety_off_active;
-    }
+    data = (await r.json().catch(() => null)) as SafetyReply | null;
   } catch {
-    conv.safety_off = previous;
-    if (state.nodes[id]) state.nodes[id].safety_off = previous;
-    refreshSidebarTree();
+    data = null;
   } finally {
     busy = false;
     delete state.pendingSafety[id];
+    applySafetyReply(id, data);
     showConversationSafety(state.currentConv);
     renderAgentList();
   }
@@ -527,10 +563,13 @@ export function updateChrome(conv: Conversation): void {
   inputEl.placeholder = "Message this agent…";
 }
 
-// Finish the chrome of a thread that was painted before its tree node arrived.
-// The thread itself is already right, so this repaints only the topbar rather
-// than re-rendering the whole thread through the hash.
+// Finish the chrome of a thread that was painted before its tree node arrived,
+// and repaint the safety switch from the tree. The thread itself is already
+// right, so this repaints only the topbar rather than the whole thread.
 export function completeChromeFromTree(): void {
+  // Invariant: The switch repaints from each tree read, so a failed toggle's
+  // unknown state ends even when its refresh joined an earlier poll.
+  showConversationSafety(state.currentConv);
   const id = chromeAwaitingNode;
   if (!id || !state.nodes[id]) return;
   const conv = state.currentConv;

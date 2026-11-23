@@ -77,7 +77,6 @@ export {
   GIT_OUTPUT_MAX,
   GIT_REF,
   TITLE_CONFIG_KEY,
-  DOCUMENT_ENTRY,
   SVG_MEDIA_TYPE,
   cancelStaleDeletion,
   deleteArtifact,
@@ -319,6 +318,7 @@ export async function get(
   );
 }
 
+/** Match an owner’s published Git tree, never a working-tree path or symlink. */
 export async function fileBytes(
   value: ArtifactContext,
   ownerValue: string,

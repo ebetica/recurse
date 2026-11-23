@@ -47,7 +47,7 @@ async function dragPastEdge(page: any, edge: "top" | "bottom"): Promise<any> {
       .map((p: any) => p.textContent);
     const chrome = document.querySelector(
       edge === "top" ? "#conv-title" : "#composer-wrap .lbl",
-    )!.firstChild;
+    )!;
     start.dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true, pointerType: "touch" }),
     );
@@ -56,7 +56,7 @@ async function dragPastEdge(page: any, edge: "top" | "bottom"): Promise<any> {
     const tops = [scroll.scrollTop];
     let strayEnd = false;
     for (let move = 0; move < 40; move++) {
-      selection.extend(chrome, 1);
+      selection.extend(chrome.firstChild!, 1);
       await frame().then(frame);
       tops.push(scroll.scrollTop);
       strayEnd ||= !document

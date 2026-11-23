@@ -78,9 +78,10 @@ export function modelsJsonWorld() {
       nativeRequest: (request) => authRequest(root, request),
     });
     const router = new Router();
-    registerSettingsRoutes(router, { config } as unknown as Parameters<
-      typeof registerSettingsRoutes
-    >[1]);
+    registerSettingsRoutes(router, {
+      config,
+      providers: { refreshOpenAI: async () => {} },
+    } as unknown as Parameters<typeof registerSettingsRoutes>[1]);
     const { running } = await serveOpen(router, join(root, "data"));
     try {
       const response = await fetch(`${running.url}/api/settings/model-list`);

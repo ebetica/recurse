@@ -37,3 +37,8 @@ export function draft(held: Held): SubmissionDraft {
             : "steer",
       };
 }
+
+/** Service input never enters while review is or may become OFF. */
+export function reviewedOnly(requestId: string): boolean {
+  return requestId.startsWith("op:service:");
+}

@@ -10,8 +10,11 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { state } from "./state.js";
 import { summaryWithoutRunningCommands } from "./thread-render/turn-summary.js";
 import {
+  activityCardItems,
   blockSections,
+  completedShells,
   expandedTurnGroups,
+  shellCompletionCount,
   turnGroups,
   type TurnGroupItem,
 } from "./thread-render/turn-groups.js";
@@ -58,6 +61,7 @@ import {
   boundaryOutcomeLabel,
   compactedHeadLabel,
   type ActivityBoundary,
+  type ActivityMarker,
   type ActivitySlice,
 } from "./thread-render/activity-boundary.js";
 import {
@@ -174,13 +178,39 @@ function foldedMessageHeaderT({
   </button>`;
 }
 
+function shellNoticeLabel(entry: MessageEntry): string {
+  return entry.content.replace(
+    /^(Background shell finished) · (`.*`) · (.+)$/u,
+    "$1 · $3 · $2",
+  );
+}
+
+function shellNoticeOutputT(entry: MessageEntry) {
+  return entry.detail
+    ? html`<div class="tool-payload"><pre>${entry.detail}</pre></div>`
+    : nothing;
+}
+
+function shellCompletionT(notice: ActivityMarker): TemplateResult {
+  const entry = notice.turn.system!;
+  return html`<div
+    class="shell-completion"
+    role="note"
+    data-message-offset=${entry.offset}
+  >
+    <div>${shellNoticeLabel(entry)}</div>
+    ${shellNoticeOutputT(entry)}
+  </div>`;
+}
+
 function markerT(conv: Conversation, entry: MessageEntry): TemplateResult {
   if (entry.marker === "shell-notice") {
     const identity = `shell-notice:${renderedLogGeneration}:${entry.offset}`;
     const bodyId = disclosureId("shell-notice", conv.id, entry.offset);
     const expanded = messageDisclosures.isOpen(conv.id, identity);
     const toggle = messageToggle(conv.id, identity);
-    const label = `${expanded ? "Hide" : "Show"} details: ${entry.content}`;
+    const summary = shellNoticeLabel(entry);
+    const label = `${expanded ? "Hide" : "Show"} details: ${summary}`;
     return html`<div
       class="turn-series shell-notice"
       role="note"
@@ -196,11 +226,11 @@ function markerT(conv: Conversation, entry: MessageEntry): TemplateResult {
         @click=${toggle}
       >
         ${disclosureCaret}
-        <span>${entry.content}</span>
+        <span>${summary}</span>
       </button>
       ${expanded && entry.detail
         ? html`<div class="turn-series-body" id=${bodyId}>
-            <div class="tool-payload"><pre>${entry.detail}</pre></div>
+            ${shellNoticeOutputT(entry)}
           </div>`
         : nothing}
     </div>`;
@@ -827,12 +857,23 @@ function closedSeriesThinkingT(
 function toolSeriesT(
   conv: Conversation,
   boundary: ActivityBoundary,
-  slice: ActivitySlice,
-  seriesId: string | number = slice.segmentIndex,
+  {
+    slice,
+    noticesBefore = [],
+    noticesAfter = [],
+  }: Extract<TurnGroupItem, { kind: "tools" }>,
   runningOwner?: ActivitySlice | null,
 ): TemplateResult | typeof nothing {
-  const summary = toolSeriesSummary(slice.segment);
-  if (!summary) return nothing;
+  const commands = toolSeriesSummary(slice.segment);
+  if (!commands) return nothing;
+  const completions = [...noticesBefore, ...noticesAfter].reduce(
+    (total, notice) => total + completedShells(notice),
+    0,
+  );
+  const summary = completions
+    ? `${commands}, ${shellCompletionCount(completions)}`
+    : commands;
+  const seriesId = slice.segmentIndex;
   if (
     !slice.segment.tools.length &&
     slice.turn.open &&
@@ -841,7 +882,7 @@ function toolSeriesT(
     return nothing;
   if (!slice.segment.tools.length)
     return html` <div class="turn-series-summary" role="note">
-      ${summary} · details unavailable
+      <span>${summary} · details unavailable</span>
     </div>`;
   // Invariant: A running series updates its summary in place and carries
   // text only; the status bar shows the turn's state.
@@ -887,7 +928,10 @@ function toolSeriesT(
     </button>
     ${open
       ? html`<div class="turn-series-body" id=${bodyId}>
-          ${toolRowsT(conv, slice)}
+          ${noticesBefore.map(shellCompletionT)}${toolRowsT(
+            conv,
+            slice,
+          )}${noticesAfter.map(shellCompletionT)}
         </div>`
       : nothing}
   </div>`;
@@ -929,7 +973,8 @@ function turnGroupItemsT(
   footerReply: MessageEntry | null = null,
   footer: TemplateResult | typeof nothing = nothing,
 ): TemplateResult {
-  return html`${items.map((item) => {
+  const rows = expanded ? activityCardItems(items) : items;
+  return html`${rows.map((item) => {
     switch (item.kind) {
       case "turn":
         if (expanded && item.visibleReply)
@@ -959,13 +1004,7 @@ function turnGroupItemsT(
           item.slice.segmentIndex,
         )
           ? closedSeriesThinkingT(conv, item.slice)
-          : nothing}${toolSeriesT(
-          conv,
-          boundary,
-          item.slice,
-          item.slice.segmentIndex,
-          runningOwner,
-        )}`;
+          : nothing}${toolSeriesT(conv, boundary, item, runningOwner)}`;
       case "thought":
         return thinkingT(conv, item.entry);
       case "assistant":
@@ -1050,7 +1089,7 @@ function turnGroupItemsT(
         const endRun = () => {
           if (run.length)
             parts.push(
-              html`<div class="activity-group-part">
+              html`<div class="activity-group-part activity-card">
                 ${hidePlaced ? nothing : ((hidePlaced = true), hide)}
                 ${turnGroupItemsT(conv, boundary, run, true, owner)}
               </div>`,
@@ -1073,7 +1112,9 @@ function turnGroupItemsT(
               >
                 ${open
                   ? html`<div
-                      class="activity-group-body${split ? " split" : ""}"
+                      class="activity-group-body ${split
+                        ? "split"
+                        : "activity-card"}"
                       id=${bodyId}
                     >
                       ${split
@@ -1252,7 +1293,10 @@ export function activityBoundaryT(
       ? " refused"
       : ""}"
   >
-    <div class="activity-body" id=${bodyId}>
+    <div
+      class="activity-body${expanded && insideChunk ? " activity-card" : ""}"
+      id=${bodyId}
+    >
       ${boundary.slices.some((slice) => slice.turn.partial)
         ? html`<div class="turn-note" role="note">
             Earlier parts of this response are not loaded. Scroll up to load

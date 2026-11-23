@@ -76,10 +76,9 @@ test("remote delivery retries startup admission without duplicating the message"
     const receiver = String(
       (await apps[1]!.instance.create.create({ title: "Receiver" })).id,
     );
-    await apps[1]!.instance.conversations.save({
-      ...apps[1]!.instance.conversations.load(receiver)!,
-      safety_off: true,
-    });
+    await (
+      await apps[1]!.instance.nodes.node(receiver).setSafety(true)
+    )[1];
     const connected = await fetch(servers[0]!.url + "/api/backends", {
       method: "POST",
       headers: { "content-type": "application/json" },

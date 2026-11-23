@@ -76,6 +76,58 @@ export function routes(fx: Fixture): Routes {
       ]);
       return { agent: "durable-demo" };
     },
+    "seed-activity-card": async ({ isolated }) => {
+      const agent = `activity-card-${hex(4)}`;
+      await create(agent, "Review command results");
+      const directory = await agentTemp.agentTempPath(
+        conversations.load(agent)!,
+      );
+      const gate = join(directory, "finish-background-command");
+      const waitForGate = `while [ ! -e ${JSON.stringify(gate)} ]; do sleep 0.05; done`;
+      const faux = script(agent);
+      if (isolated) {
+        faux.setResponses([
+          fauxAssistantMessage(
+            fauxToolCall("bash", {
+              command: `: '${"COMPARE WIDE SAMPLE ".repeat(5)}'; ${waitForGate}; printf '%s %s\\n' 'Background comparison' finished`,
+              background: true,
+            }),
+            { stopReason: "toolUse" },
+          ),
+          fauxAssistantMessage("The background comparison is running."),
+          fauxAssistantMessage("The background comparison is complete."),
+        ]);
+        return { agent, gate };
+      }
+      faux.setResponses([
+        fauxAssistantMessage(
+          [
+            fauxThinking(
+              "**Checking samples**\nI’ll wait for the sample output.",
+            ),
+            fauxToolCall("bash", {
+              command: `${waitForGate}; printf '%s %s\\n' 'Sample comparison' complete`,
+              background: true,
+            }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage(fauxToolCall("wait", {}), {
+          stopReason: "toolUse",
+        }),
+        fauxAssistantMessage(
+          [
+            fauxThinking(
+              "**Verifying output**\nI’ll verify the result before replying.",
+            ),
+            fauxToolCall("bash", { command: "printf 'Verified\\n'" }),
+          ],
+          { stopReason: "toolUse" },
+        ),
+        fauxAssistantMessage("The sample results agree."),
+      ]);
+      return { agent, gate };
+    },
     "seed-focused-settle": async ({ recovery }) => {
       const agent = recovery ? "focused-recovery" : "focused-settle";
       await create(agent, "Focused reply");

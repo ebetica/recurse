@@ -563,7 +563,9 @@ export async function buildApp(options: AppOptions): Promise<App> {
     node: (cid: string) => {
       const node = nodes.node(cid);
       return {
-        setSafety: (off: boolean) => node.setSafety(off),
+        setSafety: (off: boolean, onNoticed: () => void) =>
+          node.setSafety(off, onNoticed),
+        safetyState: () => node.safetyState(),
         renameTitle: (title: string, order: string) =>
           node.renameTitle(title, order),
         piStatus: () => durable.liveStatus(cid)[0],

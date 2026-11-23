@@ -7,6 +7,7 @@ import {
   artifactFileUrl,
   artifactVersionsUrl,
   normalizeArtifactVersions,
+  isMarkdownPath,
 } from "./model.js";
 import type { ArtifactInfo } from "./model.js";
 import { setPaneLoading } from "../panes.js";
@@ -163,13 +164,13 @@ export async function refreshArtifact(pane: ArtifactEl): Promise<void> {
 
 function scrollLinkedSection(pane: ArtifactEl): void {
   const rs = pane._rs;
-  const section = rs.linkedSection;
-  if (section?.artifact === rs.selId) {
-    const body = pane.querySelector<HTMLElement>(".report-doc");
-    if (body) scrollDocumentFragment(body, section.fragment, true);
-    rs.linkedSection = undefined;
-  } else if (rs.linkedScrollTop !== undefined)
+  if (rs.linkedScrollTop !== undefined)
     artifactScroller(pane).scrollTop = rs.linkedScrollTop;
+  else if (rs.linkedSection?.artifact === rs.selId) {
+    const body = pane.querySelector<HTMLElement>(".report-doc");
+    if (body) scrollDocumentFragment(body, rs.linkedSection.fragment, true);
+  }
+  rs.linkedSection = undefined;
   rs.linkedScrollTop = undefined;
 }
 
@@ -196,8 +197,9 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
   rs.selectedVersion =
     pendingCommentVersion(pane) ?? rs.selectedVersion ?? info.version;
   void loadVersions(pane, info);
-  const revisionKey = rs.selectedVersion || `current:${info.updated_at}`;
-  const key = `${rs.agentId}\n${info.id}\n${revisionKey}`;
+  const revisionKey = rs.selectedVersion ?? `current:${info.updated_at}`;
+  const page = rs.selectedPage === info.entry ? null : rs.selectedPage;
+  const key = `${rs.agentId}\n${info.id}\n${revisionKey}\n${page || ""}`;
   if (rs.shownKey === key) {
     scrollLinkedSection(pane);
     return;
@@ -211,29 +213,45 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
   setNotice(pane, "Loading…", false);
   setPaneLoading(pane, true);
   try {
+    if (requestedVersion === "")
+      throw new Error(
+        "Invalid Artifact version. Check the link or choose a version.",
+      );
+    if (page !== null && (info.format !== "markdown" || !isMarkdownPath(page)))
+      throw new Error(
+        "File not found. Choose a Markdown page in this Artifact.",
+      );
     const snapshot = await contentCache.getOrLoad(
       key,
       requestedAgent,
       requestedId,
       requestedVersion === null,
       async () => {
-        const contentInfo = info;
-        const entry = contentInfo.entry;
-        if (!entry || contentInfo.format === "html") {
-          return { info: contentInfo, content: null };
-        }
+        const entry = page || info.entry;
+        if (!entry || info.format === "html") return { info, content: null };
         const response = await backendFor(requestedAgent).api(
           artifactFileUrl(requestedAgent, requestedId, entry, requestedVersion),
         );
-        if (!response.ok)
+        if (!response.ok) {
+          if (requestedVersion && response.status === 400) {
+            const problem = await response.json().catch(() => null);
+            if (problem?.detail === "unknown artifact version")
+              throw new Error(
+                "Artifact version not found. Check the link or choose a version.",
+              );
+          }
           throw new Error(
-            errorText("Couldn’t display this artifact", response),
+            page && [400, 404].includes(response.status)
+              ? "File not found. Check the link or choose another page."
+              : errorText("Couldn’t display this artifact", response),
           );
-        const content = await response.text();
-        return { info: contentInfo, content };
+        }
+        return { info, content: await response.text() };
       },
     );
-    const changes = await changesFor(pane, snapshot.info, requestedVersion);
+    const changes = page
+      ? null
+      : await changesFor(pane, snapshot.info, requestedVersion);
     if (
       !isCurrentArtifactRequest(
         pane,
@@ -255,6 +273,7 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
     rs.contentInfo = {
       ...snapshot.info,
       version: requestedVersion ?? snapshot.info.version,
+      ...(page ? { page } : {}),
     };
     const displayed = await renderArtifactContent(
       pane,

@@ -11,7 +11,8 @@ import { retirePath } from "../../../utils/trash-sweep";
 import { slowSpan } from "../../../observability/slow-span";
 import { isDirectory } from "../archive.ts";
 import type { DurableHost } from "../host.ts";
-import { draft, type Held } from "./submission.ts";
+import { draft, type Held, reviewedOnly } from "./submission.ts";
+import { runtime } from "./load.ts";
 
 export interface ClearState {
   held: Held[];
@@ -132,7 +133,22 @@ export async function submitHeld(
   // the old storage is retired (cancel in send.ts).
   while (clear.held.length) {
     const item = clear.held[0]!;
-    await conversation.submit(draft(item), context);
+    if (!reviewedOnly(item.requestId))
+      await conversation.submit(draft(item), context);
+    else if (
+      (await (
+        await runtime()
+      ).submitReviewed(
+        conversation,
+        draft(item),
+        () => host.safetyRequestedOff(cid),
+        context,
+      )) === null
+    )
+      host.deps.log("durable_send_refused", {
+        cid,
+        request_id: item.requestId,
+      });
     clear.held.splice(clear.held.indexOf(item), 1);
   }
   host.clears.delete(cid);

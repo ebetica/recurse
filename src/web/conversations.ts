@@ -176,7 +176,9 @@ export interface ConversationsRoutesDeps {
     existing(cid: string): { inboxMessages(): readonly Rec[] } | null;
     /** agent_nodes.node: throws KeyError for an unknown conversation. */
     node(cid: string): {
-      setSafety(off: boolean): Promise<[Rec, boolean]>;
+      setSafety(off: boolean, onNoticed: () => void): Promise<unknown[]>;
+      /** A safety reply's current state; null once deleted. */
+      safetyState(): Rec | null;
       renameTitle(title: string, order: string): Rec | null;
       /** The live PiAgent's status, or null without one. */
       piStatus(): string | null;
@@ -696,30 +698,44 @@ export function registerConversationRoutes(
 
   router.post("/api/conversations/{cid}/safety", async (ex) => {
     // Invariant: Durable commits the per-action review state before queuing its
-    // notice; the next tool call follows the operator's setting.
+    // notice; the next tool call follows the operator's setting. Refused until
+    // startup has migrated the records it rewrites.
+    deps.requireActionReady();
     const cid = ex.params.cid!;
     const body = await dictBody(ex);
     const off = body.off;
     if (typeof off !== "boolean")
       throw new HttpError(422, "off must be a boolean");
     if (!store.convRowExists(cid)) throw new HttpError(404);
+    const safety = (conv: Rec) => ({
+      id: cid,
+      safety_off: pyTruthy(conv.safety_off),
+      safety_off_active: pyTruthy(conv.safety_off_active),
+      safety_rev: typeof conv.safety_rev === "number" ? conv.safety_rev : null,
+    });
     let conv: Rec;
-    let submitted: boolean;
     try {
-      [conv, submitted] = await deps.nodes.node(cid).setSafety(off);
+      // Invariant: The reply does not wait for the notice; its run starts
+      // once the notice is admitted.
+      [conv] = (await deps.nodes
+        .node(cid)
+        .setSafety(off, () => deps.delivery.requestRun(cid))) as [Rec];
     } catch (error) {
       if (errorName(error) === "KeyError")
         throw new HttpError(404, "conversation not found");
-      if (isValueError(error))
-        throw new HttpError(409, (error as Error).message);
-      throw error;
+      if (!isValueError(error)) throw error;
+      // Invariant: A refused request still reports the current state, so the
+      // browser shows the server's state rather than its previous one.
+      const current = store.load(cid)
+        ? deps.nodes.node(cid).safetyState()
+        : null;
+      if (!current) throw new HttpError(409, (error as Error).message);
+      return jsonResponse(
+        { error: (error as Error).message, ...safety(current) },
+        409,
+      );
     }
-    if (submitted) deps.delivery.requestRun(cid);
-    return jsonResponse({
-      id: conv.id,
-      safety_off: pyTruthy(conv.safety_off),
-      safety_off_active: pyTruthy(conv.safety_off_active),
-    });
+    return jsonResponse(safety(conv));
   });
 
   router.post("/api/conversations/{cid}/rename", async (ex) => {

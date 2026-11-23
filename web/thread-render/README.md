@@ -12,7 +12,11 @@
   policy; [inline image captions](../image-preview/inline.ts) use cached filenames.
 
 Running tool counts and details belong to the transcript, not the
-[status bar](../conversation/README.md#status-bar).
+[status bar](../conversation/README.md#status-bar). The opened activity card
+keeps summaries compact on desktop and preserves tap targets on phones and touch
+screens. Shell completion details stay with the adjacent
+[command series](turn-groups.ts), so output stays available without a duplicate row.
+A completion without an adjacent series keeps its own disclosure.
 
 [Thread styles](style.css) load with the app so transcript layout and image
 controls do not depend on the Files stylesheet. The transcript and message

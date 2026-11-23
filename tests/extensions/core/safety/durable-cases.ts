@@ -321,6 +321,7 @@ async function openDurable(
         statsRoot: process.env.RECURSE_SAFETY_DIR,
       }),
       shells: () => undefined,
+      reviewOffAllowed: () => true,
       loadConfig: () => ({
         additionalRules: [],
         path: "/tmp/pi-safety.json",
@@ -352,7 +353,7 @@ async function openDurable(
           },
         },
   );
-  if (c.off) await setSafetyReviewOff(conversation, true, BG);
+  if (c.off) await setSafetyReviewOff(conversation, true, BG, 1);
   return {
     harness,
     conversation,
@@ -1062,7 +1063,7 @@ test("the escape hatch follows only the setter, not the model, tools, or PI_SAFE
       attempts[1]!.args,
       probe(1)[0]!.args,
     ]);
-    await setSafetyReviewOff(setup.conversation, true, BG);
+    await setSafetyReviewOff(setup.conversation, true, BG, 1);
     await (
       await setup.conversation.submit({ type: "input", content: "off" }, BG)
     ).wait(BG);

@@ -191,7 +191,9 @@ test("host tools match Pi results; later calls and restart use committed cwd/env
         import.meta.url,
       ).href
     );
-    await safety.setSafetyReviewOff(opened.conversation, true, context);
+    records.c1!.safety_off = true;
+    records.c1!.safety_rev = 1;
+    await safety.setSafetyReviewOff(opened.conversation, true, context, 1);
     await host.send("c1", "exercise tools", "parity");
     await opened.conversation.waitForIdle(context);
     expect(

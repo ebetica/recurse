@@ -524,7 +524,10 @@ So yes, it’s effectively a **sigmoid-like decay parameterization**. The meanin
           .locator(".agent-message-row")
           .locator(".lead")
           .evaluate((element) => getComputedStyle(element).color);
-        expect(platformColor).not.toBe(agentColor);
+        expect(platformColor).toBe(agentColor);
+        expect(await platformRow.locator(".lead").innerText()).toBe(
+          "Platform message",
+        );
         await platformRow.click();
         const platformBody = platform.locator(".agent-message-body");
         await platformBody.waitFor();

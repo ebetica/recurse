@@ -5,7 +5,6 @@ type JsonObject = Record<string, unknown>;
 
 interface NodeDesires {
   readonly muteDesired: boolean | null;
-  readonly safetyDesired: boolean | null;
 }
 
 /** config_actions._muted_locked without creating a node on a cold read. */
@@ -14,27 +13,15 @@ export function readMuted(conv: JsonObject, node: NodeDesires | null): boolean {
   return truthy(conv.muted);
 }
 
-/** config_actions._safety_off_locked without creating a node on a cold read. */
-export function readSafetyOff(
-  conv: JsonObject,
-  node: NodeDesires | null,
-): boolean {
-  if (node !== null && node.safetyDesired !== null) return node.safetyDesired;
-  return truthy(conv.safety_off);
-}
-
-/** config_actions._safety_effective_off without creating a node. */
-export function readSafetyEffectiveOff(
-  conv: JsonObject,
-  node: NodeDesires | null,
-): boolean {
+/** Whether review is skipped now: the launched turn's value while running. */
+export function readSafetyEffectiveOff(conv: JsonObject): boolean {
   if (conv.status === "running") {
     const active = conv.active_turn;
     if (isObject(active) && "safety_off" in active) {
       return truthy(active.safety_off);
     }
   }
-  return readSafetyOff(conv, node);
+  return truthy(conv.safety_off);
 }
 
 /** Pre-accept working-row fields: warming vs resuming the first send. */

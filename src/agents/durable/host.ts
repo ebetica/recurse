@@ -84,6 +84,8 @@ export interface DurableHostDeps extends PromotionRecord {
   piAgentDir: string;
   /** An owned record (or selected field), or null when it no longer exists. */
   load(cid: string, fields?: readonly string[]): Rec | null;
+  /** ConversationStore.newestSafety's revision, accepted in this process. */
+  newestSafetyRev?(cid: string): number | undefined;
   /** Resolve owned upload paths and images before the admission commit. */
   uploadParts?(
     cid: string,
@@ -456,6 +458,7 @@ export class DurableHost {
                 note ? undefined : WARNING,
               ),
             () => Object.keys(this.deps.customProviders?.() ?? {}),
+            this.deps.config?.env,
           );
         const { usageLimits } = this.deps;
         this.modelsValue = usageLimits
@@ -881,14 +884,33 @@ export class DurableHost {
     return toolDetails(this, cid, artifactId, includeOperatorFailure);
   }
 
-  /** Operator-only control, called by AgentNode.setSafety before its notice. */
-  async setSafetyReviewOff(cid: string, off: boolean): Promise<void> {
+  /**
+   * Operator-only control for AgentNode.setSafety: commit request `rev`.
+   * `admits` runs inside the commit: false commits nothing, returns false.
+   */
+  async setSafetyReviewOff(
+    cid: string,
+    off: boolean,
+    rev?: number,
+    admits?: () => boolean,
+  ): Promise<boolean> {
     const { conversation, row } = await this.open(cid);
     const safety = await runtime();
-    await safety.setSafetyReviewOff(conversation, off, context);
+    if (
+      !(await safety.setSafetyReviewOff(
+        conversation,
+        off,
+        context,
+        rev,
+        admits,
+      ))
+    )
+      return false;
     row.safetyOff = off;
+    row.safetyOffRev = off ? rev : undefined;
     if (off) row.safetyUnavailable = undefined;
     this.deps.safetyChanged?.(cid);
+    return true;
   }
 
   /** Durable's persisted chdir cwd, also used in runtime prompts. */
@@ -929,6 +951,26 @@ export class DurableHost {
       names: Object.keys(after ?? {}).sort(),
       absent: change.unset.filter((name) => !before.includes(name)),
     };
+  }
+
+  /** Whether the newest safety request, recorded and accepted, is OFF at `rev`. */
+  safetyOffAllowed(cid: string, rev: number): boolean {
+    const record = this.deps.load(cid, ["safety_off", "safety_rev"]);
+    const newest = this.deps.newestSafetyRev?.(cid) ?? rev;
+    return (
+      record?.safety_off === true && record.safety_rev === rev && newest === rev
+    );
+  }
+
+  /** Whether the record's newest safety request is OFF. */
+  safetyRequestedOff(cid: string): boolean {
+    return this.deps.load(cid, ["safety_off"])?.safety_off === true;
+  }
+
+  /** Whether tools skip review now, as last read from recurse.safety. */
+  safetyOffActive(cid: string): boolean {
+    const rev = this.liveRows.get(cid)?.safetyOffRev;
+    return rev !== undefined && this.safetyOffAllowed(cid, rev);
   }
 
   /** Whether recurse.safety turns review off, once the Harness has read it. */
@@ -1109,8 +1151,7 @@ export class DurableHost {
     };
   }
 
-  // Overlay live run, queue and safety state on metadata. Review hooks read
-  // recurse.safety per call, so desired and effective state are equal.
+  // Overlay live run, queue and effective safety state on metadata.
   metadata(cid: string): {
     status: string;
     active_run: string | null;
@@ -1118,13 +1159,12 @@ export class DurableHost {
     run_state_clock: [string, number];
     pending: Rec[];
     pending_actions: string[];
-    safety_off: boolean;
     safety_off_active: boolean;
     safety_unavailable: string | null;
   } {
     const row = this.liveRows.get(cid);
     const run = this.liveStatus(cid)[1];
-    const off = row?.safetyOff ?? false;
+    const off = this.safetyOffActive(cid);
     return {
       status: run === null ? "idle" : "running",
       active_run: run,
@@ -1132,7 +1172,6 @@ export class DurableHost {
       run_state_clock: runStateClock(),
       pending: this.pendingRows(cid),
       pending_actions: this.pendingActions(cid),
-      safety_off: off,
       safety_off_active: off,
       safety_unavailable: off ? null : (row?.safetyUnavailable ?? null),
     };

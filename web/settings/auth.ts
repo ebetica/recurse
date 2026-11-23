@@ -166,7 +166,7 @@ export function buildClaudeSection(body: HTMLElement): void {
 }
 
 interface OpenAIStatus {
-  subscription: "signed_in" | "imported" | "detected" | null;
+  subscription: "signed_in" | "codex_cli" | null;
   api_key: "saved" | "environment" | null;
   usage_limits?: UsageLimits;
 }
@@ -183,6 +183,18 @@ export function buildOpenAISection(body: HTMLElement): void {
         <button type="button" class="ghost remove-sub" hidden>Remove subscription</button>
       </div>
       <p class="msg" role="status"></p>
+      <dialog class="settings-sheet disconnect-codex" aria-labelledby="codex-disconnect-title">
+        <form method="dialog">
+          <header class="settings-sheet-head"><h2 id="codex-disconnect-title">Disconnect Codex from Recurse?</h2></header>
+          <div class="settings-detail-content">
+            <p>You’ll stay signed in to Codex CLI. To use your subscription in Recurse again, sign in with ChatGPT here.</p>
+            <div class="dialog-buttons">
+              <button class="btn" value="cancel" autofocus>Cancel</button>
+              <button class="btn" value="disconnect">Disconnect Codex</button>
+            </div>
+          </div>
+        </form>
+      </dialog>
     </section>
     <section class="openai-api-key">
       <h3>API key</h3>
@@ -207,6 +219,7 @@ export function buildOpenAISection(body: HTMLElement): void {
   const signin = q<HTMLButtonElement>(".signin");
   const edit = q<HTMLButtonElement>(".editkey");
   const removeSub = q<HTMLButtonElement>(".remove-sub");
+  const disconnect = q<HTMLDialogElement>(".disconnect-codex");
   const removeKey = q<HTMLButtonElement>(".remove-key");
   const save = q<HTMLButtonElement>(".savekey");
   const message = (msg: HTMLElement) => (cls: string, text: string) => {
@@ -217,22 +230,28 @@ export function buildOpenAISection(body: HTMLElement): void {
   const showKey = message(q(".openai-api-key > .msg"));
   providerDetail(body, "OpenAI");
   const status = statuses.get(body)!;
+  let usingCodexCli = false;
   const applyStatus = ({
     subscription,
     api_key: key,
     usage_limits,
   }: OpenAIStatus) => {
+    usingCodexCli = subscription === "codex_cli";
     q(".openai-subscription .credential-status").textContent =
       subscription === "signed_in"
         ? "Signed in"
-        : subscription
-          ? "Signed in through Codex"
+        : usingCodexCli
+          ? "Signed in through Codex CLI"
           : "Not signed in";
     q(".openai-api-key .credential-status").textContent =
       key === "saved" ? "Saved" : key ? "Provided by the server" : "Not saved";
-    removeSub.hidden = !subscription || subscription === "detected";
+    removeSub.hidden = !subscription;
+    removeSub.textContent = usingCodexCli
+      ? "Disconnect Codex"
+      : "Remove subscription";
     removeKey.hidden = key !== "saved";
-    signin.textContent = subscription ? "Sign in again" : "Sign in";
+    signin.textContent =
+      subscription === "signed_in" ? "Sign in again" : "Sign in";
     edit.textContent = key === "saved" ? "Replace API key" : "Add API key";
     status.text =
       subscription && key
@@ -243,7 +262,10 @@ export function buildOpenAISection(body: HTMLElement): void {
             ? "API key · available"
             : "Not signed in";
     status.refresh();
-    showUsageLimits(sub, { configured: !!subscription, usage_limits });
+    showUsageLimits(sub, {
+      configured: subscription === "signed_in",
+      usage_limits,
+    });
     window.dispatchEvent(new Event("recurse-auth-changed"));
   };
   const setBusy = (busy: boolean) => {
@@ -336,17 +358,28 @@ export function buildOpenAISection(body: HTMLElement): void {
       showKey,
       closeKeyPanel,
     );
-  removeSub.onclick = () =>
+  const logout = () =>
     void change(
       "logout",
       undefined,
-      "Couldn't remove the subscription sign-in.",
+      usingCodexCli
+        ? "Couldn't disconnect Codex."
+        : "Couldn't remove the subscription sign-in.",
       showSub,
       () => {
         login.hide();
         signin.focus();
       },
     );
+  removeSub.onclick = () => {
+    if (!usingCodexCli) return logout();
+    removeSub.focus({ preventScroll: true });
+    disconnect.returnValue = "cancel";
+    disconnect.showModal();
+  };
+  disconnect.onclose = () => {
+    if (disconnect.returnValue === "disconnect") logout();
+  };
 }
 
 // Muse subscription stays hidden until its login flow is verified end-to-end.

@@ -44,7 +44,6 @@ export function referenceImageUrl(
   source: string | null,
   cid: string | null,
   documentPath?: string,
-  artifact?: string,
 ): string | null {
   if (!source) return null;
   if (source.length <= 256 * 1024 && DATA_IMAGE.test(source)) return source;
@@ -62,7 +61,6 @@ export function referenceImageUrl(
   }
   const query = new URLSearchParams({ path, thumbnail: "1" });
   if (documentPath) query.set("document", documentPath);
-  if (artifact) query.set("artifact", artifact);
   return backendFor(cid).url(
     `/api/conversations/${encodeURIComponent(parseConversationId(cid).cid)}/path-image?${query}`,
   );

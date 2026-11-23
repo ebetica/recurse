@@ -64,6 +64,7 @@ import {
   visibleAgent,
 } from "../state.js";
 import { reconcilePendingManualTitle } from "../title-actions.js";
+import { keepRepliedSafety } from "../safety-view.js";
 import {
   requestArtifactsRefresh,
   requestPrsRefresh,
@@ -253,6 +254,22 @@ function prsChangedBelow(
   }
 }
 
+// Whether a row shown in `shown` has other safety fields than in `nodes`.
+function safetyDiffers(
+  shown: typeof state.nodes,
+  nodes: TreeRead["nodes"],
+): boolean {
+  return nodes.some((node) => {
+    const was = shown[node.id];
+    return (
+      !!was &&
+      (was.safety_off !== node.safety_off ||
+        was.safety_off_active !== node.safety_off_active ||
+        was.safety_rev !== node.safety_rev)
+    );
+  });
+}
+
 function commitTree(label: string, read: TreeRead | null): boolean {
   if (!read) {
     if (!label && !homeTreeKnown) previewDesktopPanes(null);
@@ -263,8 +280,14 @@ function commitTree(label: string, read: TreeRead | null): boolean {
     return false;
   }
   // Invariant: An unchanged remote snapshot has nothing to fold in, unless
-  // it is counting the selected conversation's absence (one-snapshot grace).
-  if (label && !read.changed && labelOf(state.selectedId) !== label)
+  // it is counting the selected conversation's absence (one-snapshot grace)
+  // or a row shows other safety fields (a safety reply cleared or kept them).
+  if (
+    label &&
+    !read.changed &&
+    labelOf(state.selectedId) !== label &&
+    !safetyDiffers(state.nodes, read.nodes)
+  )
     return true;
   const wire = sharedTreeNodes(read.nodes);
   let treeReadSucceeded = false;
@@ -291,7 +314,12 @@ function commitTree(label: string, read: TreeRead | null): boolean {
       ...Object.fromEntries(
         Object.entries(state.nodes).filter(([id]) => labelOf(id) !== label),
       ),
-      ...Object.fromEntries(arr.map((n): [string, typeof n] => [n.id, n])),
+      ...Object.fromEntries(
+        arr.map((n): [string, typeof n] => {
+          keepRepliedSafety(n.id, read.sentAt, state.nodes[n.id], n);
+          return [n.id, n];
+        }),
+      ),
     };
     // Invariant: The home tree is read before remote snapshots reconcile, so
     // a remote never drives boot restore or selection against an empty home.
@@ -358,6 +386,7 @@ function commitTree(label: string, read: TreeRead | null): boolean {
     }
 
     const previousNodes = state.nodes;
+    const safetyMoved = safetyDiffers(previousNodes, arr);
     const nextIds = new Set(Object.keys(nextNodes));
     for (const id of Array.from(missingUiOwners)) {
       if (labelOf(id) !== label) continue;
@@ -434,8 +463,11 @@ function commitTree(label: string, read: TreeRead | null): boolean {
       JSON.stringify(arr) + state.selectedId + state.cursorId;
     // Invariant: A remote's section header shows its tree status, which the
     // row hash omits, so a changed remote read repaints even if rows match.
+    // A safety reply repaints rows without updating the hash, so a read that
+    // changes shown safety fields repaints too.
     if (
       ((label && read.changed) ||
+        safetyMoved ||
         beforeRestoreHash !== treeHashes.get(label)) &&
       runPollUi("Agent tree", renderSidebar)
     )

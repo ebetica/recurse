@@ -160,7 +160,9 @@ test("an idle sleeping remote pauses home polls, queues messages and wakes on us
           (await app!.instance.create.create({ title: `Agent ${i}` })).id,
         );
         fixtures[i]!.faux.setResponses([fauxAssistantMessage("ready")]);
-        await app!.instance.nodes.node(id).setSafety(true);
+        await (
+          await app!.instance.nodes.node(id).setSafety(true)
+        )[1];
         await until(viewed(i, id, "ready"));
         await until(settled(i, id));
         return id;

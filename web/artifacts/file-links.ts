@@ -1,5 +1,5 @@
-// Version-pinned Artifact sibling tabs reuse the shared Markdown, image, PDF
-// and offline document renderers. Descriptors contain identity, never URLs;
+// Version-pinned Artifact siblings share the image, PDF and offline document
+// viewers. Saved layouts can still reopen old Markdown tabs. Descriptors contain identity, never URLs;
 // comments are scoped to the repository file rather than the entry document.
 // Escaping paths render an error without issuing file requests.
 import { html, render } from "lit";
@@ -15,7 +15,11 @@ import {
   imagePlaceholder,
   revealArtifactImage,
 } from "../document-markdown.js";
-import { artifactFileUrl } from "./model.js";
+import {
+  artifactFileUrl,
+  artifactRelativePath,
+  isMarkdownPath,
+} from "./model.js";
 import { artifactWorkingPath } from "../../src/artifacts/working_path.js";
 import {
   commentRendering,
@@ -42,7 +46,7 @@ interface Target {
 }
 
 function kind(path: string): string | null {
-  if (/\.(md|markdown)$/i.test(path)) return "markdown";
+  if (isMarkdownPath(path)) return "markdown";
   if (/\.(png|jpe?g|gif|webp|avif|svg)$/i.test(path)) return "image";
   if (/\.pdf$/i.test(path)) return "pdf";
   if (/\.(docx|xlsx|xls|ods|csv|pptx|ipynb|html?)$/i.test(path))
@@ -54,21 +58,6 @@ function kind(path: string): string | null {
   )
     return "text";
   return null;
-}
-
-export function artifactRelativePath(entry: string, path: string): string {
-  let pathname = path.split(/[?#]/)[0]!;
-  try {
-    pathname = decodeURIComponent(pathname);
-  } catch {}
-  const parts = entry.split("/").slice(0, -1);
-  for (const part of pathname.replace(/\\/g, "/").split("/")) {
-    if (part === "..") {
-      if (!parts.length) return `../${pathname}`;
-      parts.pop();
-    } else if (part && part !== ".") parts.push(part);
-  }
-  return parts.join("/");
 }
 
 export function openArtifactFile(target: Target, fragment = ""): boolean {
@@ -265,18 +254,24 @@ registerFileTabSource("artifact", (key, id) => {
               documentPath: target.path,
               onImageFrame: registerInlineBoxFrame,
               signal,
-              resolveRelative: (path) =>
-                artifactFileUrl(
-                  target.agent,
-                  target.artifact,
-                  artifactRelativePath(target.path, path),
-                  target.version,
-                ),
-              openRelative: (path, hash) =>
-                openArtifactFile(
-                  { ...target, path: artifactRelativePath(target.path, path) },
-                  hash,
-                ),
+              resolveRelative: (path) => {
+                const sibling = artifactRelativePath(target.path, path);
+                return sibling
+                  ? artifactFileUrl(
+                      target.agent,
+                      target.artifact,
+                      sibling,
+                      target.version,
+                    )
+                  : null;
+              },
+              openRelative: (path, hash) => {
+                const sibling = artifactRelativePath(target.path, path);
+                return (
+                  !!sibling &&
+                  openArtifactFile({ ...target, path: sibling }, hash)
+                );
+              },
             });
           else {
             const pre = document.createElement("pre");

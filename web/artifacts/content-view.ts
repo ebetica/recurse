@@ -5,6 +5,8 @@ import {
   artifactFileUrl,
   artifactImagePreviewTarget,
   artifactPageUrl,
+  artifactRelativePath,
+  isMarkdownPath,
 } from "./model.js";
 import { nextArtifactFrameDescriptionId } from "../document-media/index.js";
 import {
@@ -15,7 +17,8 @@ import {
 import { watchReview, type DocumentChanges } from "../document-review.js";
 import { registerInlineBoxFrame } from "../comments/box/index.js";
 import { setNotice } from "./artifact-detail.js";
-import { artifactRelativePath, openArtifactFile } from "./file-links.js";
+import { openArtifactFile } from "./file-links.js";
+import { artifactLinkUrl } from "../deep-link.js";
 import { invalidatePaneCache } from "../panes.js";
 import { watchPageErrors } from "./page-errors.js";
 import { attachAppState, reloadAppFrame } from "./app-state-bridge.js";
@@ -137,33 +140,53 @@ export async function renderContent(
   if (info.format === "markdown") {
     const agent = pane._rs.agentId!,
       version = pane._rs.selectedVersion;
+    const entry = info.entry || info.filename;
+    const documentPath = pane._rs.selectedPage || entry;
     renderDocumentMarkdown(body, content || "", {
       title: info.title,
       signal: controller.signal,
       agentId: pane._rs.agentId!,
-      documentPath: info.entry || info.filename,
+      documentPath,
       artifactId: info.id,
       onImageFrame: registerInlineBoxFrame,
       previous: changes?.previous,
-      openRelative: (path, fragment) =>
-        !!version &&
-        openArtifactFile(
-          {
-            agent,
-            artifact: info.id,
-            version,
-            owner: info.owner_agent_id,
-            path: artifactRelativePath(info.entry || info.filename, path),
-          },
-          fragment,
-        ),
-      resolveRelative: (path, image) => {
-        const url = artifactFileUrl(
-          agent,
-          info.id,
-          artifactRelativePath(info.entry || info.filename, path),
-          version,
+      openRelative: (path, fragment) => {
+        const sibling = artifactRelativePath(documentPath, path);
+        return (
+          !!version &&
+          !!sibling &&
+          openArtifactFile(
+            {
+              agent,
+              artifact: info.id,
+              version,
+              owner: info.owner_agent_id,
+              path: sibling,
+            },
+            fragment,
+          )
         );
+      },
+      resolveRelative: (path, image, fragment) => {
+        const sibling = artifactRelativePath(documentPath, path);
+        if (!sibling) return null;
+        if (!image && isMarkdownPath(sibling)) {
+          let section: string | null = null;
+          try {
+            if (fragment) section = decodeURIComponent(fragment.slice(1));
+          } catch {}
+          return new URL(
+            artifactLinkUrl(
+              location.href,
+              agent,
+              info.id,
+              sibling === entry ? null : sibling,
+              section,
+              pane._rs.followCurrent ? null : version,
+            ),
+          ).hash;
+        }
+        const url = artifactFileUrl(agent, info.id, sibling, version);
         return image ? refreshUrl(pane, url) : url;
       },
     });

@@ -37,6 +37,7 @@ import seed from "./fixtures/http_settings/seed.json";
 
 type Rec = Record<string, unknown>;
 type SettingsCase = RefCase & {
+  capture?: "native";
   current: {
     status: number;
     body?: unknown;
@@ -169,7 +170,6 @@ describe("corpus", () => {
     const common = {
       store,
       ambient,
-      home: ambient.HOME,
       nowMs: () => NOW * 1000,
       randomBytes: tokenBytes,
     };
@@ -177,12 +177,10 @@ describe("corpus", () => {
       ...common,
       tokenUrl: `${fake.url}/claude/token`,
     });
-    const createCodex = () =>
-      new CodexAuth({
-        ...common,
-        tokenUrl: `${fake.url}/codex/token`,
-      });
-    const codex = createCodex();
+    const codex = new CodexAuth({
+      ...common,
+      tokenUrl: `${fake.url}/codex/token`,
+    });
     const muse = new MuseAuth({
       store,
       models: config.models,
@@ -270,6 +268,8 @@ describe("corpus", () => {
     const authBytes = () => readFileSync(authPath).toString("base64");
     let authBeforeStatus: string | undefined;
     let checked = 0;
+    const capturePath = process.env.RECURSE_CAPTURE_HTTP_SETTINGS;
+    const captures: unknown[] = [];
     try {
       const problems = await runRefCases(
         running.port,
@@ -282,19 +282,41 @@ describe("corpus", () => {
               (spec.files ?? {}) as Record<string, string>,
             )) {
               mkdirSync(dirname(join(root, rel)), { recursive: true });
-              writeFileSync(join(root, rel), text);
+              writeFileSync(join(root, rel), text, { mode: 0o600 });
             }
             for (const rel of (spec.remove ?? []) as string[])
               unlinkSync(join(root, rel));
-            if (spec.restart_codex) await createCodex().importCodexCliLogin();
             if (spec.unchanged_auth) authBeforeStatus = authBytes();
+            if (spec.openai_environment === true)
+              ambient.OPENAI_API_KEY = "test-ambient-openai-key";
+            if (spec.openai_environment === false)
+              delete ambient.OPENAI_API_KEY;
           },
           expect: (item, got) => {
+            const { current, capture } = item as SettingsCase;
+            if (capturePath) {
+              if (capture === "native")
+                captures.push({
+                  name: item.name,
+                  status: got.status,
+                  body: (got.body as { json: unknown }).json,
+                  files: Object.fromEntries(
+                    Object.keys(current.files ?? {}).map((rel) => [
+                      rel,
+                      readJson(join(root, rel)),
+                    ]),
+                  ),
+                  requests: [...fake.requests],
+                });
+              fake.requests.length = 0;
+              fake.responses.length = 0;
+              checked++;
+              return null;
+            }
             if (authBeforeStatus !== undefined) {
               expect(authBytes() === authBeforeStatus, item.name).toBe(true);
               authBeforeStatus = undefined;
             }
-            const current = (item as SettingsCase).current;
             expect(got.status, item.name).toBe(current.status);
             Object.assign(expectedFiles, current.files);
             for (const [rel, want] of Object.entries(expectedFiles)) {
@@ -314,10 +336,10 @@ describe("corpus", () => {
             const value = body as Rec;
             const publicText = JSON.stringify(got.body);
             for (const credential of Object.values(
-              readJson(join(agent, "auth.json")),
-            ) as Rec[])
+              readJson(authPath) ?? {},
+            ) as (Rec | null)[])
               for (const key of ["key", "access", "refresh"])
-                if (typeof credential[key] === "string")
+                if (typeof credential?.[key] === "string")
                   expect(publicText, item.name).not.toContain(
                     credential[key] as string,
                   );
@@ -356,7 +378,9 @@ describe("corpus", () => {
         },
       );
       expect(problems).toEqual([]);
-      expect(checked).toBe(90);
+      if (capturePath)
+        await Bun.write(capturePath, JSON.stringify(captures, null, 2));
+      expect(checked).toBe(97);
       expect(readFileSync(marksPath, "utf8")).toBe(legacyMarks);
       const expectUpdatesRefused = async (base: string, reason: string) => {
         const url = `${base}/api/settings/update`;

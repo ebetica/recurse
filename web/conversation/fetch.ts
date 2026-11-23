@@ -51,6 +51,7 @@ import {
 } from "../show-timing.js";
 import { DRAFT, embedded, embeddedFrameHidden, state } from "../state.js";
 import { convHash, renderThread } from "./thread.js";
+import { keepRepliedSafety } from "../safety-view.js";
 import { type Conversation } from "../types.js";
 import { type ViewPage } from "../row-thread-state/view-blocks.js";
 
@@ -490,6 +491,12 @@ export async function refreshConv(
     latestRunRead = { id, started: requestedAt };
     convReadAt.set(id, performance.now());
   }
+  keepRepliedSafety(
+    id,
+    requestedAt,
+    current?.id === id ? current : undefined,
+    conv,
+  );
   state.currentConv = conv;
   focusedRead.stopReadAuthoritativeId = id;
   // Invariant: A successful read proves the conversation exists: lift any

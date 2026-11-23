@@ -11,6 +11,7 @@ import { slowSpan } from "../observability/slow-span";
 import type { ProcessHandle, ProcessLifecycle } from "../process_lifecycle";
 import { parsePythonJson, pyCompactJson } from "../utils/python-json";
 import type { ProviderCredentialStore } from "./provider_store";
+import { readBoundedSettingsAuth } from "./codex_cli";
 
 const AUTH_FILE_NAME = "auth.json";
 export const HTTP_TIMEOUT_MS = 30_000;
@@ -427,6 +428,13 @@ export class OAuthStore implements ProviderCredentialStore {
     } catch {
       return {};
     }
+  }
+
+  /** Bound sign-in status reads; only a missing file means no saved choices. */
+  async readBoundedAuth(): Promise<Json | null> {
+    return readBoundedSettingsAuth(
+      join(await this.options.piAgentDir(), AUTH_FILE_NAME),
+    );
   }
 
   async writePending(name: string, payload: Json): Promise<void> {

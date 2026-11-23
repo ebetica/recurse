@@ -16,7 +16,7 @@ import { WARNING } from "../../../observability/runtime_logging";
 import { writeClear } from "./clear.ts";
 import { startTitle } from "./title.ts";
 import { runtime } from "./load.ts";
-import { draft, type Held } from "./submission.ts";
+import { draft, type Held, reviewedOnly } from "./submission.ts";
 
 export interface SendOptions {
   note?: boolean;
@@ -27,7 +27,7 @@ export interface SendOptions {
 
 /**
  * Admit one input; resolves with its request id once Durable committed it,
- * or null when the conversation is being deleted.
+ * or null when the conversation is being deleted or refuses service input.
  */
 export async function send(
   host: DurableHost,
@@ -51,6 +51,7 @@ export async function send(
     const opened = await host.open(cid);
     const { conversation } = opened;
     const clear = host.clears.get(cid);
+    const service = reviewedOnly(requestId);
     if (clear !== undefined) {
       const existing = clear.held.some((item) => item.requestId === requestId);
       const expectedRun = opened.row.runId;
@@ -90,7 +91,22 @@ export async function send(
         : false;
     options.onInterrupt?.(interrupted);
     const before = host.deps.load(cid);
-    const submission = await conversation.submit(draft(held), context);
+    // Invariant: Service input is checked in its own admission commit, ordered
+    // with every safety toggle commit, not by the earlier check in delivery.
+    const submission = service
+      ? await (
+          await runtime()
+        ).submitReviewed(
+          conversation,
+          draft(held),
+          () => host.safetyRequestedOff(cid),
+          context,
+        )
+      : (await conversation.submit(draft(held), context)).id;
+    if (submission === null) {
+      host.deps.log("durable_send_refused", { cid, request_id: requestId });
+      return null;
+    }
     if (operator && existing === undefined) {
       if (
         before &&
@@ -106,7 +122,7 @@ export async function send(
     host.deps.log("durable_send_admitted", {
       cid,
       request_id: requestId,
-      submission: Number(submission.id),
+      submission: Number(submission),
     });
     return requestId;
   });

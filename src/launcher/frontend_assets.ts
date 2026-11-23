@@ -19,6 +19,7 @@ export const APP_CSS_SOURCES = [
   "web/composer/style.css",
   "web/prompt/style.css",
   "web/context/style.css",
+  "web/artifacts/style.css",
   "web/theme.css",
   "web/panes/powerbar.css",
   "web/app.css",

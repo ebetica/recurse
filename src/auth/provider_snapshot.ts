@@ -1,11 +1,13 @@
 // Cached auth-provider snapshots keep Config reads synchronous.
-// Refresh at startup and after Settings login changes so model choices reflect them.
-// External edits wait for refresh. Concurrent refreshes share work; a request
-// during a run schedules one more, so the last change wins.
+// Model listings recheck only OpenAI, whose Codex CLI sign-in can change
+// outside Settings. A Settings write always schedules a post-write refresh.
 
 interface ProviderSnapshotSources {
   readonly anthropic: { claudeConfigured(): Promise<boolean> };
-  readonly codex: { modelProviders(): Promise<Set<string>> };
+  readonly codex: {
+    modelProviders(): Promise<Set<string>>;
+    liveModelProviders(): Promise<Set<string> | undefined>;
+  };
   readonly muse: { modelProviders(): Promise<Set<string>> };
   readonly openrouter: { authStatus(): Promise<Record<string, unknown>> };
   /** Configured custom endpoint names (config.custom_model_providers). */
@@ -14,10 +16,20 @@ interface ProviderSnapshotSources {
   storedApiKey(provider: string): Promise<[boolean, string | null]>;
 }
 
+async function quiet<T>(work: () => Promise<T>, fallback: T): Promise<T> {
+  try {
+    return await work();
+  } catch {
+    return fallback;
+  }
+}
+
 export class ProviderSnapshot {
   private builtIn: ReadonlySet<string> = new Set();
+  private openAI: ReadonlySet<string> = new Set();
   private custom: ReadonlySet<string> = new Set();
   private running: Promise<void> | null = null;
+  private readingOpenAI: Promise<boolean> | null = null;
   private again = false;
 
   constructor(private readonly sources: ProviderSnapshotSources) {}
@@ -32,7 +44,7 @@ export class ProviderSnapshot {
     return this.custom;
   }
 
-  /** Recompute both sets; resolves once a run started after this call ends. */
+  /** Recompute both sets, including any changes made during an earlier run. */
   refresh(): Promise<void> {
     if (this.running) {
       this.again = true;
@@ -48,23 +60,32 @@ export class ProviderSnapshot {
     return this.running;
   }
 
+  /** Spot external Codex CLI changes without waiting for other providers. */
+  refreshOpenAI(): Promise<boolean> {
+    return (this.readingOpenAI ??= this.pollOpenAI().finally(() => {
+      this.readingOpenAI = null;
+    }));
+  }
+
+  private async pollOpenAI(): Promise<boolean> {
+    const openAI = await quiet(
+      () => this.sources.codex.liveModelProviders(),
+      new Set<string>(),
+    );
+    if (!openAI) return false;
+    const authed = new Set(this.builtIn);
+    for (const id of this.openAI) authed.delete(id);
+    for (const id of openAI) authed.add(id);
+    this.openAI = openAI;
+    this.builtIn = authed;
+    return true;
+  }
+
   private async compute(): Promise<void> {
     const { sources } = this;
-    const quiet = async <T>(work: () => Promise<T>, fallback: T) => {
-      try {
-        return await work();
-      } catch {
-        return fallback;
-      }
-    };
     const authed = new Set<string>();
     if (await quiet(() => sources.anthropic.claudeConfigured(), false))
       authed.add("anthropic");
-    for (const provider of await quiet(
-      () => sources.codex.modelProviders(),
-      new Set<string>(),
-    ))
-      authed.add(provider);
     for (const provider of await quiet(
       () => sources.muse.modelProviders(),
       new Set<string>(),
@@ -86,6 +107,14 @@ export class ProviderSnapshot {
       ] as [boolean, string | null]);
       if (key) custom.add(name);
     }
+    // Finish any pre-write poll before asking for the post-write state.
+    await this.readingOpenAI;
+    if (!(await this.refreshOpenAI()))
+      this.openAI = await quiet(
+        () => sources.codex.modelProviders(),
+        new Set<string>(),
+      );
+    for (const id of this.openAI) authed.add(id);
     this.builtIn = authed;
     this.custom = custom;
   }

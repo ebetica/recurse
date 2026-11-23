@@ -240,15 +240,10 @@ export const tests: BrowserTest[] = [
         await browserExpect(input).toHaveValue("Clarify this paragraph");
         await input.press("Escape");
         await browserExpect(popover).toBeHidden();
-        await mutable.waitFor();
-        expect(
-          await mutable.evaluate(
-            (element: HTMLImageElement) => element.naturalWidth,
-          ),
-        ).toBe(1);
         await browserExpect(
-          mutable.locator("..").locator("mark.report-cbox"),
-        ).toHaveCount(0);
+          doc.getByText("Image not found: live-diagram.png", { exact: true }),
+        ).toBeVisible();
+        await browserExpect(doc.locator("mark.report-cbox")).toHaveCount(1);
       }
       await image.locator("..").locator("mark.report-cbox").waitFor();
       await browserExpect(crop).toBeVisible();

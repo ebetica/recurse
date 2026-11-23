@@ -63,6 +63,7 @@ export interface ArtifactState {
   // Blocks content while history traverses back before opening a new Artifact.
   awaitingHistory?: boolean;
   selectedVersion: string | null;
+  selectedPage: string | null;
   shownKey: string | null;
   loadingKey: string | null;
   failedKey: string | null;
@@ -86,7 +87,7 @@ export interface ArtifactState {
   justRestored: boolean;
   notice: string;
   noticeError: boolean;
-  contentInfo: ArtifactInfo | null;
+  contentInfo: (ArtifactInfo & { page?: string }) | null;
   versionMenuOpen: boolean;
   contentAbort: AbortController | null;
   refreshKey?: number;
@@ -100,12 +101,13 @@ interface CommentDoc {
   version: string | null;
   noun?: "file";
   path?: string;
+  page?: string;
 }
 export interface CommentPane extends HTMLElement {
   _rs: Pick<
     ArtifactState,
     "agentId" | "selId" | "deleting" | "sending" | "sendFailed" | "sendSeq"
-  > & { contentInfo: CommentDoc | null };
+  > & { contentInfo: CommentDoc | null; selectedPage?: string | null };
 }
 export interface CommentRendering {
   renderBar(pane: CommentPane): void;

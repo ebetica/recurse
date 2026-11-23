@@ -231,21 +231,19 @@ describe("owner scoping", () => {
     });
     const repo = String(artifact.repo_path);
     await mkdir(join(repo, "nested"));
+    await writeFile(join(repo, "index.md"), "# Image document\n");
+    await artifacts.publish(app.artifacts, "owner-a", String(artifact.id));
     await writeFile(join(repo, "nested", "picture.png"), png);
-    const query = {
-      artifact: String(artifact.id),
-      document: "nested/report.md",
-    };
-    const artifactImage = await fetch(url("picture.png", query));
-    expect(artifactImage.status).toBe(200);
-    expect(new Uint8Array(await artifactImage.arrayBuffer())).toEqual(png);
-    expect((await fetch(url("picture.png", query, "owner-b"))).status).toBe(
-      404,
-    );
-    expect(
-      (await fetch(url("picture.png", { ...query, document: "../report.md" })))
-        .status,
-    ).toBe(404);
+    const artifactImage = (agent: string) =>
+      fetch(
+        `${base}/api/artifacts/${artifact.id}/file?${new URLSearchParams({ agent, path: "nested/picture.png" })}`,
+      );
+    expect((await artifactImage("owner-a")).status).toBe(404);
+    await artifacts.publish(app.artifacts, "owner-a", String(artifact.id));
+    const published = await artifactImage("owner-a");
+    expect(published.status).toBe(200);
+    expect(new Uint8Array(await published.arrayBuffer())).toEqual(png);
+    expect((await artifactImage("owner-b")).status).toBe(404);
     const document = join(documents, "report.md");
     await writeFile(document, "![Picture](picture.png)");
     const saved = await registerFile(
@@ -838,6 +836,61 @@ describe("owner scoping", () => {
       expect(normalise(raw, "DELETE").status).toBe(404);
     } finally {
       node.reaping = false;
+    }
+  });
+
+  // Regression: #3674 Artifact image previews must not read outside the published tree.
+  test("artifact file reads refuse traversal and symlink escapes", async () => {
+    const owner = "owner-a";
+    const created = await artifacts.create(app.artifacts, {
+      owner,
+      title: "Image guide",
+    });
+    const artifact = String(created.id);
+    const repo = String(created.repo_path);
+    const fileUrl = `/api/artifacts/${artifact}/file?agent=${owner}&path=`;
+    await writeFile(join(repo, "index.md"), "# Image guide\n");
+    await artifacts.publish(app.artifacts, owner, artifact);
+    const ownerRoot = join(app.artifacts.artifactsDir, owner);
+    const outside = join(ownerRoot, "outside-figure.svg");
+    const escape = join(repo, "alias-figure.svg");
+    await writeFile(outside, '<svg xmlns="http://www.w3.org/2000/svg"/>');
+    await symlink(outside, escape);
+    try {
+      for (const [path, status] of [
+        ["../outside-figure.svg", 400],
+        [outside, 400],
+        ["alias-figure.svg", 404],
+      ] as const) {
+        expect((await get(fileUrl + encodeURIComponent(path))).status).toBe(
+          status,
+        );
+        expect(
+          (
+            await get(
+              `/api/conversations/${owner}/path-image?${new URLSearchParams({ artifact, path })}`,
+            )
+          ).status,
+        ).toBe(404);
+      }
+      expect((await get(fileUrl + "%2e%2e%2foutside-figure.svg")).status).toBe(
+        400,
+      );
+
+      await Bun.$`git -C ${repo} add -- alias-figure.svg`.quiet();
+      const tree = (await Bun.$`git -C ${repo} write-tree`.text()).trim();
+      const commit = (
+        await Bun.$`git -C ${repo} commit-tree ${tree} -p HEAD -m ${"Track the image symlink"}`.text()
+      ).trim();
+      await Bun.$`git -C ${repo} update-ref ${artifacts.GIT_REF} ${commit}`.quiet();
+      const refused = await get(fileUrl + "alias-figure.svg");
+      expect([refused.status, refused.body]).toEqual([
+        400,
+        { json: { detail: "artifact tree contains a symlink or submodule" } },
+      ]);
+    } finally {
+      await unlink(escape);
+      await unlink(outside);
     }
   });
 

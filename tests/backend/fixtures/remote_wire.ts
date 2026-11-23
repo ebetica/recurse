@@ -141,7 +141,9 @@ export async function withRemoteWire(
       };
       sides.push(side);
       provider.faux.setResponses([fauxAssistantMessage("wire ready")]);
-      await app.instance.nodes.node(agent).setSafety(true);
+      await (
+        await app.instance.nodes.node(agent).setSafety(true)
+      )[1];
       await until(async () =>
         JSON.stringify(await app.instance.durable.view(agent)).includes(
           "wire ready",

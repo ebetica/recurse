@@ -3,7 +3,7 @@
 // Saved app state is operator-only HTTP: raw JSON, owner-scoped, no-store.
 // Operator-only path images: bounded no-store snapshots scoped by conversation.
 
-import { basename, extname, isAbsolute, relative, resolve } from "node:path";
+import { basename, extname } from "node:path";
 import { timingDetail, timingFailure } from "../observability/request_timing";
 
 import * as artifacts from "../artifacts";
@@ -481,35 +481,17 @@ export function registerFileRoutes(
     async (ex) => {
       if (agentMarked(ex) || !isOperator(ex, { allowBackendKey: true }))
         throw new HttpError(403, "only the operator can view local images");
-      const cid = ex.params.cid!;
-      const cwd = await deps.imageCwd(cid);
+      if (str(ex, "artifact") !== null)
+        throw new HttpError(
+          404,
+          "Artifact images must be read from the published version",
+        );
+      const cwd = await deps.imageCwd(ex.params.cid!);
       if (!cwd) throw new HttpError(404, "conversation not found");
-      let document = str(ex, "document");
-      const artifact = str(ex, "artifact");
-      if (artifact) {
-        try {
-          const meta = await artifacts.get(deps.artifacts, cid, artifact);
-          const repo = String(meta.repo_path);
-          const entry = document || artifacts.DOCUMENT_ENTRY;
-          const target = resolve(repo, entry);
-          const fromRepo = relative(repo, target);
-          if (
-            isAbsolute(entry) ||
-            fromRepo === ".." ||
-            fromRepo.startsWith("../") ||
-            isAbsolute(fromRepo)
-          )
-            throw new HttpError(404, "artifact document not found");
-          document = target;
-        } catch (error) {
-          if (error instanceof artifacts.ArtifactError) artifactFailure(error);
-          throw error;
-        }
-      }
       let { data, media, name } = await readPathImage(
         cwd,
         String(ex.query.path),
-        document,
+        str(ex, "document"),
         ATTACH_MAX_BYTES,
         ex.request.signal,
       );

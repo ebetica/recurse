@@ -27,6 +27,7 @@ import {
   artifactLinkUrl,
   readAgentLink,
   readArtifactLink,
+  setArtifactTarget,
 } from "../deep-link.js";
 import { artifactGeneration } from "../panes/autoopen.js";
 import { DRAFT, state } from "../state.js";
@@ -106,12 +107,15 @@ function nextArtifactVisit(): number {
   return artifactVisit;
 }
 
-function artifactUrl(id: string, section: string | null = null): string {
+function artifactUrl(
+  id: string,
+  page: string | null,
+  section: string | null,
+  version: string | null,
+): string {
   const url = new URL(location.href);
   const params = new URLSearchParams(url.hash.slice(1));
-  params.set("artifact", id);
-  params.delete("section");
-  if (section !== null) params.set("section", section);
+  setArtifactTarget(params, id, page, section, version);
   url.hash = params.toString();
   return url.href;
 }
@@ -135,9 +139,38 @@ function rememberArtifact(
   history.replaceState(
     { ...history.state, artifactView },
     "",
-    address ? artifactUrl(rs.selId) : location.href,
+    address
+      ? artifactUrl(
+          rs.selId,
+          rs.selectedPage,
+          artifactSection(rs.selId, rs.selectedPage),
+          rs.followCurrent ? null : rs.selectedVersion,
+        )
+      : location.href,
   );
   rs.linkedVisit = artifactView.visit;
+}
+
+function artifactSection(id: string, page: string | null): string | null {
+  const params = new URLSearchParams(location.hash.slice(1));
+  return params.get("artifact") === id && params.get("page") === page
+    ? params.get("section")
+    : null;
+}
+
+function artifactAddress(hash: string) {
+  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  const version = params.get("version");
+  return {
+    page: params.get("page"),
+    section: params.get("section"),
+    // Empty distinguishes an invalid explicit pin from following latest.
+    version: isFullVersion(version)
+      ? version.toLowerCase()
+      : version === null
+        ? null
+        : "",
+  };
 }
 
 function startArtifactTrail(open: () => void): void {
@@ -180,15 +213,18 @@ export function openArtifactLink(hash = location.hash): void {
       history.go(saved.depth < (pane._rs.linkedDepth || 0) ? 1 : -1);
       return;
     }
+    const { page, section, version } = artifactAddress(hash);
     openArtifact(
       id,
-      new URLSearchParams(hash.replace(/^#/, "")).get("section"),
+      section,
       saved?.id === id
         ? {
             ...saved,
             followCurrent: saved.version === null && saved.followCurrent,
           }
         : undefined,
+      page,
+      version,
     );
   }
 }
@@ -197,14 +233,28 @@ function openArtifact(
   id: string,
   section: string | null = null,
   returning?: ArtifactHistory,
+  page: string | null = null,
+  version: string | null = null,
 ): void {
   if (!state.selectedId || state.draft) return;
-  if (deferPaneOpenUntilRead(() => openArtifact(id, section, returning)))
+  if (
+    deferPaneOpenUntilRead(() =>
+      openArtifact(id, section, returning, page, version),
+    )
+  )
     return;
-  if (artifactMount.current && !discardCurrent(artifactMount.current)) return;
+  const current = artifactMount.current;
+  if (current && !discardCurrent(current)) return;
   linkedAgent = state.selectedId;
-  entry(state.selectedId).invalidated = true;
-  if (!openPane(ARTIFACTS_PANE_ID)) return;
+  const sameArtifact =
+    current?._rs.agentId === state.selectedId && current._rs.selId === id;
+  const cache = entry(state.selectedId);
+  if (!sameArtifact) cache.invalidated = true;
+  const visible =
+    sameArtifact &&
+    current?.getClientRects().length &&
+    getComputedStyle(current).visibility === "visible";
+  if (!visible && !openPane(ARTIFACTS_PANE_ID)) return;
   const pane = artifactMount.current;
   if (!pane) return;
   if (!returning)
@@ -216,19 +266,21 @@ function openArtifact(
           id,
           depth: 0,
           visit: nextArtifactVisit(),
-          version: null,
-          followCurrent: true,
-          scrollTop: 0,
+          version,
+          followCurrent: version === null,
+          scrollTop: null,
         } satisfies ArtifactHistory,
       },
       "",
       readArtifactLink(location.hash)
-        ? artifactUrl(id, section)
+        ? artifactUrl(id, page, section, version)
         : location.href,
     );
   pane._rs.browsing = false;
-  pane._rs.returningVersion = returning;
-  pane._rs.linkedScrollTop = returning?.scrollTop;
+  pane._rs.returningVersion =
+    version !== null ? { version, followCurrent: false } : returning;
+  pane._rs.linkedScrollTop =
+    returning?.scrollTop ?? (section === null ? 0 : undefined);
   pane._rs.linkedDepth = returning?.depth || 0;
   pane._rs.linkedVisit = readArtifactHistory(state.selectedId)?.visit;
   pane._rs.linkedArtifactId = id;
@@ -237,10 +289,11 @@ function openArtifact(
       ? undefined
       : { artifact: id, fragment: `#${encodeURIComponent(section)}` };
   pane._rs.restoredArtifactId = id;
+  const requestedVersion = version ?? returning?.version;
   if (
     pane._rs.selId !== id ||
-    (returning?.version
-      ? returning.version !== pane._rs.selectedVersion
+    (requestedVersion != null
+      ? requestedVersion !== pane._rs.selectedVersion
       : !pane._rs.followCurrent)
   ) {
     pane._rs.contentAbort?.abort();
@@ -250,11 +303,18 @@ function openArtifact(
     pane._rs.loadingKey = null;
     pane._rs.requestSeq++;
   }
+  if (pane._rs.selectedPage !== page) {
+    resetContent(pane);
+    pane._rs.requestSeq++;
+    pane._rs.selectedPage = page;
+    pane.querySelector<HTMLElement>(".report-doc")!.replaceChildren();
+    renderComments(pane);
+  }
   pane._rs.failedKey = null;
-  if (!entry(state.selectedId).fetching)
+  if (cache.invalidated && !cache.fetching)
     void refreshList(state.selectedId, true);
   renderShell(pane);
-  void showArtifact(pane);
+  showSelected(pane, sameArtifact);
 }
 
 document.addEventListener("click", (event) => {
@@ -262,47 +322,65 @@ document.addEventListener("click", (event) => {
   const href = link?.getAttribute("href");
   if (
     event.defaultPrevented ||
-    !href?.startsWith("#") ||
-    !readArtifactLink(href)
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey ||
+    !href?.startsWith("#")
   )
     return;
-  if (readAgentLink(href).present) return;
-  event.preventDefault();
-  const id = readArtifactLink(href)!;
-  const section = new URLSearchParams(href.slice(1)).get("section");
+  const id = readArtifactLink(href);
+  if (!id) return;
+  const { page, section, version } = artifactAddress(href);
   const pane = artifactMount.current;
-  if (pane && !discardCurrent(pane)) return;
-  if (pane?.contains(link!) && link!.closest(".report-doc") && pane._rs.selId) {
+  const fromDocument =
+    pane?.contains(link!) &&
+    !!link!.closest(".report-doc, .artifact-page-nav") &&
+    !!pane._rs.selId;
+  const agent = readAgentLink(href);
+  if (agent.present && !(fromDocument && agent.id === state.selectedId)) return;
+  event.preventDefault();
+  if (
+    pane &&
+    (pane._rs.sending ||
+      pane._rs.restoring ||
+      pane._rs.deleting ||
+      !discardCurrent(pane))
+  )
+    return;
+  if (pane && fromDocument) {
+    const rs = pane._rs;
     const depth = readArtifactHistory(state.selectedId)?.depth || 0;
-    if (pane._rs.selId === id) {
-      openArtifact(id, section, {
-        agent: state.selectedId!,
-        id,
-        depth,
-        visit: artifactVisit,
-        version: pane._rs.selectedVersion,
-        followCurrent: pane._rs.followCurrent,
-        scrollTop: artifactScroller(pane).scrollTop,
-      });
-      return;
-    }
-    rememberArtifact(pane, depth);
+    const sameArtifact = rs.selId === id;
+    const samePage =
+      sameArtifact &&
+      rs.selectedPage === page &&
+      (version === null || version === rs.selectedVersion);
+    if (!samePage) rememberArtifact(pane, depth);
     const artifactView: ArtifactHistory = {
       agent: state.selectedId!,
       id,
-      depth: depth + 1,
-      visit: nextArtifactVisit(),
-      version: null,
-      followCurrent: true,
-      scrollTop: 0,
+      depth: samePage ? depth : depth + 1,
+      visit: samePage
+        ? (rs.linkedVisit ?? nextArtifactVisit())
+        : nextArtifactVisit(),
+      version: version ?? (sameArtifact ? rs.selectedVersion : null),
+      followCurrent: version === null && (!sameArtifact || rs.followCurrent),
+      scrollTop:
+        samePage && section === null ? artifactScroller(pane).scrollTop : null,
     };
-    history.pushState(
-      { ...history.state, artifactView },
-      "",
-      artifactUrl(id, section),
+    if (!samePage)
+      history.pushState(
+        { ...history.state, artifactView },
+        "",
+        artifactUrl(id, page, section, version),
+      );
+    openArtifact(id, section, artifactView, page);
+  } else
+    startArtifactTrail(() =>
+      openArtifact(id, section, undefined, page, version),
     );
-    openArtifact(id, section, artifactView);
-  } else startArtifactTrail(() => openArtifact(id, section));
 });
 
 const HISTORY_ICON = unsafeHTML(ARTIFACT_HISTORY_ICON);
@@ -375,7 +453,7 @@ function applyRestoredArtifactSelection(pane: ArtifactEl): boolean {
   rs.contentAbort?.abort();
   rs.selId = nextId;
   const next = selectedInfo(pane);
-  rs.selectedVersion = returning?.version || next?.version || null;
+  rs.selectedVersion = returning?.version ?? next?.version ?? null;
   rs.followCurrent = returning?.followCurrent ?? true;
   rs.headVersion = next?.version || null;
   rs.contentInfo = null;
@@ -389,7 +467,7 @@ function applyRestoredArtifactSelection(pane: ArtifactEl): boolean {
 }
 
 function showSelected(pane: ArtifactEl, focus: boolean): void {
-  const { agentId, selId, selectedVersion } = pane._rs;
+  const { agentId, selId, selectedVersion, selectedPage } = pane._rs;
   const previousFocus = document.activeElement;
   void showArtifact(pane).then(() => {
     const rs = pane._rs;
@@ -399,6 +477,7 @@ function showSelected(pane: ArtifactEl, focus: boolean): void {
       rs.agentId === agentId &&
       rs.selId === selId &&
       rs.selectedVersion === selectedVersion &&
+      rs.selectedPage === selectedPage &&
       !rs.browsing &&
       (document.activeElement === previousFocus ||
         document.activeElement === document.body)
@@ -440,7 +519,7 @@ function selectArtifact(
   rs.linkedSection = undefined;
   rs.linkedScrollTop = undefined;
   rs.linkedDepth = 0;
-  if (rs.selId === id && rs.followCurrent) {
+  if (rs.selId === id && rs.followCurrent && !rs.selectedPage) {
     rememberArtifact(pane, 0, !!readArtifactLink(location.hash));
     renderShell(pane);
     showSelected(pane, focus);
@@ -448,6 +527,7 @@ function selectArtifact(
     return true;
   }
   resetContent(pane);
+  rs.selectedPage = null;
   rs.selId = id;
   const next = selectedInfo(pane);
   rs.selectedVersion = next?.version || null;
@@ -475,6 +555,9 @@ function selectVersion(pane: ArtifactEl, version: string, focus = false): void {
   resetContent(pane);
   rs.selectedVersion = version;
   rs.followCurrent = version === selectedInfo(pane)?.version;
+  const saved = readArtifactHistory(rs.agentId);
+  if (saved?.id === rs.selId && readArtifactLink(location.hash) === rs.selId)
+    rememberArtifact(pane, saved?.depth ?? 0);
   renderShell(pane);
   showSelected(pane, focus);
 }
@@ -530,12 +613,18 @@ function navigateArtifact(pane: ArtifactEl, command: PaneNavigation): boolean {
           (entry) => entry.id === item?.dataset.artifactId,
         )
       : selectedInfo(pane);
-    if (!info || !rs.agentId || !info.entry) return true;
+    if (
+      !info ||
+      !rs.agentId ||
+      !info.entry ||
+      (!browsing && rs.selectedVersion === "")
+    )
+      return true;
     const agentId = rs.agentId;
     const href = artifactFileUrl(
       agentId,
       info.id,
-      info.entry,
+      browsing ? info.entry : rs.selectedPage || info.entry,
       browsing ? info.version : rs.selectedVersion,
       true,
     );
@@ -559,12 +648,21 @@ async function copyArtifactLink(
   pane: ArtifactEl,
   button: HTMLButtonElement,
 ): Promise<void> {
-  const { agentId, selId } = pane._rs;
+  const { agentId, selId, selectedPage } = pane._rs;
   if (!agentId || !selId) return;
   const notice = panePowerbar(pane).querySelector<HTMLElement>(
     ".artifact-copy-status",
   )!;
-  await copyLink(artifactLinkUrl(location.href, agentId, selId), notice);
+  await copyLink(
+    artifactLinkUrl(
+      location.href,
+      agentId,
+      selId,
+      selectedPage,
+      artifactSection(selId, selectedPage),
+    ),
+    notice,
+  );
   if (button.isConnected && document.activeElement === document.body)
     button.focus({ preventScroll: true });
 }
@@ -586,11 +684,13 @@ function renderShell(pane: ArtifactEl): void {
   ) {
     rs.contentAbort?.abort();
     rs.selId = list[0]?.id || null;
+    rs.selectedPage = null;
     rs.selectedVersion = list[0]?.version || null;
     rs.contentInfo = null;
     rs.shownKey = null;
   }
   const currentInfo = selectedInfo(pane);
+  if (currentInfo?.entry === rs.selectedPage) rs.selectedPage = null;
   if (currentInfo && rs.headVersion !== currentInfo.version) {
     rs.headVersion = currentInfo.version;
     rs.versionsId = null;
@@ -673,17 +773,17 @@ function renderShell(pane: ArtifactEl): void {
     !!rs.selectedVersion && rs.selectedVersion !== currentInfo?.version;
   const canRestore = offCurrent && hasVersions;
   const download =
-    currentInfo && rs.agentId && currentInfo.entry
+    currentInfo && rs.agentId && currentInfo.entry && rs.selectedVersion !== ""
       ? artifactFileUrl(
           rs.agentId,
           currentInfo.id,
-          currentInfo.entry,
+          rs.selectedPage || currentInfo.entry,
           rs.selectedVersion,
           true,
         )
       : "";
   const downloadLabel = info
-    ? `Download original ${info.filename}${rs.selectedVersion ? `, version ${rs.selectedVersion.slice(0, 8)}` : ""}`
+    ? `Download original ${rs.selectedPage || info.filename}${rs.selectedVersion ? `, version ${rs.selectedVersion.slice(0, 8)}` : ""}`
     : "Download original";
   const coldList = !!cache?.fetching && !cache.loaded;
   const missingLink = rs.linkedArtifactId && selectionReady && !currentInfo;
@@ -792,14 +892,16 @@ function renderShell(pane: ArtifactEl): void {
             >
               ${unsafeHTML(SHARE_ICON)}
             </button>
-            <a
-              class="artifact-icon-btn artifact-download"
-              href=${download}
-              download
-              aria-label=${downloadLabel}
-              title="Download original"
-              >${DOWNLOAD_ICON}</a
-            >
+            ${download
+              ? html`<a
+                  class="artifact-icon-btn artifact-download"
+                  href=${download}
+                  download
+                  aria-label=${downloadLabel}
+                  title="Download original"
+                  >${DOWNLOAD_ICON}</a
+                >`
+              : nothing}
           </div>
           <div
             class="menu menu-note artifact-copy-status"
@@ -861,6 +963,22 @@ function renderShell(pane: ArtifactEl): void {
     html`<h2 id="artifact-heading" class="sr-only">
         ${info ? info.title : "Artifacts"}
       </h2>
+      ${!browsing && rs.selectedPage && currentInfo && rs.agentId
+        ? html`<nav class="artifact-page-nav" aria-label="Document pages">
+            <a
+              href=${new URL(
+                artifactUrl(
+                  currentInfo.id,
+                  null,
+                  null,
+                  rs.followCurrent ? null : rs.selectedVersion,
+                ),
+              ).hash}
+              >${unsafeHTML(BACK_ICON)} Overview</a
+            >
+            <span aria-current="page">${rs.selectedPage}</span>
+          </nav>`
+        : nothing}
       <div
         class=${`artifact-notice ${noticeText ? "on" : ""} ${cache?.error || missingLink || rs.noticeError ? "error" : ""}`}
         role="status"
@@ -936,6 +1054,7 @@ function retarget(pane: ArtifactEl, agentId: string): boolean {
   rs.browsing = false;
   rs.filter = "";
   rs.selId = null;
+  rs.selectedPage = null;
   rs.restoredArtifactId = undefined;
   rs.linkedArtifactId = undefined;
   rs.linkedSection = undefined;
@@ -1150,6 +1269,7 @@ registerPane({
       browsing: false,
       filter: "",
       selId: null,
+      selectedPage: null,
       selectedVersion: null,
       shownKey: null,
       loadingKey: null,

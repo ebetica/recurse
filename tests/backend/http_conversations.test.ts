@@ -951,7 +951,12 @@ test("the safety toggle leaves the running turn's state alone", async () => {
       '{"off": true}',
     );
     expect(got.body).toEqual({
-      json: { id: "conv-run", safety_off: true, safety_off_active: false },
+      json: {
+        id: "conv-run",
+        safety_off: true,
+        safety_off_active: false,
+        safety_rev: 1,
+      },
     });
     expect(built.world.drain()).toEqual([
       ["set_safety", "conv-run", true],

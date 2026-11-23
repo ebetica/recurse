@@ -56,6 +56,11 @@ The [Changes group](test_changes_expand.ts) covers patch loading and truncated
 summaries alongside line expansion. [Turns](test_turns.ts) covers conversation
 history and reply controls.
 
+## Touch selection
+
+The [edge-drag test](test_long_selection.ts) uses live drag targets because
+background refreshes can repaint the title and composer between moves.
+
 ## Notifications
 
 The [notification-click test](test_notification_clicks.ts) uses real desktop

@@ -272,20 +272,30 @@ test("a side conversation forks its parent's exact prompt and tools, refuses non
       () => world.app.instance.conversations.load(side)?.title === "Side title",
     );
 
+    await (
+      await world.app.instance.nodes.node(side).setSafety(true)
+    )[1];
+    expect(world.host.safetyReviewOff(side)).toBe(true);
     await world.api(`/api/conversations/${side}/deliver`, {
       content: "hold one",
     });
     await until(() => held.includes("hold one"));
+    await world.host.close();
+    await expect(
+      world.app.instance.nodes.node(side).setSafety(false),
+    ).rejects.toThrow("server is stopping");
     await world.stop();
     world = await start();
     expect(world.app.instance.conversations.load(side)).toMatchObject({
       side_of: parent,
+      safety_off: false,
     });
     await until(async () =>
       (
         await (await world.api(`/api/conversations/${side}/view`)).text()
       ).includes("hold one resumed"),
     );
+    expect(world.host.safetyReviewOff(side)).toBe(false);
     expect(
       (
         await world.api(`/api/conversations/${side}/deliver`, {

@@ -23,6 +23,7 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 
 import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
+import { CODEX_PROVIDER, withCodexCliAccess } from "../../auth";
 import { ReadOnlySignIns } from "../../auth/read_only_sign_ins.ts";
 import { providerOutageKind, PICK_EFFORT_LEVEL_AGAIN } from "../view";
 import { FileModelsStore } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/models-store.js";
@@ -48,6 +49,7 @@ export const STORED_CREDENTIALS_ONLY: AuthContext = {
 
 const TRUSTED_CATALOG = Symbol("trusted model catalog");
 const ADD_FILE_MODELS = Symbol("add file models to Settings provider");
+const STORED_CODEX_AUTH = Symbol("stored Codex auth for MCP");
 
 /** Shipped models and Settings providers, never file-backed catalogs. */
 export function trustedModelCatalog<T extends Models>(models: T): T {
@@ -293,14 +295,24 @@ export function durableModels(
   warn: (message: string, note?: boolean) => void = (message) =>
     console.warn(message),
   reservedProviders: () => string[] = () => [],
+  ambient: Readonly<Record<string, string | undefined>> = process.env,
 ): MutableModels {
+  const readOnly = ambient.RECURSE_READ_ONLY_SIGN_INS;
+  const authPath = join(piAgentDir, "auth.json");
+  const stored = readOnly
+    ? new ReadOnlySignIns(readOnly)
+    : AuthStorage.createLazy(authPath);
   const options = {
-    credentials: process.env.RECURSE_READ_ONLY_SIGN_INS
-      ? new ReadOnlySignIns(process.env.RECURSE_READ_ONLY_SIGN_INS)
-      : AuthStorage.createLazy(join(piAgentDir, "auth.json")),
+    credentials: readOnly
+      ? stored
+      : withCodexCliAccess(stored, authPath, ambient),
     authContext: STORED_CREDENTIALS_ONLY,
     modelsStore: new FileModelsStore(join(piAgentDir, "models-store.json")),
   };
+  const storedCodex = createModels({
+    credentials: stored,
+    authContext: options.authContext,
+  });
   const trusted = createModels({
     credentials: options.credentials,
     authContext: options.authContext,
@@ -313,6 +325,7 @@ export function durableModels(
   let openRouterCatalogIds: string[] = [];
   for (const builtin of builtinProviders()) {
     const provider = withPlatformKeyOnly(builtin);
+    if (provider.id === CODEX_PROVIDER) storedCodex.setProvider(provider);
     builtinIds.set(
       provider.id,
       (provider.getAllModels?.() ?? provider.getModels()).map(
@@ -572,6 +585,7 @@ export function durableModels(
     get(target, key) {
       if (key === TRUSTED_CATALOG) return trusted;
       if (key === ADD_FILE_MODELS) return addFileModels;
+      if (key === STORED_CODEX_AUTH) return storedCodex;
       if (key === "refresh")
         return async (...args: Parameters<MutableModels["refresh"]>) => {
           const result = await baseCatalog.refresh(...args);
@@ -593,8 +607,13 @@ export async function providerToken(
   models: Models,
   provider: string,
 ): Promise<string | undefined> {
+  const source =
+    provider === CODEX_PROVIDER
+      ? ((Reflect.get(models, STORED_CODEX_AUTH) as Models | undefined) ??
+        models)
+      : models;
   try {
-    return (await models.getAuth(provider))?.auth.apiKey;
+    return (await source.getAuth(provider))?.auth.apiKey;
   } catch {
     return undefined;
   }

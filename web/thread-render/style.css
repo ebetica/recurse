@@ -107,18 +107,13 @@
 /* A visible reply inside an opened row stays untinted at its closed width. */
 .activity-group-body.split { padding: 0; background: none; box-shadow: none; }
 .activity-group-body, .activity-group-part { position: relative; display: flex; flex-direction: column;
-  gap: var(--space-3); padding: var(--space-4); border-radius: 10px; }
-.activity-group-body .agent-message-row .lead, .activity-group-body .agent-message-row .sub { flex: none; }
-.activity-group-body .agent-message-row, .activity-group-body .turn-series-toggle { min-height: 0; }
-.activity-group-body .agent-message-row[aria-expanded] { padding: 0; background: transparent; }
-.activity-group-body .agent-message-row { display: flex; flex-wrap: nowrap; gap: var(--space-2); width: 100%; text-align: left; overflow: hidden; }
-.activity-group-body .turn-series-toggle { width: 100%; }
+  gap: var(--space-3); padding: var(--space-3) var(--space-4); border-radius: 10px; }
 .activity-group-body .agent-message { align-self: stretch; max-width: 100%; }
-/* The close tab straddles the border with a centred 44px hit area.
-   A little clearance above keeps it off the preceding block footer. */
+/* The close tab straddles the corner without covering the first label.
+   Clearance above keeps its 44px hit area off the preceding footer. */
 .activity-group-body:has(> .activity-group-hide), .activity-group-part:has(> .activity-group-hide) {
   margin-top: var(--space-2); }
-.activity-group-hide { position: absolute; z-index: var(--z-raised); top: -1px; transform: translateY(-50%); right: 8px; display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: var(--space-2); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: pointer; }
+.activity-group-hide { position: absolute; z-index: var(--z-raised); top: -1px; right: 0; transform: translate(50%, -50%); display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: var(--space-2); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--muted); cursor: pointer; }
 .activity-group-hide::before { content: ""; position: absolute; width: 44px; height: 44px; left: -11px; top: -11px; }
 .activity-group-hide svg { width: 16px; height: 16px; display: block; }
 .activity-group-hide:hover, .activity-group-hide:focus-visible { color: var(--text); border-color: var(--text); }
@@ -295,7 +290,6 @@ button.turn-series-summary.hidden-chunk:focus-visible { color: var(--text); }
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .agent-message-row.attributed-agent-row { align-items: baseline; flex-wrap: nowrap;
   line-height: 1.45; gap: var(--space-3); overflow: hidden; }
-.activity-group-body .agent-message-row.attributed-agent-row { padding: var(--space-1) 0; }
 .agent-message-row.attributed-agent-row .lead { flex: 0 1 auto; min-width: 0;
   overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .agent-message-row.attributed-agent-row .sub { flex: none; }
@@ -479,6 +473,24 @@ button.agent-attachment:hover, button.agent-attachment:focus-visible,
 .compacted-head[aria-expanded="true"], .prompt-banner-row[aria-expanded="true"] {
   border-color: var(--expanded-border); }
 
+.activity-card {
+  --activity-row-height: 18px;
+  & > .turn-thinking { margin: 0; }
+  & > .turn-series-summary,
+  & > :is(.turn-thinking, .turn-series, .agent-message) > :is(.turn-thinking-toggle, .turn-series-toggle, .agent-message-row) {
+    display: flex; align-items: center; width: 100%; min-height: var(--activity-row-height);
+    gap: var(--space-3); padding: 0; background: none; color: var(--muted);
+    font-size: 0.78125rem; font-weight: 400; line-height: 1.45;
+  }
+  & > :is(.turn-thinking, .turn-series, .agent-message) > button:is(:hover, :focus-visible) { color: var(--text); }
+  & > .turn-series-summary > span,
+  & > :is(.turn-thinking, .turn-series, .agent-message) > button > span:not(.disclosure-caret) {
+    display: block; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    color: inherit; font-weight: inherit;
+  }
+}
+.shell-completion { color: var(--muted); font-size: 0.78125rem; overflow-wrap: anywhere; }
+
 /* markdown */
 .content p { margin: 0 0 .8em; }
 /* Collapse the trailing block's bottom margin so a message ending in a code
@@ -523,6 +535,7 @@ button.agent-attachment:hover, button.agent-attachment:focus-visible,
 #messages img[src$="/preview"] { -webkit-tap-highlight-color: transparent; }
 
 @media (max-width: 700px) {
+  .activity-group-body, .activity-group-part { padding-block: 0; }
   /* Keep response footers to two lines on a phone without changing their
      disclosure controls or their touch target size. */
   :is(.msg.assistant, .activity-body):has(> .turn-foot) { --turn-button-size: 22px; --turn-button-gap: var(--space-2); }
@@ -539,6 +552,7 @@ button.agent-attachment:hover, button.agent-attachment:focus-visible,
 @media (pointer: coarse) {
   .agent-message-row, .turn-series-toggle,
   button.turn-series-summary.hidden-chunk { min-height: 44px; }
-  .activity-group-body .agent-message-row,
-  .activity-group-body .turn-series-toggle { min-height: 0; }
+}
+@media (max-width: 700px), (pointer: coarse) {
+  .activity-card { --activity-row-height: 44px; }
 }

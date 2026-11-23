@@ -55,7 +55,6 @@ const LEVELS: Record<number, string> = {
 };
 const LIFECYCLE_EVENTS = new Set([
   "claude_code_login_import_failed",
-  "codex_cli_login_import_failed",
   "store_import",
   "store_import_failed",
   "store_import_incomplete_no_marker",
@@ -158,7 +157,6 @@ function harness(overrides: Partial<LifecycleDeps> = {}): Harness {
     },
     logins: {
       importClaudeCodeLogin: async () => false,
-      importCodexCliLogin: async () => false,
     },
     agentTemp: {
       migrateUploads: async () => {},

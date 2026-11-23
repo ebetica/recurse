@@ -54,6 +54,9 @@ const RESTART_UNCERTAIN_NOTICE =
   "The server restarted while sending this message, so it may have reached the agent; Retry to send it again or Dismiss it.";
 /** Third consecutive strike also closes the durable store row. */
 const SEND_FAIL_CAP = 3;
+// A superseded request reports no outcome: only the newest one is confirmed.
+const SUPERSEDED =
+  "a newer safety request for this conversation replaced this one";
 const DEBUG = 10;
 
 export interface NodeStore {
@@ -94,14 +97,13 @@ export interface AgentNodeDeps {
     | "save"
     | "saveActivity"
     | "publishTitle"
+    | "agentStore"
+    | "writeSafety"
+    | "newestSafety"
   >;
   configActions: Pick<
     ConfigActions,
-    | "safetyOffLocked"
-    | "applyPendingSafety"
-    | "safetyEffectiveOff"
-    | "withMuteGuard"
-    | "withConfigurationMetadataGuard"
+    "withNodeGuard" | "withMuteGuard" | "withConfigurationMetadataGuard"
   >;
   config: Pick<Config, "levels" | "models" | "paths">;
   runtime: RuntimeErrors;
@@ -109,8 +111,15 @@ export interface AgentNodeDeps {
   agentStore: NodeStore;
   /** store_import.import_finalized(): false refuses admission. */
   importFinalized(): boolean | null;
-  /** Authenticated operator control; commit before publishing its notice. */
-  setSafetyReviewOff?(cid: string, off: boolean): Promise<void>;
+  /** DurableHost.setSafetyReviewOff: commits only while `admits()`. */
+  setSafetyReviewOff?(
+    cid: string,
+    off: boolean,
+    rev: number,
+    admits: () => boolean,
+  ): Promise<boolean>;
+  /** DurableHost.safetyOffActive: whether Durable tools skip review now. */
+  durableSafetyOff?(cid: string): boolean;
   modelChanged?(cid: string): void;
   /** compaction._action_request(kind, cid). */
   actionRequest(kind: "clear" | "compact", cid: string): unknown;
@@ -164,7 +173,6 @@ const ATTACH_ALL = new RegExp(ATTACHMENT_REFERENCE_REGEX.source, "g");
 /** In-process owner intent for one conversation. */
 export class AgentNode {
   muteDesired: boolean | null = null;
-  safetyDesired: boolean | null = null;
   turnTask: Promise<void> | null = null;
   private turnScope: AbortScope | null = null;
   private turnStarted: (() => boolean) | null = null;
@@ -180,7 +188,6 @@ export class AgentNode {
   persistenceError: [string, string] | null = null;
   private readonly files: FileLeases;
   private lockTail: Promise<void> = Promise.resolve();
-  private safetyTail: Promise<unknown> = Promise.resolve();
   private readonly lockTokens = new WeakSet<object>();
   private lastActivityAt: number | null = null;
 
@@ -785,7 +792,10 @@ export class AgentNode {
   async cancelQueued(mid: string, mayReleaseUploads = true): Promise<boolean> {
     const queued = await this.deps.configActions.withMuteGuard(
       this.cid,
-      async () => {
+      async (_muteToken, nodeToken) => {
+        // Invariant: Cancel only on the node whose lock is held; a replaced
+        // node cancels nothing.
+        if (!this.lockTokens.has(nodeToken) || !this.isCurrent()) return null;
         const found = this.pendingIntents().find((entry) => entry.id === mid);
         if (found === undefined) return null;
         const revoked = this.revokeLive(mid);
@@ -864,58 +874,104 @@ export class AgentNode {
     );
   }
 
-  /** Set the DESIRED per-action safety-review state; [conv, noteSubmitted]. */
-  setSafety(off: boolean): Promise<[ConversationRecord, boolean]> {
+  /**
+   * Request safety review OFF or ON; reply [conv, noticed] once recorded and
+   * committed. `noticed` settles with the notice, calling `onNoticed` if admitted.
+   */
+  async setSafety(
+    off: boolean,
+    onNoticed?: () => void,
+  ): Promise<[ConversationRecord, Promise<boolean>]> {
     this.requireOwner();
-    // Invariant: One toggle at a time, so Durable's review state and the node's
-    // desired state change in the same order.
-    const result = this.safetyTail.then(() => this.applySafety(Boolean(off)));
-    this.safetyTail = result.catch(() => undefined);
-    return result;
-  }
-
-  private async applySafety(
-    off: boolean,
-  ): Promise<[ConversationRecord, boolean]> {
-    for (;;) {
-      // Invariant: Durable commits its review state before the guard is taken:
-      // the commit may open the Harness, and an open takes this conversation's
-      // guards.
-      const durable =
-        this.deps.conversations.load(this.cid)?.backend === "durable";
-      if (durable) await this.deps.setSafetyReviewOff!(this.cid, off);
-      const applied = await this.applySafetyGuarded(off, durable);
-      if (applied !== null) return applied;
+    const { conversations } = this.deps;
+    const before = this.safetyState();
+    const request = conversations.writeSafety(this.cid, off, this.deps.now());
+    if (request === null) throw new KeyError(this.cid);
+    const newest = () => conversations.newestSafety(this.cid) === request;
+    // Invariant: An OFF commits only while newest. An ON commits for its record
+    // whatever newer requests failed; Durable keeps a newer committed OFF.
+    const admits = () =>
+      (off
+        ? newest()
+        : conversations.newestSafety(this.cid)?.life === request.life) &&
+      this.nodes.ownerAdmits(this.cid);
+    if (!request.recorded) {
+      if (!off && this.durableBackend())
+        await this.deps.setSafetyReviewOff!(
+          this.cid,
+          false,
+          request.rev,
+          admits,
+        );
+      throw new Error("safety record write refused");
     }
+    this.refreshRow();
+    const persisted = await conversations.agentStore.flush(this.cid);
+    if ((persisted || !off) && this.durableBackend())
+      await this.deps.setSafetyReviewOff!(this.cid, off, request.rev, admits);
+    if (!persisted) throw new Error("safety record flush failed");
+    if (!newest()) throw new ValueError(SUPERSEDED);
+    const conv = this.withPending(this.safetyState()!);
+    this.refreshRow();
+    // A retried OFF whose earlier attempt failed changes only the effective
+    // state, so it still announces.
+    const noticed =
+      request.changed || before?.safety_off_active !== off
+        ? this.admitSafetyNotice(off, conv.status === "running", newest).then(
+            (admitted) => {
+              if (admitted) onNoticed?.();
+              return admitted;
+            },
+            (error: unknown) => {
+              this.deps.nodeLog.log(
+                WARNING,
+                `safety notice not admitted: ${String(error)}`,
+              );
+              return false;
+            },
+          )
+        : Promise.resolve(false);
+    return [conv, noticed];
   }
 
-  private applySafetyGuarded(
+  /**
+   * The record's newest safety request (`safety_off`, `safety_rev`) and
+   * whether review is skipped now (`safety_off_active`); null once deleted.
+   */
+  safetyState(): ConversationRecord | null {
+    const conv = this.deps.conversations.load(this.cid);
+    if (conv === null) return null;
+    conv.safety_off = conv.safety_off === true;
+    conv.safety_off_active =
+      conv.backend === "durable"
+        ? (this.deps.durableSafetyOff?.(this.cid) ?? false)
+        : conv.status === "running" &&
+            isDict(conv.active_turn) &&
+            "safety_off" in conv.active_turn
+          ? conv.active_turn.safety_off === true
+          : conv.safety_off;
+    return conv;
+  }
+
+  private durableBackend(): boolean {
+    return this.deps.conversations.load(this.cid)?.backend === "durable";
+  }
+
+  private async admitSafetyNotice(
     off: boolean,
-    durableCommitted: boolean,
-  ): Promise<[ConversationRecord, boolean] | null> {
-    const { conversations, configActions } = this.deps;
-    return configActions.withConfigurationMetadataGuard(
-      this.cid,
-      async (titleToken, _muteToken, nodeToken) => {
-        const conv = conversations.load(this.cid);
-        if (conv === null) throw new KeyError(this.cid);
-        // Invariant: An import made it Durable after the check: commit there
-        // first.
-        if (conv.backend === "durable" && !durableCommitted) return null;
-        const changed = configActions.safetyOffLocked(conv) !== off;
-        const running = conv.status === "running";
-        this.safetyDesired = off;
-        if (
-          conv.status !== "running" &&
-          (await configActions.applyPendingSafety(conv, nodeToken))
-        ) {
-          conv.updated = this.deps.now();
-          await conversations.save(conv, titleToken);
-        }
-        conv.safety_off = configActions.safetyOffLocked(conv);
-        conv.safety_off_active = configActions.safetyEffectiveOff(conv);
-        let submitted = false;
-        if (changed) {
+    running: boolean,
+    newest: () => boolean,
+  ): Promise<boolean> {
+    for (;;) {
+      if (!newest()) return false;
+      const admitted = await this.deps.configActions.withNodeGuard(
+        this.cid,
+        async (nodeToken) => {
+          if (!newest() || !this.nodes.ownerAdmits(this.cid)) return false;
+          // Invariant: Admit only into the current node while holding its own
+          // lock; a replacement during the wait retries on the new node.
+          if (!this.nodes.existing(this.cid)?.lockTokens.has(nodeToken))
+            return null;
           const msg = this.deps.runtime.buildSubmission(
             off ? SAFETY_OFF_NOTICE : SAFETY_ON_NOTICE,
             {
@@ -928,20 +984,19 @@ export class AgentNode {
           );
           msg.admitted_at = this.deps.monotonic();
           try {
-            submitted =
+            return (
               this.nodes.admit(this.cid, "submission", msg, {
                 store: this.deps.agentStore,
-              }) !== null;
+              }) !== null
+            );
           } catch (error) {
             if (!(error instanceof AgentClosed)) throw error;
-            submitted = false;
+            return false;
           }
-          this.refreshRow();
-        }
-        this.refreshRow();
-        return [this.withPending(conv), submitted];
-      },
-    );
+        },
+      );
+      if (admitted !== null) return admitted;
+    }
   }
 
   /** The reap fence flag. */
@@ -1000,7 +1055,6 @@ export class AgentNode {
     const [clean, diagnostic] = await this.quiesceSubordinates(signal);
     if (!clean) return [false, diagnostic];
     this.muteDesired = null;
-    this.safetyDesired = null;
     return [true, null];
   }
 

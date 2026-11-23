@@ -1,5 +1,6 @@
 import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
+import type { Request } from "playwright";
 import {
   captureErrors,
   checkedTap,
@@ -303,6 +304,195 @@ export const tests: BrowserTest[] = [
       expect(errors).toEqual([[], [], []]);
     } finally {
       await Promise.all(pages.map((page) => page.close()));
+    }
+  },
+  // Regression: #3665 a refused or failed toggle restored the tab's earlier choice instead of showing the server's state, and a failed toggle's refresh that joined a tree poll left the switch unknown.
+  async function test_safety_toggle_shows_the_server_state(browser, base) {
+    const { agent } = await postFixture(base, "seed-safety-review");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 915 },
+    });
+    const errors = captureErrors(page);
+    const path = `/api/conversations/${agent}/safety`;
+    const reviewOn = page.getByRole("switch", { name: "Safety review, on" });
+    const reviewOff = page.getByRole("switch", {
+      name: "Safety review off (Yolo mode)",
+      checked: false,
+    });
+    const checking = page.getByText("Checking whether safety review is on…");
+    const releases: (() => void)[] = [];
+    const trees: PromiseWithResolvers<(fresh: boolean) => void>[] = [];
+    let treesHeld = true;
+    const treeArrival = () => {
+      const index = trees.length;
+      return async () => {
+        await browserExpect
+          .poll(() => trees.length, {
+            message: "no tree read reached its route",
+          })
+          .toBeGreaterThan(index);
+        return trees[index]!.promise;
+      };
+    };
+    try {
+      await page.route(/\/api\/tree\/events([?]|$)/, (route) => route.abort());
+      await page.goto(`${base}#agent=${agent}`);
+      await focusComposer(page);
+      await page.locator("#model-trigger").click();
+      await page.route(
+        new RegExp(`/api/conversations/${agent}(/view|/events)?([?]|$)`),
+        (route) =>
+          route.request().method() === "GET" ? route.abort() : route.fallback(),
+      );
+      const firstTree = treeArrival();
+      await page.route(/\/api\/tree([?]|$)/, async (route) => {
+        if (!treesHeld) return route.fallback();
+        const slot = Promise.withResolvers<(fresh: boolean) => void>();
+        trees.push(slot);
+        const gate = Promise.withResolvers<boolean>();
+        releases.push(() => gate.resolve(false));
+        const sampled = await route.fetch().catch((error: unknown) => {
+          slot.reject(error);
+          throw error;
+        });
+        slot.resolve(gate.resolve);
+        const response = (await gate.promise) ? await route.fetch() : sampled;
+        await route.fulfill({ response }).catch(() => undefined);
+      });
+      const beforeOff = await firstTree();
+      await page.route(
+        `**${path}`,
+        async (route) => {
+          const applied = await (await route.fetch()).json();
+          await route.fulfill({
+            status: 409,
+            json: {
+              ...applied,
+              error:
+                "a newer safety request for this conversation replaced this one",
+            },
+          });
+        },
+        { times: 1 },
+      );
+      await reviewOn.click();
+      await page
+        .getByRole("button", { name: "Turn off safety review", exact: true })
+        .click();
+      const warning = page.getByRole("button", {
+        name: "Safety review off",
+        exact: true,
+      });
+      await browserExpect(warning).toBeVisible();
+      await warning.click();
+      await browserExpect(reviewOff).toBeVisible();
+      const offTree = treeArrival();
+      beforeOff(false);
+      await browserExpect(reviewOff).toBeVisible();
+      const sampledOff = await offTree();
+      await page.route(
+        `**${path}`,
+        async (route) => {
+          await route.fetch();
+          await route.fulfill({ status: 500, body: "" });
+        },
+        { times: 1 },
+      );
+      const failed = page.waitForResponse(
+        (response) =>
+          response.url().endsWith(path) &&
+          response.request().method() === "POST",
+      );
+      await reviewOff.click();
+      expect((await failed).status()).toBe(500);
+      await browserExpect(checking).toBeVisible();
+      await browserExpect(reviewOn).toBeDisabled();
+      const onTree = treeArrival();
+      sampledOff(false);
+      const afterOn = await onTree();
+      await browserExpect(checking).toBeVisible();
+      await browserExpect(reviewOn).toBeDisabled();
+      treesHeld = false;
+      afterOn(true);
+      await browserExpect(checking).toBeHidden();
+      await browserExpect(reviewOn).toBeEnabled();
+      await browserExpect(warning).toBeHidden();
+      const staleReadDuringOff = async (
+        title: string,
+        edit: (
+          body: Record<string, unknown>,
+          reply: { safety_rev: number },
+        ) => void,
+      ) => {
+        const held = Promise.withResolvers<Request>();
+        let routed = false;
+        const release = Promise.withResolvers<{ safety_rev: number }>();
+        releases.push(() => release.resolve({ safety_rev: 0 }));
+        await page.route(
+          new RegExp(`/api/conversations/${agent}[?]`),
+          async (route) => {
+            routed = true;
+            try {
+              const stale = await route.fetch();
+              const body = { ...(await stale.json()), title };
+              held.resolve(route.request());
+              edit(body, await release.promise);
+              await route.fulfill({ response: stale, json: body });
+            } catch (error) {
+              held.reject(error);
+            }
+          },
+          { times: 1 },
+        );
+        await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+        await browserExpect
+          .poll(() => routed, {
+            message: `${title}: no focused read reached its route`,
+          })
+          .toBe(true);
+        const request = await held.promise;
+        const posted = page.waitForResponse(
+          (response) =>
+            response.url().endsWith(path) &&
+            response.request().method() === "POST",
+        );
+        await reviewOn.click();
+        await page
+          .getByRole("button", { name: "Turn off safety review", exact: true })
+          .click();
+        await browserExpect(warning).toBeVisible();
+        const finished = page.waitForEvent(
+          "requestfinished",
+          (done) => done === request,
+        );
+        release.resolve(await (await posted).json());
+        await finished;
+        await browserExpect(page.getByText(title).first()).toBeVisible();
+        await browserExpect(warning).toBeVisible();
+      };
+      await staleReadDuringOff("Stale read", () => {});
+      await warning.click();
+      const reset = page.waitForResponse(
+        (response) =>
+          response.url().endsWith(path) &&
+          response.request().method() === "POST",
+      );
+      await reviewOff.click();
+      expect((await reset).status()).toBe(200);
+      await browserExpect(reviewOn).toBeEnabled();
+      await browserExpect(warning).toBeHidden();
+      await staleReadDuringOff("Unapplied read", (body, reply) =>
+        Object.assign(body, {
+          safety_off: true,
+          safety_off_active: false,
+          safety_rev: reply.safety_rev,
+        }),
+      );
+      expect(errors).toEqual([]);
+    } finally {
+      treesHeld = false;
+      for (const release of releases) release();
+      await page.close();
     }
   },
 ];

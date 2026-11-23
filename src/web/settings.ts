@@ -142,7 +142,7 @@ interface SettingsRoutesDeps {
     removeCredentials(providers: string[]): Promise<void>;
     storedModelProviders(): Promise<StoredModelSignIns>;
   };
-  readonly providers: Pick<ProviderSnapshot, "refresh">;
+  readonly providers: Pick<ProviderSnapshot, "refresh" | "refreshOpenAI">;
   /** The subscription usage limits model responses last reported. */
   readonly usageLimits: Pick<UsageLimits, "read" | "changeLogin">;
   /** The prepared Pi agent dir that holds mcp.json. */
@@ -452,6 +452,7 @@ export function registerSettingsRoutes(
   router.get("/api/models", async (ex) => {
     // Invariant: Only models whose provider is logged in are offered;
     // `providers` reports each login state so the UI can prompt a first login.
+    await deps.providers.refreshOpenAI();
     const authed = config.models.authedModelProviders();
     const providers: Rec[] = PI_PROVIDER_LABELS.map(([id, label]) => ({
       id,
@@ -592,17 +593,19 @@ export function registerSettingsRoutes(
     });
   });
 
-  router.get("/api/settings/model-list", async (ex) =>
-    conditionalJson(ex.request, {
+  router.get("/api/settings/model-list", async (ex) => {
+    await deps.providers.refreshOpenAI();
+    return conditionalJson(ex.request, {
       models: settingsModelList(config),
       reasoning: [...THINKING_LEVELS],
-    }),
-  );
+    });
+  });
 
   router.get("/api/settings/effort-levels", async (ex) => {
     // Invariant: Content-derived validator: reachability flips on login without
     // touching the ladder file, so an unchanged ladder is a cheap 304 only
     // while the payload is identical.
+    await deps.providers.refreshOpenAI();
     const levels = config.levels.effortLevels();
     const reachability = config.levels.effortLevelReachability();
     const byLevel = <T>(record: Record<number, T>) =>
@@ -652,6 +655,8 @@ export function registerSettingsRoutes(
     subscription: UsageProvider,
     status: T,
   ) {
+    if ("subscription" in status && status.subscription !== "signed_in")
+      return status;
     const usage = await deps.usageLimits.read(subscription);
     return { ...status, ...(usage && { usage_limits: usage }) };
   }
@@ -661,18 +666,15 @@ export function registerSettingsRoutes(
     prefix: string,
     title: string,
     auth: AnthropicAuth | CodexAuth,
-    importAmbient: () => Promise<boolean>,
+    importAmbient: (() => Promise<boolean>) | null,
     subscription: UsageProvider,
   ) {
     // Invariant: Usage limits belong to one login.
     const changeLogin = <T>(change: () => Promise<T>): Promise<T> =>
       deps.usageLimits.changeLogin(subscription, change);
     router.get(prefix, async () => {
-      // Invariant: Import runs only with no stored login, so no usage exists.
-      const imported = await importAmbient();
-      let status = await auth.authStatus();
-      if (imported) status = await providerAuthUpdated(status);
-      return json(await withUsage(subscription, status));
+      if (await importAmbient?.()) await deps.providers.refresh();
+      return json(await withUsage(subscription, await auth.authStatus()));
     });
 
     router.post(`${prefix}/login-url`, async () =>
@@ -777,13 +779,7 @@ export function registerSettingsRoutes(
     () => deps.anthropic.importClaudeCodeLogin(),
     "anthropic",
   );
-  oauthRoutes(
-    openai,
-    "ChatGPT",
-    deps.codex,
-    () => deps.codex.importCodexCliLogin(),
-    "openai-codex",
-  );
+  oauthRoutes(openai, "ChatGPT", deps.codex, null, "openai-codex");
   apiKeyRoute(claude, async (key) => {
     await deps.usageLimits.changeLogin("anthropic", () =>
       deps.anthropic.setApiKey(key),

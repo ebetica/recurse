@@ -21,6 +21,8 @@ export interface TreeRead {
   /** Qualified ids in wire order, including side conversations. */
   nodes: TreeNode[];
   changed: boolean;
+  /** When the read was sent, on the `performance.now()` clock. */
+  sentAt: number;
 }
 
 export type ApplyTree = (read: TreeRead | null) => boolean;
@@ -121,7 +123,9 @@ class BackendTree {
       if (this.status === "incompatible version") return Promise.resolve(false);
       this.invalidate();
       this.status = "incompatible version";
-      return Promise.resolve(apply({ nodes: [], changed: true }));
+      return Promise.resolve(
+        apply({ nodes: [], changed: true, sentAt: performance.now() }),
+      );
     }
     if (this.serverIncompatible) {
       this.serverIncompatible = false;
@@ -169,7 +173,7 @@ class BackendTree {
         this.backend.apiVersion = version;
         if (version !== expected) {
           this.status = "incompatible version";
-          return apply({ nodes: [], changed: true });
+          return apply({ nodes: [], changed: true, sentAt: performance.now() });
         }
       }
       const prior = this.homeSnapshot;
@@ -178,6 +182,7 @@ class BackendTree {
         if (prior?.etag) opts.cache = "no-store";
         opts.headers = { "x-recurse-tree-base": prior?.etag ?? "snapshot" };
       }
+      const sentAt = performance.now();
       // Invariant: apiJson keeps the body read under the request's timeout
       // and this read's abort signal.
       const { response, data } = await this.backend.apiJson<
@@ -200,6 +205,7 @@ class BackendTree {
             taken_over: node.taken_over ?? node.pinned,
           })),
           changed: body !== this.remoteBody,
+          sentAt,
         };
         this.remoteBody = body;
       } else {
@@ -220,6 +226,7 @@ class BackendTree {
             etag && prior?.etag
               ? etag !== prior.etag
               : JSON.stringify(wire) !== JSON.stringify(prior?.nodes),
+          sentAt,
         };
         this.homeSnapshot = { etag, nodes: wire };
       }

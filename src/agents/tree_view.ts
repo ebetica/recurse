@@ -292,6 +292,7 @@ function buildRow(
     reap_deferred_reason: conv.reap_deferred_reason ?? null,
     safety_off: o.safetyOff,
     safety_off_active: o.safetyOffActive,
+    safety_rev: typeof conv.safety_rev === "number" ? conv.safety_rev : null,
     skill_context: o.skill,
     ...(typeof conv.side_of === "string" && { side_of: conv.side_of }),
     ...(conv.promoting === true && { promoting: true }),
@@ -325,12 +326,11 @@ interface TreeViewDeps {
   >;
   node(cid: string): {
     muteDesired: boolean | null;
-    safetyDesired: boolean | null;
     pendingIntents(): readonly unknown[];
     activityUpdated(): number | null;
   } | null;
   liveStatus(cid: string): [unknown, unknown];
-  durableSafetyOff(cid: string): boolean | undefined;
+  durableSafetyOff(cid: string): boolean;
   hasLiveShell(cid: string): boolean;
   logCaptureFailure?(event: string, fields: Record<string, unknown>): void;
   skills: SkillContextSource;
@@ -404,19 +404,19 @@ export class TreeView {
       if (typeof stored !== "number" || activity > stored)
         record.updated = activity;
     }
-    // Invariant: Durable review reads its recurse.safety document, not the
-    // record.
-    const durableOff =
-      record.backend === "durable"
-        ? (this.deps.durableSafetyOff(cid) ?? false)
-        : undefined;
-    const safetyOff = durableOff ?? node?.safetyDesired ?? !!record.safety_off;
+    // Invariant: The record holds the newest request; Durable review is skipped
+    // only while its document carries the same OFF revision
+    // (DurableHost.safetyOffActive).
+    const safetyOff = !!record.safety_off;
     const active = record.active_turn;
     const safetyOffActive =
-      durableOff ??
-      (record.status === "running" && isDict(active) && "safety_off" in active
-        ? !!active.safety_off
-        : safetyOff);
+      record.backend === "durable"
+        ? this.deps.durableSafetyOff(cid)
+        : record.status === "running" &&
+            isDict(active) &&
+            "safety_off" in active
+          ? !!active.safety_off
+          : safetyOff;
     return {
       status,
       runId,

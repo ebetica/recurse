@@ -28,6 +28,7 @@ import {
   writeContinuationNote,
 } from "../../extensions/core/context/durable-compaction.ts";
 import {
+  safetyOffRevision,
   safetyReviewOff,
   safetyReviewUnavailable,
 } from "../../extensions/core/safety/durable.ts";
@@ -52,6 +53,8 @@ export interface LiveRow {
   queued?: number;
   pending: Rec[];
   safetyOff?: boolean;
+  /** The request revision of an OFF recurse.safety document. */
+  safetyOffRev?: number;
   safetyUnavailable?: string;
   shells: Map<unknown, ShellInput>;
   modelError?: string;
@@ -224,6 +227,7 @@ export async function followConversation(input: FollowInput): Promise<{
     input.clearPending?.();
     reporter?.recheck();
     const off = await safetyReviewOff(harness, conversation, context);
+    const rev = await safetyOffRevision(harness, conversation, context);
     const unavailable = await safetyReviewUnavailable(
       harness,
       conversation,
@@ -231,9 +235,12 @@ export async function followConversation(input: FollowInput): Promise<{
     );
     if (
       input.current() &&
-      (row.safetyOff !== off || row.safetyUnavailable !== unavailable)
+      (row.safetyOff !== off ||
+        row.safetyOffRev !== rev ||
+        row.safetyUnavailable !== unavailable)
     ) {
       row.safetyOff = off;
+      row.safetyOffRev = rev;
       row.safetyUnavailable = unavailable;
       input.safetyChanged();
     }

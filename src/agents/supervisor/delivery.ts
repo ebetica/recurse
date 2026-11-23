@@ -411,7 +411,7 @@ export class SupervisorDelivery {
     const cid = conv.id as string;
     const { conversations, configActions } = this.deps;
     return conversations.withTitleGuard(cid, (titleToken) =>
-      configActions.withMuteGuard(cid, async (muteToken) => {
+      configActions.withMuteGuard(cid, async (muteToken, nodeToken) => {
         const latest = conversations.load(cid);
         // Invariant: Reap notices retain the deleted root snapshot.
         const edge = latest ?? conv;
@@ -421,7 +421,7 @@ export class SupervisorDelivery {
         );
         if (latest !== null && muteChanged)
           await conversations.save(edge, titleToken);
-        edge.muted = configActions.mutedLocked(edge);
+        edge.muted = configActions.mutedLocked(edge, nodeToken);
         if (edge.muted) return "dropped";
         const target =
           options.targetParent || (edge.parent as string) || parent;
@@ -560,7 +560,9 @@ export class SupervisorDelivery {
                 : [],
             },
           );
-          if (accepted === null) return;
+          if (accepted === null && origin !== "service") return;
+          // Invariant: Service input refused at admission (review OFF or
+          // requested OFF) is dropped, never held ahead of later input.
           node.retireIntent(storeId);
         } catch (exc) {
           node.markUncertain(storeId, String(exc));

@@ -971,19 +971,23 @@ describe("DurableHost", () => {
     }
   });
 
-  test("the safety state is the recurse.safety document, not the record", async () => {
+  test("review is skipped only while the document and the record carry the same OFF revision", async () => {
     const { models } = fauxModels();
-    const records = { c1: { ...record("c1", root), safety_off: true } };
+    const records = {
+      c1: { ...record("c1", root), safety_off: true, safety_rev: 5 },
+    };
     const changed: string[] = [];
-    const host = hostFor(records, models, "faux/faux-1", (cid) =>
-      changed.push(cid),
-    );
+    let notify = () => {};
+    const host = hostFor(records, models, "faux/faux-1", (cid) => {
+      changed.push(cid);
+      notify();
+    });
+    const changes = async (done: () => boolean) => {
+      while (!done()) await new Promise<void>((resolve) => (notify = resolve));
+    };
     try {
       const { conversation } = await host.open("c1");
-      expect(host.metadata("c1")).toMatchObject({
-        safety_off: false,
-        safety_off_active: false,
-      });
+      expect(host.metadata("c1").safety_off_active).toBe(false);
       const safety = new URL(
         "../../src/extensions/core/safety/durable.ts",
         import.meta.url,
@@ -993,13 +997,20 @@ describe("DurableHost", () => {
           c: unknown,
           off: boolean,
           ctx: unknown,
-        ) => Promise<void>;
+          rev?: number,
+        ) => Promise<boolean>;
       };
-      await setSafetyReviewOff(conversation, true, context);
-      await until(async () => host.metadata("c1").safety_off);
-      expect(host.metadata("c1").safety_off_active).toBe(true);
-      expect(host.safetyReviewOff("c1")).toBe(true);
-      expect(changed).toEqual(["c1", "c1"]);
+      await setSafetyReviewOff(conversation, true, context, 4);
+      await changes(() => host.safetyReviewOff("c1") === true);
+      expect(host.metadata("c1").safety_off_active).toBe(false);
+      expect(host.safetyOffAllowed("c1", 4)).toBe(false);
+      const seen = changed.length;
+      await setSafetyReviewOff(conversation, true, context, 5);
+      await changes(() => host.metadata("c1").safety_off_active);
+      expect(host.safetyOffAllowed("c1", 5)).toBe(true);
+      records.c1.safety_rev = 6;
+      expect(host.metadata("c1").safety_off_active).toBe(false);
+      expect(changed.slice(seen)).toEqual(["c1"]);
     } finally {
       await host.close();
     }

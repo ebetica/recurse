@@ -247,8 +247,8 @@ export const tests: BrowserTest[] = [
         .waitFor();
       expect(external).toEqual([]);
       await report.getByRole("link", { name: "Notes", exact: true }).click();
-      await page
-        .locator('.file-tab img[alt="File picture"]:not([hidden])')
+      await report
+        .locator('.report-doc img[alt="File picture"]:not([hidden])')
         .click();
       await viewer.waitFor();
       await viewer

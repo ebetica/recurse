@@ -24,7 +24,12 @@ import type {
 
 export type TurnGroupItem =
   | { kind: "users"; entries: MessageEntry[] }
-  | { kind: "tools"; slice: ActivitySlice }
+  | {
+      kind: "tools";
+      slice: ActivitySlice;
+      noticesBefore?: ActivityMarker[];
+      noticesAfter?: ActivityMarker[];
+    }
   | { kind: "thought"; entry: MessageEntry }
   | { kind: "assistant"; entry: MessageEntry }
   | { kind: "attachments"; items: AgentAttachment[] }
@@ -68,9 +73,54 @@ export function activityEntryKeys(items: readonly TurnGroupItem[]): string[] {
   });
 }
 
-// A background shell's completion notice folds like a tool run.
-const isShellNotice = (item: TurnGroupItem): item is ActivityMarker =>
-  item.kind === "marker" && item.turn.system?.marker === "shell-notice";
+const isShellNotice = (
+  item: TurnGroupItem | undefined,
+): item is ActivityMarker =>
+  item?.kind === "marker" && item.turn.system?.marker === "shell-notice";
+
+export const shellCompletionCount = (count: number): string =>
+  `${count} background shell${count === 1 ? "" : "s"} finished`;
+
+export function completedShells(notice: ActivityMarker): number {
+  const label = notice.turn.system?.content ?? "";
+  if (
+    /^Background shell failed to start|^\[pi-bg-shell\] internal error:/u.test(
+      label,
+    )
+  )
+    return 0;
+  const batch = /^Background shells finished · (\d+) completed$/u.exec(label);
+  const count = Number(batch?.[1]);
+  return Number.isSafeInteger(count) && count > 0 ? count : 1;
+}
+
+// Pair adjacent notices within one card, preserving their order when opened.
+export function activityCardItems(
+  items: readonly TurnGroupItem[],
+): TurnGroupItem[] {
+  const rows: TurnGroupItem[] = [];
+  for (let index = 0; index < items.length; index++) {
+    const item = items[index]!;
+    if (!isShellNotice(item) || !completedShells(item)) {
+      rows.push(item);
+      continue;
+    }
+    const notices = [item];
+    let next = items[index + 1];
+    while (isShellNotice(next) && completedShells(next)) {
+      notices.push(next);
+      next = items[++index + 1];
+    }
+    const previous = rows.at(-1);
+    if (previous?.kind === "tools")
+      rows[rows.length - 1] = { ...previous, noticesAfter: notices };
+    else if (next?.kind === "tools") {
+      rows.push({ ...next, noticesBefore: notices });
+      index++;
+    } else rows.push(...notices);
+  }
+  return rows;
+}
 
 function groupSummary(items: readonly TurnGroupItem[]): string {
   const counts = { agents: 0, platform: 0, replies: 0 };
@@ -109,17 +159,14 @@ function groupSummary(items: readonly TurnGroupItem[]): string {
       case "thought":
         break;
       case "marker":
-        if (isShellNotice(item)) shells += 1;
+        if (isShellNotice(item)) shells += completedShells(item);
         break;
     }
   };
   items.forEach(visit);
-  const finished = shells
-    ? `${shells} background shell${shells === 1 ? "" : "s"} finished`
-    : "";
   const toolSummary = [
     toolSeriesSummary({ tools, user: [], assistant: null, summary: null }),
-    finished,
+    shells ? shellCompletionCount(shells) : "",
   ]
     .filter(Boolean)
     .join(", ");

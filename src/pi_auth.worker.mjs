@@ -8,7 +8,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline";
-import { OPENAI_CHOICE_MARKER } from "./auth/index.ts";
+import { OPENAI_CHOICE_MARKER, validCredential, validCredentials } from "./auth/index.ts";
 
 const EXPECTED_PI_VERSION = "1.5.1";
 const ANTHROPIC_OAUTH_MODULE = new URL(
@@ -69,33 +69,6 @@ function extraProviders(request) {
 	return extra;
 }
 
-function validCredential(credential) {
-	if (credential === null || typeof credential !== "object"
-		|| Array.isArray(credential) || typeof credential.type !== "string") {
-		return false;
-	}
-	// Invariant: Fail closed on unusable selections: a partial credential must
-	// error rather than resolve, so ambient fallbacks can never override it.
-	if (credential.type === "oauth") {
-		return typeof credential.access === "string" && credential.access.length > 0
-			&& typeof credential.refresh === "string" && credential.refresh.length > 0
-			&& typeof credential.expires === "number" && Number.isFinite(credential.expires);
-	}
-	if (credential.type === "api_key") {
-		return (typeof credential.key === "string" && credential.key.length > 0)
-			|| (credential.env !== null && typeof credential.env === "object"
-				&& Object.keys(credential.env).length > 0);
-	}
-	return false;
-}
-
-function validCredentials(data) {
-	if (!data || typeof data !== "object" || Array.isArray(data)) {
-		return false;
-	}
-	return Object.values(data).every(validCredential);
-}
-
 function parseCredentials(current) {
 	let data;
 	try {
@@ -113,12 +86,7 @@ function mutate(FileAuthStorageBackend, authPath, remove, selected, onlyIfMissin
 	const backend = new FileAuthStorageBackend(authPath);
 	return backend.withLock((current) => {
 		const data = parseCredentials(current);
-		// Invariant: Check for an OpenAI choice under the auth-file lock.
-		if (selected && onlyIfMissing && (
-			selected.provider in data
-			|| (selected.provider === "openai-codex"
-				&& ("openai" in data || OPENAI_CHOICE_MARKER in data))
-		)) {
+		if (selected && onlyIfMissing && selected.provider in data) {
 			return { result: false };
 		}
 		for (const id of remove) delete data[id];
