@@ -511,6 +511,11 @@ function fakeVendorAssets(root: string): void {
 test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
   const root = temp("recurse-build-stage-");
   fakeVendorAssets(root);
+  mkdirSync(join(root, "web/image-preview"), { recursive: true });
+  writeFileSync(
+    join(root, "web/image-preview/style.css"),
+    ".drawing-editor { color: red; }\n",
+  );
   mkdirSync(join(root, "web/dist"), { recursive: true });
   writeFileSync(join(root, "web/app.ts"), "source");
   const styles = APP_CSS_SOURCES.map((source) =>
@@ -564,7 +569,7 @@ test("test_frontend_build_failure_keeps_last_good_and_retries", async () => {
   );
   expect(
     readFileSync(join(root, "web/dist/excalidraw/index.css"), "utf8"),
-  ).toBe(".excalidraw {}");
+  ).toBe(".excalidraw {}\n.drawing-editor { color: red; }\n");
   expect(
     readFileSync(
       join(root, "web/dist/excalidraw/fonts/Excalifont/Excalifont.woff2"),

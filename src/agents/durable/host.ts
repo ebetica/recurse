@@ -14,12 +14,16 @@ import { splitPiUserText } from "../view/session_entries";
 import { unavailable } from "../view/reader";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ImageContent, MutableModels } from "@earendil-works/pi-ai";
-import type { CustomProviderSpec } from "./models";
+import type { ProviderSpec } from "../../models";
 import type { Config } from "../../config";
 import type { SidebarScript } from "../../sidebar_script";
 import type { LiveState } from "@earendil-works/pi-durable";
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
-import type { DurableViews, PageOptions } from "./durable_rows.ts";
+import type {
+  DurableViews,
+  PageOptions,
+  PublishedFiles,
+} from "./durable_rows.ts";
 import type { PromptSnapshot } from "./prompt_sections.ts";
 import type { SqliteWorker } from "./sqlite_worker.ts";
 import {
@@ -143,7 +147,7 @@ export interface DurableHostDeps extends PromotionRecord {
   /** Records the subscription usage limits that model responses report. */
   usageLimits?: Pick<UsageLimits, "login" | "record">;
   /** Settings' custom providers (model-providers.json), from Config's cache. */
-  customProviders?(): Record<string, CustomProviderSpec>;
+  customProviders?(): Record<string, ProviderSpec>;
   /** The server environment's value of a custom provider's own env_key. */
   customProviderEnvValue?(provider: string): string | undefined;
   // Build the Settings model catalog and effort ladder that settings() reads.
@@ -187,7 +191,7 @@ export class DurableHost {
   private modelsValue: MutableModels | null = null;
   private catalogRefresh: Promise<unknown> | null = null;
   private syncCustom:
-    | ((providers: Record<string, CustomProviderSpec>) => void)
+    | ((providers: Record<string, ProviderSpec>) => void)
     | null = null;
   /** Synchronous reads share the row owned by each open handle. */
   readonly liveRows = new Map<string, LiveRow>();
@@ -1016,7 +1020,7 @@ export class DurableHost {
   private async publishedFiles(
     cid: string,
     callIds: readonly string[],
-  ): Promise<{ files: Record<string, unknown[]>; complete: boolean }> {
+  ): ReturnType<PublishedFiles> {
     const { publishedCallFiles } =
       await import("../runtime/attachments/published.ts");
     const conv = this.deps.load(cid)!;
@@ -1024,7 +1028,7 @@ export class DurableHost {
       ? this.deps.collectionPath(conv)
       : this.collection(cid, {});
     const lookup = await publishedCallFiles(path, cid);
-    const result: Record<string, unknown[]> = Object.create(null);
+    const result: typeof lookup.files = Object.create(null);
     // Invariant: Pi names nested calls by appending /key to their parent id.
     for (const [call, items] of Object.entries(lookup.files)) {
       let owner: string | undefined;

@@ -30,6 +30,7 @@ import {
   SAFETY_ON_NOTICE,
   type ConfigActions,
 } from "./config_actions";
+import { invalidateContextUsage } from "./context_usage";
 import { Fence } from "./fence";
 import {
   collectionSnapshot,
@@ -92,18 +93,17 @@ export interface AgentNodeDeps {
     | "load"
     | "save"
     | "saveActivity"
-    | "refreshTreeRow"
-    | "captureDigestInputs"
     | "publishTitle"
-    | "withConfigurationMetadataGuard"
-    | "withMuteGuard"
-    | "invalidateContextUsage"
   >;
   configActions: Pick<
     ConfigActions,
-    "safetyOffLocked" | "applyPendingSafety" | "safetyEffectiveOff"
+    | "safetyOffLocked"
+    | "applyPendingSafety"
+    | "safetyEffectiveOff"
+    | "withMuteGuard"
+    | "withConfigurationMetadataGuard"
   >;
-  config: Pick<Config, "levels" | "models" | "agentTempLeaf" | "paths">;
+  config: Pick<Config, "levels" | "models" | "paths">;
   runtime: RuntimeErrors;
   /** The shared agent store admission binds. */
   agentStore: NodeStore;
@@ -115,6 +115,7 @@ export interface AgentNodeDeps {
   /** compaction._action_request(kind, cid). */
   actionRequest(kind: "clear" | "compact", cid: string): unknown;
   requestRun(cid: string): void;
+  refreshTreeRow(cid: string): void;
   tasks: TaskSet;
   scheduler: StallTimerDeps["scheduler"];
   nodeLog: RuntimeLogger;
@@ -228,7 +229,7 @@ export class AgentNode {
   }
 
   private snapshotOf(conv: ConversationRecord): CollectionSnapshot | null {
-    return collectionSnapshot(conv, this.deps.config);
+    return collectionSnapshot(conv, this.deps.config.paths);
   }
 
   private get nodes() {
@@ -614,7 +615,7 @@ export class AgentNode {
 
   /** Republish this agent's cached display row. */
   refreshRow(): void {
-    this.deps.conversations.refreshTreeRow(this.cid);
+    this.deps.refreshTreeRow(this.cid);
   }
 
   // Last admitted/start/settled activity, including live unpersisted activity.
@@ -782,7 +783,7 @@ export class AgentNode {
 
   /** Queue one explicit cancel for a never-sent intent. */
   async cancelQueued(mid: string, mayReleaseUploads = true): Promise<boolean> {
-    const queued = await this.deps.conversations.withMuteGuard(
+    const queued = await this.deps.configActions.withMuteGuard(
       this.cid,
       async () => {
         const found = this.pendingIntents().find((entry) => entry.id === mid);
@@ -830,8 +831,8 @@ export class AgentNode {
   /** Switch an IDLE conversation's model for its NEXT turn. */
   async setModel(resolved: string): Promise<ConversationRecord> {
     this.requireOwner();
-    const { conversations, config } = this.deps;
-    return conversations.withConfigurationMetadataGuard(
+    const { conversations, config, configActions } = this.deps;
+    return configActions.withConfigurationMetadataGuard(
       this.cid,
       async (titleToken) => {
         const conv = conversations.load(this.cid);
@@ -852,7 +853,7 @@ export class AgentNode {
             conv.model = resolved;
             conv.effort = config.models.chatSettings(resolved)[1];
           }
-          conversations.invalidateContextUsage(conv);
+          invalidateContextUsage(conv);
           conv[SET_MODEL_MARKER] = true;
         }
         conv.updated = this.deps.now();
@@ -893,7 +894,7 @@ export class AgentNode {
     durableCommitted: boolean,
   ): Promise<[ConversationRecord, boolean] | null> {
     const { conversations, configActions } = this.deps;
-    return conversations.withConfigurationMetadataGuard(
+    return configActions.withConfigurationMetadataGuard(
       this.cid,
       async (titleToken, _muteToken, nodeToken) => {
         const conv = conversations.load(this.cid);

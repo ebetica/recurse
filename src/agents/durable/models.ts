@@ -38,6 +38,7 @@ import {
   reportPiModelConfigError,
   type PiModelConfigSnapshot,
 } from "../../pi_model_config";
+import type { ProviderSpec } from "../../models";
 
 /** No environment variables and no ambient credential files. */
 export const STORED_CREDENTIALS_ONLY: AuthContext = {
@@ -599,21 +600,10 @@ export async function providerToken(
   }
 }
 
-export interface CustomProviderSpec {
-  base_url: string;
-  wire_api: string;
-  env_key: string;
-  models: readonly {
-    id: string;
-    label?: string | null;
-    context_window?: number | null;
-  }[];
-}
-
 /** A custom provider's key: its stored key, else its own env_key. */
 function customKey(
   id: string,
-  spec: CustomProviderSpec,
+  spec: ProviderSpec,
   envValue: (provider: string) => string | undefined,
 ): ApiKeyAuth {
   return {
@@ -634,7 +624,7 @@ function customKey(
 
 function customProvider(
   id: string,
-  spec: CustomProviderSpec,
+  spec: ProviderSpec,
   envValue: (provider: string) => string | undefined,
 ): Provider {
   const api =
@@ -670,13 +660,13 @@ export function customProviderSync(
   models: MutableModels,
   envValue: (provider: string) => string | undefined,
   reserved?: ReadonlySet<string>,
-): (providers: Record<string, CustomProviderSpec>) => void {
+): (providers: Record<string, ProviderSpec>) => void {
   const trusted = trustedModelCatalog(models);
   const syncTrusted =
     trusted === models
       ? undefined
       : customProviderSync(trusted, envValue, new Set(getBuiltinProviders()));
-  let applied: Record<string, CustomProviderSpec> = {};
+  let applied: Record<string, ProviderSpec> = {};
   const builtins = new Map(models.getProviders().map((p) => [p.id, p]));
   const installed = new Map<string, Provider>();
   return (providers) => {

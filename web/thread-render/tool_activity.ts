@@ -79,7 +79,7 @@ function clipHead(value: string, limit: number): string {
 const REDACTED_THINKING =
   /^(?:\[?(?:redacted|encrypted)(?:[ _-](?:thinking|reasoning))?\]?|<encrypted>)+$/iu;
 
-// Formats thinking titles; only the live pill's available width clips.
+// Formats thinking titles; only the status bar's available width clips.
 function thinkingSummaryLabel(value: unknown): string {
   if (typeof value !== "string") return "Thinking";
   const latest = [...value.matchAll(/\*\*(.+?)\*\*/gu)].at(-1)?.[1] ?? value;
@@ -88,7 +88,7 @@ function thinkingSummaryLabel(value: unknown): string {
   return title;
 }
 
-/** Plain prose beneath the title already shown by the live bar. */
+/** Plain prose beneath the title already shown by the status bar. */
 export function thinkingSummaryBody(value: string, title: string): string {
   const text = value.trim();
   if (
@@ -150,16 +150,13 @@ export interface LiveActivityRow {
   stop_reason?: string | null;
 }
 
-type LiveActivityKind = "tool" | "thinking" | "starting";
+type StatusBarKind = "thinking" | "starting";
 
-interface LiveActivityPanel {
-  kind: LiveActivityKind;
+interface StatusBarState {
+  kind: StatusBarKind;
   label: string;
   title: string;
   key: string;
-  // Tool-only name/argument split; Thinking/Starting use just the label.
-  name?: string;
-  args?: string;
   // Elapsed thinking time is rendered in its own ticking span.
   thinkingElapsedMs?: number;
   thinkingRow?: LiveActivityRow;
@@ -168,12 +165,12 @@ interface LiveActivityPanel {
 
 // Admission excludes settled history. Once the run has a thought, later
 // replies and tool rows cannot fence it off.
-export function liveActivityState(
+export function statusBarState(
   rows: readonly LiveActivityRow[],
   promptAccepted?: boolean,
   selected?: LiveActivityRow | null,
   runStart?: number | null,
-): LiveActivityPanel {
+): StatusBarState {
   let turnStart = 0;
   let hasBoundary = false;
   for (let i = 0; i < rows.length; i++) {
@@ -286,19 +283,19 @@ export function liveActivityState(
   };
 }
 
-export type LiveTitleState = {
+export type StatusBarTitleState = {
   turnKey: string;
   title: string;
   shownAt: number;
 };
 
 /** Hold a thinking title long enough to read; leave prior state untouched. */
-export function holdLiveTitle(
-  previous: LiveTitleState | undefined,
+export function holdStatusBarTitle(
+  previous: StatusBarTitleState | undefined,
   turnKey: string,
   title: string,
   now: number,
-): { state: LiveTitleState; changed: boolean } {
+): { state: StatusBarTitleState; changed: boolean } {
   if (!previous || previous.turnKey !== turnKey)
     return { state: { turnKey, title, shownAt: now }, changed: false };
   if (previous.title === title || now - previous.shownAt < 1500)
@@ -306,23 +303,6 @@ export function holdLiveTitle(
   return { state: { turnKey, title, shownAt: now }, changed: true };
 }
 
-type ActivityStatusKind = "panel" | "summary" | "waiting";
-
-export function activityStatusKind(
-  streaming: boolean,
-  activeShells: number,
-  activeAgents: number,
-  isLast = true,
-  queued = false,
-): ActivityStatusKind {
-  // Invariant: Only the latest boundary owns a live/Waiting surface. An
-  // admitted next turn supersedes the stopped response's Waiting panel.
-  if (!isLast) return "summary";
-  if (streaming) return "panel";
-  if (queued) return "summary";
-  if (activeShells > 0 || activeAgents > 0) return "waiting";
-  return "summary";
-}
 // the same bounded text. Full tool details remain behind the eye disclosure.
 // A turn still waiting on its prompt says resuming when its first send reused
 // a warm core, starting when it spawned cold (or the backend predates the

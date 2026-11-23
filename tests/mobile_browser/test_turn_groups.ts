@@ -1313,7 +1313,7 @@ export const turnGroupTests: BrowserTest[] = [
               index === rows.length - 1 ? { ...entry, live: true } : entry,
             );
           await page.reload();
-          const panel = page.locator(".live-panel");
+          const panel = page.locator(".status-bar");
           await panel.waitFor();
           expect(
             await page
@@ -1340,7 +1340,7 @@ export const turnGroupTests: BrowserTest[] = [
           await page.reload();
           await panel.waitFor();
           expect(
-            await panel.locator(".live-panel-box.is-thinking").count(),
+            await panel.locator(".status-bar-box.is-thinking").count(),
           ).toBe(1);
           expect(await outside(panel)).toBeTrue();
           await eyes.first().click();

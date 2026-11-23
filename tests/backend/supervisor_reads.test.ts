@@ -211,9 +211,9 @@ class Harness {
           cwd,
         }),
       },
-      config: {
-        paths: { AGENT_FILES_DIR: "/data/tmp" },
-        agentTempLeaf: (key: string) => key,
+      paths: {
+        AGENT_FILES_DIR: "/data/tmp",
+        AGENT_TEMP_USES_SHORT_DEFAULT: false,
       } as any,
       sessionFiles: {} as any,
       boundSessionFile: async (_sid, file) => {

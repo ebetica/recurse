@@ -206,8 +206,6 @@ export class PiModelUpdater {
       catalog: Pick<ModelCatalog, "setPiModelList" | "piModelListState">;
       /** Run detached work that stops at shutdown (instance.tasks.spawn). */
       spawn(name: string, work: () => Promise<void>): Promise<void>;
-      /** Rewrite files derived from the list (available-models.json). */
-      afterUpdate(): Promise<void>;
       now?: () => number;
     },
   ) {}
@@ -252,7 +250,6 @@ export class PiModelUpdater {
       models,
       errors.length ? undefined : started,
     );
-    await this.deps.afterUpdate();
     if (errors.length) throw new Error(errors.join("; ").slice(0, 300));
   }
 }

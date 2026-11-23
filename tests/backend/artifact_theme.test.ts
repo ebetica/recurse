@@ -50,14 +50,14 @@ test("served HTML and app pages follow selection, preserving security headers an
     const original = await (await fetch(downloadUrl)).text();
     for (const theme of ["Ocean", "GitHub Light", "system"]) {
       await writeFile(
-        app.temp.config.paths.THEMES_FILE,
+        app.temp.paths.THEMES_FILE,
         JSON.stringify({
           theme,
           dark: "Tokyo Night",
           light: "Tokyo Night Day",
         }),
       );
-      const selection = await readTheme(app.temp.config.paths.THEMES_FILE);
+      const selection = await readTheme(app.temp.paths.THEMES_FILE);
       for (const [index, url] of urls.entries()) {
         const response = await fetch(url);
         expect(response.status).toBe(200);

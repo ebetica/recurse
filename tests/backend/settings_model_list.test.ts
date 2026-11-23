@@ -54,18 +54,15 @@ async function world(authed: string[]) {
   roots.push(root);
   const data = join(root, "data");
   mkdirSync(join(data, "config"), { recursive: true });
+  const lab = JSON.stringify({
+    base_url: "https://lab.example/v1",
+    env_key: "LAB_KEY",
+    wire_api: "completions",
+    models: [{ id: "tiny", label: "Tiny", context_window: 32_000 }],
+  });
   writeFileSync(
     join(data, "config", "model-providers.json"),
-    JSON.stringify({
-      providers: {
-        lab: {
-          base_url: "https://lab.example/v1",
-          env_key: "LAB_KEY",
-          wire_api: "completions",
-          models: [{ id: "tiny", label: "Tiny", context_window: 32_000 }],
-        },
-      },
-    }),
+    `{"providers":{"lab":${lab},"42":${lab},"042":${lab},"2nd-lab":${lab}}}`,
   );
   const config = new Config({
     env: {
@@ -131,6 +128,13 @@ test("the Settings list holds only logged-in routes and custom providers, in rou
         id: "lab/tiny",
         label: "Tiny",
         route: "lab",
+        context_window: 32_000,
+        reasoning_levels: null,
+      },
+      {
+        id: "2nd-lab/tiny",
+        label: "Tiny",
+        route: "2nd-lab",
         context_window: 32_000,
         reasoning_levels: null,
       },

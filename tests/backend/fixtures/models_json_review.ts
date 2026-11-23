@@ -185,7 +185,7 @@ export async function run(input: {
         await models.refresh({ allowNetwork: false });
         models.setProvider(actingProvider);
         await policyConfig!.refreshSettings();
-        policy = await policyConfig!.trustedModelPolicy(
+        policy = await policyConfig!.safetyReview.trustedModelPolicy(
           `${acting.provider}/${acting.id}`,
         );
       }
@@ -235,7 +235,9 @@ export async function run(input: {
   const pinnedProvider =
     input.mode === "file-provider-pin" ? "file-only-reviewer" : "anthropic";
   let policy = policyConfig
-    ? await policyConfig.trustedModelPolicy(`${acting.provider}/${acting.id}`)
+    ? await policyConfig.safetyReview.trustedModelPolicy(
+        `${acting.provider}/${acting.id}`,
+      )
     : JSON.stringify({
         version: 1,
         active: { provider: acting.provider, model: acting.id },

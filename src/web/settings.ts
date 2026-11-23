@@ -9,7 +9,7 @@ import {
   THINKING_LEVELS,
   type PiModelUpdater,
 } from "../models";
-import type { StoredModelSignIns } from "../safety_review_models";
+import type { StoredModelSignIns } from "../safety_review";
 import {
   brandingFile,
   brandResponse,
@@ -435,13 +435,7 @@ export function registerSettingsRoutes(
   });
 
   async function providerAuthUpdated<T>(value: T): Promise<T> {
-    config.noteCredentialsUpdated();
     await deps.providers.refresh();
-    // Invariant: A login change re-checks reachability; never fatal to the
-    // login.
-    try {
-      await config.levels.writeAvailableModels();
-    } catch {}
     return value;
   }
 
@@ -464,9 +458,7 @@ export function registerSettingsRoutes(
       label,
       authed: logicalProviderAuthed(id, authed),
     }));
-    const catalog = config.models
-      .chatModels()
-      .filter((option) => authed.has(config.models.providerOf(option.id)));
+    const catalog = config.models.signedInChatModels(authed);
     for (const name of Object.keys(config.models.customModelProviders()))
       providers.push({
         id: name,
@@ -474,10 +466,8 @@ export function registerSettingsRoutes(
         custom: true,
         authed: authed.has(name),
       });
-    const want = config.models.defaultChatModel();
-    const fallback = catalog.length ? catalog[0]!.id : null;
     return conditionalJson(ex.request, {
-      default: catalog.some((option) => option.id === want) ? want : fallback,
+      default: catalog.length ? config.models.defaultChatModel(catalog) : null,
       models: catalog,
       backend: "pi",
       providers,
@@ -525,7 +515,7 @@ export function registerSettingsRoutes(
   });
 
   router.get("/api/settings/safety-review-model", async () => {
-    const model = config.safetyReviewModel();
+    const model = config.safetyReview.model();
     const route = PI_MODEL_ROUTES.find(
       ([id]) => id === model?.split("/")[0],
     )?.[1];
@@ -533,7 +523,7 @@ export function registerSettingsRoutes(
       model: model ?? null,
       invalid: model === undefined,
       ...(route && { route }),
-      models: await config.safetyReviewModels(
+      models: await config.safetyReview.modelsForSignIns(
         await deps.credentials.storedModelProviders(),
       ),
     });
@@ -542,7 +532,7 @@ export function registerSettingsRoutes(
     const body = await jsonDictBody(ex);
     return json({
       model: await mutate(() =>
-        config.setSafetyReviewModel(field(body, "model"), () =>
+        config.safetyReview.setModel(field(body, "model"), () =>
           deps.credentials.storedModelProviders(),
         ),
       ),

@@ -1,4 +1,5 @@
 export { ModelCatalog } from "./catalog";
+export type { ProviderSpec } from "./custom_providers";
 export { EffortLadder } from "./effort_ladder";
 export { validModelScopeKey } from "./model_id";
 export {

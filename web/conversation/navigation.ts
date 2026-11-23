@@ -23,8 +23,8 @@ import {
   threadJumpAwaited,
 } from "../thread-scroll/index.js";
 
-// Completion and retained context are different places: resolve the summary's
-// boundary, then reuse the row jump to load/reveal/focus the kept message.
+// Follow a linked summary's resolved cut, or the notice's explicit cut when
+// it has no summary. Backends predating explicit notice targets use the older lookup.
 export async function jumpToCompactionPoint(
   cid: string,
   noticeId: string,
@@ -39,9 +39,16 @@ export async function jumpToCompactionPoint(
     const rows = rowThreads.get(cid)?.rows ?? [];
     const noticeIndex = rows.findIndex((row) => `row:${row.id}` === noticeId);
     if (noticeIndex < 0) return false;
-    const targetId = (
-      rows[noticeIndex]?.meta as { summaryEntryId?: unknown } | null
-    )?.summaryEntryId;
+    const notice = rows[noticeIndex]?.meta as {
+      summaryEntryId?: unknown;
+      firstKeptEntryId?: unknown;
+    } | null;
+    const targetId = notice?.summaryEntryId;
+    if (
+      typeof targetId !== "string" &&
+      typeof notice?.firstKeptEntryId === "string"
+    )
+      return jumpToRowMessage(cid, notice.firstKeptEntryId, true);
     const marker =
       typeof targetId === "string"
         ? rows.find((row) => row.id === targetId)

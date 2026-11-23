@@ -1,3 +1,5 @@
+// Keep dynamic edges in one graph so diagnostics retain their source paths.
+// Externalize forbidden imports so transitive bundler errors cannot hide the chain.
 import { builtinModules } from "node:module";
 import { relative } from "node:path";
 

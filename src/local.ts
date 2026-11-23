@@ -31,6 +31,7 @@ import { versionLine } from "./release";
 import { pyResolve } from "./utils";
 
 export { HERE };
+/** Keep the shell launchers and setup script on the same Bun minimum. */
 const BUN_MIN_VERSION = "1.4.0";
 
 export const PREBUILT_ARTIFACTS = [

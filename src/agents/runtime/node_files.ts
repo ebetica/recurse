@@ -4,8 +4,9 @@ import { join } from "node:path";
 import {
   AGENT_DRAFT_KEY_RE,
   AGENT_TEMP_KEY_RE,
-  type Config,
-} from "../../config";
+  agentTempLeaf,
+  type StatePaths,
+} from "../../state_paths";
 import {
   WARNING,
   logEvent,
@@ -22,7 +23,7 @@ export interface CollectionSnapshot {
 /** Recorded collection identity for the supplied record, or null. */
 export function collectionSnapshot(
   conv: Readonly<Record<string, unknown>>,
-  config: Pick<Config, "agentTempLeaf" | "paths">,
+  paths: StatePaths,
 ): CollectionSnapshot | null {
   const cid = conv.id;
   const key = conv.tmp_key;
@@ -34,8 +35,8 @@ export function collectionSnapshot(
     return null;
   return Object.freeze({
     collection: join(
-      config.paths.AGENT_FILES_DIR,
-      config.agentTempLeaf(key),
+      paths.AGENT_FILES_DIR,
+      agentTempLeaf(paths, key),
       "uploads",
     ),
     owner: cid,

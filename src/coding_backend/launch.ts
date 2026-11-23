@@ -33,7 +33,6 @@ interface BuildEnvOptions {
 const TMP_NAMES = [
   "RECURSE_AGENT_TMPDIR",
   "RECURSE_AGENT_ENV_FILE",
-  "RECURSE_AGENT_WORKDIR_FILE",
   "TMPDIR",
   "TMP",
   "TEMP",
@@ -73,7 +72,6 @@ export async function buildEnv(
     for (const name of ["TMPDIR", "TMP", "TEMP"])
       env[name] = o.localTmpdir ?? o.agentTmpdir;
     env.RECURSE_AGENT_ENV_FILE = join(o.agentTmpdir, "env.sh");
-    env.RECURSE_AGENT_WORKDIR_FILE = join(o.agentTmpdir, "workdir.json");
   }
   // Invariant: Fail safe: only an explicit per-conversation choice disables
   // review.
@@ -81,7 +79,9 @@ export async function buildEnv(
   if (o.safetyOff) env.PI_SAFETY_OFF = "1";
   delete env.RECURSE_MODEL_POLICY;
   if (o.model != null)
-    env.RECURSE_MODEL_POLICY = await config.trustedModelPolicy(o.model);
+    env.RECURSE_MODEL_POLICY = await config.safetyReview.trustedModelPolicy(
+      o.model,
+    );
   for (const [name, root] of [
     ["RECURSE_WORKSPACE_ROOT", o.workspaceRoot],
     ["RECURSE_WORKTREES_ROOT", o.worktreesRoot],

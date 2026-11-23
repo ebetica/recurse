@@ -152,7 +152,7 @@ test("tree memory is shared within the current tree only", async () => {
       snapshotRecursePrompt(
         world.instance.prompts,
         row,
-        world.instance.conversations.captureDigestInputs(),
+        world.instance.treeView.captureDigestInputs(),
         cwd,
         await world.instance.prompts.captureMemoryPrompt(row),
         { contextFiles: [], skills: [] },

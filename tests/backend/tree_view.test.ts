@@ -1,33 +1,32 @@
 import { expect, test } from "bun:test";
-import { IDLE_LIVE, TreeView } from "../../src/agents/tree_view";
-import {
-  logger,
-  type RuntimeLogRecord,
-} from "../../src/observability/runtime_logging";
+import { rm } from "node:fs/promises";
+import { buildInstance } from "../../src/agents/instance";
+import { Config } from "../../src/config";
+import type { RuntimeLogRecord } from "../../src/observability/runtime_logging";
+import { appWorld } from "./web_app_support";
 
-function newView(records: RuntimeLogRecord[] = []): TreeView {
-  return new TreeView({
-    skills: {
-      contextForWorkdirLoopSafe: (w) => (w === null ? null : `loop:${w}`),
-      renderer: () => async (w) => (w === null ? null : `full:${w}`),
-    },
-    logger: logger("agents", { write: (r) => records.push(r) }),
-  });
-}
-
-test("refresh failure logs tree_view_refresh_failed and keeps the old row", () => {
+test("a save that cannot refresh the tree logs the failure and keeps the old row", async () => {
+  const { root, env } = appWorld();
   const records: RuntimeLogRecord[] = [];
-  const view = newView(records);
-  view.refresh({
-    record: { id: "a", updated: 1 },
-    live: IDLE_LIVE,
-    workdir: null,
+  const instance = await buildInstance({
+    config: new Config({ env }),
+    sink: { write: (record) => void records.push(record) },
   });
-  view.refresh({
-    record: { id: "a", last: 5 },
-    live: IDLE_LIVE,
-    workdir: null,
-  });
+  const { conversations, treeView } = instance;
+  try {
+    await conversations.save({ id: "a", title: "before", updated: 1 });
+    expect(treeView.serve()).toMatchObject([{ id: "a", title: "before" }]);
+    await conversations.save({ id: "a", title: "malformed", last: 5 });
 
-  expect(JSON.stringify(records)).toContain("tree_view_refresh_failed");
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        conversation_id: "a",
+        message: expect.stringContaining("event=tree_view_refresh_failed"),
+      }),
+    );
+    expect(treeView.serve()).toMatchObject([{ id: "a", title: "before" }]);
+  } finally {
+    await instance.shutdown();
+    await rm(root, { recursive: true, force: true });
+  }
 });

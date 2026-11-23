@@ -21,8 +21,6 @@ export function liveModel(provider: string, config = new Config()) {
     const id = levels[level]!.model;
     const separator = id.indexOf("/");
     if (id.slice(0, separator) !== provider) continue;
-    const unlisted = config.models.unlistedModelSentence(id, level);
-    if (unlisted) throw new Error(unlisted);
     return { id, route: { provider, modelId: id.slice(separator + 1) } };
   }
   throw new Error(`Choose a ${provider} model in Settings > Effort levels`);

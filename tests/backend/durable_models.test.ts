@@ -111,7 +111,7 @@ describe("durableModels", () => {
       base_url: "http://127.0.0.1:9/v1",
       env_key: "CUSTOM_KEY",
       wire_api: "responses" as const,
-      models: models.map((id) => ({ id })),
+      models: models.map((id) => ({ id, effort: null })),
     });
     const sync = customProviderSync(models, (provider) =>
       provider === "stored" ? "env-stored" : `env-${provider}`,
@@ -172,8 +172,8 @@ describe("DurableHost", () => {
       "local-llm": {
         base_url: `http://127.0.0.1:${server.port}${path}`,
         env_key: "LOCAL_LLM_KEY",
-        wire_api: "completions",
-        models: [{ id: "small", context_window: 100000 }],
+        wire_api: "completions" as const,
+        models: [{ id: "small", context_window: 100000, effort: null }],
       },
     });
     let providers = settings("/v1");

@@ -474,7 +474,7 @@ export const tests: BrowserTest[] = [
       await browserExpect(safetyRows).toHaveCount(1);
       await browserExpect(safetyRows).toBeVisible();
       await browserExpect(safetyRows).toHaveAccessibleName(
-        "Safety review Same as level 1",
+        "Safety review Automatic",
       );
       const labelLefts = await ladder
         .locator("h3, .settings-row-label:visible")

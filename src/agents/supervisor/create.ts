@@ -1,4 +1,4 @@
-// Create validates/reserves/claims/publishes under one lifecycle lease.
+// Create validates, claims, binds and publishes under one lifecycle lease.
 // Transactions drain despite cancellation; shutdown joins their TaskSet.
 // Refresh spawn-workdir before create; bindings retain read-only legacy state.
 // DurableHost owns Harness admission; cancellation bypasses failure cleanup.
@@ -10,9 +10,11 @@ import {
   logEvent,
   type RuntimeLogger,
 } from "../../observability/runtime_logging";
-import { abortable, checkAbort, type TaskSet } from "../../utils/tasks";
+import { abortable, type TaskSet } from "../../utils/tasks";
 import {
   CID_RE,
+  ExternalKeyConflict,
+  ServiceStorageUnavailable,
   freshTakenOverOrder,
   stripPendingKeys,
   validLevel,
@@ -20,7 +22,7 @@ import {
   type ConversationGuardToken,
   type ConversationRecord,
   type ConversationStore,
-  type ConversationStoreHooks,
+  type RowReservation,
   type ServiceBindings,
 } from "../storage";
 import { TreeLifecycleBusy, type TreeLifecycle } from "../lifecycle";
@@ -32,6 +34,7 @@ import {
 } from "../runtime/agent_node";
 import type { AgentNodes } from "../runtime/agent_nodes";
 import type { ConfigActions } from "../runtime/config_actions";
+import type { WorktreeHolders } from "../worktree_holders";
 
 const SERVICE_CREATE_BUSY_RETRIES = 20;
 const SERVICE_CREATE_BUSY_RETRY_DELAY_SECONDS = 0.05;
@@ -62,36 +65,41 @@ export class SpawnWorkdir {
 }
 
 export interface CreateDeps {
-  worktrees?: { hold(workdir: string, cid: string): Promise<void> };
+  worktrees?: Pick<WorktreeHolders, "hold" | "release">;
   conversations: Pick<
     ConversationStore,
     | "convRowExists"
+    | "discardConvProjection"
+    | "discardUnpublished"
+    | "reserveNewRow"
     | "projectionReady"
     | "load"
     | "save"
     | "newConversationId"
-    | "rollbackServiceConversation"
     | "effectiveWorkdir"
     | "withTitleGuard"
-    | "withMuteGuard"
-    | "withConfigurationMetadataGuard"
     | "loadCanonicalMetadata"
     | "updateSessionBinding"
-    | "invalidateContextUsage"
     | "allConvs"
+  >;
+  configActions: Pick<
+    ConfigActions,
+    "withMuteGuard" | "withConfigurationMetadataGuard"
   >;
   serviceBindings: Pick<
     ServiceBindings,
-    "lookupExternalKey" | "unbindExternalKey" | "unbindServiceConversation"
+    | "lookupExternalKey"
+    | "serviceOwnedConversationCount"
+    | "bindServiceConversation"
+    | "bindExternalKey"
+    | "unbindExternalKey"
+    | "unbindServiceConversation"
   >;
   nodes: Pick<
     AgentNodes<AgentNode, NodeStore>,
     "existing" | "node" | "dropNode" | "retiring"
   >;
-  lifecycle: Pick<
-    TreeLifecycle,
-    "guard" | "guardAsync" | "mutateExternalStorage"
-  >;
+  lifecycle: Pick<TreeLifecycle, "guard" | "guardAsync">;
   config: Pick<Config, "models" | "levels">;
   /** store_import.import_finalized(). */
   importFinalized(): boolean | null;
@@ -105,6 +113,7 @@ export interface CreateDeps {
     ): Promise<void>;
   };
   agentTemp: {
+    safeRemoveTempKey(key: string): Promise<boolean>;
     newAgentTempKey(cid: string): Promise<string>;
     ensureAgentTemp(
       conv: ConversationRecord,
@@ -114,6 +123,7 @@ export interface CreateDeps {
   /** agent_tree._bump_tree_topology. */
   bumpTreeTopology(): void;
   log: RuntimeLogger;
+  rollbackLog?: RuntimeLogger;
   deliverPlatformNote(cid: string, content: string): Promise<string | null>;
   /** time.time(), seconds. */
   now(): number;
@@ -140,16 +150,45 @@ export interface CreateOptions {
   tags?: Tags;
   takenOver?: boolean;
   spawnRequestId?: string | null;
-  externalKey?: string | null;
-  servicePrincipal?: string | null;
-  allowedModels?: readonly string[] | null;
-  externalKeyChecked?: boolean;
   effort?: string | null;
   level?: number | null;
   /** The archive id a revive restored (src/agents/supervisor/revive.ts). */
   revivedFrom?: string | null;
   /** Read-only fork of `parent`, hidden from the tree. */
   side?: boolean;
+}
+
+interface ServiceCreateOptions {
+  title: string | null;
+  servicePrincipal: string;
+  externalKey: string | null;
+  allowedModels: readonly string[] | null;
+  ownedLimit: number | null;
+}
+
+interface ServiceAttempt {
+  cid: string;
+  principal: string;
+  externalKey: string | null;
+  workdir: string;
+  /** The attempt's temp key, recorded in the bindings it writes. */
+  token: string;
+  /** The stamp of the worktree hold it took, if any. */
+  hold: number | null;
+  row: RowReservation | null;
+}
+
+interface ServiceCreateResult {
+  conversation: ConversationRecord;
+  created: boolean;
+}
+
+export class ServiceCreateRefusal extends Error {
+  constructor(
+    readonly reason: "quota_exceeded" | "service_storage_unavailable",
+  ) {
+    super(reason);
+  }
 }
 
 type Selection = [number | null, string, string];
@@ -160,29 +199,37 @@ function fullmatch(re: RegExp, value: unknown): value is string {
   return typeof value === "string" && re.test(value);
 }
 
-/** The store hooks this PR closes. */
-export function createStoreHooks(
-  configActions: Pick<ConfigActions, "withModelGuard">,
-  spawnWorkdir: SpawnWorkdir,
-): Pick<ConversationStoreHooks, "defaultSpawnWorkdir" | "withModelGuard"> {
-  return {
-    defaultSpawnWorkdir: () => spawnWorkdir.current(),
-    withModelGuard: (cid, fn, nodeToken) =>
-      configActions.withModelGuard(cid, fn, nodeToken),
-  };
-}
-
 export class SupervisorCreate {
   constructor(private readonly deps: CreateDeps) {}
 
-  // Create under a lifecycle lease; published spawn/external-key retries
-  // return the already live record without duplicating creation.
   async create(
     options: CreateOptions = {},
     signal?: AbortSignal,
   ): Promise<ConversationRecord> {
+    const cid = options.cid || this.deps.conversations.newConversationId();
+    const work = this.createTransaction(cid, options, null);
+    return (await this.waitForCreate(cid, work, signal)).conversation;
+  }
+
+  /** A principal-scoped service conversation, converging same-key racers. */
+  async createOrRejoinServiceConversation(
+    options: ServiceCreateOptions,
+    signal?: AbortSignal,
+  ): Promise<ServiceCreateResult> {
+    const cid = this.deps.conversations.newConversationId();
+    return this.waitForCreate(
+      cid,
+      this.createServiceWithRetry(cid, options),
+      signal,
+    );
+  }
+
+  private async createTransaction(
+    cid: string,
+    options: CreateOptions,
+    service: ServiceCreateOptions | null,
+  ): Promise<ServiceCreateResult> {
     const { conversations } = this.deps;
-    const cid = options.cid || conversations.newConversationId();
     if (!fullmatch(CID_RE, cid)) throw new ValueError("unsafe conversation id");
     if (
       this.deps.importFinalized() === false ||
@@ -191,19 +238,24 @@ export class SupervisorCreate {
       throw new Error(
         "startup import incomplete; creates refused until it completes",
       );
-    const work = (async () => {
-      try {
-        return await this.deps.lifecycle.guardAsync(
-          "create",
-          cid,
-          () => this.createLocked(cid, options),
-          undefined,
-          { timeoutSeconds: 3 },
-        );
-      } finally {
-        this.deps.bumpTreeTopology();
-      }
-    })();
+    try {
+      return await this.deps.lifecycle.guardAsync(
+        "create",
+        cid,
+        () => this.createLocked(cid, options, service),
+        undefined,
+        { timeoutSeconds: 3 },
+      );
+    } finally {
+      this.deps.bumpTreeTopology();
+    }
+  }
+
+  private waitForCreate(
+    cid: string,
+    work: Promise<ServiceCreateResult>,
+    signal?: AbortSignal,
+  ): Promise<ServiceCreateResult> {
     // Invariant: The shutdown join owns the transaction even when its caller
     // left; the caller sees its errors.
     void this.deps.tasks.spawn(`create:${cid}`, () =>
@@ -216,57 +268,41 @@ export class SupervisorCreate {
     return signal ? abortable(work, signal) : work;
   }
 
-  /** A principal-scoped service conversation, converging same-key racers. */
-  async createOrRejoinServiceConversation(
-    options: {
-      title?: string | null;
-      servicePrincipal: string;
-      externalKey: string | null;
-      allowedModels?: readonly string[] | null;
-    },
-    signal: AbortSignal = NEVER,
-  ): Promise<ConversationRecord> {
-    const rejoinServiceCreate = async (principal: string, key: string) => {
-      const current = await this.deps.serviceBindings.lookupExternalKey(
-        principal,
-        key,
-      );
-      if (current !== null) current._external_key_created = false;
-      return current;
-    };
-    let busyAttempts = 0;
-    for (;;) {
+  private async createServiceWithRetry(
+    cid: string,
+    options: ServiceCreateOptions,
+  ): Promise<ServiceCreateResult> {
+    for (let attempt = 1; ; attempt++) {
       try {
-        return await this.create(
-          {
-            title: options.title ?? null,
-            parent: null,
-            muted: false,
-            attachmentDraft: null,
-            servicePrincipal: options.servicePrincipal,
-            externalKey: options.externalKey,
-            allowedModels: options.allowedModels ?? null,
-          },
-          signal,
+        // Service callers cannot supply a parent or agent ID.
+        return await this.createTransaction(
+          cid,
+          { title: options.title },
+          options,
         );
       } catch (error) {
-        if (!(error instanceof TreeLifecycleBusy)) throw error;
-        busyAttempts += 1;
-        if (busyAttempts > SERVICE_CREATE_BUSY_RETRIES) {
+        if (error instanceof TreeLifecycleBusy) {
+          if (attempt <= SERVICE_CREATE_BUSY_RETRIES) {
+            await this.deps.sleep(
+              SERVICE_CREATE_BUSY_RETRY_DELAY_SECONDS,
+              NEVER,
+            );
+            continue;
+          }
           logEvent(this.deps.log, WARNING, "service_create_busy", {
-            fields: { attempts: busyAttempts },
+            fields: { attempts: attempt },
           });
-          throw error;
         }
-        if (options.externalKey) {
-          const rejoined = await this.deps.lifecycle.mutateExternalStorage(
-            rejoinServiceCreate,
-            [options.servicePrincipal, options.externalKey],
-          );
-          checkAbort(signal);
-          if (rejoined !== null) return rejoined;
-        }
-        await this.deps.sleep(SERVICE_CREATE_BUSY_RETRY_DELAY_SECONDS, signal);
+        if (
+          error instanceof ServiceStorageUnavailable ||
+          (typeof error === "object" &&
+            error !== null &&
+            "code" in error &&
+            typeof error.code === "string" &&
+            /^E[A-Z]+$/.test(error.code))
+        )
+          throw new ServiceCreateRefusal("service_storage_unavailable");
+        throw error;
       }
     }
   }
@@ -358,36 +394,32 @@ export class SupervisorCreate {
   }
 
   private async createLocked(
-    cidArg: string,
+    cid: string,
     o: CreateOptions,
-  ): Promise<ConversationRecord> {
+    service: ServiceCreateOptions | null,
+  ): Promise<ServiceCreateResult> {
     const { conversations, nodes, serviceBindings } = this.deps;
-    let cid = cidArg;
     let externalKey: string | null;
     try {
-      externalKey = validateExternalKey(o.externalKey ?? null);
+      externalKey = validateExternalKey(service?.externalKey ?? null);
     } catch (error) {
       throw new ValueError((error as Error).message);
     }
-    const principal = o.servicePrincipal ?? null;
-    if (principal !== null && (typeof principal !== "string" || !principal))
-      throw new ValueError("invalid service principal");
-    if (externalKey && principal === null)
-      throw new ValueError("external_key requires a service principal");
-    if (externalKey && !o.externalKeyChecked) {
-      const existing = await serviceBindings.lookupExternalKey(
-        principal!,
-        externalKey,
-      );
-      if (existing !== null) {
-        const found = existing.id;
-        cid = typeof found === "string" && found ? found : cid;
-        const fresh = conversations.load(cid);
-        if (fresh === null) throw new ValueError("conversation was deleted");
-        nodes.node(cid);
-        fresh._external_key_created = false;
-        return fresh;
-      }
+    const principal = service?.servicePrincipal ?? null;
+    if (service !== null) {
+      if (typeof principal !== "string" || !principal)
+        throw new ValueError("invalid service principal");
+      const existing =
+        externalKey &&
+        (await serviceBindings.lookupExternalKey(principal, externalKey));
+      if (existing) return { conversation: existing, created: false };
+      const limit = service.ownedLimit;
+      if (
+        limit !== null &&
+        (await serviceBindings.serviceOwnedConversationCount(principal)) >=
+          limit
+      )
+        throw new ServiceCreateRefusal("quota_exceeded");
     }
     const parent = o.parent ?? null;
     const parentConv = parent ? conversations.load(parent) : null;
@@ -404,7 +436,7 @@ export class SupervisorCreate {
     if (live !== null) {
       if (spawnRequestId !== null && live.spawn_request_id === spawnRequestId) {
         nodes.node(cid);
-        return live;
+        return { conversation: live, created: false };
       }
       throw new ValueError("conversation id already exists");
     }
@@ -415,7 +447,10 @@ export class SupervisorCreate {
       parentConv,
       o.operatorSelectedModel === true,
     );
-    if (o.allowedModels != null && !o.allowedModels.includes(selectedModel))
+    if (
+      service?.allowedModels != null &&
+      !service.allowedModels.includes(selectedModel)
+    )
       throw new ValueError("model_not_allowed");
     let workdir: string;
     if (o.workdir === undefined) {
@@ -434,13 +469,6 @@ export class SupervisorCreate {
     // worktree, so a refusal leaks neither.
     if (spawnRequestId !== null && !fullmatch(CID_RE, spawnRequestId))
       throw new ValueError("unsafe spawn request id");
-    nodes.node(cid);
-    try {
-      await this.deps.worktrees?.hold(workdir, cid);
-    } catch (error) {
-      nodes.dropNode(cid);
-      throw new ValueError((error as Error).message);
-    }
     const conv: ConversationRecord = {
       id: cid,
       title: o.title ?? null,
@@ -480,8 +508,17 @@ export class SupervisorCreate {
       if (!parent) throw new ValueError("a side conversation needs a parent");
       conv.side_of = parent;
     }
+    if (principal !== null)
+      return this.createServiceLocked(conv, principal, externalKey, workdir);
+    nodes.node(cid);
+    try {
+      await this.deps.worktrees?.hold(workdir, cid);
+    } catch (error) {
+      nodes.dropNode(cid);
+      throw new ValueError((error as Error).message);
+    }
     return conversations.withTitleGuard(cid, (titleToken) =>
-      conversations.withMuteGuard(cid, async () => {
+      this.deps.configActions.withMuteGuard(cid, async () => {
         try {
           const draftClaim = conv.attachment_draft;
           if (draftClaim)
@@ -490,10 +527,7 @@ export class SupervisorCreate {
           try {
             await conversations.save(conv, titleToken);
           } catch (error) {
-            await conversations.rollbackServiceConversation(
-              conv,
-              serviceBindings,
-            );
+            await this.rollbackConversation(conv);
             throw error;
           }
           if (draftClaim)
@@ -505,8 +539,7 @@ export class SupervisorCreate {
           else
             await this.deps.agentTemp.ensureAgentTemp(conv, { persist: false });
           conv.pending = [];
-          if (conv.external_key) conv._external_key_created = true;
-          return conv;
+          return { conversation: conv, created: true };
         } catch (error) {
           if (conversations.load(cid, { withPending: false }) === null)
             nodes.dropNode(cid);
@@ -514,6 +547,180 @@ export class SupervisorCreate {
         }
       }),
     );
+  }
+
+  // Invariant: a service attempt binds before its row exists and publishes the
+  // row only once committed, so no reader sees an unbound or losable row. Its
+  // bindings carry its temp key, so rollback removes only what it wrote.
+  private async createServiceLocked(
+    conv: ConversationRecord,
+    principal: string,
+    externalKey: string | null,
+    workdir: string,
+  ): Promise<ServiceCreateResult> {
+    const { conversations, nodes, serviceBindings } = this.deps;
+    const cid = String(conv.id);
+    const attempt: ServiceAttempt = {
+      cid,
+      principal,
+      externalKey,
+      workdir,
+      token: String(conv.tmp_key),
+      hold: null,
+      row: null,
+    };
+    nodes.node(cid);
+    try {
+      try {
+        attempt.hold = (await this.deps.worktrees?.hold(workdir, cid)) ?? null;
+      } catch (error) {
+        throw new ValueError((error as Error).message);
+      }
+      return await conversations.withTitleGuard(cid, (titleToken) =>
+        this.deps.configActions.withMuteGuard(cid, async () => {
+          nodes.node(cid).muteDesired = conv.muted ? true : null;
+          await this.deps.agentTemp.ensureAgentTemp(conv, { persist: false });
+          attempt.row = await conversations.reserveNewRow(cid);
+          if (attempt.row === null)
+            throw new ServiceCreateRefusal("service_storage_unavailable");
+          await serviceBindings.bindServiceConversation(
+            principal,
+            cid,
+            attempt.token,
+          );
+          if (externalKey) {
+            try {
+              await serviceBindings.bindExternalKey(
+                principal,
+                externalKey,
+                cid,
+                attempt.token,
+              );
+            } catch (error) {
+              if (!(error instanceof ExternalKeyConflict)) throw error;
+              const winner = await serviceBindings.lookupExternalKey(
+                principal,
+                externalKey,
+              );
+              if (winner === null) throw error;
+              return { conversation: winner, created: false };
+            }
+          }
+          await conversations.save(conv, titleToken, attempt.row);
+          if (!conversations.convRowExists(cid))
+            throw new ServiceCreateRefusal("service_storage_unavailable");
+          conv.pending = [];
+          return { conversation: conv, created: true };
+        }),
+      );
+    } finally {
+      if (!conversations.convRowExists(cid)) {
+        await this.rollbackServiceAttempt(attempt);
+        nodes.dropNode(cid);
+      }
+    }
+  }
+
+  private async rollbackConversation(conv: ConversationRecord): Promise<void> {
+    const { conversations, serviceBindings, agentTemp, nodes } = this.deps;
+    const cid = conv.id;
+    if (typeof cid !== "string" || !CID_RE.test(cid))
+      throw new Error("unsafe conversation id for rollback");
+    const cleanup = async (
+      step: string,
+      action: () => void | Promise<void>,
+    ): Promise<void> => {
+      try {
+        await action();
+      } catch (error) {
+        logEvent(
+          this.deps.rollbackLog ?? this.deps.log,
+          WARNING,
+          "service_conversation_rollback_failed",
+          {
+            conversation_id: cid,
+            fields: {
+              step,
+              error_type:
+                error instanceof Error ? error.constructor.name : "unknown",
+            },
+          },
+        );
+      }
+    };
+    conversations.discardConvProjection(cid);
+    await cleanup("service_binding", () =>
+      serviceBindings.unbindServiceConversation(cid),
+    );
+    const { external_key: key, service_principal: principal } = conv;
+    if (typeof key === "string" && typeof principal === "string")
+      await cleanup("external_key", () =>
+        serviceBindings.unbindExternalKey(principal, key, cid),
+      );
+    await cleanup("temp", async () => {
+      if (!(await agentTemp.safeRemoveTempKey(String(conv.tmp_key || ""))))
+        throw new Error("temp cleanup incomplete");
+    });
+    nodes.dropNode(cid);
+  }
+
+  // Undo an unpublished attempt under its own lease. Bindings, scratch and the
+  // hold go only once its row is known gone, and only what this attempt wrote.
+  private async rollbackServiceAttempt(attempt: ServiceAttempt): Promise<void> {
+    const { cid, principal, externalKey, token, row, hold } = attempt;
+    const { conversations, serviceBindings, agentTemp, worktrees } = this.deps;
+    if (
+      row !== null &&
+      !(await this.cleanupStep(cid, "row", async () => {
+        if (!(await conversations.discardUnpublished(row)))
+          throw new Error("row files not retired");
+      }))
+    )
+      return;
+    if (externalKey !== null)
+      await this.cleanupStep(cid, "external_key", () =>
+        serviceBindings.unbindExternalKey(principal, externalKey, cid, token),
+      );
+    await this.cleanupStep(cid, "service_binding", () =>
+      serviceBindings.unbindServiceConversation(cid, {
+        principal,
+        createToken: token,
+      }),
+    );
+    await this.cleanupStep(cid, "temp", async () => {
+      if (!(await agentTemp.safeRemoveTempKey(token)))
+        throw new Error("temp cleanup incomplete");
+    });
+    if (hold !== null && worktrees)
+      await this.cleanupStep(cid, "worktree", () =>
+        worktrees.release(attempt.workdir, cid, hold),
+      );
+  }
+
+  private async cleanupStep(
+    cid: string,
+    step: string,
+    action: () => void | Promise<void>,
+  ): Promise<boolean> {
+    try {
+      await action();
+      return true;
+    } catch (error) {
+      logEvent(
+        this.deps.rollbackLog ?? this.deps.log,
+        WARNING,
+        "service_conversation_rollback_failed",
+        {
+          conversation_id: cid,
+          fields: {
+            step,
+            error_type:
+              error instanceof Error ? error.constructor.name : "unknown",
+          },
+        },
+      );
+      return false;
+    }
   }
 
   /** Set the operator Take-over flag and mute; notify on control changes. */
@@ -526,7 +733,7 @@ export class SupervisorCreate {
       "set_taken_over",
       cid,
       () =>
-        conversations.withConfigurationMetadataGuard(
+        this.deps.configActions.withConfigurationMetadataGuard(
           cid,
           async (titleToken) => {
             const conv = conversations.load(cid);

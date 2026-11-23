@@ -343,6 +343,8 @@ interface ServedToolData {
   args: string;
   result: string | null;
   result_truncated: boolean;
+  running?: boolean;
+  tool_output_tail?: string;
   calls?: CodemodeCall[] | null;
 }
 
@@ -436,18 +438,26 @@ export function toolExpansion(
   block: ServedToolData | null,
 ): ToolExpansion {
   const full = entry.input_full || block?.args || "";
+  // Keep the served prefix and add the latest output when it no longer fits.
+  // A withheld tail covers the whole result, including the prefix.
+  const tail = block?.running ? block.tool_output_tail : undefined;
+  const outputTruncated = block?.result_truncated ?? false;
+  let output = block?.result || null;
+  if (tail === "Output withheld") output = tail;
+  else if (tail && (!output || outputTruncated))
+    output = output ? `${output}\n\n${tail}` : tail;
   if (entry.name === "codemode" && block)
     return {
       args: block.args ? codemodeScript(block.args) : null,
-      output: block.result || null,
-      outputTruncated: block.result_truncated,
+      output,
+      outputTruncated,
       calls: block.calls?.length ? block.calls : null,
     };
   return {
     args:
       !entry.artifact_id && full && full !== (entry.input || "") ? full : null,
-    output: block?.result || null,
-    outputTruncated: block?.result_truncated ?? false,
+    output,
+    outputTruncated,
   };
 }
 
@@ -509,8 +519,8 @@ interface ToolSeriesDisclosure {
   ariaLabel: string;
 }
 
-// Completed calls use the same default-closed disclosure while a turn streams
-// and after it settles. The separate live row owns only calls still running.
+// Tool calls use the same default-closed disclosure while a turn streams and
+// after it settles.
 export function toolSeriesDisclosure(
   summary: string,
   expanded: boolean,

@@ -69,7 +69,7 @@ test("installed Pi lists every model Recurse's defaults and routes use", async (
       for (const { model } of Object.values(ladder.levels.effortLevels())) {
         used.add(model);
         const { reviewer, summary } = JSON.parse(
-          await ladder.trustedModelPolicy(model),
+          await ladder.safetyReview.trustedModelPolicy(model),
         );
         for (const target of [
           reviewer,
@@ -79,11 +79,11 @@ test("installed Pi lists every model Recurse's defaults and routes use", async (
           used.add(`${target.provider}/${target.model}`);
       }
     }
-    for (const model of used)
-      expect([model, config.models.unlistedModelSentence(model, 1)]).toEqual([
-        model,
-        null,
-      ]);
+    const listed = reply.models.map(
+      ({ provider, id }: { provider: string; id: string }) =>
+        `${provider}/${id}`,
+    );
+    for (const model of used) expect(listed).toContain(model);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

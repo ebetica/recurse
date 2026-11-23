@@ -6,7 +6,11 @@ import { fauxAssistantMessage } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import * as auth from "../../src/web/request_auth";
 import { Router } from "../../src/web/router";
-import { registerTreeRoutes, type TreeRoutesDeps } from "../../src/web/tree";
+import {
+  cliIndex,
+  registerTreeRoutes,
+  type TreeRoutesDeps,
+} from "../../src/web/tree";
 import * as durable from "./fixtures/durable_host/host";
 import { serveOpen } from "./http_open_app";
 import { AgentStore } from "../../src/agents/storage/agent_store";
@@ -24,13 +28,7 @@ const agents = new AgentStore(join(data, "agents"));
 const conversations = new ConversationStore(
   paths(data),
   agents,
-  {
-    ...fixtureHooks(data),
-    liveStatus: (cid) => {
-      const live = world.host.metadata(cid);
-      return [live.status, live.active_run];
-    },
-  },
+  fixtureHooks(data),
   new Config({ env: { CHAT_DATA_DIR: data, HOME: root, RECURSE_HOME: root } }),
 );
 await conversations.save({
@@ -49,7 +47,13 @@ registerTreeRoutes(router, {
   projectionReady: () => true,
   nodeCids: () => [],
   cliIndex: async () => {
-    const rows = conversations.cliIndex();
+    const rows = cliIndex(
+      conversations.allConvs({ withPending: false }),
+      (cid) => {
+        const live = world.host.metadata(cid);
+        return [live.status, live.active_run];
+      },
+    );
     indexStatuses.push(rows.find((row) => row.id === "c1")?.status);
     return rows;
   },

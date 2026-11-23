@@ -16,6 +16,8 @@ import {
 import { switchoverWorld, until } from "./fixtures/durable_host/host";
 import { registerConversationRoutes } from "../../src/web/conversations";
 import { Router, type Exchange } from "../../src/web/router";
+import { TreeLifecycleBusy } from "../../src/utils/flock";
+import { probeMetadataFlock } from "./fixtures/metadata_flock";
 const worlds: Awaited<ReturnType<typeof switchoverWorld>>[] = [];
 afterEach(async () => {
   for (const w of worlds.splice(0)) await w.close();
@@ -413,48 +415,56 @@ for (const action of ["input", "clear", "compact"] as const)
     const clear = spyOn(w.instance.durable, "clear").mockImplementation(
       w.host.clear.bind(w.host),
     );
-    // test-check-allow: T3 Runs the real safety guard and host compaction.
-    const compact = spyOn(w.instance.durable, "compact").mockImplementation(
-      async (cid) => {
-        await w.instance.conversations.withSafetyGuard(cid, async () => {});
-        return w.host.compact(cid);
-      },
-    );
+    const compact = w.instance.durable.compact;
+    w.instance.durable.compact = (...args) => {
+      expect(w.load(cid)?.backend).toBe("durable");
+      return w.host.compact(...args);
+    };
+    const node = w.instance.nodes.node(cid);
+    const lock = node.withLock;
+    let move: Promise<void> | undefined;
+    let send: Promise<unknown> | undefined;
+    let failed = false;
     try {
-      const move = w.move.run(signal());
-      await started;
+      move = w.move.run(signal());
+      await Promise.race([
+        started,
+        move.then(() => {
+          throw new Error("Switchover did not close the Pi group");
+        }),
+      ]);
+      const { titleLockDir, muteLockDir } = w.instance.conversations.paths;
+      for (const dir of [titleLockDir, muteLockDir]) {
+        await expect(probeMetadataFlock(dir, cid)).rejects.toBeInstanceOf(
+          TreeLifecycleBusy,
+        );
+      }
       w.faux.setResponses([
         fauxAssistantMessage([fauxText("ADMITTED-DURABLE")]),
       ]);
       let admitted = false;
       const admission = Promise.withResolvers<void>();
-      const guard = w.instance.conversations.withSafetyGuard.bind(
-        w.instance.conversations,
-      );
-      // test-check-allow: T3 Observes the real guard's pending promise.
-      const waiting = spyOn(
-        w.instance.conversations,
-        "withSafetyGuard",
-      ).mockImplementation(
-        <T>(cid: string, fn: () => Promise<T>, nodeToken?: object) => {
-          const pending = guard(cid, fn, nodeToken);
-          admission.resolve();
-          return pending;
-        },
-      );
+      const withLock = node.withLock.bind(node);
+      node.withLock = (work, token) => {
+        const pending = withLock(work, token);
+        admission.resolve();
+        return pending;
+      };
       const pending =
         action === "input"
           ? w.instance.delivery.deliver(cid, "Continue.")
           : action === "clear"
             ? w.instance.parked.requestClear(cid)
             : w.instance.parked.requestCompact(cid);
-      const send = pending.then(() => {
+      send = pending.then((result) => {
         admitted = true;
+        if (action === "compact")
+          expect(result).toMatchObject({ id: cid, action: "compact" });
+        return result;
       });
-      await admission.promise;
-      waiting.mockRestore();
+      await Promise.race([admission.promise, send]);
       expect(admitted).toBe(false);
-      expect(w.instance.nodes.node(cid).pendingIntents()).toEqual([]);
+      expect(w.instance.nodes.existing(cid)?.pendingIntents()).toEqual([]);
       release();
       await move;
       await send;
@@ -465,13 +475,26 @@ for (const action of ["input", "clear", "compact"] as const)
         );
       expect(w.instance.parked.pendingActions(cid)).toEqual([]);
       expect(await w.instance.processes.sessionMemberState(row)).toBe("absent");
+    } catch (error) {
+      failed = true;
+      throw error;
     } finally {
       release();
+      await Promise.allSettled([move, send]);
+      node.withLock = lock;
       hold.mockRestore();
       route.mockRestore();
       clear.mockRestore();
-      compact.mockRestore();
-      await stopGroup(row);
+      w.instance.durable.compact = compact;
+      try {
+        if (
+          (await w.instance.processes.sessionMemberState(row)) !== "absent" &&
+          !(await stopGroup(row))
+        )
+          throw new Error("Pi group cleanup is unverified");
+      } catch (cleanupError) {
+        if (!failed) throw cleanupError;
+      }
     }
   });
 

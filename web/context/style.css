@@ -1,0 +1,30 @@
+/* Counts-only context details reuse the inspector’s usage bar. */
+#context-overlay { position: fixed; z-index: calc(var(--z-dialog) + 1); inset: 0; display: none;
+  align-items: center; justify-content: center;
+  padding: 56px var(--space-5) var(--space-6); /* space-check: allow clears the topbar */
+  background: color-mix(in srgb, var(--scrim-deep) 64%, transparent); }
+#context-overlay.on { display: flex; }
+#context-surface { width: min(680px, calc(100vw - 2 * var(--space-5))); max-height: min(78dvh, 680px);
+  overflow: hidden; display: flex; flex-direction: column; }
+.context-surface-head { min-height: 48px; display: flex; align-items: center;
+  justify-content: space-between; gap: var(--space-4);
+  padding: var(--space-3) var(--space-4) 0 var(--space-6); }
+.context-surface-head h2 { min-width: 0; margin: 0; color: var(--text);
+  font-size: 1.25rem; line-height: 1.25; font-weight: 700; }
+#context-body { min-height: 0; flex: 1 1 auto; overflow-y: auto;
+  padding: 0 var(--space-6) var(--space-6); }
+#context-body > .turn-usage-bar-line { margin-top: var(--space-4); }
+/* five legend items never fit beside the bar on a phone; give them their own
+   row so labels wrap instead of overflowing */
+#context-body .turn-usage-legend { flex: 1 1 100%; }
+.context-loading, .context-error { margin: 0 var(--space-1);
+  color: var(--muted); font-size: 0.71875rem; line-height: 1.5; }
+.context-error { color: var(--danger); }
+
+@media (max-width: 700px) {
+  #context-overlay { align-items: flex-end; padding: 0; }
+  #context-surface { width: 100%; max-width: none; max-height: calc(100dvh - var(--mobile-shell-height));
+    border-radius: 14px 14px 0 0; border-bottom: 0; }
+  .context-surface-head { padding-left: var(--space-5); }
+  #context-body { padding: 0 var(--space-5) max(var(--space-5), env(safe-area-inset-bottom)); }
+}

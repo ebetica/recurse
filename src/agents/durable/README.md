@@ -169,7 +169,7 @@ path, without creating a run or keeping the instance awake. Durable does not con
 Pi's AgentSession cache warmer, so Pi's idle-warming default does not apply.
 `follow.ts` keeps the latest committed assistant usage and its storage-session
 identity in its live row for API status, clearing it on compaction or close.
-Pi's first-entry boundary scopes search and the live panel across generations.
+Pi's first-entry boundary scopes search and the status bar across generations.
 The identity matches `/view` across projection rebuilds and changes on Clear;
 clients must not reuse usage from another session. Status uses the UI's shared
 occupancy projection without opening storage; cold or reopened-but-unsampled

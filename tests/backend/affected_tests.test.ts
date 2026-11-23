@@ -110,17 +110,19 @@ test("a worker a module starts by file name reaches that module's tests", async 
   );
 });
 
-// Feature: #2354 attachment touch-target changes select image-drawing browser coverage.
-test("a changed close-button rule reaches the group that taps chip previews", async () => {
+test("a historical shell change runs all browser groups even with old inline coverage", async () => {
   const lines = await affected("pr2354.diff.gz", "coverage_map.json");
-  expect(groups(lines)).toContain("image-drawing");
-  expect(groups(lines)).not.toBe("all");
+  expect(lines).toContain(
+    "# browser: web/index.html: frontend file the map does not cover",
+  );
+  expect(groups(lines)).toBe("all");
 });
 
 // Feature: #2377 font-size changes select selection-comment browser coverage.
 test("a font-size change reaches the group that measures the selection offer", async () => {
-  const lines = await affected("pr2377.diff.gz", "coverage_map.json");
+  const lines = await affected("pr2377-app-css.diff.gz", "coverage_map.json");
   expect(groups(lines)).toContain("selection-comments");
+  expect(groups(lines)).not.toBe("all");
 });
 
 // Regression: #2413 show server coverage alongside child-process uncertainty.
@@ -134,16 +136,17 @@ test("a theme function every group's server ran runs the whole suite", async () 
   expect(groups(lines)).toBe("all");
 });
 
-test("blame names only the commit whose changes the failing group ran", async () => {
+test("blame rules out unrelated changes but retains changes that lack coverage", async () => {
   expect(
     await blame("artifact-check", [
-      "pr2354.diff.gz",
-      "pr2377.diff.gz",
+      "pr2363.diff",
+      "pr1686.diff.gz",
       "pr2370-full.diff.gz",
     ]),
   ).toEqual([
+    "pr1686",
     "pr2370-full",
-    "# ruled out 2 of 3: artifact-check ran none of their changes",
+    "# ruled out 1 of 3: artifact-check ran none of their changes",
   ]);
 });
 
@@ -166,9 +169,14 @@ test("a frontend README runs no tests and an unnamed fixture runs the tests that
 
 // Feature: #2406 dependency planning maps keyframes and modules through their recorded importers.
 test("a changed keyframe reaches the groups that loaded its stylesheet", async () => {
-  expect(
-    groups(await affected("pr1686.diff.gz", "coverage_map.json")),
-  ).toContain("active-agents");
+  const lines = await affected("files-keyframes.diff.gz", "coverage_map.json");
+  const note = lines.find((line) =>
+    line.startsWith("# web/files.css: groups that used the changed rules -> "),
+  );
+  const covered = note?.split(" -> ")[1]?.split(" ");
+  expect(covered).toHaveLength(36);
+  expect(covered).toContain("active-agents");
+  expect(groups(lines)).not.toBe("all");
 });
 
 // Feature: #2406 dependency planning maps keyframes and modules through their recorded importers.

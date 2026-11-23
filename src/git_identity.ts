@@ -2,10 +2,11 @@
 // author/committer environment. Remove legacy defaults before inherited config.
 // Record GitHub's account locally when available; otherwise leave identity
 // unset so Git refuses commits rather than inventing an author.
-import { gitEnv } from "./git";
+import { gitEnv, runBounded } from "./git";
 import { slowSpan } from "./observability/slow-span";
 
 const pending = new Map<string, Promise<boolean>>();
+const decoder = new TextDecoder();
 type Env = Readonly<Record<string, string | undefined>>;
 
 /** Record a known identity; return false when the operator must supply one. */
@@ -30,26 +31,16 @@ async function resolveIdentity(
 ): Promise<boolean> {
   const env = gitEnv(environ);
   async function git(...args: string[]): Promise<string> {
-    const child = slowSpan("git_identity_spawn", undefined, () =>
-      Bun.spawn(["git", "-C", repoDir, ...args], {
-        env,
-        stdout: "pipe",
-        stderr: "ignore",
-        stdin: "ignore",
-      }),
+    const result = await runBounded(
+      ["git", "-C", repoDir, ...args],
+      process.cwd(),
+      env,
+      64 * 1024,
+      5,
     );
-    const timer = setTimeout(() => child.kill(), 5000);
-    try {
-      const [text, code] = await Promise.all([
-        new Response(child.stdout).text(),
-        child.exited,
-      ]);
-      if (code !== 0 && code !== 1)
-        throw new Error("Git identity configuration failed");
-      return text.trim();
-    } finally {
-      clearTimeout(timer);
-    }
+    if (!result || result.truncated || (result.code !== 0 && result.code !== 1))
+      throw new Error("Git identity configuration failed");
+    return decoder.decode(result.out).trim();
   }
   if (
     (await git("config", "--local", "user.name")) === "recurse-agent" &&

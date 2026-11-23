@@ -46,9 +46,9 @@ export interface ViewInputs {
   readonly sessionId: string;
   readonly sessionFile: string | null;
   readonly sessionCwd: string;
-  readonly live: string;
-  readonly envelope: string;
-  readonly files: string;
+  readonly live: readonly JsonObject[];
+  readonly envelope: Readonly<JsonObject>;
+  readonly files: Record<string, JsonObject[]>;
   readonly maxSessionBytes: number;
   readonly unbound?: boolean;
 }
@@ -63,7 +63,7 @@ export interface ViewFeed {
 
 export interface ViewBatch {
   readonly feed: ViewFeed;
-  readonly entries: string;
+  readonly entries: readonly JsonObject[];
   readonly reset: boolean;
   readonly caughtUp: boolean;
   readonly older: boolean;
@@ -285,8 +285,9 @@ async function olderViewEntries(
     parsed = [];
     let charged = 0;
     for (const [start, stop, raw] of rows) {
-      const entry = viewEntry(raw);
-      if (entry === null) continue;
+      const parsedEntry = viewEntry(raw);
+      if (parsedEntry === null) continue;
+      const [entry] = parsedEntry;
       charged += pythonJsonBytes(entry);
       if (charged > VIEW_READ_BYTES && parsed.length > 0) {
         capped = true;
@@ -383,7 +384,7 @@ export async function readBatch(
         tip: feed.tip,
         parent,
       },
-      entries: pythonJson(entries),
+      entries,
       reset: false,
       caughtUp: false,
       older: true,
@@ -434,7 +435,7 @@ export async function readBatch(
     };
     return {
       feed: activeFeed,
-      entries: pythonJson(entries),
+      entries,
       reset: true,
       caughtUp: false,
       older: false,
@@ -449,7 +450,7 @@ export async function readBatch(
       tip,
       parent: activeFeed.parent,
     },
-    entries: pythonJson(entries),
+    entries,
     reset,
     caughtUp,
     older: false,
@@ -464,9 +465,8 @@ export function applyBatch(
   const { rows } = view;
   if (view.evictPending || rows.instance_id !== generation) return false;
   if (batch.reset) rows.reset(batch.feed.sessionKey);
-  const entries = JSON.parse(batch.entries) as JsonObject[];
-  if (batch.older) rows.prepend(entries);
-  else rows.ingest(entries);
+  if (batch.older) rows.prepend(batch.entries);
+  else rows.ingest(batch.entries);
   view.feed = batch.feed;
   return true;
 }
@@ -898,6 +898,10 @@ function servedBlock(
       ? null
       : truncateToolDetail(block.result, VIEW_RESULT_MAX);
   const truncated = result !== block.result;
+  const name = block.name?.toLowerCase();
+  const withheldCommand =
+    (name === "bash" || name === "shell") &&
+    (containsSecret(block.args) || containsSecret(block.input ?? ""));
   let sender: string | null = null;
   let senderName: string | null = null;
   if (block.kind === "text" && block.role === "user")
@@ -935,7 +939,7 @@ function servedBlock(
     ...(block.live_thinking ? { live_thinking: true } : {}),
     origin: block.origin,
     name: block.name,
-    args: block.args,
+    args: withheldCommand ? "Command withheld" : block.args,
     result,
     ...(block.running && block.result !== null
       ? {
@@ -958,7 +962,7 @@ function servedBlock(
     error_detail: block.error_detail,
     stop_reason: block.stop_reason,
     running: block.running,
-    input: block.input,
+    input: withheldCommand ? "Command withheld" : block.input,
     sender,
     sender_name: senderName,
     stat: block.stat,
@@ -983,7 +987,7 @@ function servedBlock(
 /** Serialize a page of rows for the browser. */
 export function window(
   view: ViewEntry,
-  inputs: ViewInputs,
+  inputs: Pick<ViewInputs, "sessionId" | "live" | "envelope" | "files">,
   options: {
     caughtUp: boolean;
     liveSynced?: boolean;
@@ -996,10 +1000,8 @@ export function window(
   } = { caughtUp: false },
 ): JsonObject {
   const { rows } = view;
-  const live = JSON.parse(inputs.live) as JsonObject[];
-  if (!options.liveSynced) rows.syncLive(live, options.caughtUp);
-  rows.attachFiles(JSON.parse(inputs.files) as Record<string, JsonObject[]>);
-  const envelope = JSON.parse(inputs.envelope) as JsonObject;
+  if (!options.liveSynced) rows.syncLive(inputs.live, options.caughtUp);
+  rows.attachFiles(inputs.files);
   const limit = Math.min(Math.max(options.limit ?? 50, 1), VIEW_WINDOW_MAX);
   const page =
     options.since !== null &&
@@ -1019,7 +1021,7 @@ export function window(
     newer: page.newer,
     removed: page.removed,
     reset: page.reset,
-    ...envelope,
+    ...inputs.envelope,
   };
 }
 

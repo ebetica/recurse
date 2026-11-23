@@ -36,7 +36,6 @@ export interface ViewBlock {
   stop_reason?: string | null;
   running?: boolean;
   tool_elapsed_ms?: number;
-  tool_received_at_ms?: number;
   tool_output_tail?: string;
   artifact_id?: string;
   input?: string | null;

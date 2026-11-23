@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { captureFixture } from "./fixture_subprocess";
 
 const capsPath = "tests/checks/test_check_caps.json";
+const readmeCaps = "docs/readme_repetition_baseline.json";
 const recorded = (name: string) =>
   readFileSync(
     new URL(`./fixtures/test-check/${name}.txt`, import.meta.url),
@@ -672,8 +673,8 @@ test("CLI requires a recorded architecture sweep for oversized source and Markdo
     const ledger = "tests/checks/architecture-sweeps.json";
     const source = (lines: number) => put(file, "export {};\n".repeat(lines));
     const docs = (count: number) => put(readme, "🐾".repeat(count));
-    await put("docs/agents/repository-map.md", "# Code map\n");
     await put(ledger, "[]\n");
+    await put(readmeCaps, "{}\n");
     await source(1499);
     await docs(14999);
     const base = await baseline();
@@ -769,6 +770,81 @@ test("CLI requires a recorded architecture sweep for oversized source and Markdo
     expect(duplicate.exitCode).toBe(1);
     expect(duplicate.stderr.toString()).toContain(
       "invalid or duplicate record",
+    );
+  });
+});
+
+// Feature: #3614 router limits and shrinking README repetition counts
+test("CLI caps README indexes and rejects increases in code or history", async () => {
+  await withRepo(async ({ put, read, run }) => {
+    const router = "tests/README.md";
+    const otherReadme = "docs/example/README.md";
+    const browserSource = "tests/mobile_browser/common.ts";
+    const clockSource = "tests/web/connection-health.test.ts";
+    const oldParagraph =
+      "Browser geometry baselines use settled layout: `waitForLayout` also waits for\ndesktop Chat to sit in its window.\n";
+    const routed =
+      "- `tests/mobile_browser/common.ts`: [Browser helpers](mobile_browser/common.ts)\n";
+    const initialCaps = JSON.stringify({ [otherReadme]: 1, [router]: 2 });
+    await put(
+      clockSource,
+      `class FakeClock {
+  value = 0;
+  now = () => this.value;
+  advance(ms: number): void {
+    this.value += ms;
+  }
+}
+`,
+    );
+    await put("tests/checks/architecture-sweeps.json", "[]\n");
+    await put(readmeCaps, initialCaps);
+    await put(
+      browserSource,
+      readFileSync(
+        new URL("../mobile_browser/common.ts", import.meta.url),
+        "utf8",
+      ),
+    );
+    await put("README.md", oldParagraph);
+    await put("AGENTS.md", oldParagraph);
+    await put(
+      otherReadme,
+      '[A linked `waitForLayout`](../../tests/mobile_browser/common.ts) and <a href="../../tests/web/connection-health.test.ts">`FakeClock` #1234</a>. `unrelated.FakeClock` is not a symbol.\n',
+    );
+    await put(router, "🐾".repeat(4000));
+    const tooLong = await run("docs_check");
+    expect(tooLong.exitCode).toBe(1);
+    expect(tooLong.stderr.toString()).toContain(
+      `${router}: 4000 characters; folder indexes must stay under 4000`,
+    );
+
+    await put(
+      router,
+      routed +
+        oldParagraph +
+        "Previously, `bun test --diff` read `$RECURSE_SRC` and `CHAT_DATA_DIR`; it used to pass, but no longer does since #3388. See #3614.\n" +
+        "The `FakeClock.now()` field is named `now`.\n",
+    );
+    const growth = await run("docs_check");
+    expect(growth.exitCode).toBe(1);
+    expect(growth.stderr.toString().trim()).toBe(
+      `${router}: README repeats code or history (11, baseline 2): "waitForLayout", "Previously", "--diff", "RECURSE_SRC", "CHAT_DATA_DIR", "used to", "no longer", "since #3388", "#3614", "FakeClock.now()", "now"; move this to the code's header or --help, or delete it if the code already says it.`,
+    );
+    expect(read(readmeCaps).toString()).toBe(initialCaps);
+
+    await put(router, routed + oldParagraph);
+    const improvement = await run("docs_check");
+    expect(improvement.exitCode).toBe(0);
+    expect(improvement.stdout.toString()).toContain(
+      `Shrank ${readmeCaps}; commit the updated baseline.`,
+    );
+    expect(JSON.parse(read(readmeCaps).toString())).toEqual({ [router]: 1 });
+    await put(router, routed + oldParagraph + oldParagraph);
+    const restored = await run("docs_check");
+    expect(restored.exitCode).toBe(1);
+    expect(restored.stderr.toString()).toContain(
+      `${router}: README repeats code or history (2, baseline 1)`,
     );
   });
 });

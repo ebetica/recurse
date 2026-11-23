@@ -1,25 +1,17 @@
-// Thin lifecycle/message/view routes over owner services.
+// Lifecycle/message/view routes over owner services; focused reads never wait for Git.
 // Gate views before existence checks; focused SSE follows durable commits.
+// Skills revalidate list and context together; a context change invalidates both.
 // Relayed text is always agent input; audit its forwarding key separately.
 
-import { createHash } from "node:crypto";
 import { validBackendKeyName } from "../auth/backend_keys";
 import { keyedLabel } from "../backends/label";
 import { pyStrip, SERVICE_MESSAGE_MAX_CHARS } from "../auth";
 import { EFFORT_LEVEL_RANGE, isEffortLevel } from "../effort_levels";
 import { cleanTitleOrder, stripPendingKeys } from "../agents/storage";
-import { linkedPrList } from "../agents/conversation_prs";
 import type { Tags } from "../agent_metadata/index";
 import { TreeLifecycleBusy } from "../agents/lifecycle";
 import { AttachmentError } from "../agents/runtime/attachments/base";
 import { pyTruthy } from "../agents/runtime";
-import {
-  cleanBaseRef,
-  DIFF_REQUEST_TIMEOUT_MS,
-  unavailableDiff,
-} from "../workdir_git";
-import { timed, timingDetail } from "../observability/request_timing";
-import { prIdentity } from "../pull_request";
 import {
   INFO,
   logEvent,
@@ -56,12 +48,13 @@ export interface ConversationsRoutesDeps {
   /** Monotonic milliseconds. */
   monotonicMs(): number;
   readonly store: {
-    load(cid: string, options?: { withPending?: boolean }): Rec | null;
-    metadataSnapshot(cid: string): Rec | null;
+    convRowExists(cid: string): boolean;
+    load(
+      cid: string,
+      options?: { withPending?: boolean; fields?: readonly string[] },
+    ): Rec | null;
+    metadataSnapshot(cid: string, fields?: readonly string[]): Rec | null;
     markViewed(cid: string): Promise<void>;
-    /** Copies of the live descendant conversations, parents first. */
-    subtree(cid: string): Rec[];
-    save(conv: Rec): Promise<unknown>;
     effectiveWorkdir(conv: Rec): string;
   };
   readonly delivery: {
@@ -198,7 +191,6 @@ export interface ConversationsRoutesDeps {
     stop(cid: string): Promise<boolean>;
     clear(cid: string): Promise<Rec | null>;
     compact(cid: string): Promise<Rec | null>;
-    effectiveCwd(cid: string): Promise<string | null>;
     toolDetails?(
       cid: string,
       artifactId: string,
@@ -222,41 +214,7 @@ export interface ConversationsRoutesDeps {
     read(cid: string): Promise<Rec | null>;
     observe(cid: string): Promise<void>;
   };
-  /** Starts a background branch PR lookup (agents/conversation_prs.ts). */
-  readonly prs: { refresh(cid: string, reason: string): void };
-  readonly git: {
-    /** agent_temp.workdir_file; throws for an unsafe key. */
-    workdirFile(tempKey: string): string;
-    resolveDiffCwd(
-      stored: string,
-      persisted: string | null,
-      signal?: AbortSignal,
-    ): Promise<[string, string]>;
-    worktreeDiff(
-      cwd: string,
-      base: string | null,
-      source: string,
-      signal?: AbortSignal,
-      includeUntracked?: boolean,
-    ): Promise<unknown>;
-    diffFile(
-      cwd: string,
-      path: string,
-      base: string | null,
-      includeContents: boolean,
-      snapshot?: string | null,
-    ): Promise<unknown>;
-    pullRequestDiff(
-      url: string,
-      path: string | null,
-      queue: string,
-    ): Promise<unknown>;
-    diffCandidates(cwd: string): Promise<unknown>;
-    githubRepoUrl(
-      stored: string,
-      workdirFile: string | null,
-    ): Promise<string | null>;
-  };
+  githubRepoUrl(stored: string): Promise<string | null>;
 }
 
 export function registerConversationRoutes(
@@ -269,11 +227,11 @@ export function registerConversationRoutes(
     { url: string | null; pending: boolean }
   >();
   function githubRepoForRead(
+    cid: string,
     stored: string,
-    workdirFile: string | null,
     focused: boolean,
   ): string | null {
-    const key = JSON.stringify([stored, workdirFile]);
+    const key = JSON.stringify([cid, stored]);
     const entry = githubRepos.get(key) ?? { url: null, pending: false };
     if (focused && !entry.pending) {
       githubRepos.delete(key);
@@ -281,9 +239,9 @@ export function registerConversationRoutes(
       if (githubRepos.size > 100)
         githubRepos.delete(githubRepos.keys().next().value!);
       entry.pending = true;
-      // Recheck the persisted cwd; the next ordinary read gets the result.
-      void deps.git
-        .githubRepoUrl(stored, workdirFile)
+      // The next ordinary read gets the result.
+      void deps
+        .githubRepoUrl(stored)
         .catch(() => null)
         .then((url) => {
           entry.url = url;
@@ -362,7 +320,7 @@ export function registerConversationRoutes(
         }
       }
       const parent = body.parent ?? null;
-      if (parent !== null && !pyTruthy(store.load(parent as string)))
+      if (parent !== null && !store.convRowExists(parent as string))
         throw new HttpError(404, "parent agent not found");
       const level = body.level ?? null;
       if (level !== null && !isEffortLevel(level))
@@ -516,10 +474,8 @@ export function registerConversationRoutes(
       record.github_repo_url = null;
       try {
         record.github_repo_url = githubRepoForRead(
+          cid,
           store.effectiveWorkdir(record),
-          typeof record.tmp_key === "string"
-            ? deps.git.workdirFile(record.tmp_key)
-            : null,
           focused,
         );
       } catch {}
@@ -630,16 +586,13 @@ export function registerConversationRoutes(
       }
       if (result === null) throw new HttpError(404);
       const [skills, context] = result;
-      const canonical = pySortedJson({ context, skills });
-      const etag = `"${createHash("sha256").update(canonical).digest("hex")}"`;
-      const headers = {
-        "cache-control": "private, no-cache",
-        etag,
-        "x-recurse-skill-context": context,
-      };
-      if (header(ex, "if-none-match") === etag)
-        return new Response(null, { status: 304, headers });
-      return jsonResponse({ skills, context }, 200, headers);
+      return conditionalJson(
+        ex.request,
+        { skills, context },
+        {
+          extraHeaders: { "x-recurse-skill-context": context },
+        },
+      );
     },
     { longRunning: true },
   );
@@ -695,7 +648,7 @@ export function registerConversationRoutes(
     // Invariant: Record the next model/effort choice; the next admitted message
     // consumes it and a running turn keeps its launched model.
     const cid = ex.params.cid!;
-    if (typeof store.load(cid)?.side_of === "string")
+    if (typeof store.metadataSnapshot(cid, ["side_of"])?.side_of === "string")
       throw new HttpError(409, "a side conversation uses its parent's model");
     const body = await dictBody(ex);
     const operatorSelectedModel = operatorSelectedFileModel(ex, body.model);
@@ -721,8 +674,8 @@ export function registerConversationRoutes(
       throw new HttpError(422, "model required");
     if (effort !== null && (typeof effort !== "string" || !effort))
       throw new HttpError(422, "effort must be a non-empty string");
-    const conv = store.load(cid);
-    if (!pyTruthy(conv)) throw new HttpError(404, "conversation not found");
+    const conv = store.load(cid, { withPending: false, fields: ["backend"] });
+    if (conv === null) throw new HttpError(404, "conversation not found");
     const applied = await deps.configActions.requestModelChange(
       cid,
       model,
@@ -737,7 +690,7 @@ export function registerConversationRoutes(
       effort: applied.effort,
       level: applied.level,
       pending_model: applied.pending_model,
-      backend: conv!.backend,
+      backend: conv.backend,
     });
   });
 
@@ -749,7 +702,7 @@ export function registerConversationRoutes(
     const off = body.off;
     if (typeof off !== "boolean")
       throw new HttpError(422, "off must be a boolean");
-    if (!pyTruthy(store.load(cid))) throw new HttpError(404);
+    if (!store.convRowExists(cid)) throw new HttpError(404);
     let conv: Rec;
     let submitted: boolean;
     try {
@@ -772,47 +725,41 @@ export function registerConversationRoutes(
   router.post("/api/conversations/{cid}/rename", async (ex) => {
     const cid = ex.params.cid!;
     const body = await dictBody(ex);
-    if (!pyTruthy(store.load(cid))) throw new HttpError(404);
+    if (!store.convRowExists(cid)) throw new HttpError(404);
     const cleaned = cleanTitle(body.title ?? "");
     if (!cleaned) throw new HttpError(422, "title required");
     const order = cleanTitleOrder(body.title_order);
     const applied = deps.nodes.node(cid).renameTitle(cleaned, order);
     if (applied === null) {
-      if (!pyTruthy(store.load(cid))) throw new HttpError(404);
+      if (!store.convRowExists(cid)) throw new HttpError(404);
       throw new HttpError(422, "title required");
     }
     return jsonResponse({ id: cid, ...applied });
   });
 
-  // Spec: `/pin` with `{pinned}` is the name before the `taken_over` rename,
-  // kept for one release so tabs opened before a deploy keep working.
-  for (const [route, key] of [
-    ["take-over", "taken_over"],
-    ["pin", "pinned"],
-  ] as const)
-    router.post(`/api/conversations/{cid}/${route}`, async (ex) => {
-      if (agentMarked(ex))
-        throw new HttpError(403, "only the operator can change Take over");
-      const cid = ex.params.cid!;
-      const body = await dictBody(ex);
-      const takenOver = body[key];
-      if (typeof takenOver !== "boolean")
-        throw new HttpError(422, `${key} must be a boolean`);
-      let conv: Rec;
-      try {
-        conv = await deps.create.setTakenOver(cid, takenOver);
-      } catch (error) {
-        if (error instanceof TreeLifecycleBusy)
-          throw new HttpError(
-            503,
-            "Take-over change is busy. Try again shortly.",
-          );
-        if (errorName(error) === "KeyError")
-          throw new HttpError(404, "conversation not found");
-        throw error;
-      }
-      return jsonResponse({ id: cid, [key]: pyTruthy(conv.taken_over) });
-    });
+  router.post("/api/conversations/{cid}/take-over", async (ex) => {
+    if (agentMarked(ex))
+      throw new HttpError(403, "only the operator can change Take over");
+    const cid = ex.params.cid!;
+    const body = await dictBody(ex);
+    const takenOver = body.taken_over;
+    if (typeof takenOver !== "boolean")
+      throw new HttpError(422, "taken_over must be a boolean");
+    let conv: Rec;
+    try {
+      conv = await deps.create.setTakenOver(cid, takenOver);
+    } catch (error) {
+      if (error instanceof TreeLifecycleBusy)
+        throw new HttpError(
+          503,
+          "Take-over change is busy. Try again shortly.",
+        );
+      if (errorName(error) === "KeyError")
+        throw new HttpError(404, "conversation not found");
+      throw error;
+    }
+    return jsonResponse({ id: cid, taken_over: pyTruthy(conv.taken_over) });
+  });
 
   router.post("/api/conversations/{cid}/compact", async (ex) =>
     jsonResponse(await compactConversation(deps, ex.params.cid!)),
@@ -820,8 +767,8 @@ export function registerConversationRoutes(
 
   router.post("/api/conversations/{cid}/clear", async (ex) => {
     const cid = ex.params.cid!;
-    const conv = store.load(cid);
-    if (!pyTruthy(conv)) throw new HttpError(404);
+    const conv = store.metadataSnapshot(cid, ["backend"]);
+    if (conv === null) throw new HttpError(404);
     const applied = deps.durable?.owns(conv)
       ? await deps.durable.clear(cid)
       : await deps.compaction.requestClear(cid);
@@ -832,7 +779,7 @@ export function registerConversationRoutes(
   router.post("/api/conversations/{cid}/reparent", async (ex) => {
     const cid = ex.params.cid!;
     const body = await dictBody(ex);
-    if (!pyTruthy(store.load(cid))) throw new HttpError(404);
+    if (!store.convRowExists(cid)) throw new HttpError(404);
     const parent = body.parent;
     if (parent !== null && (typeof parent !== "string" || !parent))
       throw new HttpError(422, "parent must be an agent id or null");
@@ -855,7 +802,7 @@ export function registerConversationRoutes(
       // deleted.
       deps.requireActionReady();
       const cid = ex.params.cid!;
-      if (!pyTruthy(store.metadataSnapshot(cid))) throw new HttpError(404);
+      if (!store.convRowExists(cid)) throw new HttpError(404);
       const window = await deps.reads.readViewWindow(cid, {
         after: queryStr(ex, "after"),
         before: queryStr(ex, "before"),
@@ -883,7 +830,7 @@ export function registerConversationRoutes(
     async (ex) => {
       deps.requireActionReady();
       const cid = ex.params.cid!;
-      const conv = store.metadataSnapshot(cid);
+      const conv = store.metadataSnapshot(cid, ["backend"]);
       if (conv === null) throw new HttpError(404);
       const durable = deps.durable;
       return conversationEvents(
@@ -1047,7 +994,7 @@ export function registerConversationRoutes(
 
   router.delete("/api/conversations/{cid}/messages/{mid}", async (ex) => {
     const cid = ex.params.cid!;
-    if (!pyTruthy(store.load(cid))) throw new HttpError(404);
+    if (!store.convRowExists(cid)) throw new HttpError(404);
     if (!(await deps.delivery.cancelInboxMessageAsync(cid, ex.params.mid!)))
       throw new HttpError(404, "message not queued");
     return jsonResponse({ ok: true });
@@ -1055,195 +1002,11 @@ export function registerConversationRoutes(
 
   router.post("/api/conversations/{cid}/messages/{mid}/retry", async (ex) => {
     const cid = ex.params.cid!;
-    if (!pyTruthy(store.load(cid))) throw new HttpError(404);
+    if (!store.convRowExists(cid)) throw new HttpError(404);
     if (!(await deps.delivery.retryInboxMessage(cid, ex.params.mid!)))
       throw new HttpError(404, "message not retryable");
     return jsonResponse({ ok: true });
   });
-
-  const diffScope = async (
-    conv: Rec,
-    signal?: AbortSignal,
-  ): Promise<[string, string, string | null]> => {
-    let stored: string;
-    try {
-      stored = store.effectiveWorkdir(conv);
-    } catch {
-      throw new HttpError(404, "unknown workdir");
-    }
-    const [cwd, source] = await timed("diff.scope", async () => {
-      const persisted = deps.durable?.owns(conv)
-        ? await deps.durable.effectiveCwd(String(conv.id))
-        : null;
-      return deps.git.resolveDiffCwd(stored, persisted, signal);
-    });
-    return [cwd, source, cleanBaseRef(conv.diff_base_ref)];
-  };
-
-  const loadOr404 = (cid: string): Rec => {
-    const conv = store.load(cid);
-    if (!pyTruthy(conv)) throw new HttpError(404);
-    return conv!;
-  };
-
-  router.get("/api/conversations/{cid}/prs", async (ex) => {
-    const conv = loadOr404(ex.params.cid!);
-    const cid = String(conv.id);
-    const prs = linkedPrList(conv, store.subtree(cid));
-    // Spec: Opening Changes also refreshes the owners of the newest few PRs.
-    if (queryStr(ex, "refresh") === "1")
-      for (const id of new Set([
-        cid,
-        ...prs.slice(0, 5).map((pr) => pr.agent?.id ?? cid),
-      ]))
-        deps.prs.refresh(id, "changes_pane_open");
-    return jsonResponse({ prs });
-  });
-
-  router.get(
-    "/api/conversations/{cid}/diff",
-    async (ex) => {
-      const conv = loadOr404(ex.params.cid!);
-      const pr = queryStr(ex, "pr");
-      if (pr !== null) {
-        if (!prIdentity(pr))
-          throw new HttpError(422, "invalid pull request URL");
-        return jsonResponse(
-          await deps.git.pullRequestDiff(pr, null, ex.params.cid!),
-        );
-      }
-      const base = queryStr(ex, "base");
-      if (base !== null && cleanBaseRef(base) === null)
-        throw new HttpError(422, "invalid base ref");
-      const controller = new AbortController();
-      const abort = () => controller.abort();
-      if (ex.request.signal.aborted) abort();
-      else ex.request.signal.addEventListener("abort", abort, { once: true });
-      const deadline = setTimeout(() => {
-        timingDetail("diff_result", "deadline");
-        abort();
-      }, DIFF_REQUEST_TIMEOUT_MS);
-      const signal = controller.signal;
-      let cwd: string | null = null;
-      let source = "stored";
-      let onAbort!: () => void;
-      const aborted = new Promise<Response>((resolve) => {
-        onAbort = () =>
-          resolve(jsonResponse(unavailableDiff("diff-failed", cwd, source)));
-        if (signal.aborted) onAbort();
-        else signal.addEventListener("abort", onAbort, { once: true });
-      });
-      const work = async () => {
-        const [resolved, resolvedSource, stored] = await diffScope(
-          conv,
-          signal,
-        );
-        cwd = resolved;
-        source = resolvedSource;
-        return jsonResponse(
-          await deps.git.worktreeDiff(
-            cwd,
-            base ?? stored,
-            source,
-            signal,
-            queryStr(ex, "untracked") !== "0",
-          ),
-        );
-      };
-      try {
-        return await Promise.race([work(), aborted]);
-      } catch {
-        return jsonResponse(unavailableDiff("diff-failed", cwd, source));
-      } finally {
-        clearTimeout(deadline);
-        ex.request.signal.removeEventListener("abort", abort);
-        signal.removeEventListener("abort", onAbort);
-      }
-    },
-    {
-      query: {
-        base: { type: "str" },
-        pr: { type: "str" },
-        untracked: { type: "str" },
-      },
-      longRunning: true,
-    },
-  );
-
-  router.add(["PATCH"], "/api/conversations/{cid}/diff/base", async (ex) => {
-    const cid = ex.params.cid!;
-    const body = await dictBody(ex);
-    const conv = loadOr404(cid);
-    if (!("base" in body)) throw new HttpError(422, "base required");
-    const raw = body.base;
-    if (raw === null || (typeof raw === "string" && !pyStrip(raw)))
-      delete conv.diff_base_ref;
-    else {
-      const ref = cleanBaseRef(raw);
-      if (ref === null) throw new HttpError(422, "invalid base ref");
-      conv.diff_base_ref = ref;
-    }
-    await store.save(conv);
-    return jsonResponse({ id: cid, diff_base_ref: conv.diff_base_ref ?? null });
-  });
-
-  router.get(
-    "/api/conversations/{cid}/diff/files",
-    async (ex) => {
-      const conv = loadOr404(ex.params.cid!);
-      const path = queryStr(ex, "path");
-      if (!path) throw new HttpError(422, "path required");
-      const pr = queryStr(ex, "pr");
-      if (pr !== null) {
-        if (!prIdentity(pr))
-          throw new HttpError(422, "invalid pull request URL");
-        return jsonResponse(
-          await deps.git.pullRequestDiff(pr, path, ex.params.cid!),
-        );
-      }
-      const base = queryStr(ex, "base");
-      if (base !== null && cleanBaseRef(base) === null)
-        throw new HttpError(422, "invalid base ref");
-      const [cwd, , stored] = await diffScope(conv);
-      try {
-        return jsonResponse(
-          await deps.git.diffFile(
-            cwd,
-            path,
-            base ?? stored,
-            ex.query.contents === true,
-            queryStr(ex, "snapshot"),
-          ),
-        );
-      } catch {
-        return jsonResponse({ available: false, reason: "diff-failed", path });
-      }
-    },
-    {
-      query: {
-        path: { type: "str" },
-        pr: { type: "str" },
-        base: { type: "str" },
-        contents: { type: "bool", default: false },
-        snapshot: { type: "str" },
-      },
-      longRunning: true,
-    },
-  );
-
-  router.get(
-    "/api/conversations/{cid}/diff/candidates",
-    async (ex) => {
-      const conv = loadOr404(ex.params.cid!);
-      const [cwd] = await diffScope(conv);
-      try {
-        return jsonResponse(await deps.git.diffCandidates(cwd));
-      } catch {
-        return jsonResponse({ branches: [], commits: [], tags: [] });
-      }
-    },
-    { longRunning: true },
-  );
   return sendMessage;
 }
 
@@ -1256,17 +1019,4 @@ function pyFloatText(text: string): boolean {
       trimmed,
     )
   );
-}
-
-/** json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=False). */
-function pySortedJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(pySortedJson).join(",")}]`;
-  if (value !== null && typeof value === "object")
-    return `{${Object.keys(value)
-      .sort()
-      .map(
-        (key) => `${JSON.stringify(key)}:${pySortedJson((value as Rec)[key])}`,
-      )
-      .join(",")}}`;
-  return JSON.stringify(value);
 }

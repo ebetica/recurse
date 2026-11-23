@@ -930,7 +930,7 @@ export function registerFileRoutes(
             "artifact file metadata is invalid",
           );
         const filename = artifactFilename(meta.filename);
-        const media = artifacts.mediaType(meta, download);
+        const media = meta.media_type;
         const disposition =
           download || !ARTIFACT_INLINE_TYPES.has(media)
             ? "attachment"

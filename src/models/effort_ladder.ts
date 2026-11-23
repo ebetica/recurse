@@ -1,7 +1,6 @@
 // Resolve, save and report the effort ladder against the live model catalog.
 import {
   isObject,
-  pythonJson,
   valueError,
   type ConfigFiles,
   type Dict,
@@ -14,16 +13,13 @@ import {
   OPTIONAL_EFFORT_LEVELS,
   isEffortLevel,
 } from "../effort_levels";
-import {
-  DEFAULT_CHAT_MODEL,
-  type ModelCatalog,
-  type ModelOption,
-} from "./catalog";
+import { pyCompactJson } from "../utils/python-json";
+import { DEFAULT_CHAT_MODEL, type ModelCatalog } from "./catalog";
 import { validModelScopeKey } from "./model_id";
 import { parseThinking, type Thinking } from "./thinking";
 
 const EFFORT_LEVELS_VERSION = 1;
-const AVAILABLE_MODELS_VERSION = 1;
+const TURN_MARKS_VERSION = 1;
 type Ladder = Record<number, { model: string; reasoning: Thinking }>;
 
 export class EffortLadder {
@@ -73,17 +69,8 @@ export class EffortLadder {
     else if (authed.has("anthropic")) entries = anthro;
     else if (authed.has("openai-codex")) entries = codex;
     else {
-      let catalog: string[];
-      try {
-        catalog = this.models
-          .chatModels()
-          .filter((option) => authed.has(this.models.providerOf(option.id)))
-          .map((option) => option.id);
-      } catch {
-        catalog = [];
-      }
       const best =
-        catalog[0] ??
+        this.models.signedInChatModels(authed)[0]?.id ??
         (this.models.isFileProviderModel(this.models.CHAT_MODEL)
           ? DEFAULT_CHAT_MODEL
           : this.models.CHAT_MODEL);
@@ -138,12 +125,7 @@ export class EffortLadder {
   private resolvedEffortLevels(): Ladder {
     const raw = this.settingsFiles.json(this.paths.EFFORT_LEVELS_FILE);
     const catalogRevision = this.models.revision();
-    let authed: Set<string>;
-    try {
-      authed = this.models.authedModelProviders();
-    } catch {
-      authed = new Set();
-    }
+    const authed = this.models.authedModelProviders();
     const providers = [...authed].sort().join("\0");
     const cached = this.effortLevelsCache;
     if (
@@ -166,9 +148,8 @@ export class EffortLadder {
         let candidate = entry.model;
         if (typeof candidate === "string")
           candidate = this.models.canonicalModelId(candidate);
-        // Invariant: A stored id Pi no longer lists stays as stored: its turns
-        // fail with unlistedModelSentence rather than quietly running another
-        // model.
+        // Invariant: Keep the saved id even when Pi no longer lists it.
+        // Durable resolves that exact id at runtime, without substituting another model.
         if (typeof candidate === "string" && validModelScopeKey(candidate))
           model = candidate;
         try {
@@ -240,7 +221,10 @@ export class EffortLadder {
       : null;
   }
 
-  nearestEffortLevel(model: unknown = null, reasoning: unknown = null): number {
+  private nearestEffortLevel(
+    model: unknown = null,
+    reasoning: unknown = null,
+  ): number {
     const levels = this.effortLevels();
     const want = this.thinkingOrNone(reasoning);
     if (typeof model === "string") {
@@ -277,7 +261,7 @@ export class EffortLadder {
     return this.defaultEffortLevel();
   }
 
-  validateEffortLevels(value: unknown): Dict {
+  private validateEffortLevels(value: unknown): Dict {
     if (!isObject(value))
       throw valueError(
         `effort levels must map levels ${EFFORT_LEVEL_RANGE} to {model, reasoning}`,
@@ -343,7 +327,14 @@ export class EffortLadder {
   async setEffortLevels(input: unknown): Promise<Dict> {
     return this.settingsFiles.write(this.paths.EFFORT_LEVELS_FILE, () => {
       const value = this.validateEffortLevels(input);
-      return { text: pythonJson(this.sortKeysRecursive(value), false), value };
+      return {
+        text: pyCompactJson(value, {
+          separators: "default",
+          sortKeys: true,
+          javascriptScalars: true,
+        }),
+        value,
+      };
     });
   }
 
@@ -362,55 +353,15 @@ export class EffortLadder {
         default_level: this.defaultEffortLevel(),
         levels: { ...current, [level]: { model, reasoning } },
       });
-      return { text: pythonJson(this.sortKeysRecursive(value), false), value };
+      return {
+        text: pyCompactJson(value, {
+          separators: "default",
+          sortKeys: true,
+          javascriptScalars: true,
+        }),
+        value,
+      };
     });
-  }
-
-  private sortKeysRecursive(value: unknown): unknown {
-    if (Array.isArray(value))
-      return value.map((entry) => this.sortKeysRecursive(entry));
-    if (!isObject(value)) return value;
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, this.sortKeysRecursive(value[key])]),
-    );
-  }
-
-  availableModelsSnapshot(): Dict {
-    let authed: Set<string>;
-    try {
-      authed = this.models.authedModelProviders();
-    } catch {
-      authed = new Set();
-    }
-    let catalog: ModelOption[];
-    try {
-      catalog = this.models.chatModels();
-    } catch {
-      catalog = [];
-    }
-    const providers = Object.create(null) as Record<
-      string,
-      { authed: boolean; models: string[] }
-    >;
-    for (const option of catalog) {
-      const provider = this.models.providerOf(option.id);
-      if (!Object.hasOwn(providers, provider))
-        providers[provider] = { authed: authed.has(provider), models: [] };
-      providers[provider]!.models.push(option.id);
-    }
-    return { version: AVAILABLE_MODELS_VERSION, providers };
-  }
-
-  async writeAvailableModels(): Promise<Dict> {
-    const snapshot = this.availableModelsSnapshot();
-    await this.settingsFiles.writeJson(
-      this.paths.AVAILABLE_MODELS_FILE,
-      snapshot,
-      true,
-    );
-    return snapshot;
   }
 
   private readTurnMarks(): Record<string, { model: string; reason: string }> {
@@ -443,7 +394,7 @@ export class EffortLadder {
         model,
         reason: Array.from(reason).slice(0, 300).join(""),
       };
-      return { ...this.availableModelsSnapshot(), turn_marks: marks };
+      return { version: TURN_MARKS_VERSION, turn_marks: marks };
     });
   }
 
@@ -461,7 +412,7 @@ export class EffortLadder {
       )
         return;
       delete marks[String(level)];
-      return { ...this.availableModelsSnapshot(), turn_marks: marks };
+      return { version: TURN_MARKS_VERSION, turn_marks: marks };
     });
   }
 
@@ -469,12 +420,7 @@ export class EffortLadder {
     number,
     { reachable: boolean; model: string; reasoning: string; reason: string }
   > {
-    let authed: Set<string>;
-    try {
-      authed = this.models.authedModelProviders();
-    } catch {
-      authed = new Set();
-    }
+    const authed = this.models.authedModelProviders();
     const ids = this.models.catalogModelIds();
     const marks = this.readTurnMarks();
     const out: Record<

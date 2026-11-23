@@ -17,6 +17,7 @@ import { retire } from "../../src/utils/trash";
 import { createConfig, SETTINGS_RECHECK_MS } from "../../src/config";
 import { seedPiModelList } from "./pi_model_list_fixture";
 
+// Regression: #3612 refuse provider models the catalog would discard on read.
 test("Settings files are re-read once per window; own writes apply at once", async () => {
   const root = mkdtempSync(join(tmpdir(), "recurse-config-recheck-"));
   let config: ReturnType<typeof createConfig> | undefined;
@@ -86,13 +87,15 @@ test("Settings files are re-read once per window; own writes apply at once", asy
 
     const model = config.levels.effortLevels()[3]!.model;
     edit("available-models.json", {
+      version: 1,
+      providers: {},
       turn_marks: { "3": { model, reason: "provider unavailable" } },
     });
     await config.refreshSettings();
     expect(config.levels.effortLevelReachability()[3]!.reason).toContain(
       "provider unavailable",
     );
-    edit("available-models.json", {});
+    edit("available-models.json", { version: 1, providers: {} });
     expect(config.levels.effortLevelReachability()[3]!.reachable).toBe(false);
     await config.refreshSettings();
     expect(config.levels.effortLevelReachability()[3]!.reachable).toBe(true);
@@ -102,7 +105,23 @@ test("Settings files are re-read once per window; own writes apply at once", asy
     );
     await config.levels.noteLevelTurnSuccess(3);
     expect(config.levels.effortLevelReachability()[3]!.reachable).toBe(true);
+    expect(
+      JSON.parse(readFileSync(config.paths.AVAILABLE_MODELS_FILE, "utf8")),
+    ).toEqual({ version: 1, turn_marks: {} });
     const spec = { ...config.models.customModelProviders().local! };
+    const providerFile = config.paths.MODEL_PROVIDERS_FILE;
+    const before = readFileSync(providerFile, "utf8");
+    for (const name of ["0", "042", "4294967295"])
+      await expect(
+        config.models.upsertCustomProvider(name, spec),
+      ).rejects.toThrow(`invalid custom provider name: '${name}'`);
+    expect(readFileSync(providerFile, "utf8")).toBe(before);
+    await expect(
+      config.models.upsertCustomProvider("invalid", {
+        ...spec,
+        models: [{ id: "not a model id" }],
+      }),
+    ).rejects.toThrow("invalid custom provider spec for 'invalid'");
     expect(
       await Promise.all(
         ["first", "second"].map((name) =>
@@ -120,11 +139,18 @@ test("Settings files are re-read once per window; own writes apply at once", asy
       config.levels.noteLevelTurnFailure(2, "first failure"),
       config.levels.noteLevelTurnFailure(3, "second failure"),
     ]);
-    const marks = JSON.parse(
-      readFileSync(config.paths.AVAILABLE_MODELS_FILE, "utf8"),
-    ).turn_marks;
-    expect(marks["2"].reason).toBe("first failure");
-    expect(marks["3"].reason).toBe("second failure");
+    expect(
+      JSON.parse(readFileSync(config.paths.AVAILABLE_MODELS_FILE, "utf8")),
+    ).toEqual({
+      version: 1,
+      turn_marks: {
+        2: {
+          model: config.levels.effortLevels()[2]!.model,
+          reason: "first failure",
+        },
+        3: { model, reason: "second failure" },
+      },
+    });
     const contextPath = config.paths.MAXIMUM_CONTEXT_WINDOW_FILE;
     rmSync(contextPath);
     mkdirSync(contextPath);

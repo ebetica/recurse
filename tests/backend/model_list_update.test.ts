@@ -35,12 +35,10 @@ function world(replies: Reply[]) {
     return { kind: "models", ...reply };
   };
   const tasks = new TaskSet(() => {});
-  let written = 0;
   const updater = new PiModelUpdater({
     nativeRequest,
     catalog: config.models,
     spawn: (name, work) => tasks.spawn(name, work),
-    afterUpdate: async () => void written++,
     now: () => 1_790_000_000,
   });
   return {
@@ -49,7 +47,6 @@ function world(replies: Reply[]) {
     requests,
     updater,
     nativeRequest,
-    written: () => written,
     hold: () => (gate = new Promise((resolve) => (release = resolve))),
     release: () => release(),
   };

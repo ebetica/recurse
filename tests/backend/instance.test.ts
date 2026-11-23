@@ -36,6 +36,7 @@ import { RECURSE_SETTINGS_SKILL } from "../../src/coding_backend/skills";
 import type { RuntimeLogRecord } from "../../src/observability/runtime_logging";
 import { Cancelled } from "../../src/utils/tasks";
 import { TreeLifecycleBusy } from "../../src/agents/lifecycle/mutation_guard";
+import { TakenOverReapBlocked } from "../../src/agents/runtime/pi_protocol";
 import { seedPiModelList } from "./pi_model_list_fixture";
 import { AuthStorage } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { buildConversationsApp } from "./http_conversations_app";
@@ -994,6 +995,32 @@ test("Durable owners are wired and start() runs startup in order", async () => {
   await instance.shutdown();
 });
 
+// Regression: #3628 Legacy holds still block agent-initiated deletion.
+test("startup preserves a legacy hold against agent-initiated deletion", async () => {
+  const { env } = await world();
+  const instance = await build(env);
+  const fields = { backend: "durable", model_choice_version: 1 };
+  for (const row of [
+    { ...fields, id: "caller" },
+    { ...fields, id: "held", parent: "caller", pinned: true },
+    { ...fields, id: "released", pinned: true, taken_over: false },
+  ]) {
+    instance.agentStore.enqueueMetadata(row.id, row);
+    expect(await instance.agentStore.flush(row.id)).toBe(true);
+  }
+  await ready(instance);
+
+  await expect(
+    instance.reap.requestReap("held", "caller"),
+  ).rejects.toBeInstanceOf(TakenOverReapBlocked);
+  expect(instance.conversations.load("held")).toMatchObject({
+    taken_over: true,
+  });
+  expect(instance.conversations.load("released")).toMatchObject({
+    taken_over: false,
+  });
+});
+
 // Regression: #3031 Deletion awaits recoverable legacy tool-detail retirement.
 test("consumer seams reach their owners", async () => {
   const { root, env } = await world();
@@ -1067,7 +1094,6 @@ test("warmOpen builds the shared Models and Settings' catalog, so the first open
     expect(warnings).toEqual(["pi_model_list_truncated"]);
     expect(models.catalogBuildCount).toBe(buildsBeforeWarm + 1);
     for (const spy of spies) spy.mockClear();
-    await instance.config.levels.writeAvailableModels();
     await instance.durable.open(cid);
     expect(spies.map((spy) => spy.mock.calls.length)).toEqual([0]);
     expect(warnings).toEqual(["pi_model_list_truncated"]);

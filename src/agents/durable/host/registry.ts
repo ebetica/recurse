@@ -395,7 +395,7 @@ export function installHooks(
     ...(host.deps.config
       ? {
           modelPolicy: (acting: { provider: string; id: string }) =>
-            host.deps.config!.trustedModelPolicy(acting),
+            host.deps.config!.safetyReview.trustedModelPolicy(acting),
         }
       : {}),
     shells: () => host.shells(cid).items,

@@ -1,3 +1,4 @@
+// Summarize and redact tool calls without loading stored payloads into live state.
 export {
   formatRedactedLogText,
   oneLine,

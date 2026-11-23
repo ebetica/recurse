@@ -31,8 +31,11 @@ interface Clock {
 
 interface WorldOptions {
   root: string;
+  lockPaths?: Pick<ConversationStore["paths"], "titleLockDir" | "muteLockDir">;
   clock?: Clock;
   storeIds?: () => string;
+  /** A test Worker module for the agent store; see fixtures/agent_store. */
+  storeWorkerUrl?: string;
   msgIds?: () => string;
   sink: LogSink;
   scheduler: AgentNodeDeps["scheduler"];
@@ -68,6 +71,7 @@ export function buildWorld(options: WorldOptions): World {
   const agentStore = new AgentStore(join(root, "agents"), {
     ids: options.storeIds,
     now,
+    workerUrl: options.storeWorkerUrl,
   });
   const config = new Config({
     env: {
@@ -79,34 +83,16 @@ export function buildWorld(options: WorldOptions): World {
   if (options.seedPiModels !== false) seedPiModelList(config.paths.CONFIG_DIR);
   let nodes!: AgentNodes<AgentNode, NodeStore>;
   const hooks: ConversationStoreHooks = {
-    nodeInputs: (cid) => {
-      const node = nodes.existing(cid);
-      return node === null
-        ? null
-        : {
-            muteDesired: node.muteDesired,
-            safetyDesired: node.safetyDesired,
-            pendingCount: node.pendingIntents().length,
-            inbox: node.inboxMessages(),
-            activityUpdated: node.activityUpdated(),
-          };
-    },
-    withNodeLock: (cid, fn, token) => nodes.node(cid).withLock(fn, token),
-    liveStatus: () => ["idle", null],
-    hasLiveShell: () => false,
+    inbox: (cid) => nodes.existing(cid)?.inboxMessages() ?? [],
     defaultSpawnWorkdir: () => options.defaultSpawnWorkdir ?? root,
-    treeRefresh: () => {},
-    treeRebuild: () => {},
-    treeDiscard: () => {},
-    safeRemoveTempKey: () => true,
-    dropNode: (cid) => nodes.dropNode(cid),
-    withModelGuard: (_cid, fn) => fn(),
+    onRowsChanged: () => {},
   };
   const conversations = new ConversationStore(
     {
       dataDir: root,
       titleLockDir: join(root, "title-locks"),
       muteLockDir: join(root, "mute-locks"),
+      ...options.lockPaths,
     },
     agentStore,
     hooks,
@@ -134,6 +120,7 @@ export function buildWorld(options: WorldOptions): World {
     importFinalized: options.importFinalized ?? (() => true),
     actionRequest: options.actionRequest ?? (() => null),
     requestRun: options.requestRun ?? (() => {}),
+    refreshTreeRow: () => {},
     tasks,
     scheduler: options.scheduler,
     nodeLog,

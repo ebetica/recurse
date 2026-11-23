@@ -402,49 +402,46 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       "User has taken control",
     );
     const heldState = home.conversations.load(heldId)!;
-    const takeOverCalls = [
-      ["take-over", "taken_over", false],
-      ["pin", "pinned", true],
-    ] as const;
+    const heldFields = {
+      taken_over: heldState.taken_over,
+      muted: heldState.muted,
+      taken_over_order: heldState.taken_over_order,
+    };
+    const heldUrl = `${homeUrl}/api/conversations/${heldId}`;
     for (const markers of [
       [caller],
       ["invalid,marker"],
       [""],
       [caller, caller],
     ]) {
-      for (const [route, key, value] of takeOverCalls) {
-        const headers = new Headers({
-          "x-loopback-token": token,
-          "content-type": "application/json",
-        });
-        for (const marker of markers) headers.append("x-recurse-agent", marker);
-        const denied = await fetch(
-          `${homeUrl}/api/conversations/${heldId}/${route}`,
-          {
-            method: "POST",
-            headers,
-            body: JSON.stringify({ [key]: value }),
-          },
-        );
-        expect(denied.status).toBe(403);
-        expect(home.conversations.load(heldId)).toMatchObject({
-          taken_over: heldState.taken_over,
-          muted: heldState.muted,
-          taken_over_order: heldState.taken_over_order,
-        });
-      }
+      const headers = new Headers({
+        "x-loopback-token": token,
+        "content-type": "application/json",
+      });
+      for (const marker of markers) headers.append("x-recurse-agent", marker);
+      const denied = await fetch(`${heldUrl}/take-over`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ taken_over: false }),
+      });
+      expect(denied.status).toBe(403);
+      expect(home.conversations.load(heldId)).toMatchObject(heldFields);
     }
-    for (const [route, key, value] of takeOverCalls) {
-      const allowed = await fetch(
-        `${homeUrl}/api/conversations/${heldId}/${route}`,
-        {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ [key]: value }),
-        },
-      );
+    const legacyPin = await fetch(`${heldUrl}/pin`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ pinned: false }),
+    });
+    expect(legacyPin.status).toBe(404);
+    expect(home.conversations.load(heldId)).toMatchObject(heldFields);
+    for (const value of [false, true]) {
+      const allowed = await fetch(`${heldUrl}/take-over`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ taken_over: value }),
+      });
       expect(allowed.status).toBe(200);
-      expect(await allowed.json()).toEqual({ id: heldId, [key]: value });
+      expect(await allowed.json()).toEqual({ id: heldId, taken_over: value });
       expect(home.conversations.load(heldId)).toMatchObject({
         taken_over: value,
         muted: value,

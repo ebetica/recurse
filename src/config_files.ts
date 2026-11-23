@@ -7,6 +7,7 @@ import { slowSpan } from "./observability/slow-span";
 import fs from "node:fs";
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
+import { pyCompactJson } from "./utils/python-json";
 
 type Snapshot = {
   text: string | undefined;
@@ -85,6 +86,7 @@ export class ConfigFiles {
     return this.snapshot(path).text;
   }
 
+  /** Parsed Settings snapshot (undefined when unreadable); never mutate it. */
   json(path: string): unknown {
     return this.snapshot(path).value;
   }
@@ -108,7 +110,15 @@ export class ConfigFiles {
       const next = typeof value === "function" ? value() : value;
       return {
         value: undefined,
-        ...(next === undefined ? {} : { text: pythonJson(next, sort) }),
+        ...(next === undefined
+          ? {}
+          : {
+              text: pyCompactJson(next, {
+                separators: "default",
+                sortKeys: sort,
+                javascriptScalars: true,
+              }),
+            }),
       };
     });
   }
@@ -216,47 +226,4 @@ export function valueError(message: string): Error {
   const error = new Error(message);
   error.name = "ValueError";
   return error;
-}
-
-function asciiJsonString(value: string): string {
-  return JSON.stringify(value).replace(
-    /[^\x00-\x7f]/g,
-    (character) =>
-      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
-  );
-}
-export function pythonJson(
-  value: unknown,
-  sortKeys = false,
-  compact = false,
-): string {
-  const encode = (item: unknown): string => {
-    if (typeof item === "string") return asciiJsonString(item);
-    if (
-      item === null ||
-      typeof item === "boolean" ||
-      typeof item === "number"
-    ) {
-      return JSON.stringify(item);
-    }
-    if (Array.isArray(item)) {
-      return `[${item.map(encode).join(compact ? "," : ", ")}]`;
-    }
-    if (isObject(item)) {
-      const separator = compact ? "," : ", ";
-      const colon = compact ? ":" : ": ";
-      const entries = Object.entries(item);
-      if (sortKeys)
-        entries.sort(([left], [right]) =>
-          left < right ? -1 : left > right ? 1 : 0,
-        );
-      return `{${entries
-        .map(
-          ([key, member]) => `${asciiJsonString(key)}${colon}${encode(member)}`,
-        )
-        .join(separator)}}`;
-    }
-    return "null";
-  };
-  return encode(value);
 }

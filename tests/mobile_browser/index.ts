@@ -2,6 +2,7 @@ import type { BrowserTest } from "./common";
 import { browserArguments, runBrowserGroups } from "./parallel";
 import { tests as remoteSidebar } from "./test_remote_sidebar";
 import { tests as sidebar } from "./test_sidebar";
+import { tests as sidebarTags } from "./test_sidebar_tags";
 import { tests as unreadSidebar } from "./test_unread_sidebar";
 import { tests as themes } from "./test_themes";
 import { tests as layoutWait } from "./test_layout_wait";
@@ -9,6 +10,7 @@ import { tests as changes } from "./test_changes_expand";
 import { tests as header } from "./test_header";
 import { tests as activeAgents } from "./test_active_agents";
 import { tests as paneChrome } from "./test_pane_chrome";
+import { tests as dockLayout } from "./test_dock_layout";
 import { tests as paneHotkeys } from "./test_pane_hotkeys";
 import { tests as panePowerbar } from "./test_pane_powerbar";
 import { tests as commentRefresh } from "./test_comment_refresh";
@@ -18,6 +20,7 @@ import { tests as prReferences } from "./test_pr_references";
 import { tests as compact } from "./test_compact_rows";
 import { tests as failed } from "./test_failed_send_hold";
 import { tests as hold } from "./test_hold_confirm";
+import { tests as stopConfirm } from "./test_stop_confirm";
 import { tests as recovery } from "./test_recovery";
 import { tests as wake } from "./test_wake";
 import { tests as settings } from "./test_settings";
@@ -31,13 +34,19 @@ import { tests as settingsUpdates } from "./test_settings_updates";
 import { tests as settingsSubpages } from "./test_settings_subpages";
 import { tests as mcpSettings } from "./test_mcp_settings";
 import { tests as composer } from "./test_composer";
+import { tests as composerEffort } from "./test_composer_effort";
 import { tests as safety } from "./test_safety";
 import { tests as newAgentFocus } from "./test_new_agent_focus";
+import { tests as agentNavigation } from "./test_agent_navigation";
 import { tests as conversationTitle } from "./test_conversation_title";
+import { tests as firstLoad } from "./test_first_load";
 import { tests as mobileLayout } from "./test_mobile_layout";
 import { tests as panesArtifacts } from "./test_panes_artifacts";
+import { tests as artifactUpdates } from "./test_artifact_updates";
 import { tests as artifactVisit } from "./test_artifact_visit";
 import { tests as artifactAppState } from "./test_artifact_app_state";
+import { tests as artifactComments } from "./test_artifact_comments";
+import { tests as artifactImageComments } from "./test_artifact_image_comments";
 import { tests as files } from "./test_files";
 import { tests as filesNavigation } from "./test_files_navigation";
 import { tests as filesViewers } from "./test_files_viewers";
@@ -74,13 +83,14 @@ import { tests as artifactCheck } from "./test_artifact_check";
 
 export const groups: Array<[string, BrowserTest[]]> = [
   ["sidebar", [...sidebar, ...unreadSidebar]],
+  ["sidebar-tags", sidebarTags],
   ["remote-sidebar", remoteSidebar],
   ["themes", themes],
   ["layout-wait", layoutWait],
   ["header", header],
   ["active-agents", activeAgents],
   ["pane-chrome", paneChrome],
-  ["pane-hotkeys", paneHotkeys],
+  ["pane-hotkeys", [...dockLayout, ...paneHotkeys]],
   ["pane-powerbar", panePowerbar],
   ["changes-expand", changes],
   ["comment-refresh", commentRefresh],
@@ -89,7 +99,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["pr-references", prReferences],
   ["compact-rows", compact],
   ["failed-send-hold", failed],
-  ["hold-confirm", hold],
+  ["hold-confirm", [...hold, ...stopConfirm]],
   ["recovery", recovery],
   ["wake", wake],
   ["settings", settings],
@@ -102,15 +112,22 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["settings-updates", settingsUpdates],
   ["settings-subpages", settingsSubpages],
   ["mcp-settings", mcpSettings],
-  ["composer", composer],
+  ["composer", [...composer, ...composerEffort]],
   ["safety", safety],
-  ["new-agent-focus", newAgentFocus],
+  ["new-agent-focus", [...newAgentFocus, ...agentNavigation]],
   ["conversation-title", conversationTitle],
+  ["first-load", firstLoad],
   ["mobile-layout", mobileLayout],
   [
     "panes-artifacts",
-    [...panesArtifacts, ...artifactVisit, ...artifactAppState],
+    [
+      ...panesArtifacts,
+      ...artifactUpdates,
+      ...artifactVisit,
+      ...artifactAppState,
+    ],
   ],
+  ["artifact-comments", [...artifactImageComments, ...artifactComments]],
   ["files", [...files, ...filesNavigation]],
   ["files-viewers", [...filesViewers, ...filesDocuments]],
   ["files-comments", filesComments],

@@ -1,7 +1,7 @@
-// Thin authenticated tree/subagent/stop routes; fail closed before readiness.
-// Stop exact runs (unscoped: 422, stale: 409), never a replacement run.
-// Idle stop targets owned groups. Subagent-tool routes stay loopback-only,
-// except transcript reads also accept backend keys and operator sessions.
+// Authenticated tree/subagent routes; fail closed before readiness.
+// The CLI index projects stored records with live turn status and stays loopback-only.
+// Transcript reads also accept backend keys and operator sessions.
+// Stop exact runs or owned idle groups, never a replacement run.
 
 import { randomBytes } from "node:crypto";
 
@@ -137,7 +137,7 @@ export interface TreeRoutesDeps extends DeliverStopDeps {
   projectionReady(): boolean;
   /** agent_nodes.node_cids. */
   nodeCids(): readonly string[];
-  /** conversation_store.cli_index. */
+  /** Conversation rows shaped for the CLI. */
   cliIndex(): Promise<Rec[]>;
   /** DurableHost.transcript; null for an unknown conversation. */
   transcript(cid: string, options: TranscriptQuery): Promise<Rec | null>;
@@ -148,6 +148,37 @@ export interface TreeRoutesDeps extends DeliverStopDeps {
     revive(target: string, parent: string | null): Promise<unknown>;
     reviveFrom(path: string, parent: string | null): Promise<unknown>;
   };
+}
+
+const CLI_INDEX_KEYS = new Set([
+  "id",
+  "parent",
+  "title",
+  "muted",
+  "taken_over",
+  "workdir",
+  "session_id",
+  "msg_count",
+  "status",
+  "active_turn",
+  "draft",
+  "backend",
+]);
+
+export function cliIndex(
+  rows: readonly Rec[],
+  liveStatus: (cid: string) => readonly [unknown, unknown],
+): Rec[] {
+  return rows.map((row) => {
+    const [status] = liveStatus(String(row.id));
+    const live =
+      status === "running" || status === "interrupting"
+        ? { ...row, status }
+        : row;
+    return Object.fromEntries(
+      Object.entries(live).filter(([key]) => CLI_INDEX_KEYS.has(key)),
+    );
+  });
 }
 
 export const defaultTokenHex = () => randomBytes(16).toString("hex");

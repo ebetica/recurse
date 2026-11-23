@@ -48,14 +48,14 @@ const threadEdges: BrowserTest = async (browser, base) => {
       await mockConversation(page, base, "main", () => conv);
       await gotoRoot(page, base);
       await page.locator("#safety-row.on").waitFor({ state: "attached" });
-      if (running) await page.locator(".working .live-label").waitFor();
+      if (running) await page.locator(".working .status-bar-label").waitFor();
       else await page.getByText("Message 23:", { exact: false }).waitFor();
       await page.waitForFunction(
         `(() => { const s = document.querySelector("#scroll"); return s.scrollHeight > s.clientHeight * 1.5 && s.scrollHeight - s.scrollTop - s.clientHeight <= 1; })()`,
       );
       const gap = await page.evaluate(`(() => {
         const items = [...document.querySelector("#messages").children].filter((e) => e.getBoundingClientRect().height > 0);
-        const below = document.querySelector("#live-bar:not([hidden])") ?? document.querySelector("#composer");
+        const below = document.querySelector("#status-bar:not([hidden])") ?? document.querySelector("#composer");
         return Math.round(below.getBoundingClientRect().top - items[items.length - 1].getBoundingClientRect().bottom);
       })()`);
       expect(gap as number).toBeGreaterThanOrEqual(12);
@@ -67,8 +67,7 @@ const threadEdges: BrowserTest = async (browser, base) => {
       const offset = () => thread.evaluate((el) => el.scrollTop);
       const input = page.locator("#input");
       const controls = page.locator("#conv-controls");
-      if (mobile) expect(await controls.boundingBox()).toBeNull();
-      else await visibleAndUncovered(page, "#model-trigger");
+      await visibleAndUncovered(page, "#model-trigger");
       await thread.evaluate((el) => (el.scrollTop -= 80));
       await waitForLayout(page);
       const unfocusedOffset = await offset();

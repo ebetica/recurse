@@ -15,7 +15,6 @@ import {
   validLevel,
   type ConversationRecord,
   type ConversationStore,
-  type ConversationStoreHooks,
 } from "../storage";
 import type { TreeLifecycle } from "../lifecycle";
 import type { AgentNode, NodeStore } from "../runtime/agent_node";
@@ -68,23 +67,21 @@ interface DeliveryDeps {
   durable?: DurableDelivery;
   conversations: Pick<
     ConversationStore,
-    | "convRowExists"
-    | "projectionReady"
-    | "load"
-    | "save"
-    | "refreshTreeRow"
-    | "withSafetyGuard"
-    | "withTitleGuard"
-    | "withMuteGuard"
+    "convRowExists" | "projectionReady" | "load" | "save" | "withTitleGuard"
   >;
   nodes: Pick<
     AgentNodes<AgentNode, NodeStore>,
     "existing" | "node" | "admit" | "dropNode" | "retiring"
   >;
   agentStore: NodeStore & { flush(cid: string): Promise<boolean> };
+  refreshTreeRow(cid: string): void;
   configActions: Pick<
     ConfigActions,
-    "applyPendingMute" | "mutedLocked" | "applyPendingModelAtAdmission"
+    | "withNodeGuard"
+    | "withMuteGuard"
+    | "applyPendingMute"
+    | "mutedLocked"
+    | "applyPendingModelAtAdmission"
   >;
   lifecycle: Pick<TreeLifecycle, "guardAsync">;
   /** pi_protocol.build_submission, injected: this module stays off Pi. */
@@ -279,7 +276,7 @@ export class SupervisorDelivery {
     content: string | string[],
     options: DeliverOptions = {},
   ): Promise<string | null> {
-    const { conversations } = this.deps;
+    const { conversations, configActions } = this.deps;
     if (!conversations.convRowExists(cid)) return null;
     if (
       this.deps.importFinalized() === false ||
@@ -289,7 +286,7 @@ export class SupervisorDelivery {
     if (options.origin === "service") {
       // Invariant: A service request never enters a turn launched with the
       // operator-only unreviewed-tools escape hatch.
-      const refused = await conversations.withSafetyGuard(cid, async () => {
+      const refused = await configActions.withNodeGuard(cid, async () => {
         const conv = conversations.load(cid, { withPending: false });
         const active = conv?.active_turn;
         return (
@@ -338,7 +335,7 @@ export class SupervisorDelivery {
     // model work/send.
     msg.admitted_at = this.deps.monotonic();
     if (clientKey !== null) msg._client_key = clientKey;
-    const selected = await conversations.withSafetyGuard(cid, async () =>
+    const selected = await configActions.withNodeGuard(cid, async () =>
       durable?.owns(conversations.load(cid, { withPending: false })) &&
       !this.deps.nodes.existing(cid)?.pendingIntents().length &&
       !this.deps.nodes.existing(cid)?.turnTask
@@ -414,7 +411,7 @@ export class SupervisorDelivery {
     const cid = conv.id as string;
     const { conversations, configActions } = this.deps;
     return conversations.withTitleGuard(cid, (titleToken) =>
-      conversations.withMuteGuard(cid, async (muteToken) => {
+      configActions.withMuteGuard(cid, async (muteToken) => {
         const latest = conversations.load(cid);
         // Invariant: Reap notices retain the deleted root snapshot.
         const edge = latest ?? conv;
@@ -593,7 +590,7 @@ export class SupervisorDelivery {
     msg: JsonObject,
     options: { start: boolean; first: boolean },
   ): Promise<string | null> {
-    const admitted = await this.deps.conversations.withSafetyGuard(
+    const admitted = await this.deps.configActions.withNodeGuard(
       cid,
       async () => this.admit(cid, msg, options),
     );
@@ -652,7 +649,7 @@ export class SupervisorDelivery {
   ): Promise<string | null> {
     if (admitted.id === null || admitted.replayed) return admitted.id;
     await this.applyOperatorModel(cid, msg);
-    this.deps.conversations.refreshTreeRow(cid);
+    this.deps.refreshTreeRow(cid);
     if (start) this.requestRun(cid);
     return admitted.id;
   }
@@ -660,7 +657,7 @@ export class SupervisorDelivery {
   /** Completion hook: deferred intents may now send. Never resends. */
   redriveAfterCompletion(cid: string): void {
     this.deps.nodes.existing(cid)?.releaseDispatchBackoff();
-    this.deps.conversations.refreshTreeRow(cid);
+    this.deps.refreshTreeRow(cid);
     this.requestRun(cid);
   }
 
@@ -967,24 +964,4 @@ export class SupervisorDelivery {
     if (found === null) return false;
     return found.cancelQueued(mid, mayReleaseUploads);
   }
-}
-
-export function deliveryStoreHooks(
-  nodes: Pick<AgentNodes<AgentNode, NodeStore>, "existing" | "node">,
-): Pick<ConversationStoreHooks, "nodeInputs" | "withNodeLock"> {
-  return {
-    nodeInputs: (cid) => {
-      const node = nodes.existing(cid);
-      return node === null
-        ? null
-        : {
-            muteDesired: node.muteDesired,
-            safetyDesired: node.safetyDesired,
-            pendingCount: node.pendingIntents().length,
-            inbox: node.inboxMessages(),
-            activityUpdated: node.activityUpdated(),
-          };
-    },
-    withNodeLock: (cid, fn, token) => nodes.node(cid).withLock(fn, token),
-  };
 }

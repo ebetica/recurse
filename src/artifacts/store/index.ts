@@ -8,23 +8,17 @@ export {
   ArtifactNotFound,
   DIRECTORY_FLAGS,
   FULL_SHA_RE,
-  ID_RE,
-  MAX_MARKER_BYTES,
-  OWNER_RE,
   changed,
   context,
+  deletionReceiptName,
   errorCode,
   isMissing,
-  isObject,
-  markerPath,
   normalizedId,
   normalizedOwner,
   normalizedTitle,
   ownedBytes,
-  ownerRoot,
-  pathExists,
+  pythonInt,
   readFileBounded,
-  readMarker,
   revision,
   safeRel,
   writeFileAtomic,
@@ -32,7 +26,34 @@ export {
   type RecordValue,
   type ResolvedContext,
 } from "./layout";
+export {
+  excludeInstalls,
+  migrateCommitHooks,
+  openRepositoryWithHook,
+} from "./commit_hook";
+export {
+  cancelStaleDeletion,
+  deleteArtifact,
+  finalizeDelete,
+  recoverableDeletions,
+} from "./deletion";
+export {
+  APP_ENTRY,
+  DOCUMENT_ENTRY,
+  SVG_MEDIA_TYPE,
+  artifactKind,
+  detectEntry,
+  mediaForName,
+  sourceEntry,
+} from "./formats";
 export { GIT_OUTPUT_MAX, decode, git } from "./git";
+export { cachedInfo, listArtifacts, resolveOwner } from "./metadata";
+export {
+  createRepositoryDirectory,
+  migrateArtifactDirectories,
+  pruneEmptyOwner,
+  recoverArtifactDirectories,
+} from "./owners";
 export {
   GIT_BUILDS,
   GIT_REF,
@@ -40,15 +61,12 @@ export {
   TITLE_CONFIG_KEY,
   blob,
   commit,
-  commitDate,
   createRef,
   expectVersion,
   head,
   initRepo,
-  oldestVersionDate,
   publishRef,
   published,
-  repoTitle,
   resolveVersion,
   tree,
   versionMetadata,

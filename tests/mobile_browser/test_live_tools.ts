@@ -33,40 +33,39 @@ export const tests: BrowserTest[] = [
       const release = (gate?: string) =>
         postFixture(base, "release", { agent, gate });
       try {
+        await page.clock.install();
         await page.goto(`${base}#agent=${agent}`);
         await page.locator("#input").fill("Check the sample output.");
         await page.locator("#send").click();
-        const bar = page.locator("#live-bar .live-panel");
-        const line = bar.locator(".live-thinking-title");
-        const copy = bar.locator(".live-thinking-copy");
-        const summary = bar.locator(".live-thinking-summary");
-        const toolStatus = bar.locator(".live-tool-status");
+        const bar = page.locator("#status-bar .status-bar");
+        const line = bar.locator(".status-bar-thinking-title");
+        const copy = bar.locator(".status-bar-thinking-copy");
+        const summary = bar.locator(".status-bar-thinking-summary");
         const group = page.locator(".activity-group-toggle");
-        const thought = page
-          .locator(".turn-thinking")
-          .filter({ hasText: title });
+        const thought = page.locator(".turn-thinking");
+        const thoughtToggle = thought.getByRole("button");
         const tap = async (control: Locator) => {
           if (!phone) return control.click();
           await expectHitCorners(control);
           await checkedTap(control);
         };
-        const expectAlongside = async () => {
-          const running = phone ? "running 2 commands" : "running 1 command";
-          await browserExpect(
-            bar.filter({ has: page.getByText(title, { exact: true }) }).filter({
-              has: page.getByRole("button", {
-                name: new RegExp(`^${running}$`, "i"),
-              }),
-            }),
-          ).toBeVisible();
-          await expectHitCorners(toolStatus, phone ? 44 : 36);
+        const expectToolsInTranscript = async () => {
+          await page.clock.fastForward(3_000);
+          await browserExpect(bar).not.toContainText(
+            /running \d+ (?:commands?|tools?)/i,
+          );
+          await browserExpect(bar.getByRole("button")).toHaveCount(
+            phone ? 3 : 1,
+          );
+          await browserExpect(line).toHaveText(title);
+          await browserExpect(group).toContainText(/running \d+ commands?/i);
         };
         await browserExpect(line).toHaveText("Thinking");
         await release("thinking-start");
         await browserExpect(line).toHaveText(title);
-        await browserExpect(bar.locator(".live-thinking-head")).toContainText(
-          "Thinking ·",
-        );
+        await browserExpect(
+          bar.locator(".status-bar-thinking-head"),
+        ).toContainText("Thinking ·");
         await tap(copy);
         await browserExpect(summary).toHaveText(detail);
         await tap(copy);
@@ -86,24 +85,31 @@ export const tests: BrowserTest[] = [
           );
           expect(delivery.ok()).toBeTrue();
           await page.setViewportSize({ width: 320, height: 800 });
-          await expectAlongside();
           const shellChip = bar.locator(".shell-chip");
           const agentChip = bar.locator(".agent-chip");
           await browserExpect(shellChip).toBeVisible();
           await browserExpect(agentChip).toBeVisible();
+          await expectToolsInTranscript();
           await expectHitCorners(shellChip);
           await expectHitCorners(agentChip);
           await page.setViewportSize({ width, height: 800 });
+        } else {
+          await expectToolsInTranscript();
         }
-        await expectAlongside();
         await group.click();
-        const thoughtToggle = thought.getByRole("button", {
-          name: /^Thought for \d+s · I found the sample/,
-        });
         await tap(thoughtToggle);
         await browserExpect(thoughtToggle).toHaveAttribute(
           "aria-expanded",
           "false",
+        );
+        await browserExpect(thoughtToggle).toHaveText(/^Thought for \d+s$/, {
+          useInnerText: true,
+        });
+        await browserExpect(thoughtToggle).toHaveAccessibleName(
+          /^Thought for \d+s$/,
+        );
+        await browserExpect(thought.locator(".turn-thinking-body")).toHaveCount(
+          0,
         );
         const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
         if (shots) {
@@ -116,17 +122,11 @@ export const tests: BrowserTest[] = [
         }
         await tap(copy);
         await browserExpect(summary).toHaveText(detail);
-        await tap(toolStatus);
-        await browserExpect(bar.locator(".live-tool-body")).toBeVisible();
-        await browserExpect(summary).toHaveText(detail);
-        await tap(toolStatus);
-        await browserExpect(bar.locator(".live-tool-body")).toHaveCount(0);
         await tap(copy);
         await writeFile(commandGate, "ready");
-        await browserExpect(toolStatus).toHaveCount(0);
-        await browserExpect(bar.locator(".live-thinking-head")).toContainText(
-          "Waiting ·",
-        );
+        await browserExpect(
+          bar.locator(".status-bar-thinking-head"),
+        ).toContainText("Waiting ·");
         await browserExpect(line).toHaveText(title);
         await browserExpect(page.locator("#send.stop")).toBeVisible();
         await release();
@@ -135,10 +135,26 @@ export const tests: BrowserTest[] = [
           .waitFor();
         if (child)
           await browserExpect(
-            bar.locator(".is-waiting .live-label"),
+            bar.locator(".is-waiting .status-bar-label"),
           ).toHaveText("Waiting…");
         else await browserExpect(bar).toHaveCount(0);
         await browserExpect(line).toHaveCount(0);
+        const conversationUrl = `${base}api/conversations/${agent}`;
+        const rows = `${conversationUrl}/view?**`;
+        let holdRows = false;
+        let gateReleased = false;
+        if (!phone) {
+          await page.route(`${conversationUrl}/events?**`, (route) =>
+            route.abort(),
+          );
+          await page.route(rows, async (route) => {
+            if (gateReleased) return route.continue();
+            if (holdRows) return route.abort();
+            const response = await route.fetch();
+            if (holdRows) return route.abort();
+            return route.fulfill({ response });
+          });
+        }
         await page.reload();
         await group.click();
         await tap(thoughtToggle);
@@ -146,21 +162,59 @@ export const tests: BrowserTest[] = [
           `${title} ${detail}`,
           { useInnerText: true },
         );
+        if (!phone) {
+          holdRows = true;
+          await page.locator("#input").fill("Check another sample.");
+          const admitted = page.waitForResponse(async (response) => {
+            if (
+              !response.url().startsWith(`${conversationUrl}?`) ||
+              !response.ok()
+            )
+              return false;
+            const state = (await response.json()) as {
+              active_run_start?: number | null;
+            };
+            return state.active_run_start != null;
+          });
+          await Promise.all([admitted, page.locator("#send").click()]);
+          await browserExpect(line).toHaveText("Starting agent…");
+          await browserExpect(page.locator(".status-bar")).toHaveCount(1);
+          await browserExpect(
+            page.locator("#messages .status-bar"),
+          ).toHaveCount(0);
+          await browserExpect(thoughtToggle).toHaveAccessibleName(
+            /^Thought for \d+s$/,
+          );
+          holdRows = false;
+          gateReleased = true;
+          await release("accept-next");
+          await browserExpect(line).toHaveText("Thinking");
+          await browserExpect(page.locator(".status-bar")).toHaveCount(1);
+          await release("next-turn");
+          await page.getByText("Checked again.", { exact: true }).waitFor();
+        }
       } finally {
         await Promise.all(
           [commandGate, backgroundGate].map((path) => writeFile(path, "ready")),
         );
         if (child)
           await postFixture(base, "durable-thinking-cleanup", { agent: child });
-        for (const gate of ["thinking-start", "thinking-tool", undefined])
+        for (const gate of [
+          "thinking-start",
+          "thinking-tool",
+          undefined,
+          "accept-next",
+          "next-turn",
+        ])
           await release(gate);
+        if (!phone) await page.unrouteAll({ behavior: "wait" });
         await page.close();
       }
     }
   },
   // Regression: #3563 #3565 #3566 #3569 the bar stays joined, empty details stay closed, prose does not resize the panel, desktop controls stay visible, and only an active turn marks the card.
   async function test_thinking_and_waiting_stay_in_composer(browser, base) {
-    const screenshots = process.env.LIVE_PANEL_SCREENSHOTS;
+    const screenshots = process.env.STATUS_BAR_SCREENSHOTS;
     const phoneWidth = screenshots ? 412 : 390;
     for (const [width, appearance] of [
       [phoneWidth, "dark"],
@@ -174,9 +228,13 @@ export const tests: BrowserTest[] = [
         isMobile: phone,
         hasTouch: phone,
       });
-      const { agent } = await postFixture(base, "seed-live-thinking-idle", {
-        long: true,
-      });
+      const { agent } = await postFixture(
+        base,
+        "seed-status-bar-thinking-idle",
+        {
+          long: true,
+        },
+      );
       const release = (gate: string) =>
         postFixture(base, "release", { agent, gate });
       try {
@@ -191,11 +249,11 @@ export const tests: BrowserTest[] = [
         const send = page.locator("#send");
         if (phone) await checkedTap(send);
         else await send.click();
-        const panel = page.locator(".live-panel-box");
+        const panel = page.locator(".status-bar-box");
         const toggle = panel.getByRole("button", {
           name: /Checking sample output/,
         });
-        const summary = panel.locator(".live-thinking-summary");
+        const summary = panel.locator(".status-bar-thinking-summary");
         const expectJoined = async () => {
           await waitForLayout(page);
           const barBottom = await panel.evaluate(
@@ -206,7 +264,7 @@ export const tests: BrowserTest[] = [
             .evaluate((el) => el.getBoundingClientRect().top);
           expect(
             Math.abs(boxTop - barBottom),
-            "live bar touches the composer",
+            "status bar touches the composer",
           ).toBeLessThanOrEqual(1);
         };
         const screenshot = async (mode: string) => {
@@ -218,7 +276,7 @@ export const tests: BrowserTest[] = [
             });
           }
         };
-        const label = panel.locator(".live-label");
+        const label = panel.locator(".status-bar-label");
         const expectStatusOnly = async () => {
           await browserExpect(label).toBeVisible();
           const ariaExpanded = await label.getAttribute("aria-expanded");
@@ -497,6 +555,9 @@ export const tests: BrowserTest[] = [
         })
         .first();
       await read.locator(".turn-tool-head").click();
+      await browserExpect(
+        read.locator('.tool-payload[aria-label="Full arguments"] pre'),
+      ).toContainText("café-🌱.txt");
       await read
         .locator(".tool-payload")
         .filter({ hasText: "more lines" })
@@ -524,7 +585,7 @@ export const tests: BrowserTest[] = [
       }
     }
   },
-  // Regression: #2779 truncated titles retain trailing spaces regardless of TMPDIR length. (also Feature #2335 expanded tools need full commands and latest streamed output.; #2343 runtime precedes long commands; visible bar owns running counts.; #2411 latest shell output waits for the initial live panel checks.; #2343 the visible bar owns the running count, not the turn summary.)
+  // Regression: #2343 runtime precedes long commands; #2411 latest shell output waits for the initial activity checks. (also Feature #2335 expanded tools need full commands and latest streamed output.)
   async function test_expanded_live_tools_show_latest_safe_output(
     browser,
     base,
@@ -544,8 +605,31 @@ export const tests: BrowserTest[] = [
       const errors = captureErrors(page);
       let agent = "";
       let outputGate = "";
+      let finishGate: string | undefined;
+      let commands: string[] = [];
+      const withheldCommand = async (withOutput: boolean) => {
+        const response = await page.request.get(
+          `${base}api/conversations/${agent}/view`,
+        );
+        expect(response.ok()).toBeTrue();
+        const { blocks } = (await response.json()) as {
+          blocks: {
+            name: string | null;
+            args: string;
+            result: string | null;
+            running?: boolean;
+          }[];
+        };
+        return blocks.some(
+          (row) =>
+            row.name === "bash" &&
+            row.args === "Command withheld" &&
+            !row.running &&
+            Boolean(row.result) === withOutput,
+        );
+      };
       try {
-        ({ agent, outputGate } = await (
+        ({ agent, outputGate, commands, finishGate } = await (
           await post("__browser-test/seed-live-tools", { mode })
         ).json());
         await page.goto(`${base}#agent=${agent}`);
@@ -553,86 +637,130 @@ export const tests: BrowserTest[] = [
         await post(`api/conversations/${agent}/deliver`, {
           content: "Run tools.",
         });
-        const bar = page.locator(".working .live-label");
-        await bar.filter({ hasText: "Running" }).waitFor();
-        await bar.click();
-        const body = page.locator(".live-tool-body");
-        await body.waitFor();
-        const rows = body.locator(".live-tool-row");
-        expect(await rows.count()).toBe(mode === "many-output" ? 3 : 1);
-        expect(
-          await page
-            .locator(".turn-summary")
-            .filter({ hasText: /[Rr]unning \d+ command/ })
-            .count(),
-        ).toBe(0);
-        const title = await bar.locator(".live-thinking-title").textContent();
-        expect(title).toBe(
-          mode === "many-output"
-            ? "Running 3 commands"
-            : mode === "secret-output"
-              ? "Running command"
-              : `Running ${(await rows.first().locator("code").innerText()).slice(0, 2000)}`,
-        );
-        expect(title).not.toMatch(/\b(?:Ran|Preparing|Thinking)\b/);
-        expect(await rows.locator('[role="timer"]').count()).toBe(
-          await rows.count(),
-        );
-        if (mode !== "secret-output") {
-          await rows.first().locator("pre").waitFor();
-          expect(await rows.first().locator("pre").innerText()).not.toContain(
-            "latest-",
-          );
+        if (finishGate) {
+          await browserExpect.poll(() => withheldCommand(false)).toBe(true);
+          await postFixture(base, "release", { agent, gate: "tool-preparing" });
         }
-        await writeFile(outputGate, "ready");
-        if (mode !== "secret-output") {
-          expect(await rows.first().locator("code").innerText()).toEndWith(
-            "END_OF_COMMAND",
+        const bar = page.getByRole("group", {
+          name: "Status bar",
+          exact: true,
+        });
+        const count = mode === "many-output" ? 3 : 1;
+        const running = new RegExp(`running ${count} commands?`, "i");
+        const activity = page
+          .locator(".activity-group-toggle")
+          .filter({ hasText: running });
+        await browserExpect(activity).toBeVisible();
+        await browserExpect(bar).toBeVisible();
+        await browserExpect(bar).not.toContainText(
+          /running|END_OF_COMMAND|sk-example/i,
+        );
+        const runningLabels = page
+          .locator(
+            ".activity-group-summary .turn-summary:visible, .turn-series-toggle:visible",
+          )
+          .filter({ hasText: running });
+        await browserExpect(runningLabels).toHaveCount(1);
+        if (mode !== "background-output" || width === 1280) {
+          const foreground = mode === "background-output" ? 1 : 0;
+          if (foreground)
+            await browserExpect(activity).toContainText("Ran 1 command");
+          await activity.click();
+          const series = page.getByTitle(
+            /^Show activity: .*running \d+ command/i,
           );
-          expect(
-            (await rows.first().locator("code").innerText()).length,
-          ).toBeGreaterThan(2000);
-          await rows
-            .first()
-            .locator("pre")
-            .filter({
-              hasText: mode === "background-output" ? "latest-1" : "latest-0",
-            })
-            .waitFor();
-          const tail = await rows.first().locator("pre").innerText();
-          expect(tail.trim().split("\n").length).toBeLessThanOrEqual(5);
-          expect(tail).not.toContain("line-1\n");
-          await rows.first().locator("pre").click();
-          await page.evaluate(() => {
-            const doc = (globalThis as any).document;
-            const range = doc.createRange();
-            range.selectNodeContents(doc.querySelector(".live-tool-row pre"));
-            doc.getSelection().removeAllRanges();
-            doc.getSelection().addRange(range);
-          });
-          expect(
-            await page.evaluate(() =>
-              (globalThis as any).getSelection().toString(),
-            ),
-          ).toContain("latest-");
-          expect(await bar.getAttribute("aria-expanded")).toBe("true");
+          await series.click();
+          await browserExpect(runningLabels).toHaveCount(1);
+          await browserExpect(runningLabels).toHaveClass("turn-series-toggle");
+          const rows = page.locator(".turn-series-body .turn-tool");
+          const command = commands[foreground]!;
+          const row = foreground
+            ? rows.filter({ hasText: command })
+            : rows.first();
+          if (!foreground) await browserExpect(rows).toHaveCount(count);
+          const toggle = row.getByRole("button");
+          await toggle.press("Enter");
+          const detail = row.getByRole("region", { name: "Full tool detail" });
+          const output = detail.locator('section[aria-label="Output"] pre');
+          await browserExpect(output).toContainText(
+            "Beginning of command output",
+          );
+          if (mode !== "secret-output") {
+            const fullCommand = detail
+              .getByRole("region", { name: /Full (command|arguments)/ })
+              .locator("pre");
+            await fullCommand.waitFor();
+            expect(await fullCommand.textContent()).toBe(command);
+          }
+          await writeFile(outputGate, "ready");
+          if (finishGate) {
+            const expectRedactedRow = async () => {
+              await browserExpect(row).not.toContainText("sk-example123456789");
+              await browserExpect(toggle).not.toHaveAccessibleName(
+                /sk-example123456789/,
+              );
+              await browserExpect(
+                row.locator(".turn-tool-detail"),
+              ).toHaveAttribute("title", "Command withheld");
+            };
+            await browserExpect(output).toHaveText("Output withheld");
+            await expectRedactedRow();
+            await writeFile(finishGate, "ready");
+            await browserExpect.poll(() => withheldCommand(true)).toBe(true);
+            await expectRedactedRow();
+          } else {
+            const latest = `latest-${foreground}`;
+            await browserExpect(output).toContainText(latest);
+            await browserExpect(output).toContainText(
+              "Beginning of command output",
+            );
+            if (foreground)
+              await browserExpect(bar.locator(".shell-chip")).toBeVisible();
+            if (mode === "output") {
+              const position = await output.evaluate((pre, word) => {
+                pre.scrollIntoView({ block: "center", behavior: "instant" });
+                pre.scrollTop = pre.scrollHeight;
+                const walker = document.createTreeWalker(
+                  pre,
+                  NodeFilter.SHOW_TEXT,
+                );
+                let node: Node | null;
+                while ((node = walker.nextNode())) {
+                  const start = node.textContent?.indexOf(word) ?? -1;
+                  if (start < 0) continue;
+                  const range = document.createRange();
+                  range.setStart(node, start);
+                  range.setEnd(node, start + word.length);
+                  const text = range.getBoundingClientRect();
+                  const box = pre.getBoundingClientRect();
+                  return {
+                    x: text.left + text.width / 2 - box.left - pre.clientLeft,
+                    y: text.top + text.height / 2 - box.top - pre.clientTop,
+                  };
+                }
+                throw new Error("Latest output text is missing");
+              }, latest);
+              await output.click({ position, clickCount: 3 });
+              expect(
+                await page.evaluate(() =>
+                  window.getSelection()?.toString().trim(),
+                ),
+              ).toBe(latest);
+              await browserExpect(toggle).toHaveAttribute(
+                "aria-expanded",
+                "true",
+              );
+            }
+          }
+          await browserExpect(bar).not.toContainText(
+            /latest-|Output withheld/i,
+          );
         } else {
-          await body.getByText("Output withheld", { exact: true }).waitFor();
-          expect(await body.innerText()).not.toContain("sk-example");
-          expect(await bar.getAttribute("title")).not.toContain("sk-example");
-          expect(await body.locator("code").innerText()).toBe(
-            "Command withheld",
-          );
+          await browserExpect(activity).toContainText("Ran 1 command");
+          await writeFile(outputGate, "ready");
         }
-        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/live-tools-${width}-${mode}-expanded.png`,
-          });
         if (mode === "background-output") {
-          expect(await page.locator(".turn-summary").allInnerTexts()).toContain(
-            "Ran 1 command",
-          );
+          const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
           await page.locator(".working .shell-chip").click();
           const shell = page.locator(".shell-surface .shell-row").first();
           await shell.waitFor();
@@ -665,13 +793,13 @@ export const tests: BrowserTest[] = [
             });
           await page.locator(".shell-surface-close").click();
         }
-        await bar.click();
-        await body.waitFor({ state: "hidden" });
-        expect(
-          (await page.locator(".live-panel-box").boundingBox())!.height,
-        ).toBe(34);
         expect(errors).toEqual([]);
       } finally {
+        if (outputGate) await writeFile(outputGate, "ready");
+        if (finishGate) {
+          await writeFile(finishGate, "ready");
+          await postFixture(base, "release", { agent, gate: "tool-preparing" });
+        }
         if (agent) {
           await postFixture(base, "release", { agent, gate: "reply" });
           const view = await (

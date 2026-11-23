@@ -12,7 +12,11 @@ import type {
   UserMessage,
 } from "@earendil-works/pi-ai";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ReviewEffort, ReviewModel } from "./model-policy.ts";
+import {
+  REVIEW_TIMEOUT_MS,
+  type ReviewEffort,
+  type ReviewModel,
+} from "./model-policy.ts";
 import { SAFETY_CRITERIA, safetyDecisionContext } from "./decision.ts";
 import { buildReviewerSystemPrompt } from "./policy.ts";
 import { slowSpan } from "../../../observability/slow-span";
@@ -30,8 +34,6 @@ type ReviewInputs = {
   processSnapshot: string;
   actingAgent?: { id: string; title?: string };
 };
-
-const REVIEW_TIMEOUT_MS = 60_000;
 
 type SafetyDecision = "allow" | "deny";
 
@@ -60,7 +62,6 @@ export type SafetyVerdict = {
   decision: SafetyDecision;
   reason: string;
   reviewAttempts?: SafetyReviewAttempt[];
-  reviewer?: { provider: string; model: string };
   /** Infrastructure failures fail open and do not count as policy denials. */
   procedural?: boolean;
   /** Sanitized diagnostic for the operator log and tool view only. */

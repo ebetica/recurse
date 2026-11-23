@@ -1,5 +1,4 @@
 import { expect } from "bun:test";
-import type { Browser } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import { join } from "node:path";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -11,13 +10,11 @@ import {
   rootAgentId,
   postFixture,
   dispatchArtifactSelection,
+  type BrowserTest,
 } from "./common";
 
-export async function artifactLinks(
-  browser: Browser,
-  base: string,
-  data: string,
-) {
+// Regression: #3363 #3397 Artifact Markdown opens siblings in-app and reports missing or escaping paths.
+export const artifactLinks: BrowserTest = async (browser, base, data) => {
   const store = {
     artifactsDir: join(data, "data", "artifact_repos"),
     trashDir: join(data, "data", "trash"),
@@ -316,4 +313,4 @@ export async function artifactLinks(
     }
     await context.close();
   }
-}
+};

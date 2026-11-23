@@ -1,205 +1,28 @@
 import { expect } from "bun:test";
-import { EFFORT_LEVELS } from "../../src/effort_levels";
-import type { Locator, Route } from "playwright";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { retire } from "../../src/utils/trash";
+import type { Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
-  captureErrors,
   checkedHitPoint,
   checkedTap,
   expectHitCorners,
   focusComposer,
-  gotoRoot,
-  mockConversation,
+  openPage,
   postFixture,
-  routeArtifacts,
   runBrowserTests,
+  screenshot,
   visibleAndUncovered,
   waitForLayout,
   type BrowserTest,
 } from "./common";
-import { runConv, tree } from "./fixtures";
-
-async function expectVisuallyHidden(status: Locator) {
-  await browserExpect(status).toHaveCSS("position", "absolute");
-  await browserExpect(status).toHaveCSS("clip", "rect(0px, 0px, 0px, 0px)");
-}
-
-const fixtureEntry = (level: number) => ({
-  model: level < 4 ? "test/model-b" : "test/model-a",
-  reasoning: ["low", "medium", "high", "max", "xhigh", "max"][level - 1],
-});
-const ladder = {
-  default_level: 3,
-  levels: Object.fromEntries(
-    EFFORT_LEVELS.map((level) => [level, fixtureEntry(level)]),
-  ),
-  reachability: Object.fromEntries(
-    EFFORT_LEVELS.map((level) => [
-      level,
-      {
-        ...fixtureEntry(level),
-        reachable: true,
-        reason: "",
-      },
-    ]),
-  ),
-  models: [
-    { id: "test/model-a", label: "Test A" },
-    { id: "test/model-b", label: "Test B" },
-  ],
-  reasoning: ["low", "medium", "high", "xhigh", "max"],
-};
-const pollStop = (read: () => unknown, message: string) =>
-  browserExpect.poll(read, { message, intervals: [20] });
-
-async function runTokenlessStopLookupRace(
-  browser: any,
-  base: string,
-  staleFirst: boolean,
-): Promise<void> {
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-  });
-  const page = await context.newPage();
-  const errors = captureErrors(page);
-  const posts: any[] = [];
-  const runningState = runConv("running", null);
-  const oldState = { ...runningState, active_run: "run-old" };
-  const replacementState = { ...runningState, active_run: "run-new" };
-  const phase = {
-    name: "initial",
-    heldA: [] as any[],
-    heldC: [] as any[],
-    heldPoll: [] as any[],
-    pollReleased: false,
-    staleReleasedAfterCurrent: false,
-  };
-  await page.route(`${base}api/tree`, (route: Route) =>
-    route.fulfill({
-      json: [
-        { ...tree("main", "running")[0], active_run: null, children: 1 },
-        {
-          id: "other",
-          parent: "main",
-          title: "Other",
-          status: "idle",
-          kind: null,
-          children: 0,
-        },
-      ],
-    }),
-  );
-  await page.route(`${base}api/conversations/other**`, (route: Route) =>
-    route.fulfill({ json: runConv("idle", null) }),
-  );
-  await mockConversation(page, base, "main", () => runningState);
-  await page.route(`${base}api/conversations/main**`, (route: Route) => {
-    const requestUrl = new URL(route.request().url());
-    if (requestUrl.pathname !== "/api/conversations/main")
-      return route.fallback();
-    const purpose = requestUrl.searchParams.get("purpose");
-    const focused = requestUrl.searchParams.get("focused") === "1";
-    const traced =
-      route.request().headers()["x-recurse-client-dispatch-ms"] !== undefined;
-    if (
-      phase.name === "hold-a" &&
-      (purpose === "stop" || (focused && !traced))
-    ) {
-      phase.name = "a-held";
-      phase.heldA.push(route);
-      return;
-    }
-    if (
-      purpose !== "stop" &&
-      !(phase.name === "hold-c" && focused && !traced)
-    ) {
-      if (phase.name === "a-held" && !phase.heldPoll.length) {
-        phase.heldPoll.push(route);
-        return;
-      }
-      return route.fulfill({
-        json: phase.name === "c-held" ? replacementState : runningState,
-      });
-    }
-    if (phase.name === "initial") {
-      phase.name = "idle";
-      return route.fulfill({ json: runningState });
-    }
-    if (phase.name === "b-tokenless") {
-      phase.name = "idle-b";
-      return route.fulfill({ json: runningState });
-    }
-    if (
-      phase.name === "hold-c" &&
-      (purpose === "stop" || (focused && !traced))
-    ) {
-      phase.name = "c-held";
-      if (!phase.heldC.length) {
-        if (staleFirst)
-          for (const held of phase.heldA) held.fulfill({ json: oldState });
-        route.fulfill({ json: replacementState });
-        if (!staleFirst) {
-          for (const held of phase.heldA) held.fulfill({ json: oldState });
-          phase.staleReleasedAfterCurrent = true;
-        }
-      }
-      phase.heldC.push(route);
-      return;
-    }
-    if (phase.name === "c-held" && purpose === "stop")
-      return route.fulfill({ json: replacementState });
-    return route.fulfill({ json: runningState });
-  });
-  await page.route(`${base}api/conversations/main/deliver`, (route: Route) => {
-    const body = route.request().postDataJSON();
-    posts.push(body);
-    return route.fulfill({
-      json: {
-        ok: true,
-        run_id: body.run_id,
-        stop_id: body.stop_id,
-        status: "stopping",
-      },
-    });
-  });
-  try {
-    await gotoRoot(page, base);
-    await page.locator("#send.stop").waitFor();
-    expect(await page.locator("#send").getAttribute("aria-label")).toBe(
-      "Stop this agent",
-    );
-    expect(await page.locator("#send.armed").count()).toBe(0);
-    phase.name = "hold-a";
-    await page.locator("#send").click();
-    await pollStop(() => phase.name, "first held lookup").toBe("a-held");
-    await page.evaluate("void fetch('/api/conversations/main?focused=1')");
-    await pollStop(() => phase.heldPoll.length, "held polling lookup").toBe(1);
-    await phase.heldPoll[0].fulfill({ json: runningState });
-    phase.pollReleased = true;
-    await page.locator('.agent[data-id="other"]').click();
-    await page.locator('.agent[data-id="main"]').click();
-    phase.name = "b-tokenless";
-    await page.locator("#send.stop").waitFor();
-    phase.name = "hold-c";
-    await page.locator("#send").click();
-    await pollStop(() => phase.name, "replacement lookup").toBe("c-held");
-    expect(phase.pollReleased).toBeTrue();
-    await page.waitForFunction(
-      "document.querySelector('#send')?.getAttribute('aria-label') === 'Confirm stop this agent'",
-    );
-    expect(posts).toHaveLength(0);
-    await page.locator("#send").click();
-    await pollStop(() => posts.length, "tokenless race Stop").toBe(1);
-    expect(posts[0].run_id).toBe("run-new");
-    if (!staleFirst) expect(phase.staleReleasedAfterCurrent).toBeTrue();
-    await page.locator("#send.stop").waitFor();
-    expect(await page.locator("#send.error").count()).toBe(0);
-    expect(errors).toEqual([]);
-  } finally {
-    await page.unrouteAll({ behavior: "ignoreErrors" });
-    await context.close();
-  }
-}
+import {
+  editExplorerHtml,
+  openExplorer,
+  seedExplorerWorkspace,
+} from "./explorer_support";
 
 // Regression: #2479 one confirm click stops the newer run despite an older lookup. (also #2410 model selection errors stay visible and retain manual retry.)
 const modelSelectionError: BrowserTest = async (browser, base) => {
@@ -208,7 +31,7 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
     { model: "not-a-model", effort: "default" },
     { model: "fauxordinary/removed", effort: null },
   ].entries()) {
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 900 },
     });
     try {
@@ -218,7 +41,6 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
         { data: { agent, model, effort } },
       );
       expect(seeded.ok()).toBeTrue();
-      const page = await context.newPage();
       if (effort === null)
         await page.route(
           (url) => url.pathname === `/api/conversations/${agent}`,
@@ -229,7 +51,6 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
             await route.fulfill({ response, json: detail });
           },
         );
-      const errors = captureErrors(page);
       const sends: string[] = [];
       page.on("request", (request) => {
         if (
@@ -289,6 +110,309 @@ const modelSelectionError: BrowserTest = async (browser, base) => {
 };
 
 export const tests: BrowserTest[] = [
+  async function test_composer_file_mentions(browser, base, data) {
+    const temporary = await mkdtemp(
+      join(data, "data", "browser-composer-files-"),
+    );
+    let testFailed = false;
+    try {
+      const { root, otherRoot, pickedPath, htmlPath, htmlSource } =
+        await seedExplorerWorkspace(
+          temporary,
+          `${base}explorer-html-probe/`,
+          new URL(base).origin,
+        );
+      await writeFile(htmlPath, editExplorerHtml(htmlSource));
+      const other = await postFixture(base, "seed-model-selection-error", {
+        agent: "explorer-other",
+        model: "fauxordinary/faux-1",
+        workdir: otherRoot,
+      });
+      for (const width of [1280, 412]) {
+        const fixture = await postFixture(base, "seed-model-selection-error", {
+          agent: `explorer-demo-${width}`,
+          model: "fauxordinary/faux-1",
+          workdir: root,
+        });
+        const { context, page, errors } = await openPage(browser, {
+          viewport: { width, height: 915 },
+          touch: width === 412,
+          ...(width === 1280
+            ? { permissions: ["clipboard-read", "clipboard-write"] }
+            : {}),
+        });
+        try {
+          await page.goto(`${base}#agent=${fixture.agent}`, {
+            waitUntil: "domcontentloaded",
+          });
+          await page
+            .locator("#conv-title", { hasText: "Choose a model" })
+            .waitFor();
+          const warmSearchReply = `Explorer comment ${width} received`;
+          await page.locator("#input").fill(`Reply only ${warmSearchReply}`);
+          await page.locator("#send").click();
+          await page
+            .locator("#messages .msg.assistant", { hasText: warmSearchReply })
+            .waitFor();
+          await openExplorer(page, width);
+          const pane = page.locator('.pane-col[data-pane="explorer"]');
+          await pane.locator('.explorer-row[data-path="src"]').click();
+          await pane
+            .locator('.explorer-row[data-path="src/application.ts"]')
+            .waitFor();
+          if (width === 1280) {
+            const search = pane.getByRole("combobox", { name: "Search files" });
+            await search.fill("appts");
+            await pane
+              .locator(".explorer-result", { hasText: "src/application.ts" })
+              .waitFor();
+            await search.press("Enter");
+            await page.locator(".pane-col.file-tab .explorer-source").waitFor();
+            await page.locator(".dv-tab", { hasText: "Explorer" }).click();
+            await search.press("Escape");
+            await page.locator('.dv-tab[data-dock-panel="chat"]').click();
+          } else {
+            await pane
+              .getByRole("button", { name: "Close Explorer", exact: true })
+              .click();
+            await pane.waitFor({ state: "hidden" });
+          }
+          const composer = page.locator("#input");
+          const fileMenu = page.locator("#file-menu");
+          await composer.fill("");
+          await page.keyboard.type("# ");
+          expect(await composer.inputValue()).toBe("# ");
+          expect(await fileMenu.isVisible()).toBe(false);
+          await composer.fill("Review #pick");
+          const fileOption = fileMenu.getByRole("option", {
+            name: pickedPath,
+            exact: true,
+          });
+          await fileOption.waitFor();
+          const completedFiles = await fileMenu
+            .getByRole("option")
+            .allTextContents();
+          const lazySearchPath = `**/api/conversations/${fixture.agent}/tree/search?*`;
+          const lazyRoutes = new Map<
+            string,
+            ReturnType<typeof Promise.withResolvers<Route>>
+          >();
+          for (const query of ["picking", "pickingmore"])
+            lazyRoutes.set(query, Promise.withResolvers<Route>());
+          await page.route(lazySearchPath, (route) => {
+            const query = new URL(route.request().url()).searchParams.get("q")!;
+            const held = lazyRoutes.get(query);
+            if (held) return held.resolve(route);
+            return route.fallback();
+          });
+          await composer.press("End");
+          await page.keyboard.insertText("ing");
+          const olderSearch = await lazyRoutes.get("picking")!.promise;
+          await screenshot(page, `explorer/files-${width}`);
+          await browserExpect(fileOption).toBeVisible();
+          await browserExpect(fileOption).toHaveAttribute(
+            "aria-selected",
+            "true",
+          );
+          await browserExpect(fileMenu).not.toContainText(
+            /Finding files|Searching|Loading/,
+          );
+          const olderCancelled = page.waitForEvent("requestfailed", {
+            predicate: (request) => request === olderSearch.request(),
+          });
+          await page.keyboard.insertText("more");
+          const newerSearch = await lazyRoutes.get("pickingmore")!.promise;
+          await browserExpect(fileOption).toBeVisible();
+          await newerSearch.fulfill({
+            json: { results: ["newer-file.ts", pickedPath] },
+          });
+          await browserExpect(fileMenu.getByRole("option")).toHaveCount(2);
+          await browserExpect(fileOption).toHaveAttribute(
+            "aria-selected",
+            "true",
+          );
+          await olderSearch
+            .fulfill({ json: { results: ["stale-file.ts"] } })
+            .catch(() => {});
+          expect((await olderCancelled).failure()?.errorText).toContain(
+            "ERR_ABORTED",
+          );
+          await browserExpect(fileMenu.getByRole("option")).toHaveText([
+            "newer-file.ts",
+            pickedPath,
+          ]);
+          await page.unroute(lazySearchPath);
+          await composer.press("Escape");
+          const restoredSearch = page.waitForResponse(
+            (response) =>
+              response
+                .url()
+                .includes(`/api/conversations/${fixture.agent}/tree/search?`) &&
+              new URL(response.url()).searchParams.get("q") === "pick",
+          );
+          await composer.fill("Review #pick");
+          await restoredSearch;
+          await browserExpect(fileMenu.getByRole("option")).toHaveText(
+            completedFiles,
+          );
+          await fileOption.waitFor();
+          for (const composition of [{ isComposing: true }, { keyCode: 229 }]) {
+            for (const key of ["Escape", "Enter"]) {
+              await composer.dispatchEvent("keydown", {
+                key,
+                bubbles: true,
+                ...composition,
+              });
+              expect(await fileMenu.isVisible()).toBe(true);
+              expect(await composer.inputValue()).toBe("Review #pick");
+            }
+          }
+          await composer.press("ArrowLeft");
+          const menuBounds = (await fileMenu.boundingBox())!;
+          const fieldBounds = (await page.locator("#composer").boundingBox())!;
+          expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(
+            fieldBounds.y,
+          );
+          expect(menuBounds.y + menuBounds.height).toBeGreaterThan(
+            fieldBounds.y - fieldBounds.height,
+          );
+          await screenshot(page, `explorer/${width}-composer-files`);
+          if (width === 1280) await fileOption.click();
+          else {
+            await composer.press("ArrowDown");
+            await composer.press("ArrowUp");
+            await composer.press("Tab");
+          }
+          const chosen = "Review ``" + pickedPath + "`` ";
+          expect(await composer.inputValue()).toBe(chosen);
+          expect(await fileMenu.isVisible()).toBe(false);
+          await screenshot(page, `explorer/${width}-composer-path`);
+          const pickerReply = `Composer files ${width} received`;
+          const pickerMessage = `${chosen}\nReply only ${pickerReply}`;
+          await composer.fill(pickerMessage);
+          const pickedDelivery = page.waitForRequest(
+            (request) =>
+              request.method() === "POST" &&
+              new URL(request.url()).pathname ===
+                `/api/conversations/${fixture.agent}/deliver`,
+          );
+          await page.locator("#send").click();
+          expect((await pickedDelivery).postDataJSON().content).toBe(
+            pickerMessage,
+          );
+          await page
+            .locator("#messages .msg.assistant")
+            .filter({ hasText: pickerReply })
+            .waitFor();
+          if (width === 412) {
+            await openExplorer(page, width);
+            const folder = pane.locator(".explorer-row", { hasText: "src" });
+            await folder.waitFor();
+            if ((await folder.getAttribute("aria-expanded")) !== "true")
+              await folder.click();
+            await pane
+              .locator(".explorer-row", { hasText: "application.ts" })
+              .waitFor();
+          }
+          const held = Promise.withResolvers<Route>();
+          const heldPath = `**/api/conversations/${fixture.agent}/tree/file?*`;
+          await page.route(heldPath, (route) => held.resolve(route));
+          await pane
+            .locator(".explorer-row", { hasText: "application.ts" })
+            .click();
+          const pending = await held.promise;
+          await composer.fill("Review #pick");
+          await fileOption.waitFor();
+          const cancelled = page.waitForEvent("requestfailed", {
+            predicate: (request) => request === pending.request(),
+          });
+          const heldSearch = Promise.withResolvers<Route>();
+          const searchPath = `**/api/conversations/${fixture.agent}/tree/search?*`;
+          await page.route(searchPath, (route) => heldSearch.resolve(route));
+          await composer.fill("#onlyhere");
+          const searching = await heldSearch.promise;
+          const searchCancelled = page.waitForEvent("requestfailed", {
+            predicate: (request) => request === searching.request(),
+          });
+          await page.evaluate(
+            `location.hash = ${JSON.stringify(`#agent=${other.agent}`)}`,
+          );
+          await pane.waitFor({ state: "detached" });
+          await fileMenu.waitFor({ state: "hidden" });
+          await page.waitForFunction(
+            "document.querySelector('#input').value === ''",
+          );
+          expect(await composer.inputValue()).toBe("");
+          await pending.continue().catch(() => {});
+          expect((await cancelled).failure()?.errorText).toContain(
+            "ERR_ABORTED",
+          );
+          await page.unroute(heldPath);
+          await searching.continue().catch(() => {});
+          expect((await searchCancelled).failure()?.errorText).toContain(
+            "ERR_ABORTED",
+          );
+          await page.unroute(searchPath);
+          await openExplorer(page, width);
+          await pane
+            .locator(".explorer-row", { hasText: "only-here.txt" })
+            .waitFor();
+          expect(
+            await pane
+              .locator(".explorer-row", { hasText: "application.ts" })
+              .count(),
+          ).toBe(0);
+          if (width === 412) {
+            await pane
+              .getByRole("button", { name: "Close Explorer", exact: true })
+              .click();
+            await pane.waitFor({ state: "hidden" });
+          }
+          await composer.fill("#pick");
+          await fileMenu
+            .getByText("No matching files.", { exact: true })
+            .waitFor();
+          expect(await fileMenu.getByRole("option").count()).toBe(0);
+          await composer.fill("#onlyhere");
+          await fileMenu
+            .getByRole("option", { name: "only-here.txt", exact: true })
+            .waitFor();
+          expect(
+            (await fileMenu.getByRole("option").allTextContents()).map((text) =>
+              text.trim(),
+            ),
+          ).toEqual(["only-here.txt"]);
+          await composer.press("Escape");
+          expect(await composer.inputValue()).toBe("#onlyhere");
+          expect(await fileMenu.isVisible()).toBe(false);
+          expect(errors).toEqual([]);
+        } catch (error) {
+          testFailed = true;
+          throw error;
+        } finally {
+          try {
+            await context.close();
+          } catch (error) {
+            if (!testFailed) throw error;
+            console.error(
+              "Composer file mentions context cleanup failed",
+              error,
+            );
+          }
+        }
+      }
+    } catch (error) {
+      testFailed = true;
+      throw error;
+    } finally {
+      try {
+        retire(temporary, join(tmpdir(), ".trash"));
+      } catch (error) {
+        if (!testFailed) throw error;
+        console.error("Composer file mentions workspace cleanup failed", error);
+      }
+    }
+  },
   async function offlineMessagesPersistAndDeliverOnce(browser, base) {
     for (const width of [1280, 412]) {
       const agent = `offline-send-${width}`;
@@ -296,12 +420,10 @@ export const tests: BrowserTest[] = [
         agent,
         model: "fauxordinary/faux-1",
       });
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
+        touch: width === 412,
       });
-      const page = await context.newPage();
       const deliveries: { content: string; client_message_id: string }[] = [];
       let blocked = false;
       let dropped = false;
@@ -342,11 +464,7 @@ export const tests: BrowserTest[] = [
           .getByRole("button", { name: "Remove queued message" })
           .click();
         await browserExpect(page.locator(".msg.user.pending")).toHaveCount(2);
-        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/offline-pending-${width}.png`,
-          });
+        await screenshot(page, `composer/offline-pending-${width}`);
         const removable = "Remove this message after reload";
         await page.locator("#input").fill(removable);
         await page.locator("#send").click();
@@ -407,10 +525,7 @@ export const tests: BrowserTest[] = [
         expect(deliveries[0]!.client_message_id).toBe(
           deliveries[1]!.client_message_id,
         );
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/offline-delivered-${width}.png`,
-          });
+        await screenshot(page, `composer/offline-delivered-${width}`);
       } finally {
         await context.close();
       }
@@ -432,7 +547,7 @@ export const tests: BrowserTest[] = [
       const input = page.locator("#input");
       await input.fill("Run the shell tools.");
       await checkedTap(page.locator("#send"));
-      const chip = page.locator("#live-bar .shell-chip");
+      const chip = page.locator("#status-bar .shell-chip");
       const surface = page.locator(".shell-surface");
       await checkedTap(chip);
       await surface.waitFor();
@@ -467,7 +582,7 @@ export const tests: BrowserTest[] = [
           { data: { content: "Run the background check." } },
         );
         expect(delivered.ok()).toBe(true);
-        const agentChip = page.locator("#live-bar .agent-chip");
+        const agentChip = page.locator("#status-bar .agent-chip");
         await checkedTap(agentChip);
         await page
           .getByRole("dialog", { name: "Active agents for Live tools" })
@@ -624,13 +739,11 @@ export const tests: BrowserTest[] = [
     const { agent, tokens } = await postFixture(base, "seed-durable-context");
     for (const width of [390, 412, 1280]) {
       const mobile = width < 700;
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
-        isMobile: mobile,
-        hasTouch: mobile,
+        touch: mobile,
       });
       try {
-        const page = await context.newPage();
         await page.goto(`${base}#agent=${agent}`);
         await page
           .locator(`#conv-title`)
@@ -675,7 +788,6 @@ export const tests: BrowserTest[] = [
             return {
               lineHeight,
               contentHeight: bottom - top,
-              firstLine: top + lineHeight / 2,
             };
           });
         const expectLines = async (count: number) => {
@@ -697,7 +809,12 @@ export const tests: BrowserTest[] = [
           expect(send!.x + send!.width).toBeCloseTo(field.x + field.width, 0);
           await expectAligned("bottom row");
           if (mobile) {
-            for (const button of buttons) await expectHitCorners(button);
+            for (const control of [
+              ...buttons,
+              composer.locator("#model-trigger"),
+              composer.locator("#context-indicator"),
+            ])
+              await expectHitCorners(control, 44, { scroll: false });
             expect(
               await input.evaluate((el) => {
                 const { left, right, top, bottom } = el.getBoundingClientRect();
@@ -710,21 +827,54 @@ export const tests: BrowserTest[] = [
             ).toBe(true);
           }
         };
-        if (mobile) {
-          await expectAligned(
-            "collapsed placeholder",
-            (await textGeometry()).firstLine,
-            centerY(surrounding),
-          );
-          for (const button of buttons) await expectHitCorners(button);
-          await input.tap();
-        } else {
-          await visibleAndUncovered(page, "#context-indicator");
-          await expectBottomRow();
-          await input.click();
-          expect(await composer.boundingBox()).toEqual(surrounding);
-        }
+        await browserExpect(input).not.toBeFocused();
+        await visibleAndUncovered(page, "#model-trigger");
+        await visibleAndUncovered(page, "#context-indicator");
         await expectBottomRow();
+        if (mobile) await checkedTap(input);
+        else await input.click();
+        await browserExpect(input).toBeFocused();
+        await expectBottomRow();
+        expect(await composer.boundingBox()).toEqual(surrounding);
+        if (mobile) {
+          await page.setViewportSize({ width, height: 613 });
+          await waitForLayout(page);
+          await browserExpect(input).toBeFocused();
+          await expectBottomRow();
+          expect(await composer.boundingBox()).toEqual({
+            ...surrounding,
+            y: surrounding.y - 302,
+          });
+          const thread = page.locator("#scroll");
+          expect(
+            await thread.evaluate((el) => {
+              const card = document.querySelector("#composer-card")!;
+              return (
+                el.getBoundingClientRect().bottom <=
+                card.getBoundingClientRect().top
+              );
+            }),
+          ).toBe(true);
+          await thread.evaluate((el) => {
+            el.scrollTop = Math.floor((el.scrollHeight - el.clientHeight) / 2);
+          });
+          await waitForLayout(page);
+          const offset = () => thread.evaluate((el) => el.scrollTop);
+          const reading = await offset();
+          expect(reading).toBeGreaterThan(0);
+          for (const height of [540, 613]) {
+            await page.setViewportSize({ width, height });
+            await waitForLayout(page);
+            await browserExpect(input).toBeFocused();
+            expect(await offset()).toBe(reading);
+          }
+          await page.setViewportSize({ width, height: 915 });
+          await waitForLayout(page);
+        }
+        await input.blur();
+        await browserExpect(input).not.toBeFocused();
+        await expectBottomRow();
+        expect(await composer.boundingBox()).toEqual(surrounding);
         await input.fill("One-line draft");
         await input.blur();
         await browserExpect(input).not.toBeFocused();
@@ -784,11 +934,7 @@ export const tests: BrowserTest[] = [
         await browserExpect(composer.locator("#context-control")).toHaveText(
           "",
         );
-        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/composer-context-meter-${width}.png`,
-          });
+        await screenshot(page, `composer/composer-context-meter-${width}`);
         await expectAligned(
           "full bottom row",
           centerY((await meter.boundingBox())!),
@@ -800,7 +946,41 @@ export const tests: BrowserTest[] = [
           for (const x of [4, box.width - 4])
             for (const y of [4, box.height - 4])
               await checkedHitPoint(control, { x, y });
-          if (width < 700) await expectHitCorners(control);
+          if (mobile) await expectHitCorners(control);
+        }
+        if (mobile) {
+          const turn = await postFixture(base, "seed-focused-settle", {
+            recovery: width === 412,
+          });
+          const release = () =>
+            postFixture(base, "release", { agent: turn.agent });
+          try {
+            await postFixture(base, "seed-model-response", {
+              agent: turn.agent,
+              downgrade: false,
+            });
+            await page.goto("about:blank");
+            await page.goto(`${base}#agent=${turn.agent}`);
+            await page.getByText("NORMAL_MODEL_OK", { exact: true }).waitFor();
+            const send = page.locator("#send");
+            await input.fill("Check the composer controls.");
+            await input.blur();
+            await checkedTap(send);
+            await browserExpect(send).toHaveAccessibleName(/^Stop/);
+            await browserExpect(input).not.toBeFocused();
+            await browserExpect(
+              composer.locator("#context-indicator"),
+            ).toBeVisible();
+            await expectBottomRow();
+            await release();
+            await browserExpect(page.locator("#messages")).toContainText(
+              "The focused reply is complete.",
+            );
+            await browserExpect(send).toHaveAccessibleName(/^Send/);
+            await expectBottomRow();
+          } finally {
+            await release();
+          }
         }
       } finally {
         await context.close();
@@ -810,9 +990,7 @@ export const tests: BrowserTest[] = [
   modelSelectionError,
   async function earlySendWaitsForSelection(browser, base) {
     const agent = "early-send-selection";
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const errors = captureErrors(page);
+    const { context, page, errors } = await openPage(browser);
     let release = () => {};
     const held = new Promise<void>((resolve) => (release = resolve));
     const deliveries: { path: string; content: string }[] = [];
@@ -867,9 +1045,7 @@ export const tests: BrowserTest[] = [
   },
   async function missingSendTargetFailsFast(browser, base) {
     const agent = "missing-send-target";
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    const errors = captureErrors(page);
+    const { context, page, errors } = await openPage(browser);
     let release = () => {};
     const held = new Promise<void>((resolve) => (release = resolve));
     const deliveries: { content: string; client_message_id: string }[] = [];
@@ -935,698 +1111,6 @@ export const tests: BrowserTest[] = [
       release();
       await context.close();
     }
-  },
-  // Regression: #2248 pre-startup composer text survives selection (also Feature #2749 compact composer height follows text instead of its controls.; #2440 a boot-time Enter waits visibly, then reaches the real selection.; #2440 a real deleted target returns404 without the transient retry ladder.)
-  async function test_input_typed_before_boot_survives_selection(
-    browser,
-    base,
-  ) {
-    const page = await browser.newPage();
-    let release = () => {};
-    const held = new Promise<void>((resolve) => (release = resolve));
-    await page.route("**/static/app.js?*", async (route) => {
-      await held;
-      await route.continue();
-    });
-    try {
-      await page.goto(base, { waitUntil: "commit" });
-      await page.locator("#input").fill("Composer draft survives refresh");
-      release();
-      await page.locator(".agent.selected").waitFor();
-      expect(await page.locator("#input").inputValue()).toBe(
-        "Composer draft survives refresh",
-      );
-      expect(await page.locator("#send").isEnabled()).toBeTrue();
-    } finally {
-      release();
-      await page.close();
-    }
-  },
-  // Regression: #2248 pre-tree composer text survives selection
-  async function test_input_typed_before_first_tree_survives_selection(
-    browser,
-    base,
-  ) {
-    const page = await browser.newPage();
-    let release = () => {};
-    const held = new Promise<void>((resolve) => (release = resolve));
-    await page.route("**/api/tree", async (route) => {
-      await held;
-      await route.continue();
-    });
-    try {
-      await gotoRoot(page, base);
-      await page.locator("#input").fill("Composer draft survives refresh");
-      release();
-      await page.locator(".agent.selected").waitFor();
-      expect(await page.locator("#input").inputValue()).toBe(
-        "Composer draft survives refresh",
-      );
-      expect(await page.locator("#send").isEnabled()).toBeTrue();
-    } finally {
-      release();
-      await page.close();
-    }
-  },
-
-  async function test_phone_effort_chip_names_the_model_variant(browser, base) {
-    const { agent } = await postFixture(base, "seed-durable-context");
-    for (const width of [320, 360, 390, 412]) {
-      const page = await browser.newPage({
-        viewport: { width, height: 844 },
-        isMobile: true,
-        hasTouch: true,
-      });
-      try {
-        await page.goto(`${base}#agent=${agent}`);
-        await page.locator("#input").tap();
-        const trigger = page.locator("#model-trigger");
-        const name = trigger.locator(".model-name");
-        await browserExpect(trigger).toHaveText("Opus 5.5 Medium");
-        await browserExpect(trigger).toHaveAttribute(
-          "aria-label",
-          /^Level \d: Claude Opus 5\.5 · Medium: /,
-        );
-        await visibleAndUncovered(page, "#context-indicator");
-        await visibleAndUncovered(page, "#model-trigger .model-name");
-        await expectHitCorners(trigger);
-        await expectHitCorners(page.locator("#context-indicator"));
-        await browserExpect(
-          page.getByRole("switch", { name: /^Safety review/ }),
-        ).toBeHidden();
-        const { scrollWidth, clientWidth } = await name.evaluate((el) => ({
-          scrollWidth: el.scrollWidth,
-          clientWidth: el.clientWidth,
-        }));
-        expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
-      } finally {
-        await page.close();
-      }
-    }
-  },
-
-  // Regression: #3565 desktop composer controls stay visible across focus and effort keyboard shortcuts.
-  async function test_effort_ladder_rejected_switch_reverts(browser, base) {
-    for (const width of [1280, 412, 390]) {
-      const { agent, model, effort } = await postFixture(
-        base,
-        "seed-recorded-effort-choice",
-      );
-      const shown = model.replace(/^Claude /, "");
-      const modelUrl = `${base}api/conversations/${agent}/model`;
-      const mobile = width !== 1280;
-      const context = await browser.newContext({
-        viewport: { width, height: width === 390 ? 844 : 915 },
-        isMobile: mobile,
-        hasTouch: mobile,
-      });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
-      const posts: unknown[] = [];
-      let rejectChange = true;
-      await page.route(modelUrl, (route) => {
-        const request = route.request();
-        if (request.method() !== "POST") return route.fallback();
-        posts.push(request.postDataJSON());
-        return rejectChange ? route.fulfill({ status: 409 }) : route.continue();
-      });
-      const modelResponse = () =>
-        page.waitForResponse(
-          (r) => r.url() === modelUrl && r.request().method() === "POST",
-        );
-      try {
-        await page.goto(`${base}#agent=${agent}`);
-        await page.locator(`.agent.selected[data-id="${agent}"]`).waitFor({
-          state: "attached",
-        });
-        const trigger = page.locator("#model-trigger");
-        const name = trigger.locator(".model-name");
-        const menu = page.locator("#model-menu:popover-open");
-        const range = menu.getByRole("slider", {
-          name: "Effort level",
-          exact: true,
-        });
-        const label = menu.locator("#effort-model");
-        const composer = page.locator("#composer");
-        const recordedLabel = `${model} · Low`;
-        const recordedAction = `Level 3: ${recordedLabel}: choose effort level`;
-        await browserExpect(name).toHaveText(shown);
-        await browserExpect(trigger.locator("svg")).toHaveCount(0);
-        await browserExpect(trigger).toHaveText(`${shown} Low`);
-        await browserExpect(trigger).toHaveAttribute(
-          "aria-label",
-          recordedAction,
-        );
-        await waitForLayout(page);
-        const row = page.locator("#conv-controls");
-        const input = page.locator("#input");
-        const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
-        const initialCard = await composer.boundingBox();
-        const checkRow = async () => {
-          await visibleAndUncovered(page, "#model-trigger");
-          expect((await row.boundingBox())!.y).toBeGreaterThanOrEqual(
-            await input.evaluate((el) => el.getBoundingClientRect().bottom),
-          );
-          if (!mobile)
-            expect(await composer.boundingBox()).toEqual(initialCard);
-        };
-        if (mobile) await browserExpect(row).toBeHidden();
-        else await checkRow();
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/composer-unfocused-${width}.png`,
-          });
-        if (mobile) await input.tap();
-        else await input.click();
-        await browserExpect(input).toBeFocused();
-        await checkRow();
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/composer-focused-${width}.png`,
-          });
-        if (mobile) {
-          await input.fill("Keep this draft when the picker closes.");
-          await checkedTap(trigger);
-          await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
-          await browserExpect(menu).toBeVisible();
-          await browserExpect(input).toBeFocused();
-          const cdp = await context.newCDPSession(page);
-          await cdp.send("Emulation.setTouchEmulationEnabled", {
-            enabled: false,
-          });
-          await page.waitForFunction(
-            () => !window.matchMedia("(pointer: coarse)").matches,
-          );
-          await input.evaluate((field) =>
-            field.addEventListener(
-              "blur",
-              () => {
-                field.dataset.blurred = "true";
-              },
-              { once: true },
-            ),
-          );
-          await page.keyboard.press("Escape");
-          await browserExpect(
-            input,
-            "Escape dismisses effort without blurring the draft",
-          ).toBeFocused();
-          await browserExpect(menu).toBeHidden();
-          expect(await input.getAttribute("data-blurred")).toBeNull();
-          await browserExpect(input).toHaveValue(
-            "Keep this draft when the picker closes.",
-          );
-          await cdp.send("Emulation.setTouchEmulationEnabled", {
-            enabled: true,
-            maxTouchPoints: 1,
-          });
-          await page.waitForFunction(
-            () => window.matchMedia("(pointer: coarse)").matches,
-          );
-          await input.fill("");
-        } else {
-          await input.blur();
-          await checkRow();
-          await page.locator(".prompt-banner-row").focus();
-          await page.keyboard.press("Tab");
-          await browserExpect(page.locator("#scroll-btn")).toBeFocused();
-          await checkRow();
-          await page.keyboard.press("Tab");
-          await browserExpect(input).toBeFocused();
-          await checkRow();
-          await page.keyboard.press("Tab");
-          await browserExpect(page.locator("#attach")).toBeFocused();
-          await page.keyboard.press("Tab");
-          await browserExpect(trigger).toBeFocused();
-          await page.keyboard.press("Enter");
-          await browserExpect(menu).toBeFocused();
-          await page.keyboard.press("Tab");
-          await browserExpect(range).toBeFocused();
-          await page.keyboard.press("Tab");
-          await browserExpect(
-            menu.getByRole("switch", { name: /^Safety review/ }),
-          ).toBeFocused();
-          await page.keyboard.press("Escape");
-          await browserExpect(trigger).toBeFocused();
-          await trigger.blur();
-          await checkRow();
-          for (const shortcut of ["e", "Shift+M"]) {
-            await page.keyboard.press(shortcut);
-            await browserExpect(trigger).toHaveAttribute(
-              "aria-expanded",
-              "true",
-            );
-            await visibleAndUncovered(page, "#effort-range");
-            await checkRow();
-            await page.keyboard.press("Escape");
-            await browserExpect(trigger).toBeFocused();
-            await trigger.blur();
-            await checkRow();
-          }
-          await focusComposer(page);
-        }
-        const chipLayout = await trigger.evaluate((el, touch) => {
-          const { left, right, top, bottom, height } =
-            el.getBoundingClientRect();
-          const x = (left + right) / 2;
-          const y = top + height / 2;
-          const hit = (x: number, y: number) =>
-            el.contains(el.ownerDocument.elementFromPoint(x, y));
-          const textRects = (selector: string) => {
-            const text = el.ownerDocument.createRange();
-            text.selectNodeContents(el.querySelector(selector)!);
-            return [...text.getClientRects()].filter((rect) => rect.width > 0);
-          };
-          const [model] = textRects(".model-name");
-          const suffix = textRects(".effort-reasoning-text");
-          return {
-            endCorners: [left + 16, right - 16].flatMap((x) =>
-              (touch ? [y - 21, y + 21] : [top + 3, bottom - 3]).map((y) =>
-                hit(x, y),
-              ),
-            ),
-            minimumCorners:
-              !touch ||
-              [x - 21, x + 21].every((x) =>
-                [y - 21, y + 21].every((y) => hit(x, y)),
-              ),
-            centeredText:
-              Math.abs(model!.left - left - (right - suffix[0]!.right)) < 1,
-            reasoningOnModelLine:
-              suffix.length === 1 &&
-              suffix.every(
-                (rect) =>
-                  model &&
-                  rect.top < model.bottom &&
-                  rect.bottom > model.top &&
-                  rect.left >= left &&
-                  rect.right <= right &&
-                  rect.top >= top &&
-                  rect.bottom <= bottom &&
-                  [rect.left + 1, rect.right - 1].every((x) =>
-                    hit(x, rect.top + rect.height / 2),
-                  ),
-              ),
-          };
-        }, mobile);
-        expect(chipLayout).toEqual({
-          endCorners: [true, true, true, true],
-          minimumCorners: true,
-          centeredText: true,
-          reasoningOnModelLine: true,
-        });
-        if (mobile) await trigger.tap();
-        else await trigger.click();
-        await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
-        await visibleAndUncovered(page, "#effort-range");
-        await visibleAndUncovered(page, "#send");
-        if (mobile) {
-          await browserExpect
-            .poll(() =>
-              menu.evaluate((el) => {
-                const box = el.getBoundingClientRect();
-                const viewport = el.ownerDocument.documentElement;
-                return (
-                  box.left >= 12 &&
-                  box.right <= viewport.clientWidth - 12 &&
-                  box.top >= 0 &&
-                  box.bottom <= viewport.clientHeight
-                );
-              }),
-            )
-            .toBe(true);
-        }
-        const dots = menu.locator(".effort-stops > span");
-        await browserExpect(dots).toHaveCount(EFFORT_LEVELS.length);
-        const points = await dots.evaluateAll((dots) =>
-          dots.map((dot) => {
-            const box = dot.getBoundingClientRect();
-            const x = box.left + box.width / 2;
-            const y = box.top + box.height / 2;
-            return {
-              x,
-              y,
-              left: box.left,
-              right: box.right,
-              nonempty: box.width > 0 && box.height > 0,
-              control: dot.ownerDocument.elementFromPoint(x, y)?.id,
-            };
-          }),
-        );
-        expect(
-          points.every(
-            (dot, i) =>
-              dot.nonempty && (i === 0 || points[i - 1]!.right < dot.left),
-          ),
-        ).toBeTrue();
-        expect(points.map(({ control }) => control)).toEqual(
-          EFFORT_LEVELS.map(() => "effort-range"),
-        );
-        expect(points[0]!.y).toBeGreaterThan(
-          await label.evaluate((el) => el.getBoundingClientRect().bottom),
-        );
-        await browserExpect(label).toHaveText(`${model} Low`);
-        await visibleAndUncovered(page, "#effort-model");
-        const status = menu.getByRole("status");
-        await browserExpect
-          .poll(() => status.ariaSnapshot())
-          .toBe(`- status: ${JSON.stringify(`Level 3: ${recordedLabel}`)}`);
-        await expectVisuallyHidden(status);
-        await browserExpect(range).toHaveValue("3");
-        await browserExpect(range).toHaveAttribute(
-          "aria-valuetext",
-          `Level 3: ${recordedLabel}`,
-        );
-        if (mobile) {
-          await expectHitCorners(range, 44, {
-            horizontalInset: 3,
-            exact: true,
-            scroll: false,
-          });
-        }
-        const response = await page.request.get(
-          `${base}api/settings/effort-levels`,
-        );
-        expect(response.ok()).toBeTrue();
-        const live = (await response.json()) as typeof ladder;
-        const at3 = live.levels["3"]!;
-        const at5 = live.levels["5"]!;
-        expect(at3.model).not.toBe(model);
-        expect(at3.reasoning).not.toBe(effort);
-        expect(at5.model).not.toBe(model);
-        const labelFor = (selector: string) =>
-          live.models.find(({ id }) => id === selector)!.label;
-        const choice3 = labelFor(at3.model);
-        const choice5 = labelFor(at5.model);
-        const pendingLabel = `${choice3} · Medium`;
-        const previewLabel = `${choice5} · Xhigh`;
-        if (shots)
-          await page.screenshot({ path: `${shots}/effort-open-${width}.png` });
-        await range.evaluate((el) => {
-          (el as HTMLInputElement).value = "5";
-        });
-        await range.dispatchEvent("input");
-        await browserExpect(range).toHaveValue("5");
-        await browserExpect(label).toHaveText(`${choice5} Xhigh`);
-        await browserExpect(status).toHaveText(`Level 5: ${previewLabel}`);
-        await expectVisuallyHidden(status);
-        await browserExpect(range).toHaveAttribute(
-          "aria-valuetext",
-          `Level 5: ${previewLabel}`,
-        );
-        await browserExpect(trigger).toHaveText(`${shown} Low`);
-        await browserExpect(trigger).toHaveAttribute(
-          "aria-label",
-          recordedAction,
-        );
-        await waitForLayout(page);
-        await browserExpect(menu).toBeVisible();
-        const geometry = await composer.boundingBox();
-        expect(geometry).not.toBeNull();
-        expect(posts).toEqual([]);
-        const [rejected] = await Promise.all([
-          modelResponse(),
-          range.dispatchEvent("change"),
-        ]);
-        expect(rejected.status()).toBe(409);
-        await browserExpect(range).toHaveValue("3");
-        await browserExpect(trigger).not.toHaveClass(/pending/);
-        await browserExpect(trigger).toHaveText(`${shown} Low`);
-        await browserExpect(trigger).toHaveAttribute(
-          "aria-label",
-          recordedAction,
-        );
-        await browserExpect(menu).toBeVisible();
-        await browserExpect(label).toHaveText(`${model} Low`);
-        await browserExpect(status).toHaveText(`Level 3: ${recordedLabel}`);
-        await browserExpect(range).toHaveAttribute(
-          "aria-valuetext",
-          `Level 3: ${recordedLabel}`,
-        );
-        await browserExpect
-          .poll(() => composer.boundingBox())
-          .toEqual(geometry);
-        expect(posts).toEqual([{ level: 5 }]);
-
-        rejectChange = false;
-        const { x, y } = points[2]!;
-        const [accepted] = await Promise.all([
-          modelResponse(),
-          mobile ? page.touchscreen.tap(x, y) : page.mouse.click(x, y),
-          browserExpect(label).toHaveText(`${choice3} Medium`),
-        ]);
-        expect(accepted.status()).toBe(200);
-        expect((await accepted.json()).pending_model).toEqual({
-          level: 3,
-          model: at3.model,
-          effort: at3.reasoning,
-        });
-        await browserExpect(range).toBeEnabled();
-        await browserExpect(trigger).toHaveClass(/pending/);
-        await browserExpect(trigger).toHaveText(
-          `${choice3.replace(/^Claude /, "")} Medium`,
-        );
-        await browserExpect(trigger).toHaveAttribute(
-          "aria-label",
-          `Level 3: ${pendingLabel}: switches on your next message; choose effort level`,
-        );
-        await browserExpect(label).toHaveText(`${choice3} Medium`);
-        if (shots)
-          await page.screenshot({
-            path: `${shots}/effort-pending-${width}.png`,
-          });
-        await browserExpect(status).toHaveText(`Level 3: ${pendingLabel}`);
-        await browserExpect(range).toHaveAttribute(
-          "aria-valuetext",
-          `Level 3: ${pendingLabel}`,
-        );
-        expect(posts).toEqual([{ level: 5 }, { level: 3 }]);
-        if (width === 390) {
-          const ladderUrl = `${base}api/settings/effort-levels`;
-          const saveLevels = async (levels: typeof live.levels) => {
-            const update = await page.request.post(ladderUrl, {
-              data: { levels, default_level: live.default_level },
-            });
-            expect(update.ok()).toBeTrue();
-          };
-          await page.keyboard.press("Escape");
-          try {
-            await saveLevels({
-              ...live.levels,
-              "3": { ...at3, reasoning: "high" },
-            });
-            await page.reload();
-            await focusComposer(page);
-            await trigger.tap();
-            await range.dispatchEvent("input");
-            await browserExpect(label).toHaveText(`${choice3} High`);
-            await page.keyboard.press("Escape");
-            await trigger.tap();
-            await browserExpect(trigger).toHaveText(
-              `${choice3.replace(/^Claude /, "")} Medium`,
-            );
-            await browserExpect(label).toHaveText(`${choice3} Medium`);
-            await browserExpect(range).toHaveAttribute(
-              "aria-valuetext",
-              `Level 3: ${pendingLabel}`,
-            );
-          } finally {
-            await saveLevels(live.levels);
-          }
-          const fifth = (await dots.nth(4).boundingBox())!;
-          const [switched] = await Promise.all([
-            modelResponse(),
-            page.touchscreen.tap(
-              fifth.x + fifth.width / 2,
-              fifth.y + fifth.height / 2,
-            ),
-          ]);
-          expect(switched.ok()).toBeTrue();
-          await browserExpect(range).toHaveValue("5");
-          await browserExpect(label).toHaveText(`${choice5} Xhigh`);
-          expect(posts).toEqual([{ level: 5 }, { level: 3 }, { level: 5 }]);
-
-          await page.keyboard.press("Escape");
-          await page.setViewportSize({ width, height: 300 });
-          await input.fill("Draft line\n".repeat(14));
-          await trigger.tap();
-          await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
-          await visibleAndUncovered(page, "#effort-model");
-          await visibleAndUncovered(page, "#effort-range");
-        }
-        expect(errors).toEqual([]);
-      } finally {
-        await context.close();
-      }
-    }
-  },
-  // Feature: #2009 draft effort picker remains visibly accessible
-  async function test_effort_picker_and_draft_level(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 1100, height: 800 },
-    });
-    const shown = "Test B with a name longer than the chip and the page";
-    const long = `Anthropic: ${shown}`;
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await routeArtifacts(page, base);
-    await page.route(`${base}api/settings/effort-levels`, (route) =>
-      route.fulfill({
-        json: {
-          ...ladder,
-          levels: {
-            ...ladder.levels,
-            5: { model: "test/model-c", reasoning: "max" },
-            6: { model: "test/model-d", reasoning: "max" },
-          },
-          reachability: {
-            ...ladder.reachability,
-            5: {
-              model: "test/model-c",
-              reasoning: "max",
-              reachable: true,
-              reason: "",
-            },
-            6: {
-              model: "test/model-d",
-              reasoning: "max",
-              reachable: true,
-              reason: "",
-            },
-          },
-          models: [
-            { id: "test/model-d", label: "Gemini 3.5 Flash" },
-            { id: "test/model-a", label: "GPT-6 Sol" },
-            { id: "test/model-b", label: long },
-            { id: "test/model-c", label: "GPT-6.2 Sol" },
-          ],
-        },
-      }),
-    );
-    await page.route(`${base}api/conversations`, (route) =>
-      route.fulfill({ status: 422, body: "test" }),
-    );
-    await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
-    await page.keyboard.press("Escape");
-    await page.keyboard.press("t");
-    await page.keyboard.press("t");
-    await page.locator("#draft-model-host").waitFor();
-    const trigger = page.locator("#model-trigger");
-    const chip = trigger.locator(".model-name");
-    const input = page.locator("#input");
-    const fits = (field: Locator) =>
-      field.evaluate(
-        (node) =>
-          node.clientHeight > 0 && node.scrollHeight <= node.clientHeight,
-      );
-    const height = () => input.evaluate((node) => node.clientHeight);
-    await browserExpect(chip).toHaveText(shown);
-    await browserExpect.poll(() => fits(input)).toBe(true);
-    const oneLine = await height();
-    for (const width of [1100, 750, 412]) {
-      await page.setViewportSize({ width, height: 800 });
-      await browserExpect
-        .poll(() =>
-          chip.evaluate((name) => {
-            const r = name.getBoundingClientRect();
-            return (
-              name.scrollWidth <= name.clientWidth &&
-              [r.left + 2, r.right - 2].every((x) =>
-                [r.top + 2, r.bottom - 2].every((y) =>
-                  name.contains(name.ownerDocument.elementFromPoint(x, y)),
-                ),
-              )
-            );
-          }),
-        )
-        .toBe(true);
-      await browserExpect.poll(() => fits(input)).toBe(true);
-    }
-    await input.evaluate((field: any) => {
-      field.placeholder =
-        "Describe the first task for this agent, then press Enter to send it";
-    });
-    await browserExpect.poll(() => fits(input)).toBe(true);
-    expect(await height()).toBeGreaterThan(oneLine);
-    await page.setViewportSize({ width: 1100, height: 800 });
-    await browserExpect.poll(height).toBe(oneLine);
-    await browserExpect.poll(() => fits(input)).toBe(true);
-    expect(
-      await page
-        .locator(".draft-hello > *")
-        .first()
-        .evaluate((n) => n.tagName),
-    ).toBe("H2");
-    await browserExpect(trigger).toHaveAttribute(
-      "aria-label",
-      `Level 3: ${long}: choose effort level`,
-    );
-    await trigger.click();
-    const menu = page.getByRole("dialog", {
-      name: "Effort level",
-      exact: true,
-    });
-    const range = menu.getByRole("slider");
-    const label = menu.locator("#effort-model");
-    const status = menu.getByRole("status");
-    await browserExpect(trigger).toBeVisible();
-    await browserExpect(range).toHaveValue("3");
-    await browserExpect(label).toHaveText(long);
-    await browserExpect(status).toHaveText(`Level 3: ${long}`);
-    await expectVisuallyHidden(status);
-    await browserExpect(range).toHaveAttribute(
-      "aria-valuetext",
-      `Level 3: ${long}`,
-    );
-    await page.keyboard.press("Escape");
-    await trigger.click();
-    await range.press("ArrowRight");
-    await browserExpect(range).toHaveValue("4");
-    await browserExpect(label).toHaveText("GPT-6 Sol");
-    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol");
-    await expectVisuallyHidden(status);
-    await browserExpect(range).toHaveAttribute(
-      "aria-valuetext",
-      "Level 4: GPT-6 Sol",
-    );
-    await browserExpect(chip).toHaveText("6 Sol");
-    await browserExpect(trigger).toHaveAttribute(
-      "aria-label",
-      "Level 4: GPT-6 Sol: choose effort level",
-    );
-    await range.press("ArrowRight");
-    await browserExpect(chip).toHaveText("6.2 Sol");
-    await browserExpect(trigger).toHaveAttribute(
-      "aria-label",
-      "Level 5: GPT-6.2 Sol: choose effort level",
-    );
-    await range.press("ArrowRight");
-    await browserExpect(chip).toHaveText("Gemini 3.5 Flash");
-    await range.press("ArrowLeft");
-    await range.press("ArrowLeft");
-    await browserExpect(chip).toHaveText("6 Sol");
-    await menu.focus();
-    await page.keyboard.press("j");
-    await browserExpect(menu).toBeFocused();
-    await browserExpect(label).toHaveText("GPT-6.2 Sol");
-    await browserExpect
-      .poll(() => status.ariaSnapshot())
-      .toBe('- status: "Level 5: GPT-6.2 Sol"');
-    await expectVisuallyHidden(status);
-    await browserExpect(range).toHaveAttribute(
-      "aria-valuetext",
-      "Level 5: GPT-6.2 Sol",
-    );
-    await page.keyboard.press("k");
-    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol");
-    await page.locator("#input").fill("Use the selected effort level");
-    const req = page.waitForRequest(`${base}api/conversations`);
-    await page.locator("#send").click();
-    const request = await req;
-    expect(request.postDataJSON().level).toBe(4);
-    expect(errors).toEqual([]);
-    await context.close();
   },
   // Regression: #2964 a departed conversation's pending row read cannot replace a draft.
   async function test_draft_survives_departed_conversation_rows(browser, base) {
@@ -1706,334 +1190,6 @@ export const tests: BrowserTest[] = [
       await page.unrouteAll({ behavior: "ignoreErrors" });
       await page.close();
     }
-  },
-  // Regression: #2009 confirmed Stop stays pending until its response
-  async function test_stop_request_id_fallback_dispatches_once(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    const posts: any[] = [];
-    let heldStop: Route | null = null;
-    const diagnostics: any[] = [];
-    await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({ json: tree("main", "running") }),
-    );
-    await mockConversation(page, base, "main", () => runConv());
-    await page.route(`${base}api/conversations/main/deliver`, (route) => {
-      const body = route.request().postDataJSON();
-      posts.push(body);
-      heldStop = route;
-      return;
-    });
-    await page.route(`${base}api/stop-diagnostics**`, (route) => {
-      diagnostics.push(route.request().postDataJSON());
-      return route.fulfill({ status: 204 });
-    });
-    await page.addInitScript(
-      "Object.defineProperty(globalThis.crypto, 'randomUUID', { configurable: true, value: undefined })",
-    );
-    await gotoRoot(page, base);
-    expect(
-      String(await page.evaluate("typeof globalThis.crypto.randomUUID")),
-    ).toBe("undefined");
-    const stop = page.locator("#send.stop");
-    await stop.waitFor();
-    await stop.click();
-    expect(await stop.getAttribute("aria-label")).toBe(
-      "Confirm stop this agent",
-    );
-    expect(
-      await stop.evaluate((element) => element.classList.contains("armed")),
-    ).toBeTrue();
-    expect(posts.length).toBe(0);
-    await stop.click();
-    await pollStop(() => posts.length, "Stop request without randomUUID").toBe(
-      1,
-    );
-    expect(posts).toHaveLength(1);
-    expect(posts[0]).toEqual({
-      run_id: "run-browser",
-      stop_id: posts[0].stop_id,
-    });
-    expect(posts[0].run_id).toBe("run-browser");
-    expect(posts[0].stop_id).toBeTruthy();
-    expect(
-      await stop.evaluate((element) => element.classList.contains("stopping")),
-    ).toBeTrue();
-    await heldStop!.fulfill({
-      json: {
-        ok: true,
-        run_id: "run-browser",
-        stop_id: posts[0].stop_id,
-        status: "stopping",
-        updated: Date.now(),
-      },
-    });
-    expect(await page.locator("#input").isDisabled()).toBeFalse();
-    await page.locator("#input").fill("queued after Stop");
-    expect(await page.locator("#input").inputValue()).toBe("queued after Stop");
-    await pollStop(
-      () => diagnostics.some((row) => row.event === "request_id_fallback"),
-      "fallback diagnostics",
-    ).toBe(true);
-    const fallback = diagnostics.filter(
-      (row) => row.event === "request_id_fallback",
-    );
-    expect(fallback).toHaveLength(1);
-    expect(fallback[0].request_id_generator).toBe("get_random_values");
-    expect(errors).toEqual([]);
-    await context.close();
-  },
-  // Regression: #2009 tokenless Stop targets the replacement run
-  async function test_tokenless_run_replacement_stays_scoped(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    const posts: any[] = [];
-    let resolved = "run-old";
-    await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({ json: tree("main", "running") }),
-    );
-    await mockConversation(page, base, "main", () =>
-      runConv("running", resolved),
-    );
-    await page.route(`${base}api/conversations/main/deliver`, (route) => {
-      const body = route.request().postDataJSON();
-      posts.push(body);
-      return route.fulfill(
-        body.run_id === "run-old"
-          ? { status: 409, json: { detail: "run replaced" } }
-          : {
-              json: {
-                ok: true,
-                run_id: body.run_id,
-                stop_id: body.stop_id,
-                status: "stopping",
-              },
-            },
-      );
-    });
-    await gotoRoot(page, base);
-    const stop = page.locator("#send.stop");
-    await stop.waitFor();
-    await stop.click();
-    await page.waitForFunction(
-      "document.querySelector('#send')?.getAttribute('aria-label') === 'Confirm stop this agent'",
-    );
-    resolved = "run-new";
-    await stop.click();
-    await pollStop(() => posts.length, "stale-run Stop").toBe(1);
-    expect(posts).toHaveLength(1);
-    expect(posts[0].run_id).toBe("run-new");
-    await page.waitForFunction(
-      "document.querySelector('#send')?.getAttribute('aria-label') === 'Stop this agent'",
-    );
-    expect(posts).toHaveLength(1);
-    expect(await page.locator("#send").getAttribute("aria-label")).toBe(
-      "Stop this agent",
-    );
-    expect(errors).toEqual([]);
-    await context.close();
-  },
-  async function test_mobile_send_button_becomes_confirmed_stop(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    const stops: any[] = [];
-    const steers: any[] = [];
-    let state = runConv();
-    await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({ json: tree("main", state.status) }),
-    );
-    await mockConversation(page, base, "main", () => state);
-    await page.route(`${base}api/conversations/main/deliver`, (route) => {
-      const body = route.request().postDataJSON();
-      if (body.run_id) {
-        stops.push(body);
-        return route.fulfill({
-          json: {
-            ok: true,
-            run_id: body.run_id,
-            stop_id: body.stop_id,
-            status: "stopping",
-          },
-        });
-      }
-      steers.push(body);
-      return route.fulfill({
-        json: { message_id: "steer-mobile", steer: true },
-      });
-    });
-    await gotoRoot(page, base);
-    const stop = page.locator("#send.stop");
-    await stop.waitFor();
-    expect(await page.locator("#stop-btn").count()).toBe(0);
-    expect(
-      await page.getByRole("button", { name: "Stop this agent" }).count(),
-    ).toBe(1);
-    expect(await stop.getAttribute("title")).toBe("Stop this agent");
-    expect(await page.locator("#send").count()).toBe(1);
-    state.status = "error";
-    await page.waitForFunction(
-      "!document.querySelector('#conv-status')?.classList.contains('running')",
-      null,
-      { timeout: 5_000 },
-    );
-    await stop.waitFor();
-    expect(await stop.getAttribute("title")).toBe("Stop this agent");
-    expect(await page.locator("#conv-status").count()).toBe(1);
-    state.status = "running";
-    await page.waitForFunction(
-      "document.querySelector('#conv-status')?.classList.contains('running')",
-      null,
-      { timeout: 5_000 },
-    );
-    await stop.click();
-    expect(await stop.getAttribute("aria-label")).toBe(
-      "Confirm stop this agent",
-    );
-    expect(
-      await stop.evaluate((element) => element.classList.contains("armed")),
-    ).toBeTrue();
-    expect(stops).toHaveLength(0);
-    await page.waitForFunction(
-      "!document.querySelector('#send')?.classList.contains('armed') && document.querySelector('#send')?.getAttribute('aria-label') === 'Stop this agent'",
-    );
-    expect(await stop.getAttribute("aria-label")).toBe("Stop this agent");
-    expect(await page.locator("#send.stop").count()).toBe(1);
-    await stop.click();
-    await page.keyboard.press("Escape");
-    expect(await stop.getAttribute("aria-label")).toBe("Stop this agent");
-    await stop.click();
-    await page.locator("#input").fill("steer while working");
-    const send = page.getByRole("button", { name: "Send message" });
-    expect(await send.count()).toBe(1);
-    expect(
-      await page
-        .locator("#send")
-        .evaluate((e) => e.classList.contains("armed")),
-    ).toBeFalse();
-    await send.click();
-    await pollStop(() => steers.length, "working-turn steer").toBe(1);
-    expect(steers[0].content).toBe("steer while working");
-    expect(stops).toHaveLength(0);
-    await page.locator("#input").fill("temporary");
-    await page.locator("#input").fill("");
-    await stop.waitFor();
-    expect(await stop.getAttribute("aria-label")).toBe("Stop this agent");
-    await stop.click();
-    expect(await stop.getAttribute("aria-label")).toBe(
-      "Confirm stop this agent",
-    );
-    expect(stops).toHaveLength(0);
-    state.status = "idle";
-    state.active_run = null;
-    await page.waitForFunction(
-      "document.querySelector('#send')?.getAttribute('aria-label') === 'Send message'",
-      null,
-      { timeout: 5_000 },
-    );
-    expect(await page.locator("#send.armed").count()).toBe(0);
-    state = runConv("running", "run-mobile-2");
-    await stop.waitFor({ timeout: 5_000 });
-    await stop.click();
-    expect(await stop.getAttribute("aria-label")).toBe(
-      "Confirm stop this agent",
-    );
-    await stop.click();
-    await pollStop(() => stops.length, "confirmed mobile Stop").toBe(1);
-    expect(errors).toEqual([]);
-    await context.close();
-  },
-  async function test_errored_active_run_remains_keyboard_stoppable(
-    browser,
-    base,
-  ) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    const stops: any[] = [];
-    await page.route(`${base}api/tree`, (route) =>
-      route.fulfill({
-        json: [
-          ...tree("main", "error"),
-          { ...tree("other")[0], title: "Other" },
-        ],
-      }),
-    );
-    await mockConversation(page, base, "main", () =>
-      runConv("error", "run-reader-error"),
-    );
-    await mockConversation(page, base, "other", () => ({
-      ...runConv("idle", null),
-      id: "other",
-      title: "Other",
-    }));
-    await page.route(`${base}api/conversations/main/deliver`, (route) => {
-      const body = route.request().postDataJSON();
-      stops.push(body);
-      return route.fulfill({
-        json: {
-          ok: true,
-          run_id: body.run_id,
-          stop_id: body.stop_id,
-          status: "stopping",
-        },
-      });
-    });
-    await gotoRoot(page, base);
-    await page.locator("#send.stop").waitFor();
-    await page.locator("#input").press("Escape");
-    await page.keyboard.press("j");
-    expect(await page.locator(".agent.cursor").getAttribute("data-id")).toBe(
-      "other",
-    );
-    expect(
-      await page
-        .locator("#sidebar [aria-current=page]")
-        .getAttribute("data-id"),
-    ).toBe("main");
-    await page.keyboard.press("k");
-    await page.locator("#send.stop").waitFor();
-    await page.waitForFunction(
-      "document.querySelector('#sidebar [aria-current=page]')?.getAttribute('data-id') === 'main'",
-    );
-    expect(
-      await page
-        .locator("#sidebar [aria-current=page]")
-        .getAttribute("data-id"),
-    ).toBe("main");
-    await page.evaluate(
-      "document.querySelector('#input').dispatchEvent(new FocusEvent('focusout',{bubbles:true}))",
-    );
-    await page.keyboard.press("q");
-    expect(await page.locator("#key-mode").innerText()).toBe(
-      "q again to interrupt",
-    );
-    await page.keyboard.press("q");
-    await pollStop(() => stops.length, "errored-run keyboard Stop").toBe(1);
-    expect(stops[0].run_id).toBe("run-reader-error");
-    expect(errors).toEqual([]);
-    await context.close();
-  },
-  // Regression: #3217 Keep newer reads on the replacement run.
-  async function test_tokenless_stop_lookup_race(browser, base) {
-    await runTokenlessStopLookupRace(browser, base, true);
-  },
-  async function test_tokenless_stop_lookup_race_b_wins(browser, base) {
-    await runTokenlessStopLookupRace(browser, base, false);
   },
 ];
 if (import.meta.main) await runBrowserTests([["composer", tests]]);

@@ -1,13 +1,13 @@
 // Service principals get isolated conversations with mandatory safety review.
-// Bind creates under lease and roll back lost races. Reply cursors do not acknowledge delivery.
+// HTTP validates service input and maps create refusals; reply cursors do not acknowledge delivery.
 
 import { TreeLifecycleBusy } from "../agents/lifecycle";
 import { pyTruthy } from "../agents/runtime";
+import { ExternalKeyConflict, validateExternalKey } from "../agents/storage";
 import {
-  ExternalKeyConflict,
-  ServiceStorageUnavailable,
-  validateExternalKey,
-} from "../agents/storage";
+  ServiceCreateRefusal,
+  type SupervisorCreate,
+} from "../agents/supervisor";
 import {
   CompletedReplyCursorError,
   CompletedReplyCursorExpired,
@@ -78,16 +78,6 @@ export interface ServiceConversationRoutesDeps extends LiveSteerDeps {
   readonly store: {
     load(cid: string, options?: { withPending?: boolean }): Rec | null;
   };
-  lookupExternalKey(principal: string, key: string): Promise<Rec | null>;
-  serviceOwnedConversationCount(principal: string): Promise<number>;
-  bindServiceConversation(principal: string, cid: string): Promise<void>;
-  bindExternalKey(principal: string, key: string, cid: string): Promise<void>;
-  rollbackServiceConversation(conv: Rec): Promise<void>;
-  /** mutation_guard.mutate_external_storage (the lifecycle lease). */
-  mutateExternalStorage<T>(
-    work: () => Promise<T>,
-    rollback?: () => Promise<void>,
-  ): Promise<T>;
   readonly delivery: {
     deliver(
       cid: string,
@@ -103,14 +93,7 @@ export interface ServiceConversationRoutesDeps extends LiveSteerDeps {
       options: { wait?: unknown },
     ): Promise<Rec | null>;
   };
-  readonly create: {
-    createOrRejoinServiceConversation(options: {
-      title: string | null;
-      servicePrincipal: string;
-      externalKey: string | null;
-      allowedModels: readonly string[] | null;
-    }): Promise<Rec>;
-  };
+  readonly create: Pick<SupervisorCreate, "createOrRejoinServiceConversation">;
 }
 
 export function registerServiceConversationRoutes(
@@ -151,132 +134,44 @@ export function registerServiceConversationRoutes(
     } catch (error) {
       throw new HttpError(422, (error as Error).message);
     }
-    const ownedLimit = policy.quotas?.max_owned_conversations ?? null;
-    const allowedModels = policy.allowed_models;
-    let published: Rec | null = null;
-    const rollbackPublished = async () => {
-      if (published === null) return;
-      try {
-        await deps.rollbackServiceConversation(published);
-      } finally {
-        published = null;
-      }
-    };
-    const checkQuota = async () => {
-      if (ownedLimit === null) return;
-      let owned: number;
-      try {
-        owned = await deps.serviceOwnedConversationCount(principal);
-      } catch (error) {
-        if (error instanceof ServiceStorageUnavailable)
-          throw new ServiceRefusal("service_storage_unavailable");
-        throw error;
-      }
-      if (owned >= ownedLimit) throw new ServiceRefusal("quota_exceeded");
-    };
-    // Invariant: Leased advisory gate before the phased create: a bound address
-    // returns its conversation and an over-quota principal fails before
-    // anything publishes. Both are rechecked under the bind lease below.
-    const precheck = async (): Promise<Rec | null> => {
-      if (externalKey) {
-        const existing = await deps.lookupExternalKey(principal, externalKey);
-        if (existing !== null) return { ...existing, _created: false };
-      }
-      await checkQuota();
-      return null;
-    };
-    // Invariant: Authoritative address resolution under the same lease as the
-    // binds: a key bound mid-flight rejoins its owner instead of conflicting.
-    const bind = async (conv: Rec): Promise<Rec> => {
-      if (externalKey) {
-        const current = await deps.lookupExternalKey(principal, externalKey);
-        if (current !== null && current.id !== conv.id) {
-          await rollbackPublished();
-          return { ...current, _created: false };
-        }
-      }
-      await checkQuota();
-      try {
-        await deps.bindServiceConversation(principal, String(conv.id));
-        if (externalKey)
-          await deps.bindExternalKey(principal, externalKey, String(conv.id));
-      } catch (error) {
-        if (!(error instanceof ExternalKeyConflict) || !externalKey)
-          throw error;
-        // Invariant: Lost the bind race after the lookup: rejoin the winner, or
-        // fail closed on a dangling leaf.
-        const current = await deps.lookupExternalKey(principal, externalKey);
-        if (current === null) throw error;
-        await rollbackPublished();
-        return { ...current, _created: false };
-      }
-      return conv;
-    };
-    const storage = async <T>(work: () => Promise<T>): Promise<T> => {
-      try {
-        return await work();
-      } catch (error) {
-        if (isOsError(error))
-          throw new ServiceRefusal("service_storage_unavailable");
-        throw error;
-      }
-    };
     if (
       !(await deps.serviceCreateSlots.acquire(
         SERVICE_CREATE_WAIT_SECONDS * 1000,
       ))
     )
       throw new HttpError(429, "service create is busy");
-    let conv: Rec;
     try {
-      const existing = await storage(() =>
-        deps.mutateExternalStorage(precheck),
-      );
-      if (existing !== null) conv = existing;
-      else {
-        // Invariant: Service threads are isolated top-level rows: a
-        // caller-selected parent would be an IDOR path.
-        conv = await storage(() =>
-          deps.create.createOrRejoinServiceConversation({
-            title: title as string | null,
-            servicePrincipal: principal,
-            externalKey,
-            allowedModels: allowedModels ?? null,
-          }),
-        );
-        if (conv._external_key_created !== false) {
-          published = conv;
-          const fresh = conv;
-          conv = await storage(() =>
-            deps.mutateExternalStorage(() => bind(fresh), rollbackPublished),
-          );
-        } else conv = { ...conv, _created: false };
-      }
+      const { conversation, created } =
+        await deps.create.createOrRejoinServiceConversation({
+          title: title as string | null,
+          servicePrincipal: principal,
+          externalKey,
+          allowedModels: policy.allowed_models,
+          ownedLimit: policy.quotas?.max_owned_conversations ?? null,
+        });
+      return {
+        id: conversation.id,
+        status: conversation.status,
+        title: conversation.title ?? null,
+        created,
+      };
     } catch (error) {
       if (error instanceof ExternalKeyConflict)
         throw new HttpError(409, error.message);
       if (error instanceof TreeLifecycleBusy)
         throw new HttpError(429, "service create is busy");
-      if (error instanceof ServiceRefusal || isValueError(error)) {
-        const text = (error as Error).message;
-        if (text === "model_not_allowed")
-          throw new HttpError(403, "model_not_allowed");
-        if (text === "quota_exceeded")
-          throw new HttpError(429, "max_owned_conversations exceeded");
-        if (text === "service_storage_unavailable")
-          throw new HttpError(503, "service_storage_unavailable");
-        throw new HttpError(422, "service conversation creation rejected");
-      }
+      if (error instanceof ServiceCreateRefusal)
+        throw error.reason === "quota_exceeded"
+          ? new HttpError(429, "max_owned_conversations exceeded")
+          : new HttpError(503, "service_storage_unavailable");
+      if (isValueError(error))
+        throw (error as Error).message === "model_not_allowed"
+          ? new HttpError(403, "model_not_allowed")
+          : new HttpError(422, "service conversation creation rejected");
       throw error;
     } finally {
       deps.serviceCreateSlots.release();
     }
-    return {
-      id: conv.id,
-      status: conv.status,
-      title: conv.title ?? null,
-      created: conv._created !== false,
-    };
   };
 
   router.post(
@@ -388,14 +283,3 @@ export function registerServiceConversationRoutes(
     });
   });
 }
-
-/** A named refusal inside a service create. */
-class ServiceRefusal extends Error {
-  override name = "ValueError";
-}
-
-const isOsError = (error: unknown) =>
-  typeof error === "object" &&
-  error !== null &&
-  typeof (error as { code?: unknown }).code === "string" &&
-  /^E[A-Z]+$/.test((error as { code: string }).code);

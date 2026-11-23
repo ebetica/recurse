@@ -11,6 +11,7 @@ import {
 import type { DurableHost } from "../durable/host";
 import type { AgentNodes } from "../runtime/agent_nodes";
 import type { AgentNode, NodeStore } from "../runtime/agent_node";
+import type { ConfigActions } from "../runtime/config_actions";
 import type { ParkedActions } from "../compaction";
 import type { ProcessLifecycle } from "../../process_lifecycle";
 import type { ShellRegistry } from "../../pi_bg_shell";
@@ -18,6 +19,7 @@ import type { ShellRegistry } from "../../pi_bg_shell";
 type Rec = ConversationRecord;
 interface SwitchoverDeps {
   conversations: ConversationStore;
+  configActions: Pick<ConfigActions, "withConfigurationMetadataGuard">;
   durable: DurableHost;
   nodes: AgentNodes<AgentNode, NodeStore>;
   parked: ParkedActions;
@@ -85,7 +87,8 @@ export class PiSwitchover {
   }
 
   private async importRecord(conv: Rec, signal: AbortSignal): Promise<void> {
-    const { conversations, durable, nodes, processes } = this.deps;
+    const { conversations, configActions, durable, nodes, processes } =
+      this.deps;
     const cid = String(conv.id),
       node = nodes.node(cid, conversations.agentStore);
     let leased = false;
@@ -117,7 +120,7 @@ export class PiSwitchover {
         };
       };
       const publish = (commit: () => Promise<void>) =>
-        conversations.withConfigurationMetadataGuard(cid, async () => {
+        configActions.withConfigurationMetadataGuard(cid, async () => {
           const current = conversations.load(cid, { withPending: false });
           blocked = !current || !(await this.eligible(current));
           if (blocked) return commit();

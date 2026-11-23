@@ -349,7 +349,7 @@ if (import.meta.main) {
   try {
     if (process.argv.includes("--help"))
       console.log(
-        "Usage: bun tests/live/reviewer_cache.ts [provider/model]\nUses PI_CODING_AGENT_DIR/auth.json read-only, never refreshes OAuth. Shuts down the entire private instance after seven reviews, ten completed acting requests, or 90000 uncached input tokens; final recorded usage determines the result. Requires cacheRead > 0 on at least four of the six reviews after review one. Signals clean up the private server; its independent lifetime is 180 seconds. SKIPPED exits 2; FAIL exits 1; no retries.",
+        "Usage: bun tests/live/reviewer_cache.ts [provider/model]\nUses PI_CODING_AGENT_DIR/auth.json read-only, never refreshes OAuth. Shuts down the entire private instance at seven reviews, ten completed acting requests, over 90,000 uncached input tokens, or when the conversation goes idle after an acting request; final recorded usage determines the result. Requires cacheRead > 0 on at least four of the six follow-up reviews: identical-prefix requests can miss the provider cache, so a single miss is not a regression. Signals clean up the private server; its independent lifetime is 180 seconds. SKIPPED exits 2; FAIL exits 1; no retries.",
       );
     else await run();
   } catch (error) {

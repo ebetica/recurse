@@ -6,7 +6,6 @@ interface MarkerLike {
 
 interface PendingLike {
   status?: string;
-  compacting?: boolean;
   pending_actions?: string[];
 }
 
@@ -56,7 +55,6 @@ export function pendingActionNote(
   const pending = conv.pending_actions || [];
   const running = conv.status === "running";
   if (pending.includes("clear")) return actionStatusText("clear", running);
-  if (conv.compacting) return actionStatusText("compact", false);
   if (pending.includes("compact")) return actionStatusText("compact", running);
   return null;
 }

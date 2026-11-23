@@ -17,6 +17,8 @@ const WORKTREE = [
   "src/utils/dir_fd.ts",
   "src/utils/flock.ts",
   "src/utils/libc.ts",
+  "src/utils/python-whitespace/index.ts",
+  "src/utils/python-whitespace/strip.ts",
   "src/utils/trash.ts",
   "src/utils/trash-sweep/client.ts",
   "src/utils/trash-sweep/index.ts",

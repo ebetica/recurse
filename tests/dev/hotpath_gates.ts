@@ -1,3 +1,7 @@
+// Isolate search CPU from server startup tails, maintenance timers and full-turn
+// GC/JIT. The server burst is diagnostic; it still exercises the blocking trace.
+// The server idle median ignores one such burst; its limit leaves 50% headroom
+// over the highest calibration median (80 ticks).
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

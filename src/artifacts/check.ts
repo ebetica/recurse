@@ -12,7 +12,7 @@ import { themedHtml } from "./theme";
 import { APP_STATE_SCRIPT } from "./app_state_script";
 import { prependToHead } from "./page/index";
 import { readTheme } from "../themes";
-import { createConfig } from "../config";
+import { statePaths } from "../state_paths";
 
 const ORIGIN = "https://artifact-check.invalid";
 const PAGE_URL = `${ORIGIN}/`;
@@ -222,7 +222,7 @@ export async function checkPage(
   const servedHtml = prependToHead(
     themedHtml(
       html.toString("utf8"),
-      (await readTheme(createConfig().paths.THEMES_FILE)).css,
+      (await readTheme(statePaths(process.env, process.cwd()).THEMES_FILE)).css,
     ),
     APP_STATE_SCRIPT,
   );

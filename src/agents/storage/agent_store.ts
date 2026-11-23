@@ -2,7 +2,7 @@
 // reads and fsyncs. Closed file sets retire through the pinned trash Worker.
 // Rejected admission never swaps projected state; flush/close/load are async.
 // Nonstandard NaN JSON is corrupt; JS normalizes integral floats and key order.
-import { readdir, stat } from "node:fs/promises";
+import { lstat, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { slowSpan } from "../../observability/slow-span";
 import { pyCompactJson } from "../../utils/python-json";
@@ -36,6 +36,8 @@ interface Mailbox {
   attempted: StoreOp[];
   inFlight: boolean;
   closing: boolean;
+  /** Terminal: queued and settling writes are dropped, never retried. */
+  discarded: boolean;
   admitted: number;
   lastError: string | null;
   failedOps: number;
@@ -135,6 +137,15 @@ class SqlitePool {
       }
     }
   }
+  /** Reject this agent's batches that no Worker has started. */
+  cancelQueued(cid: string): void {
+    const cancelled = this.queue.filter(
+      (job) => job.request.kind === "apply" && job.request.cid === cid,
+    );
+    this.queue = this.queue.filter((job) => !cancelled.includes(job));
+    for (const job of cancelled)
+      job.reject(new Error("agent store batch discarded"));
+  }
   stop(): void {
     this.stopped = true;
     for (const job of this.queue)
@@ -220,6 +231,7 @@ export class AgentStore {
         attempted: [],
         inFlight: false,
         closing: false,
+        discarded: false,
         admitted: 0,
         lastError: null,
         failedOps: 0,
@@ -235,7 +247,13 @@ export class AgentStore {
     for (const callback of box.changed) callback();
   }
   private pump(cid: string, box: Mailbox): void {
-    if (box.inFlight || !box.ops.length || this.closed.has(cid)) return;
+    if (
+      box.inFlight ||
+      box.discarded ||
+      !box.ops.length ||
+      this.closed.has(cid)
+    )
+      return;
     const batch = box.ops.splice(0);
     box.inFlight = true;
     box.attempted = batch;
@@ -254,7 +272,10 @@ export class AgentStore {
     const batch = box.attempted;
     box.attempted = [];
     box.inFlight = false;
-    if (error) {
+    if (box.discarded) {
+      box.admitted -= batch.length;
+      this.totalAdmitted -= batch.length;
+    } else if (error) {
       box.lastError = error;
       box.failedOps += batch.length;
       box.errorSeq++;
@@ -271,7 +292,7 @@ export class AgentStore {
     if (this.closed.has(cid))
       throw new AgentClosed(`agent mailbox is closed: '${cid}'`);
     const box = this.mailbox(cid);
-    if (box.closing)
+    if (box.closing || box.discarded)
       throw new AgentClosed(`agent mailbox is closing: '${cid}'`);
     if (
       box.admitted >= MAX_PER_AGENT_OPS ||
@@ -381,16 +402,82 @@ export class AgentStore {
       const remaining = deadline - performance.now();
       if (remaining <= 0) return false;
       this.pump(cid, box);
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(done, remaining);
-        function done() {
-          clearTimeout(timer);
-          box!.changed.delete(done);
-          resolve();
-        }
-        box.changed.add(done);
-      });
+      await this.changed(box, remaining);
     }
+  }
+  private changed(box: Mailbox, timeoutMs?: number): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer =
+        timeoutMs === undefined ? undefined : setTimeout(done, timeoutMs);
+      function done() {
+        clearTimeout(timer);
+        box.changed.delete(done);
+        resolve();
+      }
+      box.changed.add(done);
+    });
+  }
+  /** Whether this agent has a mailbox or may have files; a missing parent is absence. */
+  async storageExists(cid: string): Promise<boolean> {
+    return this.mailboxes.has(cid) || (await this.filesPresent(cid));
+  }
+  private async filesPresent(cid: string): Promise<boolean> {
+    const path = this.dbPath(cid);
+    const present = await Promise.all(
+      [path, `${path}-journal`].map((file) =>
+        lstat(file).then(
+          () => true,
+          (error: NodeJS.ErrnoException) => {
+            if (error.code === "ENOENT" || error.code === "ENOTDIR")
+              return false;
+            throw error;
+          },
+        ),
+      ),
+    );
+    return present.includes(true);
+  }
+  /**
+   * Terminally drop an unseen agent's writes, wait up to `timeout` seconds for
+   * one a Worker started, then trash its files; a still-running write keeps them.
+   */
+  async discard(cid: string, timeout = 5): Promise<boolean> {
+    this.checkCid(cid);
+    const started = performance.now();
+    const box = this.mailboxes.get(cid);
+    if (box) {
+      box.discarded = true;
+      const dropped = box.ops.splice(0).length;
+      box.admitted -= dropped;
+      this.totalAdmitted -= dropped;
+      this.pool.cancelQueued(cid);
+      const deadline = started + timeout * 1000;
+      while (box.inFlight) {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) {
+          console.warn("store_discard_unsettled", {
+            conversation_id: cid,
+            in_flight_ops: box.attempted.length,
+            waited_seconds: Math.round(performance.now() - started) / 1000,
+          });
+          return false;
+        }
+        await this.changed(box, remaining);
+      }
+      if (this.mailboxes.get(cid) === box) this.mailboxes.delete(cid);
+    }
+    this.closed.add(cid);
+    const retired =
+      !(await this.filesPresent(cid)) || (await this.retireFiles(cid));
+    if (retired) this.forget(cid);
+    const elapsed = performance.now() - started;
+    if (elapsed >= 5000)
+      console.warn("store_discard_slow", {
+        conversation_id: cid,
+        retired,
+        elapsed_seconds: Math.round(elapsed) / 1000,
+      });
+    return retired;
   }
   async flush(cid: string, timeout = 10): Promise<boolean> {
     this.checkCid(cid);

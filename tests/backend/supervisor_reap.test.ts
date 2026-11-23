@@ -99,6 +99,7 @@ function setup(spec: Json, overrides: Partial<ReapDeps> = {}) {
   const deps: ReapDeps = {
     errors: { ProcessCleanupPending, TakenOverReapBlocked },
     conversations: world.conversations,
+    configActions: world.configActions,
     serviceBindings: world.serviceBindings,
     nodes,
     lifecycle: { guardAsync: (_s, _c, fn) => fn({} as never, null) },
@@ -248,7 +249,11 @@ test("delete then immediate HTTP create waits for the real reap lease", async ()
       claimAttachmentDraft: async () => {},
       transferAttachmentDraft: async () => {},
     },
-    agentTemp: { ...env.deps.agentTemp, ensureAgentTemp: async () => env.root },
+    agentTemp: {
+      ...env.deps.agentTemp,
+      ensureAgentTemp: async () => env.root,
+      safeRemoveTempKey: async () => true,
+    },
     bumpTreeTopology: () => {},
     deliverPlatformNote: (cid, content) => env.deps.deliver(cid, content, {}),
     sleep: async () => {},

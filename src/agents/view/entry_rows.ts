@@ -1,4 +1,5 @@
 // Pure display projection of one Pi-shaped entry, shared by legacy and Durable history.
+// Legacy notices retain text but never acquire live state or navigation.
 
 import { modelResponse } from "./model_response";
 import { describeTurnFailure, isRefusal } from "./failure_sentences";
@@ -66,8 +67,6 @@ export interface ToolTiming {
   command_ms?: number;
 }
 
-export type StreamMarker = [event: string, details: JsonObject];
-
 // Node/Bun abort wording fallback for entries without structured error fields.
 const ABORT_ERROR_TEXTS = new Set([
   "This operation was aborted",
@@ -86,7 +85,6 @@ function isAbortMessage(message: JsonObject, rawError: string | null): boolean {
   );
 }
 const BG_SHELL_CUSTOM_TYPE = "bg-shell";
-export const AUTO_RETRY_CUSTOM_TYPE = "recurse.auto-retry";
 const THINKING_HEADING_MAX_CHARS = 200;
 const REDACTED_THINKING =
   /^(?:\[?(?:redacted|encrypted)(?:[ _-](?:thinking|reasoning))?\]?|<encrypted>)+$/iu;
@@ -134,9 +132,6 @@ const COMPACTION_NOTICE_MAX = 1200;
 const COMPACTION_FAILED_TYPE = "recurse.compaction-failed";
 const COMPACTION_FAILED_REASON_MAX = 200;
 const COMPACT_PENDING_TYPE = "recurse.compact-pending";
-const SHELL_ID_MAX = 128;
-const SHELL_COMMAND_MAX = 300;
-const SHELL_PATH_MAX = 512;
 
 const PYTHON_WHITESPACE =
   "\\t-\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
@@ -204,7 +199,7 @@ function codePointSlice(value: string, end: number): string {
   return codePoints(value).slice(0, end).join("");
 }
 
-export function block(
+function block(
   id: string,
   kind: string,
   role: string,
@@ -261,7 +256,11 @@ function originOf(value: string, role: string): string {
   return "user";
 }
 
-function pythonJsonStringify(value: unknown): string | null {
+function jsonCodeUnit(unit: string): string {
+  return `\\u${unit.charCodeAt(0).toString(16).padStart(4, "0")}`;
+}
+
+function displayJson(value: unknown, escape: RegExp): string | null {
   try {
     const encoded = JSON.stringify(value, (_key, item: unknown) =>
       item === undefined ||
@@ -272,13 +271,10 @@ function pythonJsonStringify(value: unknown): string | null {
         : item,
     );
     if (encoded === undefined) return null;
-    // Invariant: Python json.dumps defaults to ensure_ascii=True.
-    // JSON.stringify leaves non-ASCII characters literal, so escape each UTF-16
-    // unit (including both halves of a supplementary code point) using
-    // lowercase hex.
-    return encoded.replace(
-      /[\u007f-\uffff]/g,
-      (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+    return encoded.replace(escape, (char) =>
+      char.length === 1
+        ? jsonCodeUnit(char)
+        : char.replace(/./gs, jsonCodeUnit),
     );
   } catch {
     return null;
@@ -287,11 +283,9 @@ function pythonJsonStringify(value: unknown): string | null {
 
 function displayArgs(argumentsValue: unknown): string {
   if (argumentsValue === null || argumentsValue === undefined) return "";
-  const raw =
-    typeof argumentsValue === "string"
-      ? argumentsValue
-      : pythonJsonStringify(argumentsValue);
-  return raw === null ? "" : oneLine(raw);
+  if (typeof argumentsValue === "string") return oneLine(argumentsValue);
+  // Keep full JSON values intact without showing invisible controls or line breaks.
+  return displayJson(argumentsValue, /[\p{C}\p{Zl}\p{Zp}]/gu) ?? "";
 }
 
 function completeArgs(argumentsValue: unknown): boolean {
@@ -404,7 +398,7 @@ export function codemodeCalls(details: unknown): JsonObject[] | null {
 export function displayResult(content: unknown): string {
   const rendered = text(content);
   if (rendered || !pythonTruthy(content)) return rendered;
-  const raw = pythonJsonStringify(content);
+  const raw = displayJson(content, /[\u007f-\uffff]/g);
   return raw === null ? "" : oneLine(raw);
 }
 
@@ -497,11 +491,17 @@ function oneLineBounded(value: string, limit: number): string {
     : `${chars.slice(0, Math.max(limit - 1, 0)).join("")}…`;
 }
 
+function isBgShellStream(entry: JsonObject): boolean {
+  return (
+    entry.customType === BG_SHELL_CUSTOM_TYPE &&
+    object(entry.details) &&
+    Object.hasOwn(entry.details, "bgShellStream")
+  );
+}
+
 function bgShellNotice(entry: JsonObject): [string, string] | null {
   if (entry.customType !== BG_SHELL_CUSTOM_TYPE || entry.display === false)
     return null;
-  const details = entry.details;
-  if (object(details) && Object.hasOwn(details, "bgShellStream")) return null;
   const content = entry.content;
   const raw = typeof content === "string" ? content : text(content);
   if (!pythonStrip(raw)) return null;
@@ -532,48 +532,12 @@ function bgShellNotice(entry: JsonObject): [string, string] | null {
     return ["Background shell failed to start · `" + failed[1] + "`", body];
   if (body.startsWith(BG_SHELL_INTERNAL_ERROR))
     return [oneLineBounded(body, BG_SHELL_LABEL_MAX), body];
+  const details = entry.details;
   if (object(details) && Object.hasOwn(details, "completionBatchId")) {
     const first = pythonSplitlines(pythonStrip(body))[0] ?? "";
     return [oneLineBounded(first, BG_SHELL_LABEL_MAX), body];
   }
   return null;
-}
-
-function compactAppliedBlock(entryId: string, entry: JsonObject): Block[] {
-  const data = entry.data;
-  if (!object(data) || data.version !== 1) return [];
-  const summary = data.summary;
-  const pointId = data.pointId;
-  const appliedAt = data.appliedAt;
-  if (
-    typeof summary !== "string" ||
-    !summary ||
-    typeof pointId !== "string" ||
-    !pointId ||
-    typeof appliedAt !== "number" ||
-    !Number.isFinite(appliedAt)
-  ) {
-    return [];
-  }
-  return [
-    block(
-      entryId,
-      "marker",
-      "compaction",
-      summary,
-      originOf(summary, "custom"),
-      {
-        meta: { compact_provisional: { pointId, appliedAt } },
-      },
-    ),
-  ];
-}
-
-function entryEpoch(value: unknown): number | null {
-  if (typeof value === "number") return Number.isFinite(value) ? value : null;
-  if (typeof value !== "string" || !value.trim()) return null;
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed / 1000 : null;
 }
 
 function messageEpochMs(value: unknown): number | null {
@@ -593,30 +557,8 @@ function modelDurationMs(
   return Number.isSafeInteger(elapsed) && elapsed > 0 ? elapsed : null;
 }
 
-function durableKeys(entry: JsonObject): CompactionKeys {
-  const firstKept =
-    typeof entry.firstKeptEntryId === "string" && entry.firstKeptEntryId
-      ? entry.firstKeptEntryId
-      : null;
-  const at = entryEpoch(entry.timestamp);
-  return [firstKept, at === null ? null : at * 1000];
-}
-
-export function entryMs(entry: JsonObject): number | null {
-  const at = entryEpoch(entry.timestamp);
-  return at === null ? null : at * 1000;
-}
-
-function compactionFailedBlock(entryId: string, entry: JsonObject): Block[] {
-  const data = entry.data;
-  const reason = object(data) ? data.reason : undefined;
-  if (typeof reason !== "string" || !pythonStrip(reason)) return [];
-  const shown = `Compaction failed: ${oneLineBounded(pythonStrip(reason), COMPACTION_FAILED_REASON_MAX)}. Retry with /compact`;
-  return [
-    block(entryId, "marker", "custom", shown, originOf(shown, "custom"), {
-      meta: { compact_marker: true },
-    }),
-  ];
+function legacyNotice(entryId: string, shown: string): Block {
+  return block(entryId, "marker", "legacy-notice", shown, "system");
 }
 
 function compactPendingBlock(entryId: string, ready = false): Block[] {
@@ -637,14 +579,20 @@ function customBlock(entryId: string, entry: JsonObject): Block[] | null {
       ? []
       : [block(entryId, "marker", "usage", "", "user", { usage: row })];
   }
-  if (entry.customType === COMPACTION_FAILED_TYPE)
-    return compactionFailedBlock(entryId, entry);
+  if (entry.customType === COMPACTION_FAILED_TYPE) {
+    const reason = object(entry.data) ? entry.data.reason : null;
+    if (typeof reason !== "string" || !pythonStrip(reason)) return [];
+    return [
+      legacyNotice(
+        entryId,
+        `Compaction failed: ${oneLineBounded(pythonStrip(reason), COMPACTION_FAILED_REASON_MAX)}`,
+      ),
+    ];
+  }
   if (entry.customType === COMPACT_PENDING_TYPE)
     return compactPendingBlock(entryId);
   if (entry.customType === "recurse.compact-ready")
     return compactPendingBlock(entryId, true);
-  if (entry.customType === "recurse.compact-applied")
-    return compactAppliedBlock(entryId, entry);
   return null;
 }
 
@@ -658,21 +606,23 @@ function customMessageBlock(entryId: string, entry: JsonObject): Block[] {
       codePoints(raw).length <= COMPACTION_NOTICE_MAX
         ? raw
         : `${codePointSlice(raw, COMPACTION_NOTICE_MAX)}\n… truncated`;
+    const firstKept = object(entry.details) ? entry.details.pointId : null;
+    const hasPoint = typeof firstKept === "string" && !!firstKept;
+    if (body.startsWith("Context compacted") && !hasPoint)
+      return [legacyNotice(entryId, body)];
     return [
       block(entryId, "marker", "compaction-notice", body, "system", {
-        meta: { body },
+        meta: hasPoint ? { body, firstKeptEntryId: firstKept } : { body },
       }),
     ];
   }
-  if (entry.customType === AUTO_RETRY_CUSTOM_TYPE) {
+  if (entry.customType === "recurse.auto-retry") {
     const shown = text(entry.content);
-    const rowId = typeof entry.retryOf === "string" ? entry.retryOf : entryId;
-    return [
-      block(rowId, "marker", "shell-notice", shown, "system", {
-        meta: { retry: true },
-      }),
-    ];
+    return entry.display === false || !pythonStrip(shown)
+      ? []
+      : [legacyNotice(entryId, shown)];
   }
+  if (isBgShellStream(entry)) return [];
   const notice = bgShellNotice(entry);
   if (notice !== null) {
     const [label, body] = notice;
@@ -686,73 +636,18 @@ function customMessageBlock(entryId: string, entry: JsonObject): Block[] {
   return [block(entryId, "marker", "custom", shown, originOf(shown, "custom"))];
 }
 
-export function streamMarker(entry: unknown): StreamMarker | null {
-  if (!object(entry) || entry.type !== "message" || !object(entry.message))
-    return null;
-  const message = entry.message;
-  if (message.role !== "custom" || message.customType !== BG_SHELL_CUSTOM_TYPE)
-    return null;
-  const details = message.details;
-  if (!object(details)) return null;
-  const event = details.bgShellStream;
-  return event === "shell-background-running" ||
-    event === "shell-background-end"
-    ? [event, details]
-    : null;
-}
-
-function shellPid(value: unknown): number | null {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? value
-    : null;
-}
-
-export function shellState(details: JsonObject): JsonObject | null {
-  const shellId = details.shellId;
-  const command = details.command;
-  const logPath = details.logPath;
-  const started = details.startedAt;
-  if (
-    typeof shellId !== "string" ||
-    !shellId ||
-    codePoints(shellId).length > SHELL_ID_MAX ||
-    typeof command !== "string" ||
-    !command
-  ) {
-    return null;
-  }
-  return {
-    shellId,
-    command: codePointSlice(command, SHELL_COMMAND_MAX),
-    pid: shellPid(details.pid),
-    pgid: shellPid(details.pgid),
-    logPath:
-      typeof logPath === "string" && logPath
-        ? codePointSlice(logPath, SHELL_PATH_MAX)
-        : "",
-    startedAt:
-      typeof started === "number" && started >= 0 && Number.isFinite(started)
-        ? started
-        : 0,
-  };
-}
-
-export type CompactionKeys = [
-  firstKept: string | null,
-  timestampMs: number | null,
-];
-
 interface EntryRows {
   rows: Block[];
   callRows?: [callId: string, rowId: string][];
-  compaction?: CompactionKeys;
+  firstKept?: string;
 }
 
 export function entryRows(entryId: string, entry: JsonObject): EntryRows {
   if (entry.type === "compaction") {
     const summary = typeof entry.summary === "string" ? entry.summary : "";
+    const firstKept = entry.firstKeptEntryId;
     return {
-      compaction: durableKeys(entry),
+      ...(typeof firstKept === "string" ? { firstKept } : {}),
       rows: [
         block(
           entryId,
@@ -760,8 +655,8 @@ export function entryRows(entryId: string, entry: JsonObject): EntryRows {
           "compaction",
           summary,
           originOf(summary, "custom"),
-          typeof entry.firstKeptEntryId === "string"
-            ? { meta: { firstKeptEntryId: entry.firstKeptEntryId } }
+          typeof firstKept === "string"
+            ? { meta: { firstKeptEntryId: firstKept } }
             : {},
         ),
       ],
@@ -778,6 +673,7 @@ export function entryRows(entryId: string, entry: JsonObject): EntryRows {
   const role = messageValue.role;
   if (role !== "user" && role !== "assistant" && role !== "custom")
     return { rows: [] };
+  if (role === "custom" && isBgShellStream(messageValue)) return { rows: [] };
   const content = messageValue.content;
   const shown = text(content);
   const info = role === "assistant" ? thinkingInfo(messageValue) : null;

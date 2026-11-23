@@ -31,7 +31,7 @@ export interface ArtifactContext {
   readonly trashDir: string;
   // Return one 32-character hexadecimal id; defaults to a cryptographic UUID.
   readonly ids?: () => string;
-  /** Supply the UTC clock used for marker dates and Git commit dates. */
+  /** Supply the UTC clock used for Git commit dates. */
   readonly now?: () => Date;
   // Shorten the Git deadline only; never extend it.
   readonly gitTimeoutMs?: number;
@@ -98,6 +98,10 @@ export function isMissing(error: unknown): boolean {
 
 export function isObject(value: unknown): value is RecordValue {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function pythonInt(value: number | null): number | null {
+  return Number.isInteger(value) ? value : null;
 }
 
 function pythonStrip(value: string): string {
@@ -338,15 +342,8 @@ export async function changed(
   );
 }
 
-export async function markerPath(
-  ctx: ResolvedContext,
-  owner: string,
-  artifactId: string,
-): Promise<string> {
-  return join(
-    await ownerRoot(ctx, owner),
-    `.deleted-${normalizedId(artifactId)}.json`,
-  );
+export function deletionReceiptName(artifactId: string): string {
+  return `.deleted-${artifactId}.json`;
 }
 
 export async function readMarker(
@@ -379,6 +376,37 @@ export async function readMarker(
     throw new ArtifactCorrupt("artifact deletion marker is invalid");
   }
   return loaded;
+}
+
+export async function openRepository(
+  ctx: ResolvedContext,
+  ownerValue: string,
+  idValue: string,
+): Promise<string> {
+  const owner = normalizedOwner(ownerValue);
+  const artifactId = normalizedId(idValue);
+  const root = await ownerRoot(ctx, owner);
+  const marker = await readMarker(
+    join(root, deletionReceiptName(artifactId)),
+    owner,
+    artifactId,
+  );
+  if (marker !== null) throw new ArtifactNotFound("artifact not found");
+  const repo = join(root, artifactId);
+  try {
+    const repoInfo = await lstat(repo);
+    if (repoInfo.isSymbolicLink() || !repoInfo.isDirectory()) {
+      throw new ArtifactCorrupt("artifact repository is invalid");
+    }
+    const gitInfo = await stat(join(repo, ".git"));
+    if (!gitInfo.isDirectory())
+      throw new ArtifactCorrupt("artifact repository is invalid");
+    return repo;
+  } catch (error) {
+    if (error instanceof ArtifactError) throw error;
+    if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
+    throw new ArtifactCorrupt("artifact repository is invalid");
+  }
 }
 
 export async function pathExists(path: string): Promise<boolean> {

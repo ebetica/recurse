@@ -8,7 +8,6 @@ import { resendText } from "./composer/index.js";
 import { refusedNoteT } from "./thread-render/refused.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { state } from "./state.js";
-import { runningTools } from "./thread-render/running-tools.js";
 import { summaryWithoutRunningCommands } from "./thread-render/turn-summary.js";
 import {
   blockSections,
@@ -96,7 +95,6 @@ import type {
   ToolEntry,
 } from "./types.js";
 
-import { liveToolLabelVisible } from "./conversation/live-panel.js";
 import { thinkingT, toolThinkingEntry } from "./conversation/thinking.js";
 import {
   activityGroupOpen,
@@ -286,17 +284,8 @@ function markerT(conv: Conversation, entry: MessageEntry): TemplateResult {
 // requested while a turn is running only takes effect once that turn ends.
 export function pendingActionT(
   conv: Conversation,
-  hasCompactionMarker = false,
 ): TemplateResult | typeof nothing {
-  // Invariant: A completed marker can outlive the transient `compacting` flag
-  // by one poll. Suppress only that stale active-compaction state; a later
-  // queued compact (or a clear, which takes precedence) still needs its own
-  // notice.
-  const staleCompaction =
-    hasCompactionMarker &&
-    conv.compacting === true &&
-    !conv.pending_actions?.includes("clear");
-  const note = staleCompaction ? null : pendingActionNote(conv);
+  const note = pendingActionNote(conv);
   if (!note) return nothing;
   return html`<div class="thread-marker pending" role="status">
     <span>${note}</span>
@@ -664,7 +653,7 @@ function toolRowT(
     else if (hasInline) toolDetailStore.toggleInline(inlineKey, repaint);
   };
   // Invariant: Selecting the revealed command must not collapse it: only an
-  // unselected click outside a control toggles, matching the live tool rows.
+  // unselected click outside a control toggles.
   const activate = (event: MouseEvent) => {
     const selection = window.getSelection()?.toString() || "";
     const target = event.target as Element | null;
@@ -854,9 +843,8 @@ function toolSeriesT(
     return html` <div class="turn-series-summary" role="note">
       ${summary} · details unavailable
     </div>`;
-  // Invariant: A series still running shows its live summary, updating in place
-  // as calls finish; the panel owns the group's single pulsing dot, so the
-  // series itself carries text only.
+  // Invariant: A running series updates its summary in place and carries
+  // text only; the status bar shows the turn's state.
   const key = toolSeriesKey(conv.id, boundary, slice.turn.turn_id, seriesId);
   const disclosure = toolSeriesDisclosure(summary, expandedToolSeries.has(key));
   const { open, ariaLabel: label } = disclosure;
@@ -876,7 +864,7 @@ function toolSeriesT(
   );
   // Invariant: The toggle and rows render while streaming exactly as when
   // settled — only the footer summary text stays hidden — so in-flight calls
-  // stay expandable and inspectable above the panel.
+  // stay expandable and inspectable in the transcript.
   return html`<div class="turn-series">
     <button
       class="turn-series-toggle"
@@ -1013,16 +1001,8 @@ function turnGroupItemsT(
             ? [part.slice]
             : [],
         );
-        const tools = /(?:^|, | · )[Rr]unning \d+ commands?/.test(item.line)
-          ? runningTools(rowThreads.get(conv.id)?.rows ?? [], performance.now())
-          : [];
-        const barOwnsRunning = liveToolLabelVisible(
-          conv,
-          Math.max(0, ...tools.map((tool) => tool.elapsedMs)),
-        );
         const owner =
           open &&
-          !barOwnsRunning &&
           runningSlices.length === 1 &&
           seriesIsOpen(
             conv,
@@ -1032,10 +1012,9 @@ function turnGroupItemsT(
           )
             ? runningSlices[0]!
             : null;
-        const line =
-          barOwnsRunning || owner
-            ? summaryWithoutRunningCommands(item.line)
-            : item.line;
+        const line = owner
+          ? summaryWithoutRunningCommands(item.line)
+          : item.line;
         const bodyId = disclosureId(
           "activity-group",
           conv.id,
@@ -1181,7 +1160,7 @@ export function activityBoundaryT(
     : expanded
       ? expandedTurnGroups(boundary, conv.parent ?? null)
       : turnGroups(boundary, conv.parent ?? null);
-  // Invariant: Controls follow the latest visible reply, above the live panel.
+  // Invariant: Controls follow the latest visible reply, above the status bar.
   // Usage and outcomes appear only when the block settles.
   const sections = blockSections(boundary, conv.parent ?? null);
   const minimized =

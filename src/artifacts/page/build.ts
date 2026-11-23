@@ -13,9 +13,9 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { APP_ENTRY } from "../store";
 import { prependToHead } from "./head";
 
-export const APP_ENTRY = "index.html";
 const INSTALL_TIMEOUT_MS = 120_000;
 const BUILD_TIMEOUT_MS = 60_000;
 const LOG_MAX_CHARS = 4_000;

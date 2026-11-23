@@ -49,6 +49,11 @@ Reviewers review only the requested diff. Prompt-only changes (AGENTS.md,
 generated prompts, help/JSDoc) need no tests. Prove mechanisms (for example, the
 process group is gone), not that cleanup ran.
 
+Review every README diff against this allowlist: why the part is arranged as it
+is, invariants the code cannot express, and links. The generated code map shows
+layout. Delete anything else rather than shortening it. If the code needs prose
+to make sense, flag the code for a rename or restructure instead.
+
 Justify every new line injected into a model prompt. Prefer one-line command
 signatures; put detailed instructions in skills or actionable errors instead of
 repeating them on every turn. Review the rendered prompt, not only its source.
@@ -149,25 +154,29 @@ for classes that code cannot catch, a reviewer rule under
 [Evidence and review](#evidence-and-review). The PR body names the proposal;
 add the check or rule only after the operator approves it.
 
-JS/TS comments are limited to short declaration docs, one file header, and
-short comments in bodies. Body comments need no special prefix. Tests have no
-comments except required test tags and tool/license comments. Tool and license
-comments are exempt throughout. `tests/checks/comment_check.ts --strict` makes
-JS/TS findings fail the static gate. Read its help for precise checks.
+Source files in `src/`, `web/`, `tools/` and `scripts/` start with a comment
+that says what the file does. The static gate rejects new missing headers and
+shrinks the baseline when headers are added. JS/TS comments are limited to short
+declaration docs, one file header, and short comments in bodies. Tests have no
+comments except required tags and tool/license comments. Tool and license
+comments are exempt throughout. See the [comment check](../../tests/checks/comment_check.ts)
+for the precise rules.
 
 ## Writing docs
 
 - A file's header and tests describe that file.
-- A directory's `README.md` describes how that part works: a **Source files**
-  list, short sections in present tense, and **Rules for changes**. Update it in
-  the same PR as the behaviour.
+- A directory's `README.md` explains why the code is arranged as it is for a
+  new reader. Link to code instead of repeating details. Use the
+  [code map tool](../../tools/code_map.ts) for layout.
 - Pages in `docs/` explain ideas that span parts, and tasks. They link to code
   instead of restating constants, flags or file lists, and leave history to
   commits.
 - `bun tests/checks/docs_check.ts` (part of the static gate) fails on a broken link, a
-  missing backticked repo path, a source directory missing from the
-  [code map](repository-map.md), or tracked Markdown that needs an
-  [architecture sweep](simplify-review.md).
+  missing backticked repo path, or tracked Markdown that needs an
+  [architecture sweep](simplify-review.md). Folder indexes stay below 4,000
+  characters. The check also rejects increases in code or history repeated in
+  READMEs and shrinks the repetition baseline after a passing run; commit the
+  update.
 
 ## Testing install changes
 

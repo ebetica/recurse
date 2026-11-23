@@ -24,7 +24,7 @@ import {
   validateSecondModelReplies,
 } from "../live_e2e_helpers.ts";
 
-test("live model selection reads Settings and refuses unlisted routes", async () => {
+test("live model selection reads the saved Settings effort levels", async () => {
   const root = await mkdtemp(join(tmpdir(), "live-model-settings-"));
   try {
     const config = new Config({ env: { CHAT_DATA_DIR: root } });
@@ -56,13 +56,6 @@ test("live model selection reads Settings and refuses unlisted routes", async ()
     expect(liveModel("fixture", config).id).toBe(levels[1].model);
     expect(() => liveModel("absent", config)).toThrow(
       "Settings > Effort levels",
-    );
-    await writeFile(
-      config.paths.PI_MODEL_LIST_FILE,
-      JSON.stringify({ version: PI_MODEL_LIST_VERSION, models: [] }),
-    );
-    expect(() => liveModel("fixture", config)).toThrow(
-      "not in Pi's model list",
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -102,8 +95,8 @@ test("second live route uses Settings over the recorded authenticated catalog or
         models: TEST_PI_MODELS.filter((model) => model.id !== routes[1].id),
       }),
     );
-    expect(() => liveSecondModel(catalog, config)).toThrow(
-      "not in Pi's model list",
+    expect(liveSecondModel(config.models.authedChatModels(), config)).toBe(
+      selected,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -192,9 +185,22 @@ describe("live E2E session ownership", () => {
   // Regression: #2656 Durable evidence must not depend on legacy Pi bindings.
   test("exports a real Durable reply and validates its provider route", async () => {
     const root = await mkdtemp(join(tmpdir(), "recurse-live-e2e-test-"));
-    const { host, faux } = fauxHost(join(root, "data"));
-    faux.setResponses([fauxAssistantMessage("SECOND_MODEL_OK")]);
+    const data = join(root, "data");
+    const config = new Config({ env: { CHAT_DATA_DIR: data } });
+    let host: ReturnType<typeof fauxHost>["host"] | undefined;
     try {
+      seedPiModelList(config.paths.CONFIG_DIR);
+      await writeFile(
+        config.paths.EFFORT_LEVELS_FILE,
+        JSON.stringify({
+          default_level: 1,
+          levels: { 1: { model: "faux/faux-1", reasoning: "low" } },
+        }),
+      );
+      const selected = liveModel("faux", config);
+      const run = fauxHost(data, selected.id);
+      host = run.host;
+      run.faux.setResponses([fauxAssistantMessage("SECOND_MODEL_OK")]);
       await host.send("c1", "Reply with SECOND_MODEL_OK", "r1");
       await until(idle(host));
       const session = String((await host.view("c1", { limit: 50 })).session);
@@ -221,7 +227,7 @@ describe("live E2E session ownership", () => {
         "did not answer on that route",
       );
     } finally {
-      await host.close();
+      await host?.close();
       await rm(root, { recursive: true, force: true });
     }
   });

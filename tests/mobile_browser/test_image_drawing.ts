@@ -1,4 +1,6 @@
 import { expect } from "bun:test";
+import type { Route } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
   gotoRoot,
@@ -144,6 +146,53 @@ const drawing: BrowserTest = async (browser, base) => {
           .a as number;
       }),
     ).toBe(2);
+    const stylesheetPath = "/static/excalidraw/index.css";
+    const stylesheetRequest = `**${stylesheetPath}`;
+    const loading = page.getByRole("dialog", { name: "Draw on image" });
+    const status = loading.getByRole("status");
+    const cancel = loading.getByRole("button", { name: "Cancel", exact: true });
+    await page.route(stylesheetRequest, (route) => route.abort(), { times: 1 });
+    await draw.click();
+    await browserExpect(status).toHaveText(
+      "Could not open the drawing editor. Try again.",
+    );
+    await cancel.click();
+    await browserExpect(loading).not.toBeAttached();
+    await browserExpect(draw).toBeFocused();
+
+    const heldStylesheet = Promise.withResolvers<Route>();
+    await page.route(
+      stylesheetRequest,
+      (route) => heldStylesheet.resolve(route),
+      {
+        times: 1,
+      },
+    );
+    await draw.click();
+    await browserExpect(status).toHaveText("Loading drawing editor…");
+    const pendingStylesheet = await heldStylesheet.promise;
+    await browserExpect(cancel).toBeFocused();
+    await browserExpect(editor.locator("canvas")).not.toBeAttached();
+    if (mobile) await cancel.tap();
+    else await cancel.click();
+    await browserExpect(loading).not.toBeAttached();
+    await browserExpect(draw).toBeFocused();
+    const stylesheet = page.locator(`link[href="${stylesheetPath}"]`);
+    await stylesheet.evaluate((link) => {
+      link.addEventListener(
+        "load",
+        () => link.setAttribute("data-loaded", ""),
+        {
+          once: true,
+        },
+      );
+    });
+    await pendingStylesheet.continue();
+    await browserExpect(stylesheet).toHaveAttribute("data-loaded", "");
+    await browserExpect(loading).not.toBeAttached();
+    await browserExpect(editor).not.toBeAttached();
+    await browserExpect(draw).toBeFocused();
+
     await startEditor();
     expect((await loaded()).length).toBeGreaterThan(0);
     expect(await page.locator(".drawing-editor .excalidraw").count()).toBe(1);

@@ -1,4 +1,5 @@
 export {
+  captureSelectionDraftRange,
   commentMount,
   selectionCommentOwner,
   selectionDraft,

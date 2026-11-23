@@ -4,7 +4,6 @@
 // Empty queues await activity; startup/pending receipts and notices retry.
 import { lstat, opendir, stat, unlink } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
-import type { Config } from "../config";
 import type { ModelCatalog } from "../models";
 import { EFFORT_LEVEL_RANGE, isEffortLevel } from "../effort_levels";
 import {
@@ -28,6 +27,7 @@ import {
 } from "./storage";
 import { TreeLifecycleBusy, type TreeLifecycle } from "./lifecycle";
 import { RetrySchedule } from "./lifecycle/retry";
+import { invalidateContextUsage } from "./runtime";
 import type { AgentNode, NodeStore } from "./runtime/agent_node";
 import type { AgentNodes } from "./runtime/agent_nodes";
 import type { DurableHost } from "./durable/host";
@@ -94,12 +94,7 @@ export interface SpawnOutcomes {
 export interface AgentTreeDeps {
   conversations: Pick<
     ConversationStore,
-    | "load"
-    | "save"
-    | "allConvs"
-    | "descendants"
-    | "effectiveWorkdir"
-    | "invalidateContextUsage"
+    "load" | "save" | "allConvs" | "descendants" | "effectiveWorkdir"
   >;
   nodes: Pick<
     AgentNodes<AgentNode, NodeStore>,
@@ -119,7 +114,7 @@ export interface AgentTreeDeps {
   >;
   durable: Pick<DurableHost, "owns" | "stop" | "clear" | "compact">;
   prompts: Pick<Prompts, "dropTurnSystemPrompt">;
-  config: Pick<Config, "credentialRevision"> & {
+  config: {
     models: Pick<ModelCatalog, "chatModel" | "isFileProviderModel">;
   };
   supervisor: TreeSupervisor;
@@ -847,7 +842,7 @@ export class AgentTree {
     const conv = conversations.load(cid, { withPending: false });
     if (conv === null) return;
     await this.deps.prompts.dropTurnSystemPrompt(conv);
-    conversations.invalidateContextUsage(conv);
+    invalidateContextUsage(conv);
     delete conv.settled_attachment_ids;
     conv.status = "idle";
     conv.active_turn = null;

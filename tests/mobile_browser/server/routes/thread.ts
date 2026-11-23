@@ -1,3 +1,5 @@
+import { unlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type AssistantMessage,
@@ -7,6 +9,7 @@ import {
   fauxToolCall,
 } from "@earendil-works/pi-ai";
 import { type Fixture, type Routes, hex, nowSeconds } from "../fixture";
+import capturedCompactions from "../../../backend/fixtures/compaction/real-shapes.json";
 
 export function routes(fx: Fixture): Routes {
   const { instance, load, save, rootAgentId, once } = fx;
@@ -39,6 +42,27 @@ export function routes(fx: Fixture): Routes {
       };
     }
     return view;
+  };
+
+  const importRecordedPi = async (sessionFile: string) => {
+    const [header] = (await Bun.file(sessionFile).text()).split("\n", 1);
+    const sessionId: string = JSON.parse(header!).id;
+    const agent = `imported-pi-${hex(6)}`;
+    const result = await instance.durable.importPi(
+      {
+        id: agent,
+        session_id: sessionId,
+        session_file: sessionFile,
+      },
+      {
+        state: () => ({ running: false, queued: 0 }),
+        publish: (commit) => commit(),
+      },
+      new AbortController().signal,
+    );
+    if (result.status !== "imported") throw new Error(JSON.stringify(result));
+    await create(agent, "Imported Pi history");
+    return { agent };
   };
 
   return {
@@ -146,26 +170,40 @@ export function routes(fx: Fixture): Routes {
       reads.viewCache.drop(cid);
       return { agent: cid };
     },
-    "import-recorded-pi": async () => {
-      const agent = `imported-pi-${hex(6)}`;
-      const result = await instance.durable.importPi(
-        {
-          id: agent,
-          session_id: "recorded-pi",
-          session_file: join(
-            import.meta.dir,
-            "../../fixtures/imported-pi.jsonl",
-          ),
-        },
-        {
-          state: () => ({ running: false, queued: 0 }),
-          publish: (commit) => commit(),
-        },
-        new AbortController().signal,
+    "import-recorded-pi": () =>
+      importRecordedPi(
+        join(import.meta.dir, "../../fixtures/imported-pi.jsonl"),
+      ),
+    "import-recorded-pi-compaction-failure": () =>
+      importRecordedPi(
+        join(
+          import.meta.dir,
+          "../../../backend/fixtures/pi_import/compaction-fail.jsonl",
+        ),
+      ),
+    "import-recorded-pi-compaction": async () => {
+      const captured = capturedCompactions.automatic;
+      const prefix = captured.slice(
+        0,
+        captured.findIndex((e) => e.type === "compaction"),
       );
-      if (result.status !== "imported") throw new Error(JSON.stringify(result));
-      await create(agent, "Imported Pi history");
-      return { agent };
+      const file = join(tmpdir(), `import-pi-compaction-${hex()}.jsonl`);
+      await writeFile(
+        file,
+        [
+          { type: "session", version: 3, id: "recorded-pi", cwd: tmpdir() },
+          ...prefix.map((entry, i) =>
+            i === 0 ? { ...entry, parentId: null } : entry,
+          ),
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n") + "\n",
+      );
+      try {
+        return await importRecordedPi(file);
+      } finally {
+        await unlink(file);
+      }
     },
     "seed-side-history": async () => {
       const cid = "side-history";

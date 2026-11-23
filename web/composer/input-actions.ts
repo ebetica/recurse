@@ -1,15 +1,9 @@
-// Edits and focuses the composer and keeps its controls steady during clicks.
+// Edits and focuses the composer while keeping the phone caret on control taps.
 import { $, inputEl, phoneComposerFocused } from "../dom.js";
 import { currentUiOwnerId } from "../state.js";
 import { resizeTextarea } from "./textarea.js";
 import { restoreComposerValue } from "./view-state.js";
 
-const composer = $("#composer")!;
-const phoneLayout = matchMedia("(max-width: 700px)");
-const expandedByInput = ":focus-within, :has(#input:not(:placeholder-shown))";
-const finishPress = () => {
-  if (composer.dataset.controlsPress) delete composer.dataset.controlsPress;
-};
 window.addEventListener(
   "mousedown",
   (event) => {
@@ -22,26 +16,9 @@ window.addEventListener(
       target.closest("#composer-wrap button, #model-menu")
     )
       event.preventDefault();
-    // Keep the phone row steady until the click lands on its original target.
-    if (!phoneLayout.matches) return;
-    if (composer.matches(expandedByInput))
-      composer.dataset.controlsPress = "open";
-    else if (event.target instanceof Node && composer.contains(event.target))
-      composer.dataset.controlsPress = "closed";
   },
   true,
 );
-window.addEventListener(
-  "mouseup",
-  (event) => {
-    if (event.button === 0 && composer.dataset.controlsPress)
-      requestAnimationFrame(finishPress);
-  },
-  true,
-);
-window.addEventListener("click", finishPress, true);
-window.addEventListener("pointercancel", finishPress);
-window.addEventListener("blur", finishPress);
 $("#conv-controls")?.addEventListener("mousedown", (event) => {
   if (
     event.defaultPrevented ||

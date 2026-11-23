@@ -21,7 +21,7 @@ import {
 } from "./common";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 async function openDetail(page: Page, label: string) {
   await page
@@ -94,6 +94,7 @@ export const tests: BrowserTest[] = [
       [data-theme="composer"] { border: 3px solid #75b9ff; border-radius: 18px; }
       [data-theme="assistant-message"] { border-left: 4px solid #75b9ff; padding-left: 12px; }`;
     try {
+      await mkdir(dirname(path), { recursive: true });
       for (const width of [1280, 412]) {
         await writeFile(
           path,

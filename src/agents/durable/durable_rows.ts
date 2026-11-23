@@ -579,7 +579,7 @@ export class DurableRows {
     const lookup = callIds.length
       ? await files(callIds)
       : { files: {}, complete: true };
-    const published: Record<string, unknown[]> = Object.assign(
+    const published: Record<string, Rec[]> = Object.assign(
       Object.create(null),
       lookup.files,
     );
@@ -594,12 +594,12 @@ export class DurableRows {
         } else {
           this.pendingFiles.add(id);
           if (published[id]) {
-            const merged = new Map<string, unknown>();
+            const merged = new Map<string, Rec>();
             for (const item of [
               ...(this.view.rows.attachments[id] ?? []),
               ...published[id],
             ])
-              merged.set(String((item as { id: unknown }).id), item);
+              merged.set(String(item.id), item);
             published[id] = [...merged.values()];
           }
         }
@@ -617,17 +617,10 @@ export class DurableRows {
       window(
         this.view,
         {
-          cid: this.cid,
           sessionId: `${this.cid}:${this.artifactPrefix}`,
-          sessionFile: null,
-          sessionCwd: "",
-          live: JSON.stringify(liveRows),
-          envelope: JSON.stringify({
-            ...envelope,
-            files_pending: this.pendingFiles.size > 0,
-          }),
-          files: JSON.stringify(published),
-          maxSessionBytes: 0,
+          live: liveRows,
+          envelope: { ...envelope, files_pending: this.pendingFiles.size > 0 },
+          files: published,
         },
         { caughtUp: true, liveSynced: true, ...options, before, limit },
       ),
@@ -816,7 +809,7 @@ export class DurableRows {
 
 export type PublishedFiles = (
   callIds: readonly string[],
-) => Promise<{ files: Record<string, unknown[]>; complete: boolean }>;
+) => Promise<{ files: Record<string, Rec[]>; complete: boolean }>;
 
 export class DurableViews {
   private readonly cache: ViewCache;

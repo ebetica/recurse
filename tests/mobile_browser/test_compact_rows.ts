@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import type { Locator } from "playwright";
+import type { Locator, Page } from "playwright";
 declare const window: any;
 declare const MutationObserver: any;
 declare const requestAnimationFrame: any;
@@ -14,13 +14,14 @@ import {
   waitForLayout,
   type BrowserTest,
 } from "./common";
-import { compactConv, row, tree } from "./fixtures";
+import { idleConv, row, tree } from "./fixtures";
 import { ConversationView } from "../../src/agents/view/conversation";
 import captured from "../backend/fixtures/compaction/real-shapes.json";
 import { SERVER_COMPACTION_MARKER } from "../../src/extensions/core/context/server-compaction";
 import durableBoundary from "./fixtures/durable-compaction-boundary.json";
 import recorded from "./fixtures/durable-compaction-jump.json";
 import durableUser from "./fixtures/durable-compaction-user.json";
+import legacyCompactionView from "./fixtures/legacy-compaction-view.json";
 import {
   projectionEntries,
   rowState,
@@ -28,6 +29,35 @@ import {
 import type { EntryRecord } from "@earendil-works/pi-durable";
 
 const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
+
+async function beginCompaction(
+  page: Page,
+  base: string,
+  agent: string,
+  isMobile = false,
+) {
+  await page.goto(`${base}#agent=${agent}`, { waitUntil: "domcontentloaded" });
+  await page.getByText("Reply 29", { exact: true }).waitFor();
+  const composer = page.locator("#input");
+  await composer.fill("/compact");
+  const command = page.locator("#skill-menu .skill-option.action", {
+    hasText: "/compact",
+  });
+  await command.waitFor();
+  const response = page.waitForResponse(
+    `${base}api/conversations/${agent}/compact`,
+  );
+  if (isMobile) await command.click();
+  else {
+    await composer.press("Escape");
+    await composer.press("Enter");
+  }
+  expect((await response).ok()).toBe(true);
+  const compacting = page.locator(".thread-marker", { hasText: "Compacting…" });
+  await compacting.waitFor({ timeout: 10_000 });
+  expect(await compacting.count()).toBe(1);
+  return compacting;
+}
 
 async function openCompactedSummary(divider: Locator, text: string) {
   expect(await divider.locator(".disclosure-body").count()).toBe(0);
@@ -140,11 +170,7 @@ export const tests: BrowserTest[] = [
         await page.route(`${base}api/tree*`, (route) =>
           route.fulfill({ json: tree() }),
         );
-        await mockConversation(page, base, "main", () => ({
-          ...compactConv(),
-          status: "idle",
-          rows,
-        }));
+        await mockConversation(page, base, "main", () => idleConv([...rows]));
         await page.clock.install();
         await gotoRoot(page, base);
         const divider = page.locator(".compacted-activity");
@@ -289,52 +315,39 @@ export const tests: BrowserTest[] = [
       try {
         const page = await context.newPage();
         const errors = captureErrors(page);
-        await page.route(`${base}api/tree*`, (route) =>
-          route.fulfill({ json: tree() }),
-        );
-        await mockConversation(page, base, "main", () => ({
-          ...compactConv(),
-          compacting: true,
-          pending_actions: ["compact"],
-        }));
-        await gotoRoot(page, base);
+        const { agent } = await postFixture(base, "seed-durable-compactable", {
+          fail: true,
+        });
+        const compacting = await beginCompaction(page, base, agent, isMobile);
+        await postFixture(base, "release", { agent, gate: "reply" });
         const failed = page.locator(".thread-marker", {
           hasText:
-            "Compaction failed: instant-auth-unavailable. Retry with /compact",
+            /Compaction failed: .*Summary unavailable.*Retry with \/compact/,
         });
         await failed.waitFor();
         expect(await failed.count()).toBe(1);
+        expect(await compacting.count()).toBe(0);
         expect(await page.locator(".thread-marker.pending").count()).toBe(0);
-        expect(
-          await page
-            .locator(".thread-marker", { hasText: "Compacting…" })
-            .count(),
-        ).toBe(0);
         expect(errors).toEqual([]);
       } finally {
         await context.close();
       }
     }
   },
-  // Regression: #2060 completed compaction replaces stale pending divider
+  // Regression: #2060 completed compaction replaces the active history marker.
   async function test_compaction_marker_replaces_stale_pending(browser, base) {
-    const thread = {
-      ...compactConv(),
-      compacting: true,
-      pending_actions: ["compact"],
-      rows: [
-        row("kept", "user", "Retained assignment"),
-        row("final-compaction", "compaction", "Final summary", {
-          kind: "marker",
-          role: "compaction",
-          meta: {
-            compact_marker: true,
-            body: "Context compacted at 27k tokens.",
-            firstKeptEntryId: "kept",
-          },
-        }),
-      ],
-    };
+    const completed = [
+      row("kept", "user", "Retained assignment"),
+      row("final-compaction", "compaction", "Final summary", {
+        kind: "marker",
+        role: "compaction",
+        meta: {
+          compact_marker: true,
+          body: "Context compacted at 27k tokens.",
+          firstKeptEntryId: "kept",
+        },
+      }),
+    ];
     for (const [viewport, isMobile, hasTouch, customPending] of [
       [{ width: 390, height: 844 }, true, true, false],
       [{ width: 1280, height: 800 }, false, false, false],
@@ -352,20 +365,25 @@ export const tests: BrowserTest[] = [
         await page.route(`${base}api/tree*`, (route) =>
           route.fulfill({ json: tree() }),
         );
-        await mockConversation(page, base, "main", () => ({
-          ...thread,
-          rows: customPending
-            ? [
-                row("legacy-pending", "custom", "Compacting…", {
-                  kind: "marker",
-                  role: "custom",
-                  meta: { compact_marker: true },
-                }),
-                row("intervening-reply", "assistant", "Compaction is running."),
-                ...thread.rows,
-              ]
-            : thread.rows,
-        }));
+        await mockConversation(page, base, "main", () =>
+          idleConv(
+            customPending
+              ? [
+                  row("legacy-pending", "custom", "Compacting…", {
+                    kind: "marker",
+                    role: "custom",
+                    meta: { compact_marker: true },
+                  }),
+                  row(
+                    "intervening-reply",
+                    "assistant",
+                    "Compaction is running.",
+                  ),
+                  ...completed,
+                ]
+              : completed,
+          ),
+        );
         await gotoRoot(page, base);
         expect(await page.locator(".thread-marker.pending").count()).toBe(0);
         expect(
@@ -392,26 +410,19 @@ export const tests: BrowserTest[] = [
     browser,
     base,
   ) {
-    for (const [
-      pending_actions,
-      compacting,
-      expected,
-      active,
-      width,
-      later = false,
-    ] of [
-      [["compact"], false, "Summarizing context…", false, 390],
+    for (const [pending_actions, expected, active, width, history] of [
+      [["compact"], "Summarizing context…", false, 390, "marker"],
+      [["compact"], "Summarizing context…", false, 390, "none"],
+      [["compact"], "Summarizing context…", false, 390, "reply"],
       [
         ["clear"],
-        true,
         "Deleting this history and starting fresh…",
         false,
         390,
+        "marker",
       ],
-      [["compact"], true, "Summarizing context…", false, 390],
-      [["compact"], true, "Compacting…", true, 390],
-      [["compact"], true, "Compacting…", true, 1280],
-      [["compact"], true, "Summarizing context…", false, 390, true],
+      [[], "Compacting…", true, 390, "marker"],
+      [[], "Compacting…", true, 1280, "marker"],
     ] as const) {
       const context = await browser.newContext({
         viewport: { width, height: width === 390 ? 844 : 800 },
@@ -433,18 +444,11 @@ export const tests: BrowserTest[] = [
           route.fulfill({ json: tree() }),
         );
         await mockConversation(page, base, "main", () => ({
-          ...compactConv(),
-          status: "idle",
-          compacting,
-          pending_actions,
-          rows: [
-            ...(compacting &&
-            !active &&
-            pending_actions[0] === "compact" &&
-            !later
-              ? []
-              : [marker]),
-            ...(later ? [row("later-reply", "assistant", "Later reply")] : []),
+          ...idleConv([
+            ...(history === "none" ? [] : [marker]),
+            ...(history === "reply"
+              ? [row("later-reply", "assistant", "Later reply")]
+              : []),
             ...(active
               ? [
                   row("active-compaction", "custom", "Compacting…", {
@@ -454,7 +458,8 @@ export const tests: BrowserTest[] = [
                   }),
                 ]
               : []),
-          ],
+          ]),
+          pending_actions,
         }));
         await gotoRoot(page, base);
         const pending = page.locator(".thread-marker", {
@@ -532,6 +537,33 @@ export const tests: BrowserTest[] = [
     expect(await jump.innerText()).toBe("Jump to first kept message");
     expect(errors).toEqual([]);
     await page.close();
+
+    const older = await browser.newPage({
+      viewport: { width: 412, height: 915 },
+    });
+    try {
+      const snapshot = structuredClone(legacyCompactionView);
+      const notice = snapshot.blocks.find((block) => block.id === "entry-26")!;
+      delete notice.meta!.summaryEntryId;
+      await mockConversation(older, base, "main", () => idleConv([]));
+      await older.route(`${base}api/conversations/main/view?*`, (route) =>
+        route.fulfill({ json: snapshot }),
+      );
+      await older.route(`${base}api/conversations/main/events?*`, (route) =>
+        route.fulfill({
+          contentType: "text/event-stream",
+          body: `retry: 1000\nid: ${snapshot.instance_id}:${snapshot.revision}\nevent: snapshot\ndata: ${JSON.stringify(snapshot)}\n\n`,
+        }),
+      );
+      await gotoRoot(older, base);
+      const oldJump = older.locator(".compaction-jump-link");
+      await oldJump.waitFor();
+      const legacyHighlight = await recordJumpHighlight(older);
+      await oldJump.click();
+      expect(await legacyHighlight()).toBe("row:entry-30");
+    } finally {
+      await older.close();
+    }
   },
 
   // Regression: #2874 #3348 restore readers and resize after live work settles.
@@ -613,7 +645,9 @@ export const tests: BrowserTest[] = [
       expect(left).toBeCloseTo(-4, 0);
       if (mobile) {
         await page.getByText("Answer 75", { exact: true }).waitFor();
-        await page.locator("#live-bar[hidden]").waitFor({ state: "attached" });
+        await page
+          .locator("#status-bar[hidden]")
+          .waitFor({ state: "attached" });
         await waitForLayout(page);
         const viewport = page.viewportSize()!;
         const paneHeight = await page
@@ -691,26 +725,7 @@ export const tests: BrowserTest[] = [
       viewport: { width: 1280, height: 900 },
     });
     const errors = captureErrors(page);
-    await page.goto(`${base}#agent=${agent}`, {
-      waitUntil: "domcontentloaded",
-    });
-    await page.getByText("Reply 29", { exact: true }).waitFor();
-    const composer = page.locator("#input");
-    await composer.fill("/compact");
-    await page
-      .locator("#skill-menu .skill-option.action", { hasText: "/compact" })
-      .waitFor();
-    const response = page.waitForResponse(
-      `${base}api/conversations/${agent}/compact`,
-    );
-    await composer.press("Escape");
-    await composer.press("Enter");
-    expect((await response).ok()).toBe(true);
-    const compacting = page.locator(".thread-marker", {
-      hasText: "Compacting…",
-    });
-    await compacting.waitFor({ timeout: 10_000 });
-    expect(await compacting.count()).toBe(1);
+    const compacting = await beginCompaction(page, base, agent);
     if (shots)
       await page.screenshot({ path: `${shots}/durable-compacting.png` });
     await postFixture(base, "release", { agent, gate: "reply" });
@@ -742,6 +757,8 @@ export const tests: BrowserTest[] = [
     expect(await kept.evaluate(inView)).toBe(true);
     const divider = page.locator(".compacted-activity");
     await openCompactedSummary(divider, "Summary of the early tasks.");
+    expect(await compacting.count()).toBe(0);
+    expect(await page.locator(".thread-marker.pending").count()).toBe(0);
     expect((await divider.boundingBox())!.y).toBeLessThan(
       (await page.getByText("Reply 29", { exact: true }).boundingBox())!.y,
     );

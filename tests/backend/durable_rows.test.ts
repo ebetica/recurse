@@ -141,9 +141,9 @@ test("a recorded transcript shows the rows of a Pi session with the same message
     sessionId: "pi",
     sessionFile: path,
     sessionCwd: "/work",
-    live: "[]",
-    envelope: "{}",
-    files: "{}",
+    live: [],
+    envelope: {},
+    files: {},
     maxSessionBytes: 1 << 30,
   };
   const view = new ViewEntry(new ConversationView("c1", ""));

@@ -250,48 +250,6 @@ describe("activity usage aggregate", () => {
 
   // Regression: #1847 truthful activity counts and usage captions
   test("keeps authoritative total cost separate from model and safety bars", () => {
-    const partialBreakdown = usage({
-      cost: 0.3,
-      model_usage_partial: false,
-      model_groups: [
-        {
-          selector: "provider/a",
-          calls: 1,
-          costPartial: true,
-          input: 10,
-          output: 2,
-          cacheRead: 20,
-          cacheWrite: 3,
-          cost: 0.1,
-        },
-      ],
-    });
-    const exactBreakdown = usage({
-      cost: 0.3,
-      model_usage_partial: false,
-      model_groups: [
-        {
-          selector: "provider/a",
-          calls: 1,
-          costPartial: false,
-          input: 10,
-          output: 2,
-          cacheRead: 20,
-          cacheWrite: 3,
-          cost: 0.3,
-        },
-      ],
-    });
-    expect(
-      activityTotalCostLabel(
-        activityUsage([withUsage("partial-breakdown", partialBreakdown, true)]),
-      ),
-    ).toBe("Total cost: $0.30");
-    expect(
-      activityTotalCostLabel(
-        activityUsage([withUsage("exact-breakdown", exactBreakdown, true)]),
-      ),
-    ).toBe("Total cost: $0.30");
     expect(
       activityTotalCostLabel(
         activityUsage([

@@ -17,8 +17,9 @@ import { join } from "node:path";
 import {
   AGENT_DRAFT_KEY_RE,
   AGENT_TEMP_KEY_RE,
-  type Config,
-} from "../../config";
+  agentTempLeaf,
+  type StatePaths,
+} from "../../state_paths";
 import * as runtimeLogging from "../../observability/runtime_logging";
 import * as startupMetrics from "../../observability/startup_metrics";
 import { slowSpan } from "../../observability/slow-span";
@@ -26,6 +27,7 @@ import { flockExclusive } from "../../utils/flock";
 import { retireAll, retirePath, sweepTrash } from "../../utils/trash-sweep";
 import type { ConversationRecord, ConversationStore } from "../storage";
 import type { AttachmentDrafts, DraftDirs } from "./attachment_drafts";
+import type { ConfigActions } from "./config_actions";
 import { AttachmentError, type Manifest } from "./attachments/base";
 import type { CropOperation } from "./attachments/crop";
 import * as publish from "./attachments/publish";
@@ -87,17 +89,15 @@ async function retireOrFalse(path: string, root: string): Promise<boolean> {
 }
 type Conversations = Pick<
   ConversationStore,
-  | "load"
-  | "save"
-  | "allConvs"
-  | "convRowExists"
-  | "withTitleGuard"
-  | "withMuteGuard"
-  | "withPermanentDeleteStateGuard"
+  "load" | "save" | "allConvs" | "convRowExists" | "withTitleGuard"
 >;
 
 export interface AgentTempDeps {
   conversations: Conversations;
+  configActions: Pick<
+    ConfigActions,
+    "withMuteGuard" | "withConfigurationMetadataGuard"
+  >;
   logger: runtimeLogging.RuntimeLogger;
   /** agent_nodes.owner_admits: whether the owner still admits file writes. */
   ownerAdmits(cid: string): boolean;
@@ -130,7 +130,7 @@ export class AgentTemp implements DraftDirs {
   private drainDue = false;
 
   constructor(
-    readonly config: Config,
+    readonly paths: StatePaths,
     private readonly deps: AgentTempDeps,
   ) {
     this.now = deps.now ?? (() => Date.now() / 1000);
@@ -145,9 +145,6 @@ export class AgentTemp implements DraftDirs {
   private get draftLifecycle(): AttachmentDrafts {
     if (!this.drafts) throw new Error("attachment drafts not attached");
     return this.drafts;
-  }
-  private get paths() {
-    return this.config.paths;
   }
 
   /** UTC day stamp scoping one temp directory generation. */
@@ -170,10 +167,10 @@ export class AgentTemp implements DraftDirs {
     ]);
     for (let attempt = 0; attempt < 10; attempt++) {
       const key = `${day}-${this.nonce()}`;
-      if (names.has(key) || names.has(this.config.agentTempLeaf(key))) continue;
+      if (names.has(key) || names.has(agentTempLeaf(this.paths, key))) continue;
       const path = join(
         this.paths.AGENT_TEMP_INSTANCE_DIR,
-        this.config.agentTempLeaf(key),
+        agentTempLeaf(this.paths, key),
       );
       if (
         this.paths.AGENT_TEMP_USES_SHORT_DEFAULT &&
@@ -201,18 +198,7 @@ export class AgentTemp implements DraftDirs {
   private tempLeaf(key: string): string {
     if (!ownedKey(key))
       throw new TempValueError("unsafe temporary-directory key");
-    return this.config.agentTempLeaf(key);
-  }
-
-  /** A conversation's persisted effective-cwd file, not created. */
-  workdirFile(tempKey: string): string {
-    if (!AGENT_TEMP_KEY_RE.test(tempKey))
-      throw new TempValueError("unsafe temporary-directory key");
-    return join(
-      this.paths.AGENT_TEMP_INSTANCE_DIR,
-      this.tempLeaf(tempKey),
-      "workdir.json",
-    );
+    return agentTempLeaf(this.paths, key);
   }
 
   // Create a temp root and its instance scope, both 0700; parents keep modes.
@@ -250,10 +236,9 @@ export class AgentTemp implements DraftDirs {
       const convs = this.deps.conversations;
       if ((options.persist ?? true) && convs.convRowExists(cid)) {
         // Invariant: Serialize a legacy row's one-time key assignment under
-        // title→mute. withMuteGuard takes only its own mute token; the title
-        // token is for the nested save.
+        // title → node → mute. Reuse the title token for the nested save.
         key = await convs.withTitleGuard(cid, (title) =>
-          convs.withMuteGuard(cid, async () => {
+          this.deps.configActions.withMuteGuard(cid, async () => {
             const current = convs.load(cid, { withPending: false });
             const currentKey = current?.tmp_key;
             if (
@@ -307,7 +292,7 @@ export class AgentTemp implements DraftDirs {
 
   /** Admit uploads under the delete-state guard; KeyError once fenced. */
   admitUploadsDir(cid: string, tempKey: string): Promise<string> {
-    return this.deps.conversations.withPermanentDeleteStateGuard(
+    return this.deps.configActions.withConfigurationMetadataGuard(
       cid,
       async () => {
         if (!this.deps.ownerAdmits(cid))
@@ -519,7 +504,7 @@ export class AgentTemp implements DraftDirs {
     const live = new Set<string>();
     const add = (key: string) => {
       live.add(key);
-      live.add(this.config.agentTempLeaf(key));
+      live.add(agentTempLeaf(this.paths, key));
     };
     for (const conv of conversations)
       if (typeof conv.tmp_key === "string") add(conv.tmp_key);

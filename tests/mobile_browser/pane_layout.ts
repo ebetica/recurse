@@ -51,3 +51,33 @@ export async function waitForPaneTransition(page: Page, selector: string) {
     );
   }, selector);
 }
+
+export function dockControls(page: Page) {
+  const thread = page.locator("#scroll");
+  const focusThread = async () => {
+    await thread.evaluate((node: any) => {
+      node.tabIndex = -1;
+      node.focus();
+    });
+  };
+  const focused = async (selector: string) => {
+    await page.waitForFunction(
+      (selector) =>
+        (globalThis as any).document.activeElement?.matches(selector),
+      selector,
+    );
+  };
+  const arrange = async (key: string) => {
+    await page.keyboard.press("w");
+    await page.locator("#window-key-hints").waitFor({ state: "visible" });
+    await page.keyboard.press(key);
+    await page.locator("#window-key-hints").waitFor({ state: "hidden" });
+  };
+  const tab = (id: string) =>
+    page.locator(`#dock .dv-tab[data-dock-panel="${id}"]`);
+  const windowBox = async (id: string) =>
+    (await tab(id)
+      .locator("xpath=ancestor::div[contains(@class, 'dv-groupview')]")
+      .boundingBox())!;
+  return { thread, focusThread, focused, arrange, tab, windowBox };
+}

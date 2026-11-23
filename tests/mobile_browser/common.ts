@@ -672,7 +672,7 @@ export async function shellSurfaceBounds(page: Page): Promise<any> {
               "#composer-wrap",
               "#scroll",
               ".shell-surface",
-              ".live-panel-box",
+              ".status-bar-box",
               ".shell-chip",
             ].map((selector) => [
               selector,
@@ -732,12 +732,16 @@ export async function openPage(
   }
 }
 
-export async function screenshot(page: Page, name: string): Promise<void> {
+export async function screenshot(
+  page: Page,
+  name: string,
+  options: { fullPage?: boolean } = {},
+): Promise<void> {
   const directory = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
   if (!directory) return;
   const path = join(directory, `${name}.png`);
   await mkdir(dirname(path), { recursive: true });
-  await page.screenshot({ path });
+  await page.screenshot({ ...options, path });
 }
 
 export async function recordJumpHighlight(
@@ -1250,6 +1254,18 @@ export async function dispatchArtifactSelection(
     },
     { pointerType, needle },
   );
+}
+
+export async function stageArtifactComment(
+  page: Page,
+  pointerType: "mouse" | "touch",
+  needle: string,
+  note: string,
+): Promise<void> {
+  await dispatchArtifactSelection(page, pointerType, needle);
+  const popover = page.locator(".report-comment-popover:not([hidden])");
+  await popover.locator("textarea").fill(note);
+  await popover.locator(".report-comment-popover-submit").click();
 }
 
 export async function dispatchArtifactTap(

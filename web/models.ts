@@ -1,5 +1,5 @@
 // Draft effort applies on creation; existing choices wait for the next turn.
-// The focused composer's chip shows the recorded or pending choice; the popup previews it.
+// The composer's chip shows the recorded or pending choice; the popup previews it.
 // Unreachable choices explain why, without duplicate controls.
 // Context reuses tree usage for loaded history; pending Clear stays blank.
 import { backendFor } from "./backends/backend.js";

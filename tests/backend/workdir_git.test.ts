@@ -13,9 +13,10 @@ import { dirname, join } from "node:path";
 import { gitEnv, runBounded } from "../../src/git";
 import { WorkdirGit, cleanBaseRef } from "../../src/workdir_git";
 import prDiff from "./fixtures/pull_request_diff.json";
-import { pullRequestFiles } from "../../src/pull_request/index";
+import { PullRequests, pullRequestFiles } from "../../src/pull_request";
 import { measure } from "../../src/observability/startup_metrics";
 import { captureFixture } from "./fixture_subprocess";
+import { until } from "./fixtures/durable_host/host";
 
 type Json = unknown;
 const temp = realpathSync(
@@ -235,14 +236,9 @@ test("agent Git environment preserves configured and explicit commit identity", 
   }
 });
 
-test("GitHub origin bases are scrubbed, cached and follow persisted chdir", async () => {
+test("GitHub origin bases are scrubbed and cached by working directory", async () => {
   const [root, env] = setupRoot();
-  const wg = new WorkdirGit({
-    repoUrl: root,
-    repoDir: root,
-    dataDir: root,
-    env,
-  });
+  const wg = new PullRequests({ dataDir: root, env });
   const remotes = [
     "https://token@github.com/Owner/Repo.git",
     "git@github.com:Owner/Repo.git",
@@ -264,17 +260,9 @@ test("GitHub origin bases are scrubbed, cached and follow persisted chdir", asyn
       index < 3 ? "https://github.com/Owner/Repo" : null,
     );
   }
-  const file = join(root, "workdir.json");
-  writeFileSync(file, JSON.stringify({ version: 1, cwd: join(root, "0") }));
-  await captureFixture([GIT, "remote", "remove", "origin"], {
-    cwd: join(root, "0"),
-    env,
-  });
-  expect(await wg.githubRepoUrl(root, file)).toBe(
-    "https://github.com/Owner/Repo",
-  );
-  writeFileSync(file, JSON.stringify({ version: 1, cwd: root }));
-  expect(await wg.githubRepoUrl(join(root, "1"), file)).toBeNull();
+  const cwd = join(root, "0");
+  await captureFixture([GIT, "remote", "remove", "origin"], { cwd, env });
+  expect(await wg.githubRepoUrl(cwd)).toBe("https://github.com/Owner/Repo");
 });
 
 for (const value of ["--output=x", "-x"]) {
@@ -385,9 +373,7 @@ test("a gh lookup past its timeout is killed, reads as no PR and backs off", asy
     { ...env, ...BUILD_ENV },
   );
   const logged: unknown[] = [];
-  const wg = new WorkdirGit({
-    repoUrl: "x",
-    repoDir: root,
+  const wg = new PullRequests({
     dataDir: root,
     env,
     log: (event, fields) => logged.push({ event, reason: fields.reason }),
@@ -452,15 +438,26 @@ test("branch PR lookups are rate-limited, skip final and default-branch closed P
     root,
     { ...env, ...BUILD_ENV },
   );
+  const lookupEnv = {
+    ...env,
+    GH_CALLS: calls,
+    GH_PR: payload,
+    GH_LIMITS: limits,
+  };
+  const prs = new PullRequests({
+    dataDir: root,
+    env: lookupEnv,
+    now: () => clock,
+  });
   const git = new WorkdirGit({
     repoUrl: "unused",
     repoDir: root,
     dataDir: root,
-    env: { ...env, GH_CALLS: calls, GH_PR: payload, GH_LIMITS: limits },
-    now: () => clock,
+    env: lookupEnv,
+    lastBranchPr: (wt, branch) => prs.lastBranchPr(wt, branch),
   });
   const wt = join(root, "r");
-  const lookup = async () => (await git.branchPr(wt, "test"))?.state ?? null;
+  const lookup = async () => (await prs.branchPr(wt, "test"))?.state ?? null;
   const called = async () =>
     (await Bun.file(calls).text()).split("\n").filter(Boolean);
   const checkout = (...args: string[]) =>
@@ -774,7 +771,8 @@ test("diff candidates keep ambiguous short names and <remote>/HEAD on every Git"
     dataDir: root,
     env,
   });
-  const { branches } = await git.diffCandidates(join(root, "r"));
+  const wt = join(root, "r");
+  const { branches } = await git.diffCandidates(wt);
   expect([...branches!].sort()).toEqual([
     "heads/example",
     "main",
@@ -785,6 +783,55 @@ test("diff candidates keep ambiguous short names and <remote>/HEAD on every Git"
     "remotes/other/HEAD",
     "third/main",
   ]);
+
+  const pidFile = join(root, "candidate-pid");
+  const sleep = Bun.which("sleep");
+  if (!sleep)
+    throw new Error("sleep is required for the Git cancellation fixture");
+  rmSync(join(root, "bin", "git"));
+  writeFileSync(
+    join(root, "bin", "git"),
+    `#!/bin/sh
+if [ "$3" = for-each-ref ]; then
+  printf '%s\\n' "$$" > ${Bun.$.escape(pidFile)}
+  exec ${Bun.$.escape(sleep)} 30
+fi
+exec ${Bun.$.escape(GIT)} "$@"
+`,
+    { mode: 0o755 },
+  );
+  const controller = new AbortController();
+  let settled = false;
+  const pending = git.diffCandidates(wt, controller.signal).finally(() => {
+    settled = true;
+  });
+  let pid: number | undefined;
+  try {
+    await until(async () => {
+      if (settled) return true;
+      const value = Number(
+        await Bun.file(pidFile)
+          .text()
+          .catch(() => ""),
+      );
+      if (Number.isSafeInteger(value) && value > 1) pid = value;
+      return pid !== undefined || settled;
+    });
+    if (pid === undefined)
+      throw new Error("Git settled before publishing its PID");
+    expect(probeProcess(pid)).toBeUndefined();
+    controller.abort();
+    expect(await pending).toEqual({ branches: [], commits: [], tags: [] });
+    expect(probeProcess(pid)).toBe("ESRCH");
+  } finally {
+    controller.abort();
+    if (pid !== undefined && probeProcess(pid) === undefined) {
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch {}
+    }
+    await pending.catch(() => undefined);
+  }
 });
 
 test("PR patches decode Git-quoted paths", () => {
@@ -802,9 +849,7 @@ test("PR summary, description and lazy patch share bounded fetches without a che
   const metadata = join(root, "metadata.json");
   write(patch, prDiff.file.patch);
   write(metadata, JSON.stringify({ body: prDiff.pr.body }));
-  const git = new WorkdirGit({
-    repoUrl: "unused",
-    repoDir: join(root, "reaped"),
+  const git = new PullRequests({
     dataDir: root,
     env: { ...env, PR_PATCH: patch, PR_CALLS: calls, PR_METADATA: metadata },
   });

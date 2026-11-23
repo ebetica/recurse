@@ -71,7 +71,7 @@ test("login and logout change the shown routes at once, with no relist", () => {
   expect([listText(config), stat()]).toEqual(before);
 });
 
-test("a stored ladder id Pi no longer lists is kept, named, and refused", async () => {
+test("a stored ladder id Pi no longer lists is kept and marked unreachable", async () => {
   const config = makeConfig(() => ["anthropic"]);
   seedPiModelList(config.paths.CONFIG_DIR);
   const ladder = {
@@ -97,15 +97,6 @@ test("a stored ladder id Pi no longer lists is kept, named, and refused", async 
   expect(config.levels.effortLevelReachability()[2]!.reason).toBe(
     "level 2 model anthropic/claude-gone-4 is not in Pi's model list",
   );
-  expect(
-    config.models.unlistedModelSentence("anthropic/claude-gone-4", 2),
-  ).toContain("not in Pi's model list");
-  expect(
-    config.models.unlistedModelSentence("anthropic/claude-gone-4", null),
-  ).toContain("not in Pi's model list");
-  expect(
-    config.models.unlistedModelSentence("anthropic/claude-opus-5", 1),
-  ).toBeNull();
   expect(readFileSync(config.paths.EFFORT_LEVELS_FILE, "utf8")).toBe(text);
   const edited = structuredClone(ladder);
   edited.levels["4"]!.reasoning = "low";
@@ -153,12 +144,6 @@ test("a list of hundreds of models is built once, not per call", async () => {
   );
   expect(config.models.chatModels()).toHaveLength(501);
   expect(config.models.chatModels()).toHaveLength(501);
-  expect(
-    config.models.unlistedModelSentence("openrouter/vendor/m7", 1),
-  ).toBeNull();
-  expect(
-    config.models.unlistedModelSentence("openrouter/vendor/gone", 1),
-  ).toContain("not in Pi's model list");
   expect(config.models.authedChatModels()).toHaveLength(500);
 
   config.models.chatModels()[1]!.label = "edited";

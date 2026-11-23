@@ -56,6 +56,7 @@ import { registerSidebarScriptRoutes } from "./sidebar_script";
 import { agentContext } from "../agents/runtime";
 import { registerApiV1 } from "./api_v1/routes";
 import { compactConversation } from "./compact";
+import { registerConversationChangesRoutes } from "./conversation_changes";
 import { registerConversationRoutes } from "./conversations";
 import {
   CreateSlots,
@@ -98,6 +99,7 @@ import {
 } from "./static";
 import { registerTreeEvents } from "./tree_events";
 import {
+  cliIndex,
   defaultTokenHex,
   deliverStop,
   withDurableStop,
@@ -156,11 +158,6 @@ export interface App {
   readonly relayInbox: ReturnType<typeof registerRelayRoutes>;
 }
 
-type Mutate = <T>(
-  work: () => Promise<T>,
-  rollback?: () => Promise<void>,
-) => Promise<T>;
-
 export async function buildApp(options: AppOptions): Promise<App> {
   const sink = options.sink ?? new WebLogSink();
   let snapshot: ProviderSnapshot | null = null;
@@ -214,8 +211,8 @@ export async function buildApp(options: AppOptions): Promise<App> {
     delivery,
     serviceBindings,
   } = instance;
-  const mutate: Mutate = (work, rollback) =>
-    lease.mutateExternalStorage(work, [], rollback ? { rollback } : {});
+  const mutate = <T>(work: () => Promise<T>): Promise<T> =>
+    lease.mutateExternalStorage(work, []);
 
   const requireActionReady = (): void => {
     if (lifecycle.importFinal === false || !conversations.projectionReady())
@@ -450,9 +447,10 @@ export async function buildApp(options: AppOptions): Promise<App> {
     projectionReady: () => conversations.projectionReady(),
     nodeCids: () => nodes.nodeCids(),
     cliIndex: async () =>
-      conversations
-        .cliIndex()
-        .map((row) => ({ ...row, shells: shellView(String(row.id)).items })),
+      cliIndex(
+        conversations.allConvs({ withPending: false }),
+        instance.liveStatus,
+      ).map((row) => ({ ...row, shells: shellView(String(row.id)).items })),
     transcript,
     stopDiagnostics: new StopDiagnosticBuckets(),
     revive: {
@@ -497,9 +495,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
     warn: warnModelList,
     spawn: (name, work) =>
       instance.tasks.spawn(name, work, instance.shutdownController.signal),
-    afterUpdate: async () => {
-      await config.levels.writeAvailableModels();
-    },
   });
   const send = process.send?.bind(process);
   const recurseUpdates = new RecurseUpdates({
@@ -579,23 +574,9 @@ export async function buildApp(options: AppOptions): Promise<App> {
   registerServiceConversationRoutes(router, {
     serviceCreateSlots: new CreateSlots(),
     store: conversations,
-    lookupExternalKey: (principal, key) =>
-      serviceBindings.lookupExternalKey(principal, key),
-    serviceOwnedConversationCount: (principal) =>
-      serviceBindings.serviceOwnedConversationCount(principal),
-    bindServiceConversation: (principal, cid) =>
-      serviceBindings.bindServiceConversation(principal, cid),
-    bindExternalKey: (principal, key, cid) =>
-      serviceBindings.bindExternalKey(principal, key, cid),
-    rollbackServiceConversation: (conv) =>
-      conversations.rollbackServiceConversation(conv, serviceBindings),
-    mutateExternalStorage: mutate,
     delivery,
     reads,
-    create: {
-      createOrRejoinServiceConversation: (o) =>
-        instance.create.createOrRejoinServiceConversation(o),
-    },
+    create: instance.create,
     nodes: conversationNodes,
     liveRunId,
   });
@@ -641,9 +622,13 @@ export async function buildApp(options: AppOptions): Promise<App> {
       read: (cid) => instance.reconciler.readSpawnOutcome(cid),
       observe: (cid) => instance.reconciler.observeSpawnOutcome(cid),
     },
+    githubRepoUrl: (stored) => instance.pullRequests.githubRepoUrl(stored),
+  });
+  registerConversationChangesRoutes(router, {
+    store: conversations,
+    durable,
     prs: instance.conversationPrs,
     git: {
-      workdirFile: (key) => instance.agentTemp.workdirFile(key),
       resolveDiffCwd: (stored, persisted, signal) =>
         instance.workdirGit.resolveDiffCwd(stored, persisted, signal),
       worktreeDiff: (cwd, base, source, signal, untracked) =>
@@ -651,10 +636,9 @@ export async function buildApp(options: AppOptions): Promise<App> {
       diffFile: (cwd, path, base, contents, snapshot) =>
         instance.workdirGit.diffFile(cwd, path, base, contents, snapshot),
       pullRequestDiff: (url, path, queue) =>
-        instance.workdirGit.pullRequestDiff(url, path, queue),
-      diffCandidates: (cwd) => instance.workdirGit.diffCandidates(cwd),
-      githubRepoUrl: (stored, file) =>
-        instance.workdirGit.githubRepoUrl(stored, file),
+        instance.pullRequests.pullRequestDiff(url, path, queue),
+      diffCandidates: (cwd, signal) =>
+        instance.workdirGit.diffCandidates(cwd, signal),
     },
   });
   registerApiV1(router, {
@@ -884,11 +868,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
           "event=git_identity_missing Set user.name and user.email, or configure a GitHub token.",
         );
     });
-    track("serve-ready-chain", () =>
-      step("write_available_models", async () =>
-        config.levels.writeAvailableModels(),
-      ),
-    );
     // Invariant: Local read of Pi's model list; never delays serving or a turn,
     // and a failure keeps the previous list (step logs its duration and
     // failure).
@@ -900,9 +879,6 @@ export async function buildApp(options: AppOptions): Promise<App> {
           catalog: config.models,
           warn: warnModelList,
         }),
-      );
-      await step("write_available_models", async () =>
-        config.levels.writeAvailableModels(),
       );
     });
     track("message-search-backfill", (signal) =>

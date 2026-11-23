@@ -150,4 +150,5 @@ Real browser coverage uses accepted files through the fake provider:
   and [`test_files_documents.ts`](../../tests/mobile_browser/test_files_documents.ts).
 - Comments and touch gestures: [`test_files_comments.ts`](../../tests/mobile_browser/test_files_comments.ts).
 - Rail badges: [`test_pane_chrome.ts`](../../tests/mobile_browser/test_pane_chrome.ts).
-- Window restoration and shortcuts: [`test_pane_hotkeys.ts`](../../tests/mobile_browser/test_pane_hotkeys.ts).
+- Window restoration: [`test_dock_layout.ts`](../../tests/mobile_browser/test_dock_layout.ts).
+- Window shortcuts: [`test_pane_hotkeys.ts`](../../tests/mobile_browser/test_pane_hotkeys.ts).

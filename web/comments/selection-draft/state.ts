@@ -40,6 +40,28 @@ export function setSelectionDraft(draft: SelectionDraft | null): void {
   selectionDraft = draft;
 }
 
+/** A DOM move can collapse the draft's live range even when its text survives. */
+export function captureSelectionDraftRange(
+  subtree: HTMLElement,
+): (() => void) | undefined {
+  const draft = selectionDraft;
+  if (!draft || draft.edit || draft.box || !subtree.contains(draft.root))
+    return;
+  const { range, root } = draft;
+  const { startContainer, startOffset, endContainer, endOffset } = range;
+  if (!root.contains(startContainer) || !root.contains(endContainer)) return;
+  return () => {
+    if (
+      selectionDraft !== draft ||
+      !root.contains(startContainer) ||
+      !root.contains(endContainer)
+    )
+      return;
+    range.setStart(startContainer, startOffset);
+    range.setEnd(endContainer, endOffset);
+  };
+}
+
 /** The pane whose shown document takes the next selection comment. */
 export const commentMount: { current: CommentPane | null } = {
   current: null,

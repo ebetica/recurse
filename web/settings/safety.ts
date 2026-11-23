@@ -9,7 +9,7 @@ import { settingsDetail } from "./layout.js";
 import { settingsClient } from "./target.js";
 
 const ENDPOINT = "/api/settings/safety-review-model";
-const DEFAULT = "Same as level 1";
+const DEFAULT = "Automatic";
 const INVALID = "Invalid saved choice";
 
 export function buildSafetyReviewRow(body: HTMLElement): void {

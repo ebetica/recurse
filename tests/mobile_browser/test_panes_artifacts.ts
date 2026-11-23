@@ -4,18 +4,16 @@ import { REFERENCE_LINKS } from "./fixtures/reference_links";
 import {
   ARTIFACT,
   ARTIFACT_VERSION,
-  LOGIN,
-  startServer,
-  stopServer,
   assertArtifactVersionMenuEscape,
-  captureErrors,
   dispatchArtifactSelection,
-  dispatchArtifactTap,
   gotoRoot,
+  openPage,
   postFixture,
   rootAgentId,
   routeArtifacts,
   runBrowserTests,
+  screenshot,
+  stageArtifactComment,
   themeColors,
   visibleAndUncovered,
   type BrowserTest,
@@ -25,163 +23,13 @@ import { join } from "node:path";
 import * as artifacts from "../../src/artifacts";
 import { artifactReopen } from "./artifact_reopen";
 import { artifactLinks } from "./artifact_links";
-import { tests as artifactImageComments } from "./test_artifact_image_comments";
 
 export const tests: BrowserTest[] = [
-  ...artifactImageComments,
-  // Regression: #3328 submitting selection comments must not close or hide the Artifact pane.
-  async function test_artifact_comments_keep_pane_open(browser, base, data) {
-    const store = {
-      artifactsDir: join(data, "data", "artifact_repos"),
-      trashDir: join(data, "data", "trash"),
-    };
-    const owner = rootAgentId();
-    const artifact = await artifacts.create(store, {
-      owner,
-      title: "Commented document",
-    });
-    const path = join(String(artifact.repo_path), "index.md");
-    for (const phone of [false, true]) {
-      await writeFile(
-        path,
-        "# Review document\n\n" +
-          Array.from(
-            { length: 5 },
-            (_, n) => `Selection anchor ${n + 1}.`,
-          ).join("\n\n"),
-      );
-      await artifacts.publish(store, owner, String(artifact.id));
-      const context = await browser.newContext({
-        viewport: { width: phone ? 390 : 1280, height: 844 },
-        isMobile: phone,
-        hasTouch: phone,
-      });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
-      const other = !phone
-        ? String(
-            (
-              await (
-                await page.request.post(`${base}api/conversations`, {
-                  data: { parent: null, title: "Comment navigation" },
-                })
-              ).json()
-            ).id,
-          )
-        : null;
-      await page.goto(`${base}#agent=${owner}&artifact=${artifact.id}`);
-      const pane = page.locator('.pane-col[data-pane="report"]');
-      await pane.getByRole("heading", { name: "Review document" }).waitFor();
-      if (!phone) {
-        await page.locator('.rail-btn[data-pane="tips"]').click();
-        await page.locator('.rail-btn[data-pane="report"]').click();
-      }
-      const reply = `Artifact comments accepted ${phone ? "phone" : "desktop"}`;
-      for (let n = 1; n <= 5; n++) {
-        await dispatchArtifactSelection(
-          page,
-          phone ? "touch" : "mouse",
-          `Selection anchor ${n}`,
-        );
-        const popover = page.locator(".report-comment-popover:not([hidden])");
-        await popover
-          .locator("textarea")
-          .fill(n === 5 ? `Reply only ${reply}` : `Note ${n}`);
-        await popover.locator(".report-comment-popover-submit").click();
-      }
-      page.once("dialog", (dialog) => void dialog.dismiss());
-      await page
-        .getByRole("button", { name: "Close Artifacts", exact: true })
-        .click();
-      expect(await pane.locator(".report-comment").count()).toBe(5);
-      expect(await pane.isVisible()).toBeTrue();
-      if (other) {
-        page.once("dialog", (dialog) => void dialog.dismiss());
-        await page.locator(`.agent[data-id="${other}"]`).click();
-        expect(await pane.locator(".report-comment").count()).toBe(5);
-        expect(await pane.isVisible()).toBeTrue();
-      }
-      await writeFile(path, "# Revised document\n\nAll anchors removed.");
-      await artifacts.publish(store, owner, String(artifact.id));
-      const refreshed = page.waitForResponse(
-        (response) => new URL(response.url()).pathname === "/api/artifacts",
-      );
-      await page.evaluate((agentId) => {
-        const browser = globalThis as any;
-        browser.dispatchEvent(
-          new browser.CustomEvent("recurse:ui-refresh", {
-            detail: { agentId },
-          }),
-        );
-      }, owner);
-      await (await refreshed).finished();
-      expect(await pane.locator(".report-comment").count()).toBe(5);
-      expect(
-        await pane
-          .getByRole("heading", { name: "Review document" })
-          .isVisible(),
-      ).toBeTrue();
-      let release = () => {};
-      const gate = new Promise<void>((resolve) => (release = resolve));
-      await page.route(
-        `**/api/conversations/${owner}/deliver`,
-        async (route) => {
-          await gate;
-          await route.continue();
-        },
-      );
-      const delivered = page.waitForResponse(
-        (response) =>
-          new URL(response.url()).pathname ===
-          `/api/conversations/${owner}/deliver`,
-      );
-      await pane.locator(".report-sendbar-send").click();
-      try {
-        expect(await pane.isVisible()).toBeTrue();
-        const pending = page.locator("[data-comment-send]");
-        await pending.waitFor({ state: "attached" });
-        expect(await pending.textContent()).toContain("Note 1");
-        expect(await pending.textContent()).toContain("Selection anchor 5");
-      } finally {
-        release();
-        await delivered;
-      }
-      expect((await delivered).ok()).toBeTrue();
-      await page.unroute(`**/api/conversations/${owner}/deliver`);
-      await page
-        .locator(".msg.assistant", { hasText: reply })
-        .waitFor({ state: "attached" });
-      await pane.getByRole("heading", { name: "Revised document" }).waitFor();
-      expect(await pane.locator(".report-comment").count()).toBe(0);
-      expect(await pane.isVisible()).toBeTrue();
-      await page.reload();
-      await pane.getByRole("heading", { name: "Revised document" }).waitFor();
-      expect(await pane.isVisible()).toBeTrue();
-      if (other) {
-        await page.locator(`.agent[data-id="${other}"]`).click();
-        await page.locator(`.agent[data-id="${owner}"]`).click();
-        await pane.getByRole("heading", { name: "Revised document" }).waitFor();
-        expect(await pane.isVisible()).toBeTrue();
-        expect(
-          (await page.request.delete(`${base}api/conversations/${other}`)).ok(),
-        ).toBeTrue();
-      }
-      expect(errors).toEqual([]);
-      await context.close();
-    }
-    await artifacts.deleteArtifact(
-      store,
-      owner,
-      String(artifact.id),
-      String((await artifacts.get(store, owner, String(artifact.id))).version),
-    );
-  },
   // Regression: #3200 staging a selection comment cannot override a later viewer focus change.
   async function test_artifact_reload_selection_and_content(
     browser,
     base,
     data,
-    serverPid,
   ) {
     const context = {
       artifactsDir: join(data, "data", "artifact_repos"),
@@ -201,14 +49,15 @@ export const tests: BrowserTest[] = [
       await artifacts.publish(context, owner, String(item.id));
     }
     for (const phone of [false, true]) {
-      const browserContext = await browser.newContext({
+      const {
+        context: browserContext,
+        page,
+        errors,
+      } = await openPage(browser, {
         viewport: { width: phone ? 390 : 1280, height: 800 },
-        isMobile: phone,
-        hasTouch: phone,
+        touch: phone,
         permissions: ["clipboard-read", "clipboard-write"],
       });
-      const page = await browserContext.newPage();
-      const errors = captureErrors(page);
       await page.goto(`${base}#agent=${owner}&artifact=${first.id}`);
       await page.locator("#artifact-picker").waitFor();
       await page.evaluate(
@@ -529,12 +378,12 @@ export const tests: BrowserTest[] = [
         await pane
           .getByRole("heading", { name: "Second updated", exact: true })
           .waitFor();
-        await dispatchArtifactSelection(page, "mouse", "Second updated");
-        const headingDraft = page.locator(
-          ".report-comment-popover:not([hidden])",
+        await stageArtifactComment(
+          page,
+          "mouse",
+          "Second updated",
+          "Heading anchor",
         );
-        await headingDraft.locator("textarea").fill("Heading anchor");
-        await headingDraft.locator(".report-comment-popover-submit").click();
         expect(
           await pane
             .locator(".report-comment .report-comment-quote")
@@ -558,13 +407,10 @@ export const tests: BrowserTest[] = [
           await pane.locator(".artifact-browse-btn").isVisible(),
         ).toBeFalse();
       }
-      const shots = process.env.RECURSE_SCREENSHOT_DIR;
-      if (shots) {
-        await mkdir(shots, { recursive: true });
-        await page.screenshot({
-          path: `${shots}/${phone ? 390 : 1280}-artifacts-navigation.png`,
-        });
-      }
+      await screenshot(
+        page,
+        `panes-artifacts/${phone ? 390 : 1280}-artifacts-navigation`,
+      );
       if (!phone) {
         await page.keyboard.press("Escape");
         await page.waitForFunction(() =>
@@ -604,177 +450,8 @@ export const tests: BrowserTest[] = [
         await artifacts.publish(context, owner, String(second.id));
       }
     }
-    const remote = await startServer({ auth: true });
-    try {
-      const { cookie, root: remoteOwner } = remote;
-      const remoteContext = {
-        artifactsDir: join(remote.data, "data", "artifact_repos"),
-        trashDir: join(remote.data, "data", "trash"),
-      };
-      const app = await artifacts.create(remoteContext, {
-        owner: remoteOwner,
-        title: "Remote app",
-      });
-      await writeFile(
-        join(String(app.repo_path), "index.html"),
-        '<button id="count" onclick="this.textContent=\'clicked\'">click</button>',
-      );
-      const published = await artifacts.publish(
-        remoteContext,
-        remoteOwner,
-        String(app.id),
-      );
-      const page = await browser.newPage({
-        viewport: { width: 1280, height: 800 },
-      });
-      expect(
-        (
-          await page.request.post(base + "api/backends", {
-            data: { label: "CacheRemote", url: remote.base, password: LOGIN },
-          })
-        ).ok(),
-      ).toBeTrue();
-      const path = `/api/backends/CacheRemote/artifacts/${app.id}/page`;
-      const initial = page.waitForResponse(
-        (response) => new URL(response.url()).pathname === path,
-      );
-      await page.goto(
-        `${base}#agent=${encodeURIComponent(`CacheRemote/${remoteOwner}`)}&artifact=${app.id}`,
-      );
-      const frame = page.frameLocator("iframe.artifact-embed-page");
-      await frame.locator("#count").click();
-      await frame.getByText("clicked", { exact: true }).waitFor();
-      const pane = page.locator('.pane-col[data-pane="report"]');
-      await pane.locator(".pane-body").focus();
-      await page.keyboard.press("h");
-      await pane.locator(".artifact-list").waitFor();
-      await page.keyboard.press("Enter");
-      await frame.getByText("clicked", { exact: true }).waitFor();
-      const etag = (await initial).headers().etag;
-      expect(etag).toBeTruthy();
-      const unauthorized = await fetch(
-        `${remote.base}api/artifacts/${app.id}/page?agent=${remoteOwner}&version=${published.version}`,
-        { headers: { "If-None-Match": etag! } },
-      );
-      expect(unauthorized.status).not.toBe(304);
-      expect(unauthorized.ok).toBeFalse();
-      const revalidation = page.waitForRequest(
-        (request) => new URL(request.url()).pathname === path,
-      );
-      await page.reload();
-      expect((await (await revalidation).allHeaders())["if-none-match"]).toBe(
-        etag,
-      );
-      await frame.locator("#count").click();
-      await frame.getByText("clicked", { exact: true }).waitFor();
-      await writeFile(
-        join(remote.data, "data/config/themes.json"),
-        JSON.stringify({ theme: "Ocean" }),
-      );
-      const themed = await fetch(
-        `${remote.base}api/artifacts/${app.id}/page?agent=${remoteOwner}&version=${published.version}`,
-        {
-          headers: { cookie, "If-None-Match": etag! },
-        },
-      );
-      expect(themed.status).toBe(200);
-      expect(themed.headers.get("etag")).not.toBe(etag);
-      await page.close();
-    } finally {
-      await fetch(base + "api/backends/CacheRemote", {
-        method: "DELETE",
-      }).finally(() => stopServer(remote));
-    }
-    await artifactReopen(browser, base, data, serverPid);
   },
-  // Feature: #2728 Git commits publish into the already-open Artifact pane.
-  async function test_artifact_commit_updates_open_pane(browser, base, data) {
-    const page = await browser.newPage();
-    const context = {
-      artifactsDir: join(data, "data", "artifact_repos"),
-      trashDir: join(data, "data", "trash"),
-    };
-    for (const kind of ["document", "app"]) {
-      const item = await artifacts.create(context, {
-        owner: rootAgentId(),
-        title: `Commit ${kind}`,
-      });
-      const repo = String(item.repo_path);
-      const entry = kind === "document" ? "index.md" : "index.html";
-      const content = (text: string) =>
-        kind === "document"
-          ? `# ${text}`
-          : `<h1>${text}</h1><button>Try</button>`;
-      await writeFile(join(repo, entry), content("Initial commit"));
-      await artifacts.publish(context, rootAgentId(), String(item.id));
-      await page.goto(`${base}#artifact=${item.id}`);
-      const visible = (text: string) =>
-        kind === "document"
-          ? page.getByRole("heading", { name: text, exact: true })
-          : page
-              .frameLocator("iframe.artifact-embed-page")
-              .getByRole("heading", {
-                name: text,
-                exact: true,
-              });
-      await visible("Initial commit").waitFor();
-      await writeFile(join(repo, entry), content("Committed update"));
-      await Bun.$`git -C ${repo} add --all`.quiet();
-      const start = performance.now();
-      const commit = Bun.spawn(
-        ["git", "-C", repo, "commit", "-m", `Update ${kind}`],
-        {
-          stdout: "ignore",
-          stderr: "pipe",
-        },
-      );
-      let output = "";
-      let published: number | undefined;
-      const completion = (async () => {
-        for await (const chunk of commit.stderr) {
-          output += new TextDecoder().decode(chunk);
-          if (published === undefined && /"command":\s*"publish"/.test(output))
-            published = Math.round(performance.now() - start);
-        }
-        return {
-          exitCode: await commit.exited,
-          completed: Math.round(performance.now() - start),
-        };
-      })();
-      await visible("Committed update").waitFor();
-      console.log(
-        `ARTIFACT_LATENCY ${kind} viewer=${Math.round(performance.now() - start)}ms`,
-      );
-      const { exitCode, completed } = await completion;
-      console.log(
-        `ARTIFACT_LATENCY ${kind} published=${published}ms completion=${completed}ms`,
-      );
-      expect(exitCode).toBe(0);
-      const head = (await Bun.$`git -C ${repo} rev-parse HEAD`.text()).trim();
-      expect(
-        (await artifacts.get(context, rootAgentId(), String(item.id))).version,
-      ).toBe(head);
-      if (kind === "app") {
-        expect(output).toMatch(/"command":\s*"check"/);
-        expect(output).toMatch(/"ok":\s*true/);
-        await writeFile(
-          join(repo, entry),
-          '<script type="module" src="./missing.ts"></script>',
-        );
-        await Bun.$`git -C ${repo} add --all`.quiet();
-        const failed =
-          await Bun.$`git -C ${repo} commit -m ${"Broken app"}`.quiet();
-        expect(failed.stderr.toString()).toMatch(/"code":\s*"build"/);
-        expect(
-          (await artifacts.get(context, rootAgentId(), String(item.id)))
-            .version,
-        ).toBe(head);
-        await visible("Committed update").waitFor();
-      }
-    }
-    await page.close();
-  },
-
+  artifactReopen,
   // Regression: #2721 image placeholders stretched figures and enlarged small images.
   async function test_artifact_figure_natural_dimensions(browser, base, data) {
     const page = await browser.newPage();
@@ -838,11 +515,9 @@ export const tests: BrowserTest[] = [
           );
         expect(gap).toBeGreaterThan(0);
       }
-      if (process.env.ARTIFACT_FIGURE_SHOTS)
-        await page.screenshot({
-          path: `${process.env.ARTIFACT_FIGURE_SHOTS}/${width}.png`,
-          fullPage: true,
-        });
+      await screenshot(page, `panes-artifacts/figure/${width}`, {
+        fullPage: true,
+      });
       measurements.push(
         ...(await page.locator(".artifact-image").evaluateAll((images) =>
           images.map((element) => {
@@ -877,264 +552,12 @@ export const tests: BrowserTest[] = [
     await page.close();
   },
 
-  // Regression: #2740 content settled with Refresh disabled until an unrelated toolbar render.
-  async function test_artifact_disk_publication_refresh(browser, base, data) {
-    const remote = await startServer({ auth: true });
-    try {
-      const remoteOwner = remote.root;
-      for (const [directory, label, owner] of [
-        [data, "", rootAgentId()],
-        [remote.data, "ArtifactRemote", remoteOwner],
-      ] as const) {
-        const page = await browser.newPage({
-          viewport: { width: 390, height: 844 },
-        });
-        const errors = captureErrors(page);
-        await page.addInitScript(() => {
-          const dom = globalThis as any;
-          new dom.MutationObserver((records: any[]) => {
-            for (const record of records) {
-              const pane = record.target;
-              if (
-                record.attributeName !== "aria-busy" ||
-                pane.getAttribute("aria-busy") !== "false" ||
-                !pane.textContent?.includes("Initial disk content")
-              )
-                continue;
-              const refresh = pane.parentElement?.querySelector(
-                ".artifact-refresh-btn",
-              );
-              if (
-                refresh &&
-                (globalThis as any).__settledArtifactRefreshDisabled ===
-                  undefined
-              )
-                (globalThis as any).__settledArtifactRefreshDisabled =
-                  refresh.disabled;
-            }
-          }).observe(dom.document, { subtree: true, attributes: true });
-        });
-        const agent = label ? `${label}/${owner}` : owner;
-        const apiBase = label ? `/api/backends/${label}` : "/api";
-        if (label) {
-          expect(
-            (
-              await page.request.post(base + "api/backends", {
-                data: { label, url: remote.base, password: LOGIN },
-              })
-            ).ok(),
-          ).toBeTrue();
-          await page.goto(base);
-          await page
-            .locator(
-              `.backend-section[data-backend="${label}"] .agent[data-id="${agent}"]`,
-            )
-            .waitFor();
-        }
-        const context = {
-          artifactsDir: join(directory, "data", "artifact_repos"),
-          trashDir: join(directory, "data", "trash"),
-        };
-        const item = await artifacts.create(context, {
-          owner,
-          title: "Disk refresh",
-        });
-        const repo = String(item.repo_path);
-        const publish = async (text: string) => {
-          await writeFile(
-            join(repo, "index.md"),
-            `${text}\n\n![Disk image](figure.svg)`,
-          );
-          await writeFile(
-            join(repo, "figure.svg"),
-            `<svg xmlns="http://www.w3.org/2000/svg" width="${text.length * 10}" height="40"><rect width="100%" height="100%" fill="steelblue"/></svg>`,
-          );
-          await artifacts.publish(context, owner, String(item.id));
-        };
-        await publish("Initial disk content");
-        const revisionRead = page.waitForResponse(
-          (response) =>
-            new URL(response.url()).pathname ===
-            `${apiBase}/artifacts/revision`,
-        );
-        await page.goto(
-          `${base}#agent=${encodeURIComponent(agent)}&artifact=${item.id}`,
-        );
-        await page.getByText("Initial disk content", { exact: true }).waitFor();
-        await page.waitForFunction(
-          () =>
-            typeof (globalThis as any).__settledArtifactRefreshDisabled ===
-            "boolean",
-        );
-        expect(
-          await page.evaluate(
-            () => (globalThis as any).__settledArtifactRefreshDisabled,
-          ),
-        ).toBeFalse();
-        const revision = await revisionRead;
-        expect(revision.status()).toBe(200);
-        expect(new URL(revision.url()).searchParams.get("agent")).toBe(owner);
-        const waitForRevision = async (
-          expected: string | null,
-          etag?: string,
-        ) => {
-          expect(typeof expected).toBe("string");
-          const deadline = performance.now() + 2000;
-          for (;;) {
-            const response = await page.request.get(
-              base + apiBase.slice(1) + "/tree",
-              {
-                headers: etag ? { "If-None-Match": etag } : {},
-              },
-            );
-            const actual =
-              response.status() === 200
-                ? (await response.json()).find((row: any) => row.id === owner)
-                    ?.artifacts_revision
-                : null;
-            if (actual === expected || performance.now() >= deadline) {
-              expect(response.status()).toBe(200);
-              expect(actual).toBe(expected);
-              return response;
-            }
-            await Bun.sleep(100);
-          }
-        };
-        const oldRevision = await artifacts.revision(context, owner);
-        const treeResponse = await waitForRevision(oldRevision);
-        const treeEtag = treeResponse.headers().etag!;
-        expect(
-          (
-            await page.request.get(base + apiBase.slice(1) + "/tree", {
-              headers: { "If-None-Match": treeEtag },
-            })
-          ).status(),
-        ).toBe(304);
-        const fileRequests: string[] = [];
-        page.on("request", (request) => {
-          if (
-            new URL(request.url()).pathname.endsWith(
-              `/artifacts/${item.id}/file`,
-            )
-          )
-            fileRequests.push(request.url());
-        });
-        await publish("Manually refreshed disk content");
-        const publishedRevision = await artifacts.revision(context, owner);
-        expect(publishedRevision).not.toBe(oldRevision);
-        const changedTree = await waitForRevision(publishedRevision, treeEtag);
-        expect(changedTree.headers().etag).not.toBe(treeEtag);
-        await page
-          .getByRole("button", { name: "Refresh artifact", exact: true })
-          .click({ timeout: 2000 });
-        await page
-          .getByText("Manually refreshed disk content", { exact: true })
-          .waitFor({ timeout: 2000 });
-        await page.waitForFunction(
-          () =>
-            (globalThis as any).document.querySelector(".artifact-image")
-              ?.naturalWidth ===
-            "Manually refreshed disk content".length * 10,
-        );
-        expect(
-          fileRequests.some(
-            (url) => new URL(url).searchParams.get("path") === "figure.svg",
-          ),
-        ).toBeTrue();
-        fileRequests.length = 0;
-        await Promise.all([
-          page.waitForRequest(
-            (request) =>
-              new URL(request.url()).searchParams.get("path") === "figure.svg",
-          ),
-          page
-            .getByRole("button", { name: "Refresh artifact", exact: true })
-            .click(),
-        ]);
-        await publish("Automatically refreshed disk content");
-        await page
-          .getByText("Automatically refreshed disk content", { exact: true })
-          .waitFor({ timeout: 2000 });
-        expect(
-          fileRequests.every((url) =>
-            new URL(url).pathname.startsWith(apiBase + "/"),
-          ),
-        ).toBeTrue();
-        expect(errors).toEqual([]);
-        await page.close();
-      }
-    } finally {
-      await fetch(base + "api/backends/ArtifactRemote", {
-        method: "DELETE",
-      }).finally(() => stopServer(remote));
-    }
-  },
-
-  // Regression: #2497 an open Artifact waited for the 15-second list refresh during a turn.
-  async function test_artifact_follows_publication_during_running_turn(
-    browser,
-    base,
-    data,
-  ) {
-    const page = await browser.newPage({
-      viewport: { width: 1280, height: 800 },
-    });
-    const { agent } = await (
-      await page.request.post(`${base}__browser-test/seed-live-tools`, {
-        data: { mode: "long" },
-      })
-    ).json();
-    const context = {
-      artifactsDir: join(data, "data", "artifact_repos"),
-      trashDir: join(data, "data", "trash"),
-    };
-    const item = await artifacts.create(context, {
-      owner: agent,
-      title: "Live publication",
-    });
-    const repo = String(item.repo_path);
-    await writeFile(
-      join(repo, "index.html"),
-      "<!doctype html><body>Initial version</body>",
-    );
-    const initial = await artifacts.publish(context, agent, String(item.id));
-    await page.goto(`${base}#agent=${agent}&artifact=${item.id}`);
-    await page
-      .frameLocator("iframe.artifact-embed-page")
-      .getByText("Initial version", { exact: true })
-      .waitFor();
-    const delivered = await page.request.post(
-      `${base}api/conversations/${agent}/deliver`,
-      { data: { content: "Run tools." } },
-    );
-    expect(delivered.ok()).toBeTrue();
-    await page
-      .locator(`.agent[data-id="${agent}"] .agent-state.running`)
-      .waitFor();
-    await writeFile(
-      join(repo, "index.html"),
-      "<!doctype html><body>Latest version</body>",
-    );
-    const latest = await artifacts.publish(context, agent, String(item.id));
-    expect(latest.version).not.toBe(initial.version);
-    await page
-      .frameLocator("iframe.artifact-embed-page")
-      .getByText("Latest version", { exact: true })
-      .waitFor({ timeout: 3000 });
-    const tree = await (await page.request.get(`${base}api/tree`)).json();
-    expect(tree.find((node: { id: string }) => node.id === agent).status).toBe(
-      "running",
-    );
-    await page.close();
-  },
-
   // Regression: #2365 pane keys must work after clicking sandboxed Artifact content.
   async function test_artifact_frame_pane_hotkeys(browser, base) {
     const app = await postFixture(base, "seed-artifact-app");
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
     await gotoRoot(page, base);
     await page.locator(`a[href="#artifact=${app.id}"]`).click();
     const frame = page.frameLocator("iframe.artifact-embed-page");
@@ -1307,13 +730,10 @@ export const tests: BrowserTest[] = [
     base,
   ) {
     const app = await postFixture(base, "seed-artifact-app");
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 412, height: 844 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await gotoRoot(page, base);
     await page.locator(`a[href="#artifact=${app.id}"]`).click();
     await page
@@ -1357,10 +777,7 @@ export const tests: BrowserTest[] = [
       switchTo("artifact-link-source"),
     ]);
     await switchTo(rootAgentId());
-    if (process.env.ARTIFACT_ATTENTION_SHOTS)
-      await page.screenshot({
-        path: `${process.env.ARTIFACT_ATTENTION_SHOTS}/switch.png`,
-      });
+    await screenshot(page, "panes-artifacts/attention/switch");
     expect(await page.locator("#pane-fab.attention").count()).toBe(0);
     expect(
       await page
@@ -1384,10 +801,7 @@ export const tests: BrowserTest[] = [
         .locator('#pane-menu .pane-menu-item[data-pane="report"].attention')
         .count(),
     ).toBe(1);
-    if (process.env.ARTIFACT_ATTENTION_SHOTS)
-      await page.screenshot({
-        path: `${process.env.ARTIFACT_ATTENTION_SHOTS}/new-version.png`,
-      });
+    await screenshot(page, "panes-artifacts/attention/new-version");
     await page.locator("#pane-fab").click();
     await page
       .locator('#pane-menu .pane-menu-item[data-pane="report"]')
@@ -1417,10 +831,9 @@ export const tests: BrowserTest[] = [
   async function test_artifact_reply_links(browser, base) {
     const app = await postFixture(base, "seed-artifact-app");
     for (const width of [1280, 390]) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 844 },
       });
-      const page = await context.newPage();
       await gotoRoot(page, base);
       const link = page.locator(`a[href="#artifact=${app.id}"]`);
       await link.waitFor();
@@ -1446,10 +859,7 @@ export const tests: BrowserTest[] = [
           await page.locator("iframe.artifact-embed-page").isVisible(),
         ).toBeTrue();
       }
-      if (process.env.ARTIFACT_LINK_SHOTS)
-        await page.screenshot({
-          path: `${process.env.ARTIFACT_LINK_SHOTS}/${width}.png`,
-        });
+      await screenshot(page, `panes-artifacts/links/${width}`);
       await page.goto(`${base}#agent=artifact-link-source`);
       await page.locator("a", { hasText: "Shared" }).click();
       await page
@@ -1482,376 +892,10 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  // Regression: #3203 closed Artifact discovery must update availability without another metadata refresh.
-  async function test_artifact_published_mid_session_becomes_reachable(
-    browser,
-    base,
-  ) {
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    let published = false;
-    let nonemptyHeld = false;
-    let metadataHeld = false;
-    let releaseArtifacts = () => {};
-    let releaseMetadata = () => {};
-    const artifactsReady = new Promise<void>(
-      (resolve) => (releaseArtifacts = resolve),
-    );
-    const metadataReady = new Promise<void>(
-      (resolve) => (releaseMetadata = resolve),
-    );
-    await page.exposeFunction("artifactMetadataApplied", () => {
-      if (metadataHeld) releaseArtifacts();
-    });
-    await page.addInitScript(() => {
-      const browser = globalThis as any;
-      const fetch = browser.fetch.bind(browser);
-      browser.fetch = async (...args: any[]) => {
-        const response = await fetch(...args);
-        const url = new URL(response.url);
-        if (
-          url.pathname.startsWith("/api/conversations/") &&
-          url.searchParams.get("focused") === "1"
-        ) {
-          const json = response.json.bind(response);
-          response.json = async () => {
-            const body = await json();
-            browser.requestAnimationFrame(() =>
-              browser.requestAnimationFrame(() =>
-                browser.artifactMetadataApplied(),
-              ),
-            );
-            return body;
-          };
-        }
-        return response;
-      };
-    });
-    await page.route(`${base}api/conversations/*?focused=1`, async (route) => {
-      const selected = nonemptyHeld && !metadataHeld;
-      if (selected) metadataHeld = true;
-      const response = await route.fetch();
-      if (metadataHeld && !selected) await metadataReady;
-      await route.fulfill({ response });
-    });
-    await page.route(`${base}api/artifacts**`, async (route) => {
-      const url = route.request().url();
-      if (url.includes("/file"))
-        return route.fulfill({
-          body: "# Browser artifact\nVisible body.\n",
-          contentType: "text/markdown; charset=utf-8",
-        });
-      if (url.includes("/versions"))
-        return route.fulfill({
-          json: [
-            {
-              version: ARTIFACT_VERSION,
-              status: "ready",
-              created_at: ARTIFACT.created_at,
-            },
-          ],
-        });
-      if (published) {
-        nonemptyHeld = true;
-        await page.keyboard.press("Shift");
-        await artifactsReady;
-      }
-      return route.fulfill({ json: published ? [ARTIFACT] : [] });
-    });
-    try {
-      const emptyArtifacts = page.waitForResponse(
-        (response) => new URL(response.url()).pathname === "/api/artifacts",
-      );
-      await gotoRoot(page, base);
-      await page.locator(".agent").first().waitFor();
-      const entry = page.locator(
-        '#pane-menu .pane-menu-item[data-pane="report"]',
-      );
-      await (await emptyArtifacts).finished();
-      await entry.waitFor({ state: "detached" });
-      expect(await entry.count()).toBe(0);
-      published = true;
-      await entry.waitFor({ state: "attached", timeout: 25_000 });
-      await page.locator("#pane-fab").click();
-      await entry.click();
-      await page.locator(".report-doc").waitFor();
-      expect(errors).toEqual([]);
-    } finally {
-      releaseArtifacts();
-      releaseMetadata();
-      await page.unrouteAll({ behavior: "wait" });
-      await context.close();
-    }
-  },
-  async function test_artifact_comment_preserves_reader_scroll(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    const paragraphs = Array.from(
-      { length: 80 },
-      (_, i) => `Paragraph ${i}: long artifact body.`,
-    );
-    paragraphs.splice(40, 0, "Reader anchor");
-    await routeArtifacts(
-      page,
-      base,
-      `# Browser artifact\n\n${paragraphs.join("\n\n")}`,
-    );
-    await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
-    await page.locator("#pane-fab").click();
-    await page.locator('.pane-menu-item[data-pane="report"]').click();
-    await page
-      .locator(".report-doc p", { hasText: "Reader anchor" })
-      .scrollIntoViewIfNeeded();
-    await page.evaluate(
-      "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
-    );
-    const paneBody = page.locator('.pane-col[data-pane="report"]');
-    const readerScroll = await paneBody.evaluate(
-      (element) =>
-        (globalThis as any).getComputedStyle(element) &&
-        (element as any).scrollTop,
-    );
-    expect(readerScroll).toBeGreaterThan(0);
-    await dispatchArtifactSelection(page, "touch", "Reader anchor");
-    await page.waitForFunction(
-      "getSelection()?.toString() === 'Reader anchor'",
-    );
-    const popover = page.locator(".report-comment-popover:not([hidden])");
-    await popover.waitFor();
-    await popover.locator("textarea").fill("keep my place");
-    await popover.locator(".report-comment-popover-submit").click();
-    await page.waitForFunction(
-      "document.activeElement?.classList.contains('report-comment-edit')",
-    );
-    expect(
-      Math.abs(
-        (await paneBody.evaluate((element) => (element as any).scrollTop)) -
-          readerScroll,
-      ),
-    ).toBeLessThanOrEqual(1);
-    expect(errors).toEqual([]);
-    await context.close();
-  },
-  // Regression: #2351 artifact comment send bar floated 14px above the desktop pane bottom
-  async function test_artifact_send_bar_meets_pane_bottom(browser, base) {
-    const paragraphs = Array.from(
-      { length: 60 },
-      (_, i) => `Paragraph ${i}: long artifact body.`,
-    );
-    for (const phone of [false, true]) {
-      const context = await browser.newContext({
-        viewport: phone
-          ? { width: 390, height: 844 }
-          : { width: 1280, height: 800 },
-        isMobile: phone,
-        hasTouch: phone,
-      });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
-      await routeArtifacts(
-        page,
-        base,
-        `# Browser artifact\nVisible body.\n\n${paragraphs.join("\n\n")}`,
-      );
-      await gotoRoot(page, base);
-      await page.locator(".agent").first().waitFor();
-      await page.evaluate((id) => {
-        (globalThis as any).location.hash = `artifact=${id}`;
-      }, ARTIFACT.id);
-      const pane = page.locator('.pane-col[data-pane="report"]');
-      await pane.locator(".report-doc", { hasText: "Visible body" }).waitFor();
-      await dispatchArtifactSelection(page, phone ? "touch" : "mouse");
-      const popover = page.locator(".report-comment-popover:not([hidden])");
-      await popover.waitFor();
-      await popover.locator("textarea").fill("bar placement");
-      await popover.locator(".report-comment-popover-submit").click();
-      const bar = page.locator(".report-sendbar.on");
-      await bar.waitFor();
-      await pane
-        .locator(".report-doc p", { hasText: "Paragraph 30:" })
-        .scrollIntoViewIfNeeded();
-      await page.evaluate(
-        "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))",
-      );
-      const [paneBox, barBox] = await Promise.all([
-        pane.boundingBox(),
-        bar.boundingBox(),
-      ]);
-      expect(
-        Math.abs(barBox!.y + barBox!.height - (paneBox!.y + paneBox!.height)),
-      ).toBeLessThanOrEqual(1);
-      expect(errors).toEqual([]);
-      await context.close();
-    }
-  },
-  // Regression: #3247 refresh must not reopen a submitted pane over comment retry controls.
-  async function test_artifact_comment_pointer_flow(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await routeArtifacts(page, base);
-    const submissions: any[] = [];
-    let attempts = 0;
-    await page.route(
-      `${base}api/conversations/${rootAgentId()}/deliver`,
-      (route) => {
-        attempts++;
-        submissions.push(route.request().postDataJSON());
-        if (attempts === 1 || attempts === 3)
-          return route.fulfill({ status: 500, json: { detail: "retry" } });
-        return route.fulfill({ json: { steer: false } });
-      },
-    );
-    await gotoRoot(page, base);
-    await page.locator('.rail-btn[data-pane="report"]').click();
-    await page
-      .locator('#dock .dv-tab[data-dock-panel="report"] button')
-      .click();
-    await page
-      .locator('.pane-col[data-pane="report"]')
-      .waitFor({ state: "detached" });
-    await page.locator('.rail-btn[data-pane="tips"]').click();
-    await page.locator('.rail-btn[data-pane="report"]').click();
-    await page.locator('.pane-col[data-pane="report"] .report-doc').waitFor();
-    await page.locator(".report-doc", { hasText: "Visible body" }).waitFor();
-    await dispatchArtifactSelection(page, "touch");
-    let popover = page.locator(".report-comment-popover:not([hidden])");
-    await popover.waitFor();
-    await popover.locator("textarea").fill("draft survives tap");
-    const caret = await popover
-      .locator("textarea")
-      .evaluate((node: any) => [node.selectionStart, node.selectionEnd]);
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.waitForFunction(
-      () =>
-        (globalThis as any).document.querySelectorAll(".pane-col").length === 1,
-    );
-    expect(await page.locator(".pane-col").count()).toBe(1);
-    expect(
-      await page.locator(".pane-col.mobile-active").getAttribute("data-pane"),
-    ).toBe("report");
-    expect(await popover.locator("textarea").inputValue()).toBe(
-      "draft survives tap",
-    );
-    expect(
-      await popover
-        .locator("textarea")
-        .evaluate((node: any) => node.ownerDocument.activeElement === node),
-    ).toBeTrue();
-    expect(
-      await popover
-        .locator("textarea")
-        .evaluate((node: any) => [node.selectionStart, node.selectionEnd]),
-    ).toEqual(caret);
-    await dispatchArtifactTap(page, "touch");
-    expect(await popover.isVisible()).toBeTrue();
-    expect(await popover.locator("textarea").inputValue()).toBe(
-      "draft survives tap",
-    );
-    await page.locator(".report-comment-popover-cancel").click();
-    expect(await page.locator(".report-comment").count()).toBe(0);
-    await dispatchArtifactSelection(page, "touch");
-    await page.locator(".report-comment-popover:not([hidden])").waitFor();
-    await page.locator(".report-comment-popover textarea").fill("first note");
-    await page.locator(".report-comment-popover-submit").click();
-    expect(await page.locator(".report-comment").count()).toBe(1);
-    await page.waitForFunction(
-      "document.activeElement?.classList.contains('report-comment-edit') && !getSelection()?.toString()",
-    );
-    await dispatchArtifactSelection(page, "touch", "Browser artifact");
-    const stagedPopover = page.locator(".report-comment-popover:not([hidden])");
-    await stagedPopover.waitFor();
-    await stagedPopover.locator("textarea").fill("draft with staged comment");
-    await dispatchArtifactTap(page, "touch");
-    expect(await page.locator(".report-comment").count()).toBe(1);
-    expect(await stagedPopover.locator("textarea").inputValue()).toBe(
-      "draft with staged comment",
-    );
-    await page.locator(".report-comment-popover-cancel").click();
-    await dispatchArtifactSelection(page, "touch", "Browser artifact");
-    await page.locator(".report-comment-popover:not([hidden])").waitFor();
-    await page.locator(".report-comment-popover textarea").fill("second note");
-    await page.locator(".report-comment-popover-submit").click();
-    expect(await page.locator(".report-comment").count()).toBe(2);
-    await page.locator(".report-sendbar-send").click();
-    expect(
-      await page.locator('.pane-col[data-pane="report"]').isVisible(),
-    ).toBeTrue();
-    await page
-      .getByRole("button", { name: "Close Artifacts", exact: true })
-      .click();
-    const pending = page.locator("[data-comment-send]");
-    const failure = pending.getByRole("alert");
-    await failure.waitFor();
-    expect(await pending.textContent()).toContain("first note");
-    expect(await pending.textContent()).toContain("second note");
-    await failure.getByRole("button", { name: "Retry" }).click();
-    await pending.waitFor({ state: "detached" });
-    expect(submissions.length).toBe(2);
-    expect(submissions[1].client_message_id).toBe(
-      submissions[0].client_message_id,
-    );
-    const payload = String(submissions[0].content);
-    expect(payload).toContain(ARTIFACT.title);
-    expect(payload).toContain(ARTIFACT.id);
-    expect(payload).toContain(ARTIFACT_VERSION);
-    expect(payload).toContain(
-      `$CHAT_DATA_DIR/artifact_repos/${rootAgentId()}/${ARTIFACT.id}`,
-    );
-    expect(payload).toContain("first note");
-    expect(payload).toContain("second note");
-    await page.locator("#pane-fab").click();
-    await page.locator('.pane-menu-item[data-pane="report"]').click();
-    await page.locator('.pane-col[data-pane="report"] .report-doc').waitFor();
-    await dispatchArtifactSelection(page, "touch");
-    await page
-      .locator(".report-comment-popover:not([hidden]) textarea")
-      .fill("Discard this note");
-    await page.locator(".report-comment-popover-submit").click();
-    await page.locator(".report-sendbar-send").click();
-    expect(
-      await page.locator('.pane-col[data-pane="report"]').isVisible(),
-    ).toBeTrue();
-    await page
-      .getByRole("button", { name: "Close Artifacts", exact: true })
-      .click();
-    const refreshed = page.waitForResponse(
-      (response) =>
-        response.request().method() === "GET" &&
-        new URL(response.url()).pathname ===
-          `/api/conversations/${rootAgentId()}`,
-    );
-    await page.evaluate("window.dispatchEvent(new Event('focus'))");
-    await (await refreshed).finished();
-    const discarded = page.locator("[data-comment-send]");
-    page.once("dialog", (dialog) => void dialog.accept());
-    await discarded.getByRole("button", { name: "Discard" }).click();
-    await discarded.waitFor({ state: "detached" });
-    expect(attempts).toBe(3);
-    expect(errors).toEqual([]);
-    await context.close();
-  },
   async function test_compact_artifact_header(browser, base) {
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await routeArtifacts(page, base);
     await page.goto(`${base}#agent=${rootAgentId()}&artifact=${ARTIFACT.id}`);
     await page.locator(".agent").first().waitFor();
@@ -1893,11 +937,9 @@ export const tests: BrowserTest[] = [
     await context.close();
   },
   async function test_artifact_delete_flow(browser, base) {
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     const nextVersion = "e".repeat(40);
     const other = {
       ...ARTIFACT,
@@ -1992,13 +1034,11 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await context.close();
   },
-  // Regression: #3307 #3363 #3397 Artifact Markdown opens siblings in-app and reports missing or escaping paths.
-  async function test_svg_artifact_asset(browser, base, data) {
-    const context = await browser.newContext({
+  // Regression: #3307 Artifact Markdown omits unnecessary link labels.
+  async function test_svg_artifact_asset(browser, base) {
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await routeArtifacts(
       page,
       base,
@@ -2022,15 +1062,13 @@ export const tests: BrowserTest[] = [
     await assertDocumentLinks(page.locator(".report-doc .artifact-markdown"));
     expect(errors).toEqual([]);
     await context.close();
-    await artifactLinks(browser, base, data);
   },
+  artifactLinks,
   // Feature: #2323 a theme change refreshes the sandboxed page without rebuilding.
   async function test_published_app_runs_in_the_pane(browser, base, data) {
-    const context = await browser.newContext({
+    const { page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     const app = await postFixture(base, "seed-artifact-app");
     await page.goto(`${base}#agent=${rootAgentId()}&artifact=${app.id}`);
     await page.locator('.pane-col[data-pane="report"]').waitFor();
@@ -2090,6 +1128,7 @@ export const tests: BrowserTest[] = [
       .getAttribute("sandbox");
     const themePath = join(data, "data/config/themes.json");
     try {
+      await mkdir(join(data, "data/config"), { recursive: true });
       for (const theme of ["GitHub Light", "Ocean"]) {
         const reloaded = page.waitForResponse((response) =>
           response.url().includes(`/api/artifacts/${app.id}/page`),

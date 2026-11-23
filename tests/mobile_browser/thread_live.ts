@@ -513,15 +513,15 @@ export const liveTests: BrowserTest[] = [
       await mockConversation(page, base, "main", () => thread);
       await gotoRoot(page, base);
       await page
-        .locator('#live-bar .working .live-label[title="Thinking"]')
+        .locator('#status-bar .working .status-bar-label[title="Thinking"]')
         .waitFor();
       const contents = page.locator(".turn.current .msg.assistant > .content");
       expect(await contents.allInnerTexts()).toEqual([
         "The provider response is complete.",
       ]);
-      const workLabel = page.locator("#live-bar .working .live-label");
+      const workLabel = page.locator("#status-bar .working .status-bar-label");
       expect(await workLabel.getAttribute("title")).toBe("Thinking");
-      const chip = page.locator("#live-bar .shell-chip");
+      const chip = page.locator("#status-bar .shell-chip");
       expect(await chip.count()).toBe(1);
       expect((await chip.innerText()).trim()).toBe("1");
       expect(await chip.getAttribute("aria-label")).toBe(
@@ -714,7 +714,7 @@ export const liveTests: BrowserTest[] = [
         route.fulfill({ json: thread }),
       );
       await gotoRoot(page, base);
-      const label = page.locator(".working .live-label");
+      const label = page.locator(".working .status-bar-label");
       await label.waitFor();
       expect(await label.innerText()).toBe("Thinking");
       expect(await label.getAttribute("title")).toBe("Thinking");
@@ -733,7 +733,7 @@ export const liveTests: BrowserTest[] = [
       await page
         .locator('.agent[data-id="main"]')
         .evaluate((element) => (element as HTMLElement).click());
-      await page.locator("#live-bar .working").waitFor({ state: "detached" });
+      await page.locator("#status-bar .working").waitFor({ state: "detached" });
       expect(await page.locator(".turn-foot .turn-summary").count()).toBe(0);
       const hidden = page.locator(".activity-group-summary .turn-summary");
       await hidden.filter({ hasText: "Ran 2 commands" }).waitFor();
@@ -949,7 +949,7 @@ export const liveTests: BrowserTest[] = [
       }
     }
   },
-  async function test_queued_panel_shows_for_admitted_undispatched_send(
+  async function test_queued_status_bar_shows_for_admitted_undispatched_send(
     browser,
     base,
   ) {
@@ -977,7 +977,7 @@ export const liveTests: BrowserTest[] = [
       const errors = captureErrors(page);
       await mockConversation(page, base, "main", () => thread);
       await gotoRoot(page, base);
-      const queued = page.locator(".live-panel-box.is-queued", {
+      const queued = page.locator(".status-bar-box.is-queued", {
         hasText: "Queued",
       });
       await queued.waitFor();
@@ -1005,14 +1005,14 @@ export const liveTests: BrowserTest[] = [
         .locator('.agent[data-id="main"]')
         .evaluate((element) => (element as HTMLElement).click());
       await page.locator(".pending-failure").waitFor();
-      expect(await page.locator(".live-panel-box.is-queued").count()).toBe(0);
+      expect(await page.locator(".status-bar-box.is-queued").count()).toBe(0);
       expect(await page.locator(".pending-failure").count()).toBe(1);
       expect(errors).toEqual([]);
     } finally {
       await context.close();
     }
   },
-  async function test_interrupted_turn_hides_error_and_keeps_one_live_panel(
+  async function test_interrupted_turn_hides_error_and_keeps_one_status_bar(
     browser,
     base,
   ) {
@@ -1072,9 +1072,9 @@ export const liveTests: BrowserTest[] = [
       await gotoRoot(page, base);
       await page.getByText("Stopped", { exact: true }).waitFor();
       expect(await page.locator(".error-note").count()).toBe(0);
-      expect(await page.locator(".live-panel").count()).toBe(1);
-      expect(await page.locator(".live-panel-box.is-waiting").count()).toBe(0);
-      expect(await page.locator(".live-panel-box.is-queued").count()).toBe(1);
+      expect(await page.locator(".status-bar").count()).toBe(1);
+      expect(await page.locator(".status-bar-box.is-waiting").count()).toBe(0);
+      expect(await page.locator(".status-bar-box.is-queued").count()).toBe(1);
       expect((await page.locator(".shell-chip").innerText()).trim()).toBe("2");
       expect(
         await page.locator(".shell-chip").getAttribute("aria-label"),
@@ -1088,15 +1088,15 @@ export const liveTests: BrowserTest[] = [
       await page.reload();
       await page.getByText("Stopped", { exact: true }).waitFor();
       expect(await page.locator(".error-note").count()).toBe(0);
-      expect(await page.locator(".live-panel").count()).toBe(1);
-      expect(await page.locator(".live-panel-box.is-waiting").count()).toBe(0);
-      expect(await page.locator(".live-panel-box.is-queued").count()).toBe(1);
+      expect(await page.locator(".status-bar").count()).toBe(1);
+      expect(await page.locator(".status-bar-box.is-waiting").count()).toBe(0);
+      expect(await page.locator(".status-bar-box.is-queued").count()).toBe(1);
     } finally {
       await context.close();
     }
   },
   // Regression: #3229 wait for settled scrolling and full streamed paragraphs before measuring preservation (also #3065; #2976 short replies add no space; long replies stop at the send; #3285 scripted scrolls release the pin).
-  async function test_send_pins_message_and_live_bar_stays_visible(
+  async function test_send_pins_message_and_status_bar_stays_visible(
     browser,
     base,
   ) {
@@ -1138,7 +1138,7 @@ export const liveTests: BrowserTest[] = [
             agent: empty.agent,
             gate: "reply",
           });
-        await shortPage.locator("#live-bar").waitFor({ state: "hidden" });
+        await shortPage.locator("#status-bar").waitFor({ state: "hidden" });
         expect(shortErrors).toEqual([]);
         await shortPage.close();
         const page = await context.newPage();
@@ -1189,7 +1189,7 @@ export const liveTests: BrowserTest[] = [
               scroll: box("#scroll"),
               sent: sent?.getBoundingClientRect(),
               queued: queued?.getBoundingClientRect(),
-              bar: box("#live-bar .working"),
+              bar: box("#status-bar .working"),
               composer: box("#composer"),
               jump: document
                 .querySelector("#scroll-btn")!
@@ -1226,13 +1226,13 @@ export const liveTests: BrowserTest[] = [
               const box = (selector: string) =>
                 document.querySelector(selector)!.getBoundingClientRect();
               return {
-                barTop: box("#live-bar .live-panel-box").top,
-                bar: box("#live-bar .live-panel-box").bottom,
+                barTop: box("#status-bar .status-bar-box").top,
+                bar: box("#status-bar .status-bar-box").bottom,
                 staged: box("#attachments"),
                 composer: box("#composer").top,
               };
             });
-          await visibleAndUncovered(page, "#live-bar .live-panel-head");
+          await visibleAndUncovered(page, "#status-bar .status-bar-head");
           await visibleAndUncovered(page, "#input");
           const fused = await edges();
           expect(fused.composer - fused.bar).toBeLessThanOrEqual(1);
@@ -1253,7 +1253,7 @@ export const liveTests: BrowserTest[] = [
           expect(
             Math.abs(withAttachment.composer - withAttachment.bar),
           ).toBeLessThanOrEqual(1);
-          await visibleAndUncovered(page, "#live-bar .live-panel-head");
+          await visibleAndUncovered(page, "#status-bar .status-bar-head");
           await visibleAndUncovered(page, "#input");
           await page.locator("#attachments .attach-chip .rm").click();
           await page
@@ -1270,6 +1270,13 @@ export const liveTests: BrowserTest[] = [
         const x = Math.round(box.x + box.width / 2);
         const y = Math.round(box.y + box.height / 2);
         if (mobile) {
+          await page.locator("#scroll").evaluate((element) => {
+            element.addEventListener(
+              "scrollend",
+              () => (element.dataset.testTouchScrollEnded = "true"),
+              { once: true },
+            );
+          });
           const cdp = await context.newCDPSession(page);
           const touch = (
             type: "touchStart" | "touchMove" | "touchEnd",
@@ -1282,6 +1289,11 @@ export const liveTests: BrowserTest[] = [
           await touch("touchStart", -200);
           for (let dy = -180; dy <= 200; dy += 20) await touch("touchMove", dy);
           await touch("touchEnd", 200);
+          await page.waitForFunction(
+            () =>
+              document.querySelector<HTMLElement>("#scroll")!.dataset
+                .testTouchScrollEnded === "true",
+          );
         } else {
           await page.evaluate(() => {
             document.querySelector("#scroll")!.scrollTop -= 400;
@@ -1329,7 +1341,7 @@ export const liveTests: BrowserTest[] = [
         ).toBeLessThanOrEqual(1);
 
         await postFixture(base, "release", { agent, gate: "reply" });
-        await page.locator("#live-bar").waitFor({ state: "hidden" });
+        await page.locator("#status-bar").waitFor({ state: "hidden" });
         await page.evaluate(() => {
           const input = document.querySelector("#input") as any;
           for (const text of ["Rapid one.", "Rapid two."]) {
@@ -1342,7 +1354,7 @@ export const liveTests: BrowserTest[] = [
           hasText: "Rapid two.",
         });
         await rapid.waitFor();
-        await page.locator("#live-bar").waitFor({ state: "hidden" });
+        await page.locator("#status-bar").waitFor({ state: "hidden" });
         await waitForLayout(page);
         const scrollBox = (await page.locator("#scroll").boundingBox())!;
         const rapidBox = (await rapid.boundingBox())!;
@@ -1379,7 +1391,7 @@ export const liveTests: BrowserTest[] = [
           hasText: "Continue.",
         });
         await handoff.nth(1).waitFor({ state: "attached" });
-        await page.locator("#live-bar").waitFor({ state: "hidden" });
+        await page.locator("#status-bar").waitFor({ state: "hidden" });
         await waitForLayout(page);
         expect((await geometry()).scrollTop).toBe(queuedHandoffTop);
         expect(errors).toEqual([]);

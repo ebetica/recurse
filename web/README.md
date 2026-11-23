@@ -1,7 +1,8 @@
 # Browser app
 
-[index.html](index.html) loads `/static/app.js`. The [browser build](../src/launcher/build.cli.ts)
-bundles [app.ts](app.ts), [sidebar-worker.ts](sidebar-worker.ts) and
+[index.html](index.html) maps the unversioned entry URL to the served build
+before preloading any modules, so a lazy chunk cannot resolve the entry to a
+second URL. The [browser build](../src/launcher/build.cli.ts) bundles [app.ts](app.ts), [sidebar-worker.ts](sidebar-worker.ts) and
 [document-preview.worker.ts](document-preview.worker.ts). [sidebar/script.ts](sidebar/script.ts)
 starts `/static/sidebar-worker.js`; [the server](../src/web/notifications.ts)
 serves [push-worker.ts](push-worker.ts) at `/push-worker.js`.
@@ -114,12 +115,13 @@ install button or install-prompt hook.
 
 ## Styles and assets
 
-Keep the shell in [index.html](index.html) as markup. Put always-loaded CSS
-in `style.css` beside its feature, and add it to the ordered
-[app.css source list](../src/launcher/frontend_assets.ts). [app.css](app.css)
-comes last so shared buttons, badges, menus, dialogs, fields and panes keep
-winning ties. Optional views can link separate stylesheets on demand. Run
-`bun run build:assets` to see CSS edits in live mode.
+[index.html](index.html) provides markup and a placeholder for the selected
+palette, not authored style rules. Put page defaults and shared controls in
+[app.css](app.css). Put always-loaded feature rules in `style.css` beside the
+feature and add it to the [app.css source list](../src/launcher/frontend_assets.ts).
+The build appends `app.css` last so shared rules win ties. Optional views can
+load CSS on demand: the drawing editor links its own rules with Excalidraw's
+stylesheet on first use. Run `bun run build:assets` to see CSS edits in live mode.
 
 [theme.css](theme.css) defines tokens; [icons.ts](icons.ts) supplies inline icons.
 Sidebar overlays fade into their row surface, preserving selection outlines.

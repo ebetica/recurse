@@ -1,0 +1,312 @@
+/* Conversation header, status bar, status, overlays, and new-agent draft. */
+
+#conv-title.armed, #conv-title.stop-armed { color: var(--danger); }
+/* ---------- main pane ---------- */
+#main { flex: 1; min-width: 0; min-height: 0; height: 100%;
+  display: flex; flex-direction: column; overflow: hidden; }
+#topbar { height: 48px; flex: none; min-width: 0; display: flex; align-items: center;
+  position: relative; z-index: auto; padding: 0 var(--space-5);
+  font-weight: 600; font-size: 0.84375rem; gap: var(--space-2); background: var(--bg); }
+#menu-btn { display: inline-flex; min-width: 44px; min-height: 44px; background: none;
+  border: 0; color: var(--text); cursor: pointer; padding: var(--space-2) var(--space-3);
+  margin-left: calc(-1 * var(--space-3)); align-items: center; justify-content: center; }
+#menu-btn svg { width: 20px; height: 20px; }
+#menu-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+#up-top { display: none; flex: none; width: 44px; height: 44px;
+  padding: 0; border: 0; border-radius: 8px; background: none;
+  color: var(--text); align-items: center; justify-content: center; cursor: pointer; }
+#up-top.on { display: inline-flex; }
+#up-top:hover { background: var(--panel); }
+#up-top:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The title takes the remaining width without moving actions onto a new row. */
+#conv-titlebar { position: relative; display: flex; flex: 1; align-items: center; gap: var(--space-3); min-width: 0; }
+#conv-title { flex: 1; min-height: 44px; line-height: 44px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#key-mode { display: inline-flex; align-items: center; min-height: 22px;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+  padding: 1px var(--space-3); font: 600 0.6875rem/1.2 var(--font-mono);
+  white-space: nowrap; transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast); }
+#key-mode.pending { color: var(--accent); border-color: var(--accent-dim);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); }
+#key-mode.danger { color: var(--danger); border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent); }
+#key-mode.sr-only { min-height: 0; padding: 0; border: 0; }
+@media (pointer: coarse) { #key-mode { display: none; } }
+#top-actions { flex: none; display: flex; align-items: center; gap: var(--space-1); }
+:is(#top-actions, #pane-rail).prefix-on .top-act[data-key-hint]:not(:disabled) { color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); outline: 1px solid var(--accent-dim); }
+:is(#top-actions, #pane-rail).prefix-on .top-act[data-key-hint]::after { content: attr(data-key-hint);
+  display: inline-flex; color: var(--text); background: var(--panel-2);
+  border: 1px solid var(--accent-dim); border-radius: 6px; padding: 1px var(--space-2);
+  font: 600 0.6875rem/1.2 var(--font-mono); }
+.top-act { display: inline-flex; align-items: center; gap: var(--space-2);
+  background: none; border: 0; color: var(--muted); cursor: pointer;
+  padding: var(--space-2) var(--space-3); border-radius: 8px;
+  font: 600 0.78125rem/1 var(--font-sans);
+  /* the press-slide gesture must not select text, pop the touch callout, or be
+     stolen by the browser as a scroll when you slide down onto the menu */
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  touch-action: none; }
+.top-act:hover { color: var(--accent); background: var(--panel); }
+.top-act:disabled { color: var(--text-disabled); cursor: default; background: none; }
+#new-top { min-width: 44px; min-height: 44px; justify-content: center;
+  color: var(--text); }
+.top-act svg { flex: none; }
+.top-act .lbl { line-height: 1; white-space: nowrap; }
+
+#takeover-btn:disabled.on { cursor: wait; opacity: .65; }
+#share-link-btn[hidden], #new-top[hidden] { display: none; }
+/* Hold-to-confirm tooltip for Stop. One
+   hidden div per button, fixed-positioned so showing it never shifts
+   layout, shown and hidden instantly — no transitions, so nothing animates
+   under prefers-reduced-motion. Visual only (aria-hidden); the buttons'
+   own titles and labels carry the meaning. */
+.hold-tip { display: none; position: fixed; z-index: var(--z-toast);
+  padding: var(--space-3) var(--space-4);
+  border-radius: 8px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text); font-size: 0.78125rem;
+  line-height: 1.35; white-space: normal; width: max-content;
+  max-width: min(360px, calc(100vw - 24px));
+  overflow: hidden; pointer-events: none; }
+.hold-tip.on { display: block; display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
+/* the title doubles as a "copy this agent's id" control for a real agent */
+#conv-title.copyable { cursor: pointer; }
+#conv-title.copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+#conv-title.copied { color: var(--accent); }
+/* transient "Copied ID" pill; announced politely for screen readers */
+#title-copied { display: none; flex: none; font-size: 0.6875rem; font-weight: 600;
+  color: var(--accent); border: 1px solid var(--accent-dim); border-radius: 999px;
+  padding: 1px var(--space-3); white-space: nowrap; pointer-events: none; }
+#title-copied.on { display: inline-block; }
+/* the working indicator: a green dot before the title, matching the sidebar
+   status dot; only shown while a turn is running */
+#conv-status { width: 8px; height: 8px; border-radius: 50%; flex: none;
+  background: var(--running); display: none; }
+#conv-status.running { display: inline-block; animation: pulse 1.2s infinite; }
+/* subagent count "N 👤" pill, mirroring the sidebar .kids badge */
+#chip-kids:not(.on), #chip-queued:not(.on), #chip-state:not(.on) { display: none; }
+#chip-kids.on, #chip-queued.on, #chip-state.on { display: inline-flex; }
+/* the last-turn state: a round warn badge holding one alert icon */
+#chip-state { width: 18px; padding: 0; }
+/* Refresh dots occupy a fixed slot below the title, never a gap between
+   controls. Showing them and pulsing opacity cannot move the header. */
+#conv-freshness { position: absolute; left: 0; bottom: 2px;
+  display: inline-flex; align-items: center;
+  gap: var(--space-1); height: 4px; visibility: hidden; }
+#conv-freshness.on { visibility: visible; }
+#conv-freshness i { width: 4px; height: 4px; border-radius: 50%;
+  background: var(--muted); animation: freshness-dot 1.2s infinite; }
+#conv-freshness i:nth-of-type(2) { animation-delay: .2s; }
+#conv-freshness i:nth-of-type(3) { animation-delay: .4s; }
+@keyframes freshness-dot { 0%, 100% { opacity: .25; } 50% { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  #conv-freshness i { animation: none; opacity: .6; }
+}
+@media (forced-colors: active) { #conv-freshness i { animation: none; } }
+
+/* Global connection status floats below the topbar, so appearing after a
+   minute never shifts the cached thread, composer, or mobile title controls. */
+#connection-status { position: fixed; z-index: var(--z-dialog); top: 56px; right: 14px;
+  display: none; align-items: center; gap: var(--space-3); max-width: calc(100vw - 28px);
+  padding: var(--space-2) var(--space-3); border: 1px solid var(--danger);
+  border-left-width: 3px; border-radius: 10px; background: var(--panel-2);
+  color: var(--text); box-shadow: var(--expanded-lift);
+  font-size: 0.71875rem; line-height: 1.2; font-weight: 600; }
+#connection-status.on { display: flex; }
+#connection-status[data-state="offline"],
+#connection-status[data-state="auth-expired"] { border-color: var(--warn); }
+#connection-status .connection-symbol { color: var(--danger); font-size: 0.84375rem; }
+#connection-status[data-state="offline"] .connection-symbol,
+#connection-status[data-state="auth-expired"] .connection-symbol { color: var(--warn); }
+#connection-status .connection-label { overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+#connection-status button { white-space: nowrap; }
+#connection-status button:disabled { cursor: wait; }
+
+#shell-overlay { position: fixed; z-index: var(--z-dialog); inset: 48px 0 0; display: flex;
+  align-items: flex-start; justify-content: center; padding: var(--space-5);
+  pointer-events: none; }
+.shell-surface { pointer-events: auto; width: min(540px, calc(100vw - 2 * var(--space-5)));
+  max-height: min(72dvh, calc(100dvh - 48px - 124px));
+  overflow: hidden; padding: var(--space-5);
+  display: flex; flex-direction: column; }
+.shell-surface-head { display: flex; align-items: flex-start; gap: var(--space-4);
+  margin-bottom: var(--space-4); }
+.shell-surface-heading { min-width: 0; flex: 1; }
+.shell-surface h2 { margin: 0; color: var(--text); font-size: 0.9375rem;
+  font-weight: 700; line-height: 1.35; overflow-wrap: anywhere; }
+.shell-surface p { margin: var(--space-2) 0 0; color: var(--muted); font-size: 0.71875rem; line-height: 1.4; }
+.shell-list { list-style: none; min-height: 0; flex: 1 1 auto; margin: 0;
+  padding: 0 var(--space-1) 0 0; display: flex; flex-direction: column; gap: var(--space-3);
+  overflow-y: auto; }
+.shell-row { min-width: 0; padding: var(--space-3) var(--space-4); background: var(--panel-2);
+  border: 1px solid var(--border); border-radius: 8px; }
+.shell-command { color: var(--text); font: 0.78125rem/1.45 var(--font-mono); overflow-wrap: anywhere; white-space: pre-wrap; }
+.shell-meta { margin-bottom: var(--space-2); display: flex; align-items: center;
+  flex-wrap: wrap; gap: var(--space-2) var(--space-3); color: var(--muted); font-size: 0.6875rem; }
+.shell-state { border: 1px solid var(--border); border-radius: 999px;
+  padding: 1px var(--space-3); font-weight: 600; }
+.shell-state.running { color: var(--running); border-color: color-mix(in srgb, var(--running) 45%, transparent); }
+.shell-state.stopping { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.shell-limit, .shell-empty { margin: var(--space-3) 1px 0; color: var(--muted); font-size: 0.6875rem; }
+.shell-empty { margin-top: var(--space-1); }
+.agent-surface { padding: var(--space-3); }
+.agent-surface .shell-surface-head { align-items: center; gap: var(--space-3);
+  margin-bottom: var(--space-2); padding-left: var(--space-3); }
+.active-agent-list .agent:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; }
+.active-agent-list { list-style: none; min-height: 0; flex: 1 1 auto;
+  margin: 0; padding: 0; overflow-y: auto; }
+button.agent { display: block; width: 100%; background: transparent;
+  color: inherit; font: inherit; text-align: left; }
+.active-agent-list .agent .time { display: inline; }
+@media (pointer: coarse) {
+  .active-agent-list .agent { min-height: 44px; } }
+
+/* new-agent draft: a blank thread shown instantly before the agent exists */
+.draft-hello { color: var(--muted); text-align: center; margin: 12vh auto 0;
+  max-width: 440px; }
+.draft-hello h2 { color: var(--text); font-size: 1.0625rem; margin: 0; }
+.draft-hello .draft-sub { margin: var(--space-3) 0 0; font-size: 0.78125rem; color: var(--muted); }
+.draft-model-host { width: min(360px, 100%); margin: var(--space-5) auto 0;
+  text-align: left; }
+#draft-tag { display: inline-flex; align-items: center; gap: var(--space-3);
+  max-width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3);
+  border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  font: inherit; font-size: 0.78125rem; cursor: pointer; }
+#draft-tag:hover, #draft-tag:focus-visible { background: var(--panel-2); color: var(--text); }
+#draft-tag:focus-visible { outline: 2px solid var(--accent-dim); }
+
+/* The title-bar fade shows only while content continues under the bar. */
+#topbar::after { content: ""; position: absolute; left: 0; right: 0;
+  height: 24px; pointer-events: none; opacity: 0; transition: opacity var(--motion-fast);
+  top: 100%; z-index: var(--z-chrome); background: linear-gradient(var(--bg), transparent); }
+#topbar:has(~ #scroll.content-above)::after { opacity: 1; }
+/* An open phone pane covers the thread: the title bar meets its bar at a
+   hard line, never the thread's fade. */
+#topbar.pane-overlay::after { display: none; }
+/* Reading selections must not include title controls. */
+#topbar { -webkit-user-select: none; user-select: none; }
+#topbar :is(input, textarea) { -webkit-user-select: text; user-select: text; }
+
+.working { width: 100%; min-width: 0; max-width: 100%; color: var(--muted);
+  font-size: 0.78125rem; }
+/* The running turn's status bar stays above the composer, outside the
+   thread, so it is visible at any scroll position and covers nothing. */
+#status-bar[hidden], #status-bar.stale { display: none; }
+#status-bar .status-bar-thinking-summary {
+  -webkit-user-select: text; user-select: text; }
+
+/* Activity keeps one header height as status and streamed text change. */
+.status-bar-box { display: flex; flex-direction: column; align-items: stretch;
+  --status-bar-head-height: 32px;
+  gap: 0; width: 100%; min-width: 0; max-width: 100%;
+  height: calc(var(--status-bar-head-height) + 2px);
+  padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: 10px;
+  background: var(--panel-2); overflow: hidden; }
+.status-bar-head { display: flex; align-items: center; gap: var(--space-3);
+  flex: none; min-width: 0; width: 100%; height: var(--status-bar-head-height); white-space: nowrap; }
+.status-bar-actions { display: flex; align-items: center; flex: none; gap: var(--space-3);
+  margin-inline-start: auto; min-height: var(--status-bar-head-height); }
+.status-bar-box .status-bar-label { display: flex; align-items: center; flex: 1 1 auto;
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--muted); font-size: 0.78125rem; font-family: inherit;
+  border: 0; padding: 0; background: none; text-align: left; cursor: default; }
+.status-bar-box button.status-bar-label { align-self: stretch; gap: var(--space-3); cursor: pointer; }
+.status-bar-box button.status-bar-thinking-copy { padding-inline: var(--space-2);
+  -webkit-tap-highlight-color: transparent; }
+.status-bar-box button.status-bar-label:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; }
+.status-bar-box .status-bar-thinking-head { display: flex; align-items: center;
+  min-width: 0; width: 100%; overflow: hidden; white-space: nowrap; }
+.status-bar-box .status-bar-thinking-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; }
+.status-bar-box .thinking-elapsed { flex: 0 0 8ch; margin-left: auto;
+  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.status-bar-box .shell-chip.live, .status-bar-box .agent-chip {
+  flex: none; animation: none; }
+.status-bar-box .status-bar-title-changing { animation: thinking-cross-fade var(--motion-fast) ease-out; }
+.status-bar-box:has(.status-bar-thinking-summary) { height: auto; min-height: 34px;
+  padding-bottom: var(--space-3); }
+.status-bar-thinking-summary { flex: none; block-size: 6lh; padding-inline: var(--space-2);
+  overflow-y: auto; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; overflow-anchor: none;
+  white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--line-height-compact); }
+@supports (scrollbar-color: auto) {
+  .status-bar-thinking-summary { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
+}
+@media (pointer: fine) {
+  @supports selector(::-webkit-scrollbar) {
+    .status-bar-thinking-summary { overflow-y: scroll; scrollbar-width: auto; scrollbar-color: auto; }
+    .status-bar-thinking-summary::-webkit-scrollbar { width: 6px; }
+    .status-bar-thinking-summary::-webkit-scrollbar-button { display: none; }
+    .status-bar-thinking-summary::-webkit-scrollbar-thumb { background: var(--muted); border: 0; }
+  }
+}
+.status-bar-thinking-summary:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: -2px; }
+
+.status-bar-box:has(.status-bar-thinking-summary) {
+  background: var(--expanded-bg); border-color: var(--expanded-border);
+  box-shadow: var(--expanded-lift); }
+.status-bar-box button.status-bar-label[aria-expanded="true"] { color: var(--text); }
+
+@keyframes thinking-cross-fade { from { opacity: .2; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .status-bar-box .status-bar-title-changing {
+    animation: none; }
+}
+
+/* Status chips are count badges (app.css .badge): green for shells, amber
+   for agents. Both render in the status bar. */
+.shell-chip, .agent-chip { max-width: min(38vw, 190px); overflow: visible;
+  cursor: pointer; transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast); }
+.shell-chip .chip-label, .agent-chip .chip-label {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The desktop status bar is 34 px tall, so its chips fit the box at
+   every breakpoint. Coarse-pointer hit areas are transparent pseudo-elements
+   below; they must not stretch the chip or let its label escape the pill. */
+.shell-chip:focus-visible, .agent-chip:focus-visible {
+  outline: 2px solid var(--text); outline-offset: 2px; }
+
+@media (max-width: 700px) {
+  /* phone: collapse the topbar actions to icon-only to save the narrow width */
+  .top-act .lbl { display: none; }
+  .top-act { padding: var(--space-2) var(--space-3); }
+  #top-actions { gap: 0; }
+  /* One row, with full-size touch targets; pane chrome still measures this
+     bar and translates it away on scroll rather than resizing the viewport. */
+  #topbar { height: calc(48px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) var(--space-3) 0; gap: var(--space-2); z-index: calc(var(--z-drawer) + 4); }
+  #key-mode { display: none; }
+  #conv-titlebar { gap: var(--space-2); }
+  #top-actions.prefix-on .top-act::after { position: absolute; transform: translateY(24px); }
+  .top-act { position: relative; }
+  #conv-title { font-size: 0.9375rem; }
+  #connection-status { top: var(--mobile-shell-height);
+    right: max(8px, env(safe-area-inset-right)); }
+  #shell-overlay { inset: var(--mobile-shell-height) 0 0; padding: var(--space-3);
+    align-items: flex-start; justify-content: stretch; }
+  .shell-surface { width: 100%; max-width: none;
+    max-height: calc(100dvh - var(--mobile-shell-height) - 112px);
+    padding: var(--space-5); border-radius: 14px; }
+  #conv-titlebar #chip-kids { display: none; }
+  .phone-list #main { visibility: hidden; }
+  /* A crowded status bar shrinks the chip font on phones. */
+  .status-bar-box .shell-chip, .status-bar-box .agent-chip { font-size: 0.6875rem; }
+}
+@media (pointer: coarse) {
+  /* The chips keep their 18 px badge height. Their transparent
+     pseudo-elements provide 44 px targets without changing the status bar's
+     layout; each target stays in its chip's horizontal slot, so the
+     adjacent shell and agent targets do not overlap. */
+  .status-bar-box { --status-bar-head-height: 44px; overflow-x: clip; overflow-y: visible; }
+  .status-bar-box .shell-chip, .status-bar-box .agent-chip {
+    position: relative; z-index: var(--z-raised);
+  }
+  .status-bar-box .shell-chip::before,
+  .status-bar-box .agent-chip::before {
+    content: ""; position: absolute; z-index: 0;
+    top: 50%; left: 50%; width: max(100%, 44px); height: 44px;
+    transform: translate(-50%, -50%);
+  }
+}

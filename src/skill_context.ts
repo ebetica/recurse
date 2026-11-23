@@ -9,6 +9,7 @@ import type { BigIntStats } from "node:fs";
 import { dirname, join } from "node:path";
 import type { Config } from "./config";
 import { resolveRoots } from "./local_roots";
+import { pyStrip } from "./utils/python-whitespace";
 
 const SKILL_CONTEXT_VERSION = 4;
 const WORKDIR_CONTEXT_TTL_SECONDS = 5;
@@ -44,17 +45,6 @@ export function makeSkillRegistry(
     repoUrl: config.repoUrl,
     displayName: config.displayName,
   };
-}
-
-const PYTHON_WHITESPACE =
-  "\\t-\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
-const PYTHON_EDGE_SPACE = new RegExp(
-  `^[${PYTHON_WHITESPACE}]+|[${PYTHON_WHITESPACE}]+$`,
-  "gu",
-);
-
-function pythonStrip(value: string): string {
-  return value.replace(PYTHON_EDGE_SPACE, "");
 }
 
 function pythonJson(value: unknown): string {
@@ -132,26 +122,24 @@ export async function gitHeadMarker(workdir: string): Promise<MarkerValue[]> {
   let gitdir = dotgit;
   try {
     if (await pathIsFile(dotgit)) {
-      const value = pythonStrip((await readText(dotgit)).slice(0, 4096));
+      const value = pyStrip((await readText(dotgit)).slice(0, 4096));
       if (value.startsWith("gitdir:")) {
-        const candidate = pythonStrip(value.slice("gitdir:".length));
+        const candidate = pyStrip(value.slice("gitdir:".length));
         gitdir = candidate.startsWith("/")
           ? candidate
           : join(dirname(dotgit), candidate);
       }
     }
-    const value = pythonStrip(
+    const value = pyStrip(
       (await readText(join(gitdir, "HEAD"))).slice(0, 4096),
     );
     const marker: MarkerValue[] = [...(await pathMarker(gitdir)), value];
     if (value.startsWith("ref:")) {
-      const ref = pythonStrip(value.slice("ref:".length));
+      const ref = pyStrip(value.slice("ref:".length));
       let common = gitdir;
       const commondir = join(gitdir, "commondir");
       if (await pathIsFile(commondir)) {
-        const commonValue = pythonStrip(
-          (await readText(commondir)).slice(0, 4096),
-        );
+        const commonValue = pyStrip((await readText(commondir)).slice(0, 4096));
         common = commonValue.startsWith("/")
           ? commonValue
           : join(gitdir, commonValue);
@@ -184,7 +172,7 @@ export function leadingModuleHelp(source: string): string | null {
   if (!source.startsWith("/**", index)) return null;
   const end = source.indexOf("*/", index + 3);
   if (end < 0) return null;
-  return pythonStrip(
+  return pyStrip(
     source
       .slice(index + 3, end)
       .split(/\r?\n/gu)

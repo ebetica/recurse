@@ -1,12 +1,30 @@
 /**
- * JS/TS comment policy: short docs, headers and body comments; no ordinary
- * comments in tests. CLI: --help lists modes; tests/check.sh enforces it.
+ * Check JS/TS comment policy and ratchet missing source headers.
+ * CLI: --help lists modes; tests/check.sh enforces both rules.
  */
-import { lstatSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from "node:fs";
 import ts from "typescript";
 import { leadingModuleHelp } from "../../src/skill_context";
+import {
+  HEADER_BYTES,
+  isHeaderSource,
+  isLicenseComment,
+  sourceHeader,
+} from "../../tools/code_map_headers.ts";
 import { hasCommentOpener, scanTsComments } from "./ts_comments.ts";
 
+const HEADER_BASELINE = "tests/checks/source_header_baseline.json";
+const HEADER_ROOT = /^(?:src|web|tools|scripts)\//;
+const checksHeader = (file: string) =>
+  HEADER_ROOT.test(file) && isHeaderSource(file);
+const checksComments = (file: string) =>
+  /\.[cm]?[jt]sx?$/i.test(file) && !file.split("/").includes("fixtures");
 const TEST_FUNCTION =
   /(?:async function test_\w+\s*\(|(?:export )?const \w+\s*:\s*BrowserTest\s*=\s*async\s*\()/y;
 
@@ -116,10 +134,7 @@ export function checkComments(file: string, text: string): Violation[] {
     testExemption(c) ||
     c.pos === helpComment?.pos ||
     directive(c) ||
-    (c.pos < firstCode &&
-      /(?:@license\b|SPDX-License-Identifier:|(?:^|\n)\s*Copyright\b|^(?:MIT License|Apache License|GNU (?:General|Lesser) Public License|Licensed under\b|Permission is hereby granted\b))/i.test(
-        content(c),
-      ));
+    (c.pos < firstCode && isLicenseComment(content(c)));
   const ownLine = (c: ts.CommentRange) =>
     text.slice(text.lastIndexOf("\n", c.pos - 1) + 1, c.pos).trim() === "";
   const groups: ts.CommentRange[] = [];
@@ -282,10 +297,13 @@ function report(violations: Violation[], summary = false): string {
 if (import.meta.main) {
   if (process.argv.includes("--help")) {
     console.log(`Usage: bun tests/checks/comment_check.ts [--strict] [--summary]
-Check tracked JS/TS files outside fixtures. Ordinary body comments, file
-headers and declaration docs may span up to four lines; data declaration docs
-must fit on one line. In tests only tags, tool directives and licenses are allowed.
---strict         Fail on any finding (tests/check.sh ts).
+Check tracked JS/TS files outside fixtures. Ordinary body comments need no
+label. Body comments, file headers and declaration docs may span up to four
+lines; data declaration docs must fit on one line. In tests only tags, tool
+directives and licenses are allowed.
+Source files in src/, web/, tools/ and scripts/ need a leading module comment.
+On a clean run, commit any shrink to the missing-header baseline.
+--strict         Fail on any finding (used by the static gate).
 --summary        Print at most 50 findings, retaining full counts.
 Without --strict, findings only warn.
 JS/TS results are cached in the checkout's git directory, keyed by this
@@ -310,8 +328,7 @@ checker's source and each file's path and content.`);
     .split("\0")
     .filter(
       (file) =>
-        /\.[cm]?[jt]sx?$/i.test(file) &&
-        !file.split("/").includes("fixtures") &&
+        (checksComments(file) || checksHeader(file)) &&
         !lstatSync(file).isSymbolicLink(),
     );
   const cachePath = Bun.spawnSync([
@@ -327,6 +344,10 @@ checker's source and each file's path and content.`);
       readFileSync(import.meta.path, "utf8"),
       readFileSync(new URL("./ts_comments.ts", import.meta.url), "utf8"),
       readFileSync(
+        new URL("../../tools/code_map_headers.ts", import.meta.url),
+        "utf8",
+      ),
+      readFileSync(
         new URL("../../src/skill_context.ts", import.meta.url),
         "utf8",
       ),
@@ -339,8 +360,29 @@ checker's source and each file's path and content.`);
   } catch {}
   const results: Record<string, Violation[]> = {};
   const violations: Violation[] = [];
+  const baselined = new Set<string>(
+    existsSync(HEADER_BASELINE)
+      ? JSON.parse(readFileSync(HEADER_BASELINE, "utf8"))
+      : [],
+  );
+  const missing: string[] = [];
   for (const file of files) {
-    const text = readFileSync(file, "utf8");
+    const bytes = readFileSync(file);
+    if (
+      checksHeader(file) &&
+      !sourceHeader(file, bytes.toString("utf8", 0, HEADER_BYTES))
+    ) {
+      missing.push(file);
+      if (!baselined.has(file))
+        violations.push({
+          file,
+          line: 1,
+          rule: "missing-header",
+          reason: "add a leading comment describing this file's job",
+        });
+    }
+    if (!checksComments(file)) continue;
+    const text = bytes.toString("utf8");
     const key = `${version}:${Bun.hash(`${file}\0${text}`).toString(36)}`;
     const hit = cached[key];
     results[key] =
@@ -360,6 +402,10 @@ checker's source and each file's path and content.`);
     writeFileSync(`${cachePath}.${process.pid}`, JSON.stringify(results));
     renameSync(`${cachePath}.${process.pid}`, cachePath);
   } catch {}
+  if (!violations.length && missing.length < baselined.size) {
+    writeFileSync(HEADER_BASELINE, `${JSON.stringify(missing, null, 2)}\n`);
+    console.log(`Shrank ${HEADER_BASELINE}; commit the updated baseline.`);
+  }
   console.log(report(violations, process.argv.includes("--summary")));
   if (process.argv.includes("--strict") && violations.length)
     process.exitCode = 1;

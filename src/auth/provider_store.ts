@@ -41,9 +41,4 @@ export function pyError(name: string, message: string): Error {
   return error;
 }
 
-const PY_WHITESPACE =
-  /^[\t-\r\x1c-\x20\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\t-\r\x1c-\x20\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/gu;
-/** Python str.strip() with no argument. */
-export function pyStrip(value: string): string {
-  return value.replace(PY_WHITESPACE, "");
-}
+export { pyStrip } from "../utils/python-whitespace";

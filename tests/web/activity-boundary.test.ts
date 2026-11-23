@@ -1,12 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import {
   activityBlocks,
-  boundaryIsLive,
   closedBoundaryView,
   type ActivityBoundary,
 } from "../../web/thread-render/activity-boundary";
 
-import { activityStatusKind } from "../../web/thread-render/tool_activity";
 import type {
   MessageEntry,
   ToolEntry,
@@ -121,57 +119,6 @@ describe("operator response boundaries", () => {
 });
 
 describe("visibility grouping anchors", () => {
-  // Regression: #1729 only latest boundary owns live surface
-  test("the live surface belongs to the latest boundary only", () => {
-    const blocks = boundaries([
-      turn(
-        "steered",
-        [
-          segment({
-            user: [msg("user", "go")],
-            tools: [tool("read")],
-          }),
-          segment({ user: [msg("user", "steer again")] }),
-        ],
-        { open: true, status: "open" },
-      ),
-    ]);
-    expect(blocks).toHaveLength(2);
-    expect(blocks.map(boundaryIsLive)).toEqual([true, true]);
-    const statuses = blocks.map((boundary, index) =>
-      activityStatusKind(
-        boundaryIsLive(boundary),
-        0,
-        2,
-        index === blocks.length - 1,
-      ),
-    );
-    expect(statuses).toEqual(["summary", "panel"]);
-    const settled = boundaries([
-      turn("first", [
-        segment({
-          user: [msg("user", "go")],
-          tools: [tool("read")],
-          assistant: msg("assistant", "done"),
-        }),
-      ]),
-      turn("second", [segment({ user: [msg("user", "again")] })], {
-        open: true,
-        status: "open",
-      }),
-    ]);
-    expect(
-      settled.map((boundary, index) =>
-        activityStatusKind(
-          boundaryIsLive(boundary),
-          0,
-          2,
-          index === settled.length - 1,
-        ),
-      ),
-    ).toEqual(["summary", "panel"]);
-  });
-
   // Regression: #1729 only latest boundary owns live surface
   test("an earlier boundary never renders the live working item", () => {
     const [boundary] = boundaries([

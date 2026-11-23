@@ -124,9 +124,7 @@ import {
   agentSurfaceOpen,
   closeAgentSurface,
   closeShellSurface,
-  closeWorkingActivity,
   shellSurfaceOpen,
-  workingActivityOpen,
 } from "./conversation/shell-surface.js";
 import {
   anchoredPaint,
@@ -402,7 +400,6 @@ function closeLocalLayer(): void {
     closePaneKeyboardLayer() ||
     closeShellSurface() ||
     closeAgentSurface();
-  if (!closed) closed = closeWorkingActivity();
   if (!closed && paneFinderOpen()) closed = closePaneFinder();
   if (!closed && agentFinderOpen()) closed = closeAgentFinder();
   if (!closed && skillAutocompleteOpen()) closeSkillAutocomplete();
@@ -782,7 +779,7 @@ document.addEventListener(
     if (
       event.target instanceof Element &&
       (event.target.closest("dialog.mermaid-viewer[open]") ||
-        (event.target.closest(".live-thinking-summary") &&
+        (event.target.closest(".status-bar-thinking-summary") &&
           /^(?:ArrowUp|ArrowDown|PageUp|PageDown|Home|End| )$/.test(event.key)))
     )
       return;
@@ -847,7 +844,6 @@ document.addEventListener(
       promptOpen() ||
       artifactVersionMenuOpen() ||
       drawingEditorOpen() ||
-      workingActivityOpen() ||
       shellSurfaceOpen() ||
       agentSurfaceOpen() ||
       skillAutocompleteOpen() ||
@@ -937,10 +933,6 @@ document.addEventListener(
       !isTextEditorTarget(event.target)
     )
       target = "pane";
-    // Invariant: Expanded activity is an inline disclosure, not a global modal:
-    // navigation and typing continue normally. Escape alone closes it before
-    // interruption.
-    if (event.key === "Escape" && workingActivityOpen()) target = "dialog";
 
     // Invariant: A composer picker is the top Insert layer. Its target listener
     // owns movement, completion, and Escape before the modal reducer may leave

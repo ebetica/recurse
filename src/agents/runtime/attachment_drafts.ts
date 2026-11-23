@@ -6,8 +6,7 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { access, mkdir, open, readdir, unlink } from "node:fs/promises";
 import { join } from "node:path";
-import { AGENT_DRAFT_KEY_RE } from "../../config";
-import type { Config } from "../../config";
+import { AGENT_DRAFT_KEY_RE, type StatePaths } from "../../state_paths";
 import type {
   ConversationGuardToken,
   ConversationRecord,
@@ -90,12 +89,12 @@ export class AttachmentDrafts {
   private readonly flock: FlockOptions | undefined;
 
   constructor(
-    readonly config: Config,
+    private readonly paths: StatePaths,
     readonly conversations: ConversationAccess,
     readonly dirs: DraftDirs,
     options: DraftOptions = {},
   ) {
-    this.draftsDir = join(config.paths.DATA_DIR, "attachment_drafts");
+    this.draftsDir = join(paths.DATA_DIR, "attachment_drafts");
     this.ids = options.ids ?? defaultId;
     this.now = options.now ?? systemNow;
     this.flock = options.flock;
@@ -675,7 +674,7 @@ export class AttachmentDrafts {
       const touchedValue = meta.updated || meta.created || now;
       if (typeof touchedValue !== "number" && typeof touchedValue !== "boolean")
         return false;
-      if (now - Number(touchedValue) < this.config.paths.AGENT_TEMP_DRAFT_TTL)
+      if (now - Number(touchedValue) < this.paths.AGENT_TEMP_DRAFT_TTL)
         return false;
       await this.releaseDraftFiles(meta, token);
       await this.unlinkMissing(this.draftPath(token));

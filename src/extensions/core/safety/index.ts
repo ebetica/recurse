@@ -2,14 +2,8 @@
 // failures. policy.ts owns reviewer rules; review.ts/transcript.ts own action
 // evidence. Codemode also calls ordinary tools; MCP tools require scripts.
 
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DENIAL_LIMIT } from "./circuit-breaker.ts";
-import type { ReviewSelection } from "./model-policy.ts";
-import {
-  reviewAction,
-  type SafetyReviewAttempt,
-  type SafetyVerdict,
-} from "./review.ts";
+import type { SafetyReviewAttempt, SafetyVerdict } from "./review.ts";
 
 // Codemode has no fs/net/process access; review each nested state change.
 const BASE_REVIEWED_TOOLS = new Set([
@@ -203,69 +197,11 @@ export function reviewFailureMessage(
   return `[pi-safety] Safety review failed, so this action was allowed without review. Reviewer error: ${failure.summary}`;
 }
 
-function reviewerAuthFailure(verdict: SafetyVerdict): boolean {
-  return (
-    Boolean(verdict.procedural) &&
-    classifyReviewFailure(verdict.reason, false).category === "auth"
-  );
-}
-
 export function safeLog(message: string): void {
   // Invariant: Diagnostic logging must never reverse the fail-open decision.
   try {
     console.error(message);
   } catch {}
-}
-
-type ReviewAction = typeof reviewAction;
-
-/** Review with the first runner-owned candidate. Authentication is checked
- * before completion, so a provider auth failure can safely advance to the next
- * candidate without duplicating a review or weakening a real DENY. All attempts
- * are kept because a remote auth failure may still have unknown spend. */
-export async function reviewWithCandidates(
-  review: ReviewAction,
-  ctx: ExtensionContext,
-  reviewers: readonly ReviewSelection[],
-  args: {
-    rules: readonly string[];
-    transcript: string;
-    action: string;
-    durableEvidence: string;
-    conversationId: string | undefined;
-    complete?: Parameters<ReviewAction>[6];
-    inputs?: Parameters<ReviewAction>[9];
-  },
-): Promise<SafetyVerdict> {
-  const call = (candidate: ReviewSelection) =>
-    review(
-      ctx,
-      candidate.model,
-      candidate.effort,
-      args.rules,
-      args.transcript,
-      args.action,
-      args.complete,
-      args.durableEvidence,
-      args.conversationId,
-      args.inputs,
-    );
-  let selected = reviewers[0]!;
-  let verdict = await call(selected);
-  const reviewAttempts = [...(verdict.reviewAttempts ?? [])];
-  for (const candidate of reviewers.slice(1)) {
-    if (!reviewerAuthFailure(verdict)) break;
-    selected = candidate;
-    const candidateVerdict = await call(candidate);
-    reviewAttempts.push(...(candidateVerdict.reviewAttempts ?? []));
-    verdict = reviewAttempts.length
-      ? { ...candidateVerdict, reviewAttempts }
-      : candidateVerdict;
-  }
-  return {
-    ...verdict,
-    reviewer: { provider: selected.model.provider, model: selected.model.id },
-  };
 }
 
 /** The built-in reviewer retries once. Bound custom implementations too so one

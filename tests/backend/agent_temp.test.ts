@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { agentTempLeaf } from "../../src/state_paths";
 import {
   cp,
   mkdir,
@@ -15,7 +16,11 @@ import { retire } from "../../src/utils/trash";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build, runSpec, type TempSpec } from "./fixtures/agent_temp/replay";
-import { fixtureStore } from "./fixtures/conversation_store/spec";
+import { buildWorld } from "./fixtures/agent_node/world";
+import { switchoverWorld } from "./fixtures/durable_host/host";
+import { timeoutScheduler } from "../../src/agents/runtime/stall_timer";
+import { TreeLifecycleBusy } from "../../src/utils/flock";
+import { probeMetadataFlock } from "./fixtures/metadata_flock";
 
 async function withRoot<T>(fn: (root: string) => Promise<T>): Promise<T> {
   const root = await mkdtemp(join(tmpdir(), "agent-temp-"));
@@ -46,7 +51,7 @@ test("requests stay available while AgentTemp drains retired trees", () =>
     await mkdir(outside);
     await writeFile(join(outside, "keep"), "outside bytes");
     await symlink(outside, join(victim, "escape"));
-    retire(victim, temp.config.paths.TRASH_DIR);
+    retire(victim, temp.paths.TRASH_DIR);
     let finished = false;
     const server = Bun.serve({
       hostname: "127.0.0.1",
@@ -62,7 +67,7 @@ test("requests stay available while AgentTemp drains retired trees", () =>
       const response = await fetch(server.url);
       expect(await response.json()).toEqual({ draining: true });
       await draining;
-      expect(await readdir(temp.config.paths.TRASH_DIR)).toEqual([]);
+      expect(await readdir(temp.paths.TRASH_DIR)).toEqual([]);
       expect(await exists(victim)).toBe(false);
       expect(await readFile(join(outside, "keep"), "utf8")).toBe(
         "outside bytes",
@@ -113,8 +118,8 @@ test("AgentTemp migrates legacy collections and drafts before adoption and retir
     );
     for (const key of [draftKey, agentKey]) {
       const legacy = join(
-        temp.config.paths.AGENT_TEMP_INSTANCE_DIR,
-        temp.config.agentTempLeaf(key),
+        temp.paths.AGENT_TEMP_INSTANCE_DIR,
+        agentTempLeaf(temp.paths, key),
       );
       await mkdir(legacy, { recursive: true });
       await rename(temp.uploadsDir(key), join(legacy, "uploads"));
@@ -125,11 +130,11 @@ test("AgentTemp migrates legacy collections and drafts before adoption and retir
     );
     expect(
       await exists(
-        join(temp.config.paths.AGENT_TEMP_INSTANCE_DIR, agentKey, "uploads"),
+        join(temp.paths.AGENT_TEMP_INSTANCE_DIR, agentKey, "uploads"),
       ),
     ).toBe(true);
     await cp(
-      join(temp.config.paths.AGENT_TEMP_INSTANCE_DIR, agentKey, "uploads"),
+      join(temp.paths.AGENT_TEMP_INSTANCE_DIR, agentKey, "uploads"),
       temp.uploadsDir(agentKey),
       { recursive: true },
     );
@@ -145,10 +150,7 @@ test("AgentTemp migrates legacy collections and drafts before adoption and retir
       ),
     ).toBe("existing");
     expect(
-      await readFile(
-        join(temp.config.paths.DATA_DIR, ".agent-files-v1"),
-        "utf8",
-      ),
+      await readFile(join(temp.paths.DATA_DIR, ".agent-files-v1"), "utf8"),
     ).toBe("1\n");
     expect((await drafts.readDraftFile(token, String(upload.id)))[1]).toEqual(
       new TextEncoder().encode("hi"),
@@ -157,64 +159,142 @@ test("AgentTemp migrates legacy collections and drafts before adoption and retir
     records.set("a", conv);
     await drafts.transferAttachmentDraft(token, conv);
     expect(await exists(join(temp.uploadsDir(draftKey), ".."))).toBe(false);
-    const trash = await readdir(temp.config.paths.TRASH_DIR);
+    const trash = await readdir(temp.paths.TRASH_DIR);
     expect(trash.length).toBe(1);
     const moved = await readdir(temp.uploadsDir("20260925-agent-a"));
     expect(moved.filter((n) => n.endsWith(".blob")).length).toBe(2);
   }));
 
-test("upload racing member retirement stores once or refuses", async () => {
-  for (let round = 0; round < 20; round++)
-    await withRoot(async (root) => {
-      const spec: TempSpec = {
-        name: "race",
-        tree: {
-          "data/attachment_counters.json": {
-            json: { version: 1, files: 0, bytes: 0 },
-          },
-        },
-        conversations: [{ id: "a", tmp_key: "20260925-agent-a" }],
-        ops: [],
-      };
-      await runSpec(root, spec);
-      const fenced = new Set<string>();
-      const { temp, conversations } = build(
-        root,
-        spec,
-        () => round + 1,
-        fenced,
-      );
-      await temp.ensureUploadsDir("20260925-agent-a");
-      const upload = temp
-        .addConversationUpload("a", new Uint8Array(64), "r.bin")
-        .then(
-          () => "stored",
-          (error: Error) => `${error.name}: ${error.message}`,
-        );
-      if (round % 2) await Bun.sleep(0);
-      fenced.add("a");
-      let retired: [boolean, string | null] = [false, null];
-      for (let i = 0; i < 200 && !retired[0]; i++) {
-        retired = await conversations.withPermanentDeleteStateGuard("a", () =>
-          temp.retireMemberCollection("a", "20260925-agent-a"),
-        );
-        if (!retired[0]) await Bun.sleep(1);
-      }
-      const outcome = await upload;
-      expect(retired).toEqual([true, null]);
-      expect(
-        await temp
-          .addConversationUpload("a", new Uint8Array(1), "late.bin")
-          .catch((error: Error) => error.message),
-      ).toBe("'attachment owner not found'");
-      expect(await exists(temp.uploadsDir("20260925-agent-a"))).toBe(false);
-      expect([
-        "stored",
-        "KeyError: 'attachment owner not found'",
-        "AttachmentError: attachment collection was retired",
-        "AttachmentError: attachment collection is unavailable",
-      ]).toContain(outcome);
+test("a fenced upload cannot reopen a collection while supervisor reap drains it", async () => {
+  const world = await switchoverWorld();
+  try {
+    const {
+      agentTemp: temp,
+      conversations,
+      create,
+      nodes,
+      reap,
+    } = world.instance;
+    const cid = "upload-race";
+    const conversation = await create.create({
+      cid,
+      model: "recurse-test/scripted",
     });
+    const collection = temp.uploadsDir(String(conversation.tmp_key));
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const fenced = Promise.withResolvers<void>();
+    const node = nodes.node(cid);
+    const lock = node.withLock;
+    const withLock = lock.bind(node);
+    let locked = 0;
+    node.withLock = (work, token) =>
+      withLock(async (held) => {
+        locked++;
+        try {
+          return await work(held);
+        } finally {
+          locked--;
+        }
+      }, token);
+    const assertGuardHeld = async () => {
+      expect(nodes.existing(cid)).toBe(node);
+      expect(locked).toBeGreaterThan(0);
+      for (const dir of [
+        conversations.paths.titleLockDir,
+        conversations.paths.muteLockDir,
+      ]) {
+        await expect(probeMetadataFlock(dir, cid)).rejects.toBeInstanceOf(
+          TreeLifecycleBusy,
+        );
+      }
+    };
+    const ensureUploadsDir = temp.ensureUploadsDir;
+    let directoryGuardChecked = false;
+    temp.ensureUploadsDir = async (key) => {
+      await assertGuardHeld();
+      const made = await ensureUploadsDir.call(temp, key);
+      directoryGuardChecked = true;
+      return made;
+    };
+    const beginReap = node.beginReap;
+    node.beginReap = () => {
+      const result = beginReap.call(node);
+      fenced.resolve();
+      return result;
+    };
+    const releaseFileOp = node.releaseFileOp;
+    const retireCollection = temp.retireMemberCollection;
+    let leaseReleased = false;
+    let collectionRetired = false;
+    node.releaseFileOp = () => {
+      releaseFileOp.call(node);
+      leaseReleased = true;
+    };
+    temp.retireMemberCollection = async (...args) => {
+      expect(leaseReleased).toBe(true);
+      await assertGuardHeld();
+      const result = await retireCollection.apply(temp, args);
+      collectionRetired = true;
+      return result;
+    };
+    const add = temp.addConversationUpload;
+    let upload: Promise<Record<string, unknown>> | undefined;
+    let deletion: Promise<string[]> | undefined;
+    try {
+      expect(await exists(collection)).toBe(false);
+      await reap.admitConversationUpload(cid, new Uint8Array(1), "before.bin");
+      expect(directoryGuardChecked).toBe(true);
+      expect(await exists(collection)).toBe(true);
+      leaseReleased = false;
+      temp.addConversationUpload = async (...args) => {
+        entered.resolve();
+        await release.promise;
+        return add.apply(temp, args);
+      };
+      upload = reap.admitConversationUpload(
+        cid,
+        new Uint8Array(64),
+        "racing.bin",
+      );
+      await Promise.race([
+        entered.promise,
+        upload.then(() => {
+          throw new Error("Upload skipped the real worker");
+        }),
+      ]);
+      deletion = reap.reap(cid, null);
+      await Promise.race([
+        fenced.promise,
+        deletion.then(() => {
+          throw new Error("Reap skipped the node fence");
+        }),
+      ]);
+      expect(node.reaping).toBe(true);
+      expect(await exists(collection)).toBe(true);
+      release.resolve();
+      await expect(upload).rejects.toThrow("attachment owner not found");
+      expect(await deletion).toEqual([cid]);
+      expect(collectionRetired).toBe(true);
+      expect(world.load(cid)).toBeNull();
+      expect(await exists(collection)).toBe(false);
+      await expect(
+        reap.admitConversationUpload(cid, new Uint8Array(1), "late.bin"),
+      ).rejects.toThrow("attachment owner not found");
+      expect(await exists(collection)).toBe(false);
+    } finally {
+      release.resolve();
+      await Promise.allSettled([upload, deletion]);
+      temp.addConversationUpload = add;
+      temp.ensureUploadsDir = ensureUploadsDir;
+      temp.retireMemberCollection = retireCollection;
+      node.beginReap = beginReap;
+      node.releaseFileOp = releaseFileOp;
+      node.withLock = lock;
+    }
+  } finally {
+    await world.close();
+  }
 });
 
 test("fenced owner admission creates nothing", () =>
@@ -229,13 +309,13 @@ test("fenced owner admission creates nothing", () =>
     await expect(temp.admitUploadsDir("a", "20260925-agent-a")).rejects.toThrow(
       "attachment owner not found",
     );
-    expect(await exists(temp.config.paths.AGENT_TEMP_INSTANCE_DIR)).toBe(false);
+    expect(await exists(temp.paths.AGENT_TEMP_INSTANCE_DIR)).toBe(false);
   }));
 
 test("trash drain is single-flight and cadenced", () =>
   withRoot(async (root) => {
     const { temp } = build(root, { name: "drain", ops: [] });
-    const trashDir = temp.config.paths.AGENT_TEMP_TRASH_DIR;
+    const trashDir = temp.paths.AGENT_TEMP_TRASH_DIR;
     await mkdir(join(trashDir, sid(1)), { recursive: true });
     await Promise.all([
       temp.drainTrash({ force: true }),
@@ -246,7 +326,11 @@ test("trash drain is single-flight and cadenced", () =>
 
 test("legacy row without tmp_key gets one assigned under the real store's guards", () =>
   withRoot(async (root) => {
-    const store = fixtureStore(join(root, "store"));
+    const { conversations: store, configActions } = buildWorld({
+      root: join(root, "store"),
+      sink: { write: () => {} },
+      scheduler: timeoutScheduler,
+    });
     try {
       const cid = "legacy";
       await store.save({
@@ -264,6 +348,7 @@ test("legacy row without tmp_key gets one assigned under the real store's guards
       const spec: TempSpec = { name: "legacy", ops: [] };
       const { temp } = build(root, spec, () => 1, new Set(), {
         conversations: store,
+        configActions,
       });
       const conv = store.load(cid, { withPending: false })!;
       expect(conv.tmp_key).toBeUndefined();

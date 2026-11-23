@@ -1,23 +1,14 @@
 // Bounded async workdir Git/diff queries; lifecycle stays in tools/worktree.
 // Fresh summaries; default and HEAD include separately capped untracked names.
-// Metadata caches belong to one WorkdirGit instance.
-import { lstat, readFile, stat } from "node:fs/promises";
-import { open } from "node:fs/promises";
+// Concurrent summaries share Git work; pull request state belongs to PullRequests.
+import { constants } from "node:fs";
+import { open, stat } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, resolve } from "node:path";
-import { gitEnv, gitText, runBounded, type GitText } from "./git";
-import { prIdentity } from "./pull_request";
-import { pullRequestFiles } from "./pull_request/index";
-import { pyResolve } from "./utils";
+import { branchAt, gitText, pyStrip, PY_SPACE, type GitText } from "./git";
+import type { PrValue } from "./pull_request";
+import { anyAbortSignal, pyResolve } from "./utils";
 import { selectedWork, type SelectedWork } from "./workdir_git_work";
-
-// Python str.isspace() code points (str.strip() and unicode \s).
-const PY_SPACE =
-  "\\t\\n\\v\\f\\r\\x1c-\\x20\\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
-const PY_STRIP_RE = new RegExp(`^[${PY_SPACE}]+|[${PY_SPACE}]+$`, "gu");
-function pyStrip(text: string): string {
-  return text.replace(PY_STRIP_RE, "");
-}
 
 type Env = Readonly<Record<string, string | undefined>>;
 
@@ -27,13 +18,11 @@ interface WorkdirGitInputs {
   dataDir: string;
   /** The server's process environment (os.environ). */
   env: Env;
-  /** Monotonic seconds; defaults to performance.now() / 1000. */
-  now?: () => number;
-  /** Log one event, e.g. each `gh` call and why it ran. */
-  log?: (event: string, fields: Record<string, unknown>) => void;
+  lastBranchPr?(wt: string, branch: string | null): PrValue | null;
 }
 
 export const DIFF_REQUEST_TIMEOUT_MS = 10_000;
+export const CANDIDATE_REQUEST_TIMEOUT_MS = 5_000;
 const MAX_DIFF_BYTES = 1_000_000;
 const MAX_DIFF_STAT_BYTES = 64 * 1024;
 const MAX_NUMSTAT_BYTES = 512 * 1024;
@@ -42,10 +31,6 @@ const MAX_FILE_PATCH_BYTES = 200 * 1024;
 const MAX_FILE_CONTENT_BYTES = 1_000_000;
 const MAX_UNTRACKED_NAMES = 500;
 const DIFF_TIMEOUT = 10.0;
-const CANDIDATE_TIMEOUT = 5.0;
-const GH_TIMEOUT = 4.0;
-const GH_CACHE_TTL = 20.0;
-const BRANCH_PR_INTERVAL = 60.0;
 const DIFF_TRUNCATION_MARK = "\n... [diff truncated at the 1 MiB server cap]\n";
 const SHA_RE = /^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$/u;
 // Python's unicode `\s` is str.isspace(), not JavaScript's `\s`.
@@ -54,7 +39,6 @@ const BASE_REF_RE = new RegExp(
   "u",
 );
 const AUTO_BASE_CHAIN = ["origin/main", "main", "master"];
-const WORKDIR_FILE_MAX_BYTES = 8 * 1024;
 
 /** Python `str.splitlines()` without keepends. */
 function splitlines(text: string): string[] {
@@ -140,78 +124,6 @@ function diffSections(result: GitText): {
 
 const decoder = new TextDecoder("utf-8");
 
-/** owner/repo of a GitHub remote URL, or null. */
-function githubRepo(url: string): string | null {
-  const match =
-    /^(?:https:\/\/(?:[^/@\s]+@)?github\.com\/|ssh:\/\/(?:[^/@\s]+@)?github\.com\/|(?:[^@\s]+@)?github\.com:)([\w.-]{1,39})\/([\w.-]{1,100}?)(?:\.git)?$/u.exec(
-      url.trim(),
-    );
-  return match &&
-    ![match[1], match[2]].some((part) => part === "." || part === "..")
-    ? `${match[1]}/${match[2]}`
-    : null;
-}
-
-interface Head {
-  remote: string;
-  /** owner/repo of the remote. */
-  repo: string;
-  /** The remote branch the local branch tracks. */
-  branch: string;
-}
-
-export interface PrValue {
-  number: number;
-  title: string;
-  url: string;
-  baseRefName?: string;
-  /** OPEN, MERGED or CLOSED, as `gh pr list` reports it. */
-  state: string;
-  /** Its status checks in one word; null when it has none. */
-  checks: "pass" | "fail" | "pending" | null;
-  /** When it was opened, in epoch seconds; only from `pullRequest`. */
-  createdAt?: number;
-}
-
-const FAILED_CHECKS = new Set([
-  "FAILURE",
-  "ERROR",
-  "CANCELLED",
-  "TIMED_OUT",
-  "ACTION_REQUIRED",
-  "STARTUP_FAILURE",
-]);
-const PASSED_CHECKS = new Set(["SUCCESS", "NEUTRAL", "SKIPPED"]);
-
-/** One word for `gh pr view --json statusCheckRollup`. */
-function checksSummary(rollup: unknown): PrValue["checks"] {
-  if (!Array.isArray(rollup) || !rollup.length) return null;
-  const results = rollup.map((check: Record<string, unknown> | null) =>
-    String(check?.conclusion || check?.state || check?.status || ""),
-  );
-  if (results.some((result) => FAILED_CHECKS.has(result))) return "fail";
-  return results.every((result) => PASSED_CHECKS.has(result))
-    ? "pass"
-    : "pending";
-}
-
-function prValue(row: Record<string, unknown> | undefined): PrValue | null {
-  const identity = typeof row?.url === "string" ? prIdentity(row.url) : null;
-  const { title, state, baseRefName, statusCheckRollup, createdAt } = row ?? {};
-  const opened = typeof createdAt === "string" ? Date.parse(createdAt) : NaN;
-  if (!identity || typeof title !== "string" || typeof state !== "string")
-    return null;
-  return {
-    number: identity.number,
-    title,
-    url: identity.url,
-    state,
-    ...(typeof baseRefName === "string" ? { baseRefName } : {}),
-    checks: checksSummary(statusCheckRollup),
-    ...(Number.isFinite(opened) ? { createdAt: opened / 1000 } : {}),
-  };
-}
-
 interface DiffFile {
   path: string;
   additions: number | null;
@@ -282,55 +194,8 @@ export function cleanBaseRef(value: unknown): string | null {
   return ref;
 }
 
-async function readBoundedJsonObject(
-  path: string,
-): Promise<Record<string, unknown> | null> {
-  try {
-    const info = await lstat(path);
-    if (info.isSymbolicLink()) return null;
-    if ((await stat(path)).size > WORKDIR_FILE_MAX_BYTES) return null;
-    const handle = await open(path, "r");
-    let raw: Uint8Array;
-    try {
-      const buf = new Uint8Array(WORKDIR_FILE_MAX_BYTES + 1);
-      const { bytesRead } = await handle.read(buf, 0, buf.length, 0);
-      raw = buf.subarray(0, bytesRead);
-    } finally {
-      await handle.close();
-    }
-    if (raw.length > WORKDIR_FILE_MAX_BYTES) return null;
-    const loaded: unknown = JSON.parse(
-      new TextDecoder("utf-8", { fatal: true }).decode(raw),
-    );
-    return loaded !== null &&
-      typeof loaded === "object" &&
-      !Array.isArray(loaded)
-      ? (loaded as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
 export class WorkdirGit {
   private readonly inputs: WorkdirGitInputs;
-  private readonly now: () => number;
-  // At most eight 1 MiB patches; concurrent file opens share the same fetch.
-  private readonly prPatches = new Map<
-    string,
-    [
-      number,
-      Promise<{ out: Uint8Array; truncated: boolean } | undefined>,
-      Promise<string | undefined>,
-    ]
-  >();
-  /** Each worktree's last branch PR lookup: [PR, branch]. */
-  private readonly cwdPr = new Map<string, [PrValue | null, string | null]>();
-  private readonly headPrs = new Map<string, [number, PrValue | null]>();
-  private readonly headLookups = new Map<string, Promise<PrValue | null>>();
-  private readonly ghQueues = new Map<string, Promise<unknown>>();
-  private ghBackoff = { seconds: 0, until: 0 };
-  private readonly githubBases = new Map<string, Promise<string | null>>();
   private readonly diffRuns = new Map<
     string,
     {
@@ -340,35 +205,8 @@ export class WorkdirGit {
     }
   >();
 
-  // One bounded, coalesced origin lookup per checkout, not per poll/message.
-  async githubRepoUrl(
-    stored: string,
-    workdirFile: string | null = null,
-  ): Promise<string | null> {
-    const state = workdirFile ? await readBoundedJsonObject(workdirFile) : null;
-    const cwd =
-      state?.version === 1 && typeof state.cwd === "string"
-        ? state.cwd
-        : stored;
-    let hit = this.githubBases.get(cwd);
-    if (!hit) {
-      hit = this.gitText(["remote", "get-url", "origin"], cwd, 4096).then(
-        (r) => {
-          const repo =
-            r.code !== 0 || r.truncated ? null : githubRepo(r.text ?? "");
-          return repo && `https://github.com/${repo}`;
-        },
-      );
-      this.githubBases.set(cwd, hit);
-      if (this.githubBases.size > 100)
-        this.githubBases.delete(this.githubBases.keys().next().value!);
-    }
-    return hit;
-  }
-
   constructor(inputs: WorkdirGitInputs) {
     this.inputs = inputs;
-    this.now = inputs.now ?? (() => performance.now() / 1000);
   }
 
   private gitText(
@@ -422,25 +260,12 @@ export class WorkdirGit {
     return (await this.ready()) ? this.inputs.repoDir : this.inputs.dataDir;
   }
 
-  /** The branch checked out at `wt`, or null (missing or detached). */
-  async branchAt(wt: string, signal?: AbortSignal): Promise<string | null> {
-    if (!(await exists(wt))) return null;
-    const r = await this.gitText(
-      ["rev-parse", "--abbrev-ref", "HEAD"],
-      wt,
-      256,
-      10.0,
-      signal,
-    );
-    const out = pyStrip(r.text ?? "");
-    return r.code === 0 && out && out !== "HEAD" ? out : null;
-  }
-
   private async gitCwd(
     candidate: unknown,
     signal?: AbortSignal,
   ): Promise<string | null> {
-    if (typeof candidate !== "string" || !candidate) return null;
+    if (signal?.aborted || typeof candidate !== "string" || !candidate)
+      return null;
     if (candidate.includes("\0") || !(await isDir(candidate))) return null;
     const { text, code } = await this.gitText(
       ["rev-parse", "--is-inside-work-tree"],
@@ -564,10 +389,11 @@ export class WorkdirGit {
       }
     }
     const branch =
-      knownBranch === undefined ? await this.branchAt(wt, signal) : knownBranch;
+      knownBranch === undefined
+        ? await branchAt(this.inputs.env, wt, signal)
+        : knownBranch;
     if (branch) {
-      const cached = this.cwdPr.get(wt);
-      const pr = cached?.[1] === branch ? cached[0] : null;
+      const pr = this.inputs.lastBranchPr?.(wt, branch) ?? null;
       if (pr?.state === "OPEN" && pr.baseRefName) {
         for (const ref of [`origin/${pr.baseRefName}`, pr.baseRefName]) {
           if ((await this.resolveRef(wt, ref, signal)) === null) continue;
@@ -604,244 +430,6 @@ export class WorkdirGit {
     const head = await this.resolveRef(wt, "HEAD", signal);
     if (head !== null) return [head, "HEAD", "head"];
     return [null, null, "head"];
-  }
-
-  /**
-   * `wt`'s PR from its upstream branch and repository, or null (detached, no
-   * GitHub upstream or PR, or a closed default-branch PR).
-   */
-  async branchPr(
-    wt: string,
-    reason: string,
-    queue = wt,
-  ): Promise<PrValue | null> {
-    const branch = await this.branchAt(wt);
-    const head = branch ? await this.upstreamHead(wt, branch) : null;
-    let value = head
-      ? await this.cachedPr(`${head.repo.toLowerCase()}\0${head.branch}`, () =>
-          this.lookupHeadPr(wt, head, reason, queue),
-        )
-      : null;
-    if (head && value && value.state !== "OPEN") {
-      const main = await this.gitText(
-        ["symbolic-ref", "--short", `refs/remotes/${head.remote}/HEAD`],
-        wt,
-        256,
-        5.0,
-      );
-      const name = pyStrip(main.text ?? "");
-      if (main.code !== 0 || name === `${head.remote}/${head.branch}`)
-        value = null;
-    }
-    this.cwdPr.delete(wt);
-    this.cwdPr.set(wt, [value, branch]);
-    while (this.cwdPr.size > 100)
-      this.cwdPr.delete(this.cwdPr.keys().next().value!);
-    return value;
-  }
-
-  private async upstreamHead(wt: string, branch: string): Promise<Head | null> {
-    const ref = await this.gitText(
-      [
-        "for-each-ref",
-        "--format=%(upstream:remotename)%00%(upstream:remoteref)",
-      ].concat([`refs/heads/${branch}`]),
-      wt,
-      1024,
-      5.0,
-    );
-    const [remote, merge] = pyStrip(ref.text ?? "").split("\0");
-    if (ref.code !== 0 || !remote || remote.startsWith("-")) return null;
-    if (!merge?.startsWith("refs/heads/")) return null;
-    const url = await this.gitText(["remote", "get-url", remote], wt, 4096);
-    const repo = url.code === 0 ? githubRepo(url.text ?? "") : null;
-    return repo
-      ? { remote, repo, branch: merge.slice("refs/heads/".length) }
-      : null;
-  }
-
-  /** The PR at `url` (canonical), or null when GitHub has none. */
-  pullRequest(url: string, reason: string, queue = url) {
-    const pr = prIdentity(url);
-    if (!pr) return Promise.resolve(null);
-    return this.cachedPr(pr.url, async () => {
-      const row = await this.gh(
-        queue,
-        ["pr", "view", String(pr.number), "--repo", pr.repo, "--json"].concat([
-          "number,title,url,state,baseRefName,statusCheckRollup,createdAt",
-        ]),
-        this.inputs.dataDir,
-        reason,
-        512 * 1024,
-        (r) => (r.truncated ? undefined : JSON.parse(decoder.decode(r.out))),
-      );
-      return row === undefined ? undefined : prValue(row);
-    });
-  }
-
-  // Invariant: One lookup per repository branch or PR URL a minute, shared by
-  // worktrees and callers; a merged or closed PR is final. Capacity evicts
-  // only attempts older than a minute, final PRs only past 2,000 entries.
-  private cachedPr(
-    key: string,
-    find: () => Promise<PrValue | null | undefined>,
-  ): Promise<PrValue | null> {
-    const hit = this.headPrs.get(key);
-    if (
-      hit &&
-      (this.now() - hit[0] < BRANCH_PR_INTERVAL ||
-        (hit[1] !== null && hit[1].state !== "OPEN"))
-    )
-      return Promise.resolve(hit[1]);
-    let lookup = this.headLookups.get(key);
-    if (!lookup) {
-      lookup = find()
-        .catch(() => undefined)
-        .then((found) => {
-          const value = found === undefined ? (hit?.[1] ?? null) : found;
-          const now = this.now();
-          this.headPrs.delete(key);
-          this.headPrs.set(key, [now, value]);
-          for (const [old, [at, pr]] of this.headPrs) {
-            if (this.headPrs.size <= 200 || now - at < BRANCH_PR_INTERVAL)
-              break;
-            if (pr?.state === "OPEN" || !pr || this.headPrs.size > 2000)
-              this.headPrs.delete(old);
-          }
-          return value;
-        })
-        .finally(() => this.headLookups.delete(key));
-      this.headLookups.set(key, lookup);
-    }
-    return lookup;
-  }
-
-  /** The PR, null for none, or undefined when GitHub gave no valid answer. */
-  private async lookupHeadPr(
-    wt: string,
-    head: Head,
-    reason: string,
-    queue: string,
-  ): Promise<PrValue | null | undefined> {
-    const rows = await this.gh(
-      queue,
-      ["pr", "list", "--repo", head.repo, "--head", head.branch]
-        .concat(["--state", "all", "--limit", "5", "--json"])
-        .concat([
-          "number,title,url,state,baseRefName,statusCheckRollup,headRepository,headRepositoryOwner",
-        ]),
-      wt,
-      reason,
-      512 * 1024,
-      (r) => {
-        const rows: unknown = r.truncated
-          ? null
-          : JSON.parse(decoder.decode(r.out));
-        return Array.isArray(rows) ? rows : undefined;
-      },
-    );
-    if (rows === undefined) return undefined;
-    const ours = rows.filter(
-      (pr) =>
-        `${pr?.headRepositoryOwner?.login}/${pr?.headRepository?.name}`.toLowerCase() ===
-        head.repo.toLowerCase(),
-    );
-    return prValue(ours.find((pr) => pr.state === "OPEN") ?? ours[0]);
-  }
-
-  // One logged `gh` call at a time per `queue` (a conversation); `parse`
-  // rejects invalid output. Failures back all calls off, doubling from a
-  // minute to 15, or until GitHub's latest exhausted rate-limit reset.
-  private gh<T>(
-    queue: string,
-    args: string[],
-    cwd: string,
-    reason: string,
-    limit: number,
-    parse: (r: { out: Uint8Array; truncated: boolean }) => T | undefined,
-    timeout = GH_TIMEOUT,
-  ): Promise<T | undefined> {
-    const queued = this.now();
-    const run = (this.ghQueues.get(queue) ?? Promise.resolve()).then(
-      async () => {
-        if (this.now() < this.ghBackoff.until) {
-          this.inputs.log?.("gh_call_skipped", { reason, backoff: true });
-          return undefined;
-        }
-        const r = await this.ghLogged(
-          args,
-          cwd,
-          reason,
-          limit,
-          timeout,
-          queued,
-        );
-        let value: T | undefined;
-        try {
-          value = r?.code === 0 ? parse(r) : undefined;
-        } catch {}
-        if (value !== undefined) {
-          this.ghBackoff.seconds = 0;
-          return value;
-        }
-        const seconds = Math.min(Math.max(60, this.ghBackoff.seconds * 2), 900);
-        this.ghBackoff = {
-          seconds,
-          until: Math.max(this.ghBackoff.until, this.now() + seconds),
-        };
-        if (r === null) return undefined;
-        const limits = await this.ghLogged(
-          ["api", "rate_limit"],
-          cwd,
-          `${reason}_failed`,
-          64 * 1024,
-          GH_TIMEOUT,
-          this.now(),
-        );
-        try {
-          const resources = JSON.parse(decoder.decode(limits!.out)).resources;
-          for (const { remaining, reset } of Object.values(resources) as {
-            remaining?: unknown;
-            reset?: unknown;
-          }[])
-            if (remaining === 0 && typeof reset === "number")
-              this.ghBackoff.until = Math.max(
-                this.ghBackoff.until,
-                this.now() + reset - Date.now() / 1000,
-              );
-        } catch {}
-        return undefined;
-      },
-    );
-    const tail = run.catch(() => undefined);
-    this.ghQueues.set(queue, tail);
-    void tail.then(() => {
-      if (this.ghQueues.get(queue) === tail) this.ghQueues.delete(queue);
-    });
-    return run;
-  }
-
-  private async ghLogged(
-    args: string[],
-    cwd: string,
-    reason: string,
-    limit: number,
-    timeout: number,
-    queued: number,
-  ): ReturnType<typeof runBounded> {
-    const env = gitEnv(this.inputs.env);
-    env.GH_PAGER ??= "cat";
-    env.NO_COLOR ??= "1";
-    const started = this.now();
-    const r = await runBounded(["gh", ...args], cwd, env, limit, timeout);
-    this.inputs.log?.("gh_call", {
-      reason,
-      command: `gh ${args.slice(0, 2).join(" ")}`,
-      exit: r?.code ?? null,
-      waited_ms: Math.round((started - queued) * 1000),
-      ms: Math.round((this.now() - started) * 1000),
-    });
-    return r;
   }
 
   private async diffFiles(
@@ -937,13 +525,10 @@ export class WorkdirGit {
     signal: AbortSignal,
     includeUntracked: boolean,
   ): Promise<DiffState> {
-    const caller = signal;
-    const controller = new AbortController();
-    const abort = () => controller.abort();
-    if (caller.aborted) abort();
-    else caller.addEventListener("abort", abort, { once: true });
-    const deadline = setTimeout(abort, DIFF_REQUEST_TIMEOUT_MS);
-    signal = controller.signal;
+    signal = anyAbortSignal([
+      signal,
+      AbortSignal.timeout(DIFF_REQUEST_TIMEOUT_MS),
+    ]);
     const cwd = pyPathStr(wt);
     try {
       const inside = await this.gitText(
@@ -956,7 +541,7 @@ export class WorkdirGit {
       if (inside.code !== 0 || pyStrip(inside.text ?? "") !== "true")
         return unavailableDiff("not-a-git-repo", cwd, cwdSource);
       const [branch, head] = await Promise.all([
-        this.branchAt(wt, signal),
+        branchAt(this.inputs.env, wt, signal),
         this.gitText(["rev-parse", "--verify", "HEAD"], wt, 256, 5.0, signal),
       ]);
       const [base, label, source, work] = await this.resolveDiffBase(
@@ -1020,8 +605,7 @@ export class WorkdirGit {
       if (st.truncated)
         statText += "\n... [stat truncated at the 64 KiB server cap]\n";
       if (df.truncated) diff += DIFF_TRUNCATION_MARK;
-      const cached = this.cwdPr.get(wt);
-      const current = cached?.[1] === branch ? cached[0] : null;
+      const current = this.inputs.lastBranchPr?.(wt, branch) ?? null;
       if (
         !pyStrip(diff) &&
         !untrackedCapped.length &&
@@ -1077,9 +661,6 @@ export class WorkdirGit {
       };
     } catch {
       return unavailableDiff("diff-failed", cwd, cwdSource);
-    } finally {
-      clearTimeout(deadline);
-      caller.removeEventListener("abort", abort);
     }
   }
 
@@ -1120,7 +701,31 @@ export class WorkdirGit {
         const info = await stat(candidate);
         if (info.isFile() && info.size > MAX_FILE_CONTENT_BYTES)
           return [null, null, true, false];
-        if (info.isFile()) newRaw = new Uint8Array(await readFile(candidate));
+        if (info.isFile()) {
+          const handle = await open(
+            candidate,
+            constants.O_RDONLY | constants.O_NONBLOCK,
+          );
+          try {
+            if ((await handle.stat()).isFile()) {
+              const buf = new Uint8Array(MAX_FILE_CONTENT_BYTES + 1);
+              let offset = 0;
+              while (offset < buf.length) {
+                const { bytesRead } = await handle.read(
+                  buf,
+                  offset,
+                  buf.length - offset,
+                  offset,
+                );
+                if (!bytesRead) break;
+                offset += bytesRead;
+              }
+              newRaw = buf.subarray(0, offset);
+            }
+          } finally {
+            await handle.close();
+          }
+        }
       }
     } catch {
       newRaw = new Uint8Array(0);
@@ -1131,88 +736,6 @@ export class WorkdirGit {
     if (oldOver || newRaw.length > MAX_FILE_CONTENT_BYTES)
       return [null, null, true, false];
     return [oldText, newText, false, false];
-  }
-
-  // GitHub's PR patch and description, independent of checkout lifetime. No
-  // full-file reads.
-  async pullRequestDiff(
-    url: string,
-    path: string | null = null,
-    queue = url,
-  ): Promise<Record<string, unknown>> {
-    const pr = prIdentity(url);
-    if (!pr) return { available: false, reason: "invalid-pull-request" };
-    const now = this.now();
-    for (const [key, [at]] of this.prPatches)
-      if (now - at >= GH_CACHE_TTL) this.prPatches.delete(key);
-    let cached = this.prPatches.get(pr.url);
-    if (!cached) {
-      if (this.prPatches.size >= 8)
-        this.prPatches.delete(this.prPatches.keys().next().value!);
-      const repo = ["--repo", pr.repo];
-      cached = [
-        now,
-        this.gh(
-          queue,
-          ["pr", "diff", String(pr.number), ...repo, "--color", "never"],
-          this.inputs.dataDir,
-          "pull_request_diff",
-          MAX_DIFF_BYTES,
-          (r) => r,
-          DIFF_TIMEOUT,
-        ),
-        this.gh(
-          queue,
-          ["pr", "view", String(pr.number), ...repo, "--json", "body"],
-          this.inputs.dataDir,
-          "pull_request_description",
-          512 * 1024,
-          (r) => {
-            const body: unknown = r.truncated
-              ? null
-              : JSON.parse(decoder.decode(r.out))?.body;
-            return typeof body === "string" ? body : undefined;
-          },
-        ),
-      ];
-      this.prPatches.set(pr.url, cached);
-    }
-    const result = await cached[1];
-    if (!result) {
-      this.prPatches.delete(pr.url);
-      return { available: false, reason: "pull-request-unavailable", path };
-    }
-    const patch = decoder.decode(result.out);
-    const files = pullRequestFiles(patch);
-    if (path !== null) {
-      const file = files.find((file) => file.path === path);
-      if (!file) return { available: false, reason: "no-such-file", path };
-      const bytes = new TextEncoder().encode(file.patch);
-      return {
-        available: true,
-        path,
-        patch: decoder.decode(bytes.subarray(0, MAX_FILE_PATCH_BYTES)),
-        truncated: result.truncated || bytes.length > MAX_FILE_PATCH_BYTES,
-      };
-    }
-    const body = await cached[2];
-    return {
-      available: true,
-      truncated: result.truncated,
-      body: body ?? null,
-      files: files
-        .slice(0, MAX_DIFF_FILES)
-        .map(({ patch: _patch, ...file }) => file),
-      moreFiles: Math.max(0, files.length - MAX_DIFF_FILES),
-      target: {
-        kind: "pr",
-        id: pr.url,
-        number: pr.number,
-        url: pr.url,
-        repoIdentity: pr.repo,
-      },
-      version: pr.url + ":" + createHash("sha256").update(patch).digest("hex"),
-    };
   }
 
   /** One file's patch for lazy per-file loading (200 KiB cap). */
@@ -1312,8 +835,12 @@ export class WorkdirGit {
   }
 
   // Bounded fuzzy-finder input: branches, recent commits, tags. Never throws.
-  async diffCandidates(wt: string): Promise<Record<string, string[]>> {
-    if (wt.includes("\0") || !(await isDir(wt)))
+  async diffCandidates(
+    wt: string,
+    signal = AbortSignal.timeout(CANDIDATE_REQUEST_TIMEOUT_MS),
+  ): Promise<Record<string, string[]>> {
+    const timeout = CANDIDATE_REQUEST_TIMEOUT_MS / 1000;
+    if (signal.aborted || wt.includes("\0") || !(await isDir(wt)))
       return { branches: [], commits: [], tags: [] };
     let branches: string[];
     try {
@@ -1328,7 +855,8 @@ export class WorkdirGit {
         ],
         wt,
         64 * 1024,
-        CANDIDATE_TIMEOUT,
+        timeout,
+        signal,
       );
       // Invariant: Git 2.55 shortens refs/remotes/<remote>/HEAD to "<remote>".
       // Keep Git 2.39's spelling: the first of "<remote>/HEAD" and
@@ -1336,7 +864,7 @@ export class WorkdirGit {
       branches = [];
       for (const line of splitlines(out.text ?? "")) {
         if (!pyStrip(line)) continue;
-        if (branches.length >= 100) break;
+        if (signal.aborted || branches.length >= 100) break;
         const [short = "", full = ""] = line.split(" ");
         const remoteHead = /^refs\/remotes\/([^/]+)\/HEAD$/u.exec(full);
         if (!remoteHead || short !== remoteHead[1]) {
@@ -1355,7 +883,8 @@ export class WorkdirGit {
           ["for-each-ref", "--format=%(refname)", ...names.flatMap(rivals)],
           wt,
           4096,
-          CANDIDATE_TIMEOUT,
+          timeout,
+          signal,
         );
         const taken =
           found.code === 0 && found.text !== null
@@ -1373,7 +902,7 @@ export class WorkdirGit {
     let deduped: string[];
     try {
       const refs = ["HEAD"];
-      const mainRef = await this.autoMainRef(wt);
+      const mainRef = await this.autoMainRef(wt, signal);
       if (mainRef !== null) refs.push(mainRef[0]);
       const commits: string[] = [];
       for (const ref of refs) {
@@ -1381,7 +910,8 @@ export class WorkdirGit {
           ["log", "--format=%h %s", "-n", "30", ref, "--"],
           wt,
           64 * 1024,
-          CANDIDATE_TIMEOUT,
+          timeout,
+          signal,
         );
         if (out.text !== null && out.code === 0)
           commits.push(...splitlines(out.text).filter((l) => pyStrip(l)));
@@ -1396,7 +926,8 @@ export class WorkdirGit {
         ["tag", "--list", "--sort=-creatordate"],
         wt,
         64 * 1024,
-        CANDIDATE_TIMEOUT,
+        timeout,
+        signal,
       );
       tags = splitlines(out.text ?? "")
         .filter((l) => pyStrip(l))

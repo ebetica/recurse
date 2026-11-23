@@ -12,7 +12,7 @@ import {
 } from "./common";
 
 export const tests: BrowserTest[] = [
-  // Regression: #2509 #3390 review failures and recovered requests stay inspectable.
+  // Regression: #2509 #3390 #3616 review failures, recovered requests, and review costs stay visible.
   async function test_safety_reviewer_unavailable_and_recovers(browser, base) {
     const { agent } = await postFixture(base, "seed-safety-review");
     const pages = await Promise.all(
@@ -136,9 +136,7 @@ export const tests: BrowserTest[] = [
       }
       expect(await inputBox()).toEqual(initial);
       await send();
-      await browserExpect(
-        page.getByText("SAFETY_TURN_DONE", { exact: true }),
-      ).toHaveCount(2);
+      await page.getByText("SAFETY_RECOVERY_DONE", { exact: true }).waitFor();
       for (const view of pages) {
         await browserExpect(view.locator("#safety-btn")).toHaveAttribute(
           "aria-label",
@@ -175,6 +173,30 @@ export const tests: BrowserTest[] = [
         expect(review.reply.stopReason).toBe("stop");
         expect(review.reply.content).toEqual([{ type: "text", text: "OK" }]);
         expect(json).not.toContain("browser-test");
+        await view.keyboard.press("Escape");
+        const usageButton = view
+          .locator(".activity-boundary")
+          .filter({
+            has: view.getByText("SAFETY_RECOVERY_DONE", { exact: true }),
+          })
+          .getByRole("button", { name: /^View activity token usage/ });
+        await usageButton.waitFor();
+        await usageButton.click();
+        const usage = view.getByRole("dialog", { name: "Turn usage" });
+        await browserExpect(
+          usage.getByRole("region", { name: "Conversation model usage" }),
+        ).toContainText("$0.40 cost");
+        await browserExpect(
+          usage.getByRole("region", { name: "Safety reviewer usage" }),
+        ).toContainText("$0.20 cost");
+        await browserExpect(usage.locator(".turn-usage-total-cost")).toHaveText(
+          "Total cost: $0.60",
+        );
+        if (shots)
+          await view.screenshot({
+            path: `${shots}/turn-usage-review-${view.viewportSize()!.width}.png`,
+          });
+        await view.keyboard.press("Escape");
       }
       await focusComposer(page);
       await page.locator("#model-trigger").click();
@@ -196,17 +218,13 @@ export const tests: BrowserTest[] = [
         });
         await view.reload();
         await browserExpect(warning).toBeVisible();
-        if (width < 700) {
-          await browserExpect(view.locator("#model-trigger")).toBeHidden();
-          await checkedTap(input);
-        } else {
-          await waitForLayout(view);
-          await visibleAndUncovered(view, "#model-trigger");
-          const composer = view.locator("#composer");
-          const card = await composer.boundingBox();
-          await focusComposer(view);
-          expect(await composer.boundingBox()).toEqual(card);
-        }
+        await waitForLayout(view);
+        await visibleAndUncovered(view, "#model-trigger");
+        const composer = view.locator("#composer");
+        const card = await composer.boundingBox();
+        if (width < 700) await checkedTap(input);
+        else await focusComposer(view);
+        expect(await composer.boundingBox()).toEqual(card);
         await browserExpect(
           view.getByRole("switch", { name: /^Safety review/ }),
         ).toBeHidden();

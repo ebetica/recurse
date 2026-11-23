@@ -1,6 +1,16 @@
 import type { Page } from "playwright";
 import { gotoRoot, mockConversation } from "./common";
 
+export const ALL_REASONING_LEVELS = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+
 export const tree = (id = "main", status = "idle") => [
   {
     id,
@@ -64,18 +74,3 @@ export const row = (
   live: false,
   ...extra,
 });
-export const compactConv = () =>
-  idleConv([
-    row("u1", "user", "go"),
-    row("p1", "custom", "Compacting…", {
-      kind: "marker",
-      origin: "custom",
-      meta: { compact_marker: true },
-    }),
-    row(
-      "f1",
-      "custom",
-      "Compaction failed: instant-auth-unavailable. Retry with /compact",
-      { kind: "marker", origin: "custom", meta: { compact_marker: true } },
-    ),
-  ]);

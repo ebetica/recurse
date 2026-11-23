@@ -241,7 +241,12 @@ function writeRecord(
 }
 
 /** Remove one agent's worktree holder; an absent holder is already removed. */
-export function removeHolder(root: Root, name: string, cid: string): boolean {
+export function removeHolder(
+  root: Root,
+  name: string,
+  cid: string,
+  stamp?: number,
+): boolean {
   const record = markerRecord(root, name);
   if (record === null) return false;
   const holders = Object.assign(
@@ -249,6 +254,8 @@ export function removeHolder(root: Root, name: string, cid: string): boolean {
     asRecord(record.holders) ?? {},
   );
   if (!Object.hasOwn(holders, cid)) return true;
+  // Invariant: a stamped release removes only the hold that wrote that stamp.
+  if (stamp !== undefined && holders[cid] !== stamp) return true;
   delete holders[cid];
   try {
     const creating = asRecord(record.creating);
@@ -772,6 +779,7 @@ export async function addHolder(
   root: Root,
   path: string,
   cid: string,
+  stamp = Date.now() / 1000,
 ): Promise<string> {
   return withCleanerLock(
     root,
@@ -797,7 +805,7 @@ export async function addHolder(
       writeRecord(
         root,
         name,
-        { ...asRecord(record.holders), [cid]: Date.now() / 1000 },
+        { ...asRecord(record.holders), [cid]: stamp },
         asRecord(record.creating)?.cid === cid ? undefined : record.creating,
       );
       return "held";

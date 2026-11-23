@@ -1,11 +1,14 @@
 import { expect } from "bun:test";
-import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { retire } from "../../src/utils/trash";
-import type { BrowserContext, Page, Route } from "playwright";
+import type { BrowserContext, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
-import { waitForPaneTransition } from "./pane_layout";
 import {
-  complexHtml,
+  editExplorerHtml,
+  openExplorer,
+  seedExplorerWorkspace,
+} from "./explorer_support";
+import {
   expectHtmlSourceFallback,
   expectInlineSeries,
   expectPhoneTapArea,
@@ -24,85 +27,22 @@ import {
   type BrowserTest,
 } from "./common";
 
-async function openExplorer(page: Page, width: number): Promise<void> {
-  const selector = '.pane-col[data-pane="explorer"]';
-  if (!(await page.locator(selector).isVisible())) {
-    if (width === 412) {
-      await page.locator("#pane-fab").click();
-      await page.locator('.pane-menu-item[data-pane="explorer"]').click();
-    } else await page.locator('.rail-btn[data-pane="explorer"]').click();
-  }
-  await waitForPaneTransition(page, selector);
-}
-
 export const tests: BrowserTest[] = [
   async function explorer_pages_previews_and_fuzzy_search(browser, base, data) {
     await using hints = await watchResourceHints();
     const temporary = await mkdtemp(join(data, "data", "browser-explorer-"));
-    const root = join(
-      temporary,
-      "workspace".repeat(15),
-      "workspace".repeat(15),
-    );
     try {
-      await mkdir(join(root, "src"), { recursive: true });
-      expect(root.length).toBeGreaterThan(256);
-      await writeFile(join(root, ".gitignore"), "node_modules/\n");
-      const source =
-        "export function application() {\n  return 'Read-only file preview';\n}\n".repeat(
-          500,
-        );
-      await writeFile(join(root, "src", "application.ts"), source);
       const probe = `${base}explorer-html-probe/`;
-      let htmlSource = `<!doctype html><html><head>
-<link rel="preconnect" href="${hints.origin}">
-<style>h1 { color: #156fa1; } #series { display: flex; gap: 1em; }</style></head><body>
-<h1>Explorer HTML preview</h1>
-<div id="series"><div>Revenue</div><div>Costs</div></div>
-<p id="summary">Offline file content</p>
-<img src="${probe}image.png">
-<iframe title="Nested preview" src="${probe}frame.html"></iframe>
-<form action="${probe}form"><button type="submit">Submit fixture</button></form>
-<script>
-const summary = document.getElementById('summary');
-summary.textContent = 'Chart data prepared';
-try { summary.dataset.parent = parent.document.title; }
-catch { summary.dataset.parent = 'blocked'; }
-document.forms[0].querySelector('button').onclick = () => { summary.dataset.formAttempt = 'done'; };
-</script>
-${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
-<p>End of file</p></body></html>`;
-      const htmlPath = join(root, "src", "page.html");
-      await writeFile(htmlPath, htmlSource);
-      const complexPath = "src/z-complex.html";
-      const complex = complexHtml(hints.origin);
-      await writeFile(join(root, complexPath), complex);
-      const pickedPath = "src/pick `quoted`.ts";
-      await writeFile(join(root, pickedPath), "export const picked = true;\n");
-      await writeFile(
-        join(root, "src", "😀app-types.ts"),
-        "export type Application = { name: string };\n",
-      );
-      await writeFile(join(root, ".env"), "fixture only\n");
-      await mkdir(join(root, "node_modules"));
-      await writeFile(
-        join(root, "node_modules", "application-ignored.ts"),
-        "ignored\n",
-      );
-      await Promise.all(
-        Array.from({ length: 70 }, (_, i) =>
-          writeFile(join(root, `notes-${i}.md`), `# Note ${i}\n`),
-        ),
-      );
-      const otherRoot = join(root, "other");
-      await mkdir(otherRoot);
-      await writeFile(join(otherRoot, "only-here.txt"), "Other conversation\n");
-      expect(
-        await Bun.spawn(["git", "init", "-q", root], {
-          stdout: "ignore",
-          stderr: "ignore",
-        }).exited,
-      ).toBe(0);
+      const {
+        root,
+        otherRoot,
+        source,
+        htmlPath,
+        htmlSource: originalHtml,
+        complexPath,
+        complex,
+      } = await seedExplorerWorkspace(temporary, probe, hints.origin);
+      let htmlSource = originalHtml;
       const other = await postFixture(base, "seed-model-selection-error", {
         agent: "explorer-other",
         model: "fauxordinary/faux-1",
@@ -445,10 +385,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
               );
               await browserExpect(next.locator(".report-bar")).toHaveCount(0);
               await browserExpect(next.locator("iframe")).toHaveCount(0);
-              htmlSource = htmlSource.replace(
-                "<p>End of file",
-                "<p>Changed between reads</p><p>End of file",
-              );
+              htmlSource = editExplorerHtml(htmlSource);
               await writeFile(htmlPath, htmlSource);
             } finally {
               release.resolve();
@@ -1083,214 +1020,6 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
               .click();
             await pane.waitFor({ state: "hidden" });
           }
-          const composer = page.locator("#input");
-          const fileMenu = page.locator("#file-menu");
-          await composer.fill("");
-          await page.keyboard.type("# ");
-          expect(await composer.inputValue()).toBe("# ");
-          expect(await fileMenu.isVisible()).toBe(false);
-          await composer.fill("Review #pick");
-          const fileOption = fileMenu.getByRole("option", {
-            name: pickedPath,
-            exact: true,
-          });
-          await fileOption.waitFor();
-          const completedFiles = await fileMenu
-            .getByRole("option")
-            .allTextContents();
-          const lazySearchPath = `**/api/conversations/${fixture.agent}/tree/search?*`;
-          const lazyRoutes = new Map<
-            string,
-            ReturnType<typeof Promise.withResolvers<Route>>
-          >();
-          for (const query of ["picking", "pickingmore"])
-            lazyRoutes.set(query, Promise.withResolvers<Route>());
-          await page.route(lazySearchPath, (route) => {
-            const query = new URL(route.request().url()).searchParams.get("q")!;
-            const held = lazyRoutes.get(query);
-            if (held) return held.resolve(route);
-            return route.fallback();
-          });
-          await composer.press("End");
-          await page.keyboard.insertText("ing");
-          const olderSearch = await lazyRoutes.get("picking")!.promise;
-          await screenshot(page, `explorer/files-${width}`);
-          await browserExpect(fileOption).toBeVisible();
-          await browserExpect(fileOption).toHaveAttribute(
-            "aria-selected",
-            "true",
-          );
-          await browserExpect(fileMenu).not.toContainText(
-            /Finding files|Searching|Loading/,
-          );
-          const olderCancelled = page.waitForEvent("requestfailed", {
-            predicate: (request) => request === olderSearch.request(),
-          });
-          await page.keyboard.insertText("more");
-          const newerSearch = await lazyRoutes.get("pickingmore")!.promise;
-          await browserExpect(fileOption).toBeVisible();
-          await newerSearch.fulfill({
-            json: { results: ["newer-file.ts", pickedPath] },
-          });
-          await browserExpect(fileMenu.getByRole("option")).toHaveCount(2);
-          await browserExpect(fileOption).toHaveAttribute(
-            "aria-selected",
-            "true",
-          );
-          await olderSearch
-            .fulfill({ json: { results: ["stale-file.ts"] } })
-            .catch(() => {});
-          expect((await olderCancelled).failure()?.errorText).toContain(
-            "ERR_ABORTED",
-          );
-          await browserExpect(fileMenu.getByRole("option")).toHaveText([
-            "newer-file.ts",
-            pickedPath,
-          ]);
-          await page.unroute(lazySearchPath);
-          await composer.press("Escape");
-          const restoredSearch = page.waitForResponse(
-            (response) =>
-              response
-                .url()
-                .includes(`/api/conversations/${fixture.agent}/tree/search?`) &&
-              new URL(response.url()).searchParams.get("q") === "pick",
-          );
-          await composer.fill("Review #pick");
-          await restoredSearch;
-          await browserExpect(fileMenu.getByRole("option")).toHaveText(
-            completedFiles,
-          );
-          await fileOption.waitFor();
-          for (const composition of [{ isComposing: true }, { keyCode: 229 }]) {
-            for (const key of ["Escape", "Enter"]) {
-              await composer.dispatchEvent("keydown", {
-                key,
-                bubbles: true,
-                ...composition,
-              });
-              expect(await fileMenu.isVisible()).toBe(true);
-              expect(await composer.inputValue()).toBe("Review #pick");
-            }
-          }
-          await composer.press("ArrowLeft");
-          const menuBounds = (await fileMenu.boundingBox())!;
-          const fieldBounds = (await page.locator("#composer").boundingBox())!;
-          expect(menuBounds.y + menuBounds.height).toBeLessThanOrEqual(
-            fieldBounds.y,
-          );
-          expect(menuBounds.y + menuBounds.height).toBeGreaterThan(
-            fieldBounds.y - fieldBounds.height,
-          );
-          await screenshot(page, `explorer/${width}-composer-files`);
-          if (width === 1280) await fileOption.click();
-          else {
-            await composer.press("ArrowDown");
-            await composer.press("ArrowUp");
-            await composer.press("Tab");
-          }
-          const chosen = "Review ``" + pickedPath + "`` ";
-          expect(await composer.inputValue()).toBe(chosen);
-          expect(await fileMenu.isVisible()).toBe(false);
-          await screenshot(page, `explorer/${width}-composer-path`);
-          const pickerReply = `Composer files ${width} received`;
-          const pickerMessage = `${chosen}\nReply only ${pickerReply}`;
-          await composer.fill(pickerMessage);
-          const pickedDelivery = page.waitForRequest(
-            (request) =>
-              request.method() === "POST" &&
-              new URL(request.url()).pathname ===
-                `/api/conversations/${fixture.agent}/deliver`,
-          );
-          await page.locator("#send").click();
-          expect((await pickedDelivery).postDataJSON().content).toBe(
-            pickerMessage,
-          );
-          await page
-            .locator("#messages .msg.assistant")
-            .filter({ hasText: pickerReply })
-            .waitFor();
-          if (width === 412) {
-            await openExplorer(page, width);
-            const folder = pane.locator(".explorer-row", { hasText: "src" });
-            await folder.waitFor();
-            if ((await folder.getAttribute("aria-expanded")) !== "true")
-              await folder.click();
-            await pane
-              .locator(".explorer-row", { hasText: "application.ts" })
-              .waitFor();
-          }
-          const held = Promise.withResolvers<Route>();
-          const heldPath = `**/api/conversations/${fixture.agent}/tree/file?*`;
-          await page.route(heldPath, (route) => held.resolve(route));
-          await pane
-            .locator(".explorer-row", { hasText: "application.ts" })
-            .click();
-          const pending = await held.promise;
-          await composer.fill("Review #pick");
-          await fileOption.waitFor();
-          const cancelled = page.waitForEvent("requestfailed", {
-            predicate: (request) => request === pending.request(),
-          });
-          const heldSearch = Promise.withResolvers<Route>();
-          const searchPath = `**/api/conversations/${fixture.agent}/tree/search?*`;
-          await page.route(searchPath, (route) => heldSearch.resolve(route));
-          await composer.fill("#onlyhere");
-          const searching = await heldSearch.promise;
-          const searchCancelled = page.waitForEvent("requestfailed", {
-            predicate: (request) => request === searching.request(),
-          });
-          await page.evaluate(
-            `location.hash = ${JSON.stringify(`#agent=${other.agent}`)}`,
-          );
-          await pane.waitFor({ state: "detached" });
-          await fileMenu.waitFor({ state: "hidden" });
-          await page.waitForFunction(
-            "document.querySelector('#input').value === ''",
-          );
-          expect(await composer.inputValue()).toBe("");
-          await pending.continue().catch(() => {});
-          expect((await cancelled).failure()?.errorText).toContain(
-            "ERR_ABORTED",
-          );
-          await page.unroute(heldPath);
-          await searching.continue().catch(() => {});
-          expect((await searchCancelled).failure()?.errorText).toContain(
-            "ERR_ABORTED",
-          );
-          await page.unroute(searchPath);
-          await openExplorer(page, width);
-          await pane
-            .locator(".explorer-row", { hasText: "only-here.txt" })
-            .waitFor();
-          expect(
-            await pane
-              .locator(".explorer-row", { hasText: "application.ts" })
-              .count(),
-          ).toBe(0);
-          if (width === 412) {
-            await pane
-              .getByRole("button", { name: "Close Explorer", exact: true })
-              .click();
-            await pane.waitFor({ state: "hidden" });
-          }
-          await composer.fill("#pick");
-          await fileMenu
-            .getByText("No matching files.", { exact: true })
-            .waitFor();
-          expect(await fileMenu.getByRole("option").count()).toBe(0);
-          await composer.fill("#onlyhere");
-          await fileMenu
-            .getByRole("option", { name: "only-here.txt", exact: true })
-            .waitFor();
-          expect(
-            (await fileMenu.getByRole("option").allTextContents()).map((text) =>
-              text.trim(),
-            ),
-          ).toEqual(["only-here.txt"]);
-          await composer.press("Escape");
-          expect(await composer.inputValue()).toBe("#onlyhere");
-          expect(await fileMenu.isVisible()).toBe(false);
           boundary.expectNoRequests();
           boundary.expectDenials();
           hints.expectQuiet();

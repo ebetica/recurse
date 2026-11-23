@@ -4,21 +4,64 @@ import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { open, type FileHandle } from "node:fs/promises";
 import {
+  ArtifactCorrupt,
+  ArtifactError,
   ArtifactInvalid,
   ArtifactLimit,
+  ArtifactNotFound,
+  DIRECTORY_FLAGS,
+  deletionReceiptName,
+  isMissing,
+  normalizedId,
+  normalizedOwner,
   type ArtifactContext,
-  withArtifactGitDirectory,
-} from "./artifacts";
+} from "./artifacts/store";
 import {
   APP_STATE_INVALID,
   APP_STATE_MAX_BYTES,
   APP_STATE_TOO_LARGE,
 } from "./artifact_app_state_protocol";
-import { openAt, renameAt, unlinkAt } from "./utils";
+import { lstatAt, openAt, renameAt, unlinkAt } from "./utils";
 
 const FILE = "recurse-app-state.json";
 const READ_FLAGS =
   constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK;
+
+/** Pin each directory so app state cannot follow links or resurrect a deleted repo. */
+async function withArtifactGitDirectory<T>(
+  value: ArtifactContext,
+  ownerValue: string,
+  idValue: string,
+  work: (gitDir: FileHandle) => Promise<T>,
+): Promise<T> {
+  const owner = normalizedOwner(ownerValue);
+  const id = normalizedId(idValue);
+  const flags = DIRECTORY_FLAGS | constants.O_NOFOLLOW;
+  const handles: FileHandle[] = [];
+  try {
+    const root = await open(value.artifactsDir, flags);
+    handles.push(root);
+    const parent = await openAt(root.fd, owner, flags);
+    handles.push(parent);
+    const deleted = await lstatAt(parent.fd, deletionReceiptName(id)).catch(
+      (error) => {
+        if (!isMissing(error)) throw error;
+      },
+    );
+    if (deleted) throw new ArtifactNotFound("artifact not found");
+    const repo = await openAt(parent.fd, id, flags);
+    handles.push(repo);
+    const gitDir = await openAt(repo.fd, ".git", flags);
+    handles.push(gitDir);
+    return await work(gitDir);
+  } catch (error) {
+    if (error instanceof ArtifactError) throw error;
+    if (isMissing(error)) throw new ArtifactNotFound("artifact not found");
+    throw new ArtifactCorrupt("saved app state is unavailable");
+  } finally {
+    for (const handle of handles.reverse()) await handle.close();
+  }
+}
 
 function stateJson(bytes: Uint8Array): string {
   if (bytes.byteLength > APP_STATE_MAX_BYTES)

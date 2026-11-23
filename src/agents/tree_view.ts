@@ -1,10 +1,14 @@
-// Cached tree rows replace atomically; failed refresh keeps the old row.
-// Rebuild swaps whole maps, preserving refreshes/discards that raced its
-// awaits.
-// Serve does no record loads/scans; overlays derive from live in-memory rows.
+// Tree rows compose detached metadata with live state; serving loads nothing.
+// Failed refresh keeps the old row. Rebuild swaps whole maps, preserving
+// refreshes/discards racing its awaits. Prompt digests capture the same
+// inputs at request time.
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import type { ConversationRecord, LiveInputs } from "./storage";
+import {
+  activeRunId,
+  type ConversationRecord,
+  type ConversationStore,
+} from "./storage";
 import { liveTags } from "../agent_metadata/index";
 import {
   type RuntimeLogger,
@@ -23,7 +27,18 @@ const PERSISTED_AGENT_STATUSES: ReadonlySet<string> = new Set([
   "deleting",
 ]);
 
-export const IDLE_LIVE: LiveInputs = Object.freeze({
+interface LiveInputs {
+  status: unknown;
+  runId: unknown;
+  muted: boolean;
+  safetyOff: boolean;
+  safetyOffActive: boolean;
+  queued: number;
+  activeRunId: string | null;
+  hasLiveShells: boolean;
+}
+
+const IDLE_LIVE: LiveInputs = Object.freeze({
   status: null,
   runId: null,
   muted: false,
@@ -301,6 +316,23 @@ interface SkillContextSource {
 }
 
 interface TreeViewDeps {
+  records: Pick<
+    ConversationStore,
+    | "metadataSnapshot"
+    | "metadataRows"
+    | "applyLoadDefaults"
+    | "effectiveWorkdir"
+  >;
+  node(cid: string): {
+    muteDesired: boolean | null;
+    safetyDesired: boolean | null;
+    pendingIntents(): readonly unknown[];
+    activityUpdated(): number | null;
+  } | null;
+  liveStatus(cid: string): [unknown, unknown];
+  durableSafetyOff(cid: string): boolean | undefined;
+  hasLiveShell(cid: string): boolean;
+  logCaptureFailure?(event: string, fields: Record<string, unknown>): void;
   skills: SkillContextSource;
   logger: RuntimeLogger;
 }
@@ -360,11 +392,95 @@ export class TreeView {
     } catch {}
   }
 
-  /** Rebuild one agent's row from its record + live inputs. */
-  refresh(entry: TreeEntryInput): TreeRow | null {
+  private captureLiveInputs(record: Conv): LiveInputs {
+    const cid = record.id;
+    if (typeof cid !== "string")
+      throw new Error("live capture record id must be a string");
+    const [status, runId] = this.deps.liveStatus(cid);
+    const node = this.deps.node(cid);
+    const activity = node?.activityUpdated();
+    if (typeof activity === "number") {
+      const stored = record.updated;
+      if (typeof stored !== "number" || activity > stored)
+        record.updated = activity;
+    }
+    // Invariant: Durable review reads its recurse.safety document, not the
+    // record.
+    const durableOff =
+      record.backend === "durable"
+        ? (this.deps.durableSafetyOff(cid) ?? false)
+        : undefined;
+    const safetyOff = durableOff ?? node?.safetyDesired ?? !!record.safety_off;
+    const active = record.active_turn;
+    const safetyOffActive =
+      durableOff ??
+      (record.status === "running" && isDict(active) && "safety_off" in active
+        ? !!active.safety_off
+        : safetyOff);
+    return {
+      status,
+      runId,
+      muted: node?.muteDesired ?? !!record.muted,
+      safetyOff,
+      safetyOffActive,
+      queued: node?.pendingIntents().length ?? 0,
+      activeRunId: activeRunId(record),
+      hasLiveShells: this.deps.hasLiveShell(cid),
+    };
+  }
+
+  private treeEntry(record: Conv): TreeEntryInput {
+    if (typeof record.id === "string")
+      this.deps.records.applyLoadDefaults(record.id, record, false);
+    return {
+      record,
+      live: this.captureLiveInputs(record),
+      workdir: this.deps.records.effectiveWorkdir(record),
+    };
+  }
+
+  private reportCaptureFailure(
+    event: string,
+    error: unknown,
+    cid?: string,
+  ): void {
+    try {
+      this.deps.logCaptureFailure?.(event, {
+        ...(cid ? { conversation_id: cid } : {}),
+        error_type: error instanceof Error ? error.constructor.name : "unknown",
+      });
+    } catch {}
+  }
+
+  /** Shallow digest rows; nested metadata is shared and read-only. */
+  captureDigestInputs(): {
+    convs: Conv[];
+    live: Record<string, LiveInputs>;
+  } {
+    const convs: Conv[] = [];
+    const live: Record<string, LiveInputs> = {};
+    for (const [cid, row] of this.deps.records.metadataRows()) {
+      this.deps.records.applyLoadDefaults(cid, row, false);
+      live[cid] = this.captureLiveInputs(row);
+      convs.push(row);
+    }
+    return { convs, live };
+  }
+
+  /** Rebuild one agent's row from its current record and live inputs. */
+  refresh(cid: string): void {
+    try {
+      const row = this.deps.records.metadataSnapshot(cid);
+      if (row) this.refreshEntry(this.treeEntry(row));
+      else this.discard(cid);
+    } catch (error) {
+      this.reportCaptureFailure("tree_view_refresh_failed", error, cid);
+    }
+  }
+
+  private refreshEntry(entry: TreeEntryInput): void {
     const conv = entry.record;
-    const cid = conv.id;
-    if (typeof cid !== "string") return null;
+    const cid = statusRecordId(conv);
     this.touched?.add(cid);
     try {
       const parent = checkedParent(conv);
@@ -396,15 +512,13 @@ export class TreeView {
           !isDeepStrictEqual(previous.tags, conv.tags ?? {}))
       )
         this.changed();
-      return this.rows.get(cid) ?? null;
     } catch (error) {
       this.report("refresh", cid, error);
-      return this.rows.get(cid) ?? null;
     }
   }
 
   /** Drop one agent's row for good. */
-  discard(cid: string): void {
+  private discard(cid: string): void {
     this.touched?.add(cid);
     try {
       if (
@@ -426,8 +540,17 @@ export class TreeView {
   }
 
   /** Rebuild every row; the finished maps swap in one synchronous step. */
-  async rebuildAll(entries: readonly TreeEntryInput[]): Promise<void> {
-    this.readyState = false;
+  async rebuildAll(): Promise<void> {
+    this.invalidate();
+    let entries: TreeEntryInput[];
+    try {
+      entries = Array.from(this.deps.records.metadataRows(), ([, row]) =>
+        this.treeEntry(structuredClone(row)),
+      );
+    } catch (error) {
+      this.reportCaptureFailure("tree_view_replay_failed", error);
+      return;
+    }
     const touched = new Set<string>();
     this.touched = touched;
     try {

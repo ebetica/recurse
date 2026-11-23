@@ -3,7 +3,6 @@ import { dirname, join } from "node:path";
 
 import { KeyError, ValueError } from "../../src/agents/runtime/agent_node";
 import { AttachmentError } from "../../src/agents/runtime/attachments/base";
-import { ExternalKeyConflict } from "../../src/agents/storage";
 import {
   CompletedReplyCursorError,
   CompletedReplyCursorExpired,
@@ -13,6 +12,10 @@ import { ServiceAuth } from "../../src/auth/service";
 import { OperatorAuth } from "../../src/auth/session";
 import { logger } from "../../src/observability/runtime_logging";
 import { composeApp, startServer, type RunningServer } from "../../src/server";
+import {
+  registerConversationChangesRoutes,
+  type ConversationChangesRoutesDeps,
+} from "../../src/web/conversation_changes";
 import {
   registerConversationRoutes,
   type ConversationsRoutesDeps,
@@ -24,6 +27,7 @@ import {
 } from "../../src/web/service_conversations";
 import { publishLoopbackToken, requestAuth } from "../../src/web/request_auth";
 import { HttpError, jsonResponse, Router } from "../../src/web/router";
+import { PullRequests } from "../../src/pull_request";
 import { WorkdirGit } from "../../src/workdir_git";
 import { captureFixture } from "./fixture_subprocess";
 import seed from "./fixtures/http_conversations/seed.json";
@@ -66,10 +70,8 @@ export async function makeRepo(root: string): Promise<string> {
 
 class ScriptedWorld {
   readonly convs = new Map<string, Rec>();
-  bindings: [string, string][];
-  readonly external = new Map<string, string>();
+  readonly bindings: [string, string][];
   counter = 0;
-  raceLookups = 0;
   calls: unknown[][] = [];
 
   constructor(repo: string) {
@@ -79,8 +81,6 @@ class ScriptedWorld {
       this.convs.set(String(record.id), record);
     }
     this.bindings = seed.bindings.map(([p, c]) => [p!, c!]);
-    for (const [p, k, cid] of seed.external_keys)
-      this.external.set(`${p}\0${k}`, cid!);
   }
   log(...call: unknown[]): void {
     this.calls.push(call);
@@ -101,59 +101,6 @@ class ScriptedWorld {
   async save(conv: Rec) {
     this.log("save", conv.id, conv.diff_base_ref ?? null);
     this.convs.set(String(conv.id), copy(conv));
-  }
-  async lookupExternalKey(principal: string, key: string) {
-    this.log("lookup_external_key", principal, key);
-    if (key === "dangling")
-      throw new ExternalKeyConflict("external_key binding is unavailable");
-    if (key === "race") {
-      this.raceLookups += 1;
-      return this.raceLookups > 1 ? this.load("svc-winner") : null;
-    }
-    const cid = this.external.get(`${principal}\0${key}`);
-    return cid ? this.load(cid) : null;
-  }
-  async ownedCount(principal: string) {
-    return this.bindings.filter(([p]) => p === principal).length;
-  }
-  async bindService(principal: string, cid: string) {
-    this.log("bind_service_conversation", principal, cid);
-    this.bindings.push([principal, cid]);
-  }
-  async bindExternal(principal: string, key: string, cid: string) {
-    this.log("bind_external_key", principal, key, cid);
-    this.external.set(`${principal}\0${key}`, cid);
-  }
-  async rollback(conv: Rec) {
-    this.log("rollback_service_conversation", conv.id);
-    this.convs.delete(String(conv.id));
-    this.bindings = this.bindings.filter(([, c]) => c !== conv.id);
-  }
-  async serviceCreate(o: {
-    title: string | null;
-    servicePrincipal: string;
-    externalKey: string | null;
-    allowedModels: readonly string[] | null;
-  }) {
-    this.log(
-      "create_service",
-      o.title,
-      o.servicePrincipal,
-      o.externalKey,
-      o.allowedModels,
-    );
-    if (o.allowedModels !== null && !o.allowedModels.includes("m1"))
-      throw new ValueError("model_not_allowed");
-    const cid = this.next("svc");
-    this.convs.set(cid, {
-      id: cid,
-      status: "idle",
-      title: o.title,
-      parent: null,
-      model: "m1",
-      backend: "pi",
-    });
-    return this.load(cid)!;
   }
   async create(o: {
     parent: string | null;
@@ -273,7 +220,9 @@ class ScriptedWorld {
   }
 }
 
-type RouteDeps = ConversationsRoutesDeps & ServiceConversationRoutesDeps;
+type RouteDeps = ConversationsRoutesDeps &
+  ConversationChangesRoutesDeps &
+  ServiceConversationRoutesDeps;
 
 export interface ConversationsApp {
   readonly running: RunningServer;
@@ -288,7 +237,6 @@ export async function buildConversationsApp(
   options: {
     authEnv?: Record<string, string | undefined>;
     patch?: (deps: RouteDeps, world: ScriptedWorld) => void;
-    slots?: CreateSlots;
   } = {},
 ): Promise<ConversationsApp> {
   const repo = await makeRepo(join(root, "corpus"));
@@ -305,11 +253,14 @@ export async function buildConversationsApp(
   );
   const world = new ScriptedWorld(repo);
   const state = { ready: true };
+  const env = { ...process.env };
+  const prs = new PullRequests({ dataDir: data, env });
   const git = new WorkdirGit({
     repoUrl: "https://example.invalid/unused.git",
     repoDir: join(root, "none"),
     dataDir: data,
-    env: { ...process.env },
+    env,
+    lastBranchPr: (wt, branch) => prs.lastBranchPr(wt, branch),
   });
   const levels = seed.levels as unknown as Record<string, [string, string]>;
   const node = (cid: string) => ({
@@ -325,10 +276,11 @@ export async function buildConversationsApp(
           "retry-after": "2",
         });
     },
-    serviceCreateSlots: options.slots ?? new CreateSlots(),
+    serviceCreateSlots: new CreateSlots(),
     log: logger("web", sink),
     monotonicMs: () => performance.now(),
     store: {
+      convRowExists: (cid) => world.convs.has(cid),
       load: (cid) => world.load(cid),
       metadataSnapshot: (cid) => world.load(cid),
       async markViewed(cid) {
@@ -341,19 +293,6 @@ export async function buildConversationsApp(
         if (typeof conv.workdir !== "string") throw new KeyError("workdir");
         return conv.workdir;
       },
-    },
-    lookupExternalKey: (p, k) => world.lookupExternalKey(p, k),
-    serviceOwnedConversationCount: (p) => world.ownedCount(p),
-    bindServiceConversation: (p, c) => world.bindService(p, c),
-    bindExternalKey: (p, k, c) => world.bindExternal(p, k, c),
-    rollbackServiceConversation: (conv) => world.rollback(conv),
-    async mutateExternalStorage(work, rollback) {
-      try {
-        return await work();
-      } catch (error) {
-        await rollback?.();
-        throw error;
-      }
     },
     delivery: {
       deliver: (cid, content, o) => world.deliver(cid, content, o),
@@ -413,7 +352,9 @@ export async function buildConversationsApp(
     },
     create: {
       create: (o) => world.create(o),
-      createOrRejoinServiceConversation: (o) => world.serviceCreate(o),
+      async createOrRejoinServiceConversation() {
+        throw new Error("service create requires the real app");
+      },
       async setTakenOver(cid, takenOver) {
         world.log("set_taken_over", cid, takenOver);
         if (!world.convs.has(cid)) throw new KeyError(cid);
@@ -528,27 +469,25 @@ export async function buildConversationsApp(
         cid === "done-spawn" ? { status: "created", id: cid } : null,
       observe: async (cid) => world.log("observe_spawn_outcome", cid),
     },
+    githubRepoUrl: (stored) => prs.githubRepoUrl(stored),
     prs: { refresh: (cid) => world.log("refresh_prs", cid) },
     git: {
-      workdirFile(key) {
-        if (key.includes("..")) throw new ValueError("unsafe");
-        return join(data, "no-workdir.json");
-      },
-      resolveDiffCwd: (stored, persisted) =>
-        git.resolveDiffCwd(stored, persisted),
-      worktreeDiff: (cwd, base, source) => git.worktreeDiff(cwd, base, source),
+      resolveDiffCwd: (stored, persisted, signal) =>
+        git.resolveDiffCwd(stored, persisted, signal),
+      worktreeDiff: (cwd, base, source, signal, untracked) =>
+        git.worktreeDiff(cwd, base, source, signal, untracked),
       diffFile: (cwd, path, base, contents) =>
         git.diffFile(cwd, path, base, contents),
       pullRequestDiff: (url, path, queue) =>
-        git.pullRequestDiff(url, path, queue),
-      diffCandidates: (cwd) => git.diffCandidates(cwd),
-      githubRepoUrl: (stored, file) => git.githubRepoUrl(stored, file),
+        prs.pullRequestDiff(url, path, queue),
+      diffCandidates: (cwd, signal) => git.diffCandidates(cwd, signal),
     },
   };
   options.patch?.(deps, world);
   const router = new Router();
   registerServiceConversationRoutes(router, deps);
   registerConversationRoutes(router, deps);
+  registerConversationChangesRoutes(router, deps);
   const handler = composeApp({
     router,
     logger: logger("http", sink),

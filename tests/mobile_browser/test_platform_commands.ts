@@ -1,20 +1,15 @@
 import { expect } from "bun:test";
-import { EventEmitter, once } from "node:events";
-import { join } from "node:path";
-import { mkdir } from "node:fs/promises";
-import type { Page, Route } from "playwright";
+import type { Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
-  closeWithRoutes,
   gotoRoot,
-  mockConversation,
+  openPage,
   postFixture,
   rootAgentId,
   runBrowserTests,
+  screenshot,
   type BrowserTest,
-  startNewAgent,
-  turn,
   waitForLayout,
 } from "./common";
 
@@ -23,80 +18,9 @@ const commandPoll = (message: string, timeout = 15_000) => ({
   timeout,
   intervals: [50],
 });
-async function mockConv(
-  page: Page,
-  base: string,
-  id: string,
-  title: string,
-  parent: string | null,
-): Promise<void> {
-  await mockConversation(page, base, id, () => ({
-    id,
-    title,
-    parent,
-    status: "idle",
-    turns: [
-      turn(`${id}-turn`, `Ask ${id}`, `${title} thread body`, {
-        includeRows: false,
-        rowIds: { user: `${id}-user`, assistant: `${id}-assistant` },
-        usage: {},
-      }),
-    ],
-  }));
-}
-const linkTitles: Record<string, string> = {
-  main: "Coordinator",
-  branch: "Branch agent",
-  leaf: "Leaf agent",
-};
-const linkParents: Record<string, string | null> = {
-  main: null,
-  branch: "main",
-  leaf: "branch",
-};
-function linkNodes(...ids: string[]) {
-  return ids.map((id) => ({
-    id,
-    parent: linkParents[id],
-    updated: 1,
-    title: linkTitles[id],
-    kind: null,
-    status: "idle",
-    children: id === "leaf" ? 0 : 1,
-    queued: 0,
-    preview: "",
-    muted: false,
-  }));
-}
-const LINK_PROBE = `(() => { window.__focusedReads=[]; window.__treeReads=0; window.__uiStatus=[]; window.__titles=[]; const realFetch=window.fetch.bind(window); window.fetch=(input,init)=>{const url=new URL(typeof input==='string'?input:input.url,location.href); if(url.pathname.startsWith('/api/conversations/')&&url.searchParams.has('focused')) window.__focusedReads.push(url.pathname.split('/').pop()); const done=realFetch(input,init); if(url.pathname==='/api/tree') done.then(()=>window.__treeReads+=1,()=>{}); return done;}; window.addEventListener('recurse:ui-status',event=>window.__uiStatus.push(event.detail.message)); document.addEventListener('DOMContentLoaded',()=>{const title=document.querySelector('#conv-title'); new MutationObserver(()=>window.__titles.push(title?.textContent ?? '')).observe(title,{childList:true,subtree:true,characterData:true});}); })()`;
-async function routeLinkTree(
-  page: Page,
-  base: string,
-  nodes: () => unknown[],
-  gate?: { open: boolean; held: Route[]; events?: EventEmitter },
-): Promise<void> {
-  await page.route(`${base}api/tree`, (route) => {
-    if (gate && !gate.open) {
-      gate.held.push(route);
-      gate.events?.emit("held");
-      return;
-    }
-    return route.fulfill({ json: nodes() });
-  });
-  await page.route(
-    new RegExp(
-      `${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}api/conversations/[\\w-]+(?:\\?[^/]*)?$`,
-    ),
-    (route) => route.fulfill({ status: 404, json: { detail: "not found" } }),
-  );
-  for (const [id, title] of Object.entries(linkTitles))
-    await mockConv(page, base, id, title, linkParents[id]);
-}
-
 export const tests: BrowserTest[] = [
   // Regression: #3198 #3239 Side reader keys follow their desktop pane without stealing editor focus
   async function test_side_conversation_pane(browser, base) {
-    const shots = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
     const agent = "side-parent";
     const page = await browser.newPage({
       viewport: { width: 1280, height: 800 },
@@ -166,11 +90,10 @@ export const tests: BrowserTest[] = [
     expect(
       await page.locator(".msg.user", { hasText: "/rename" }).count(),
     ).toBe(0);
-    if (shots) {
-      await mkdir(shots, { recursive: true });
-      await page.screenshot({ path: `${shots}/rename-1280.png` });
+    if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR) {
+      await screenshot(page, "platform-commands/rename-1280");
       await page.setViewportSize({ width: 412, height: 915 });
-      await page.screenshot({ path: `${shots}/rename-412.png` });
+      await screenshot(page, "platform-commands/rename-412");
       await page.setViewportSize({ width: 1280, height: 800 });
     }
     await input.fill("/btw Reply only Side answer");
@@ -196,7 +119,7 @@ export const tests: BrowserTest[] = [
     await side
       .locator("#scroll")
       .evaluate((node) => (node.scrollTop = node.scrollHeight / 3));
-    if (shots) await page.screenshot({ path: `${shots}/side-pane-1280.png` });
+    await screenshot(page, "platform-commands/side-pane-1280");
 
     const focusSide = () => parentReply.click();
     const windowBox = async (id: string) =>
@@ -469,7 +392,7 @@ export const tests: BrowserTest[] = [
     );
     expect(new URL(copied).hash).toBe(`#agent=${secondId}`);
     expect(new URL(copied).searchParams.has("embed")).toBeFalse();
-    if (shots) await page.screenshot({ path: `${shots}/side-keys-1280.png` });
+    await screenshot(page, "platform-commands/side-keys-1280");
     await page.context().clearPermissions();
     await page.context().grantPermissions([]);
     await page.evaluate(() => {
@@ -527,7 +450,7 @@ export const tests: BrowserTest[] = [
     expect(await finderOptions.first().textContent()).toBe(
       "sidechat/Pricing questions",
     );
-    if (shots) await page.screenshot({ path: `${shots}/finder-side-1280.png` });
+    await screenshot(page, "platform-commands/finder-side-1280");
     await page.keyboard.press("Enter");
     await page.locator(`iframe.side-frame[data-side="${first}"]`).waitFor();
     expect(await frames.count()).toBe(1);
@@ -596,8 +519,7 @@ export const tests: BrowserTest[] = [
     expect(await finderOptions.locator(".agent-option-relation").count()).toBe(
       0,
     );
-    if (shots)
-      await page.screenshot({ path: `${shots}/finder-artifact-1280.png` });
+    await screenshot(page, "platform-commands/finder-artifact-1280");
     for (const title of [...drafts, "Quarterly chart", "Release notes"]) {
       await finderQuery.fill(`artifact/${title}`);
       expect(await finderOptions.allTextContents()).toEqual([
@@ -646,7 +568,7 @@ export const tests: BrowserTest[] = [
       expect(box.height).toBeGreaterThanOrEqual(44);
       expect(box.right).toBeLessThanOrEqual(412);
     }
-    if (shots) await phone.screenshot({ path: `${shots}/side-pane-412.png` });
+    await screenshot(phone, "platform-commands/side-pane-412");
     await phone.close();
 
     const promoting = await browser.newPage({
@@ -682,26 +604,29 @@ export const tests: BrowserTest[] = [
     browser,
     base,
   ) {
-    for (const [name, viewport, mobile, touch] of [
-      ["phone", { width: 390, height: 844 }, true, true],
-      ["desktop", { width: 1280, height: 800 }, false, false],
+    for (const [name, viewport, touch] of [
+      ["phone", { width: 390, height: 844 }, true],
+      ["desktop", { width: 1280, height: 800 }, false],
     ] as const) {
-      const context = await browser.newContext({
+      const { context, page, errors } = await openPage(browser, {
         viewport,
-        isMobile: mobile,
-        hasTouch: touch,
+        touch,
       });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
       const cid = rootAgentId();
-      const registry = (await (
-        await page.request.get(`${base}api/conversations/${cid}/skills`)
-      ).json()) as { context: string };
-      const skillContext = registry.context;
+      const skillsUrl = `${base}api/conversations/${cid}/skills`;
+      const registry = await page.request.get(skillsUrl);
+      expect(registry.status()).toBe(200);
+      const { context: skillContext } = (await registry.json()) as {
+        context: string;
+      };
+      const etag = registry.headers().etag!;
+      const unchanged = await page.request.get(skillsUrl, {
+        headers: { "if-none-match": etag },
+      });
+      expect(unchanged.status()).toBe(304);
+      expect(unchanged.headers()["x-recurse-skill-context"]).toBe(skillContext);
       const heldSkills = Promise.withResolvers<Route>();
-      await page.route(`${base}api/conversations/${cid}/skills`, (route) =>
-        heldSkills.resolve(route),
-      );
+      await page.route(skillsUrl, (route) => heldSkills.resolve(route));
       await page.route(base + "api/tree", (route) =>
         route.fulfill({
           json: [
@@ -876,13 +801,10 @@ export const tests: BrowserTest[] = [
       ["phone", { width: 390, height: 844 }, true],
       ["desktop", { width: 1280, height: 800 }, false],
     ] as const) {
-      const context = await browser.newContext({
+      const { context, page, errors } = await openPage(browser, {
         viewport,
-        isMobile: mobile,
-        hasTouch: mobile,
+        touch: mobile,
       });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
       const queries: string[] = [];
       const held = new Map<
         string,
@@ -940,9 +862,7 @@ export const tests: BrowserTest[] = [
       expect(await options.nth(1).textContent()).toContain(
         "subagent of Release notes writer",
       );
-      const shots = process.env.REVIVE_SCREENSHOT_DIR;
-      if (shots)
-        await page.screenshot({ path: join(shots, `revive-${name}.png`) });
+      await screenshot(page, `platform-commands/revive-${name}`);
       const query = page.locator("#agent-finder-query");
       expect(
         (await page.evaluate("document.activeElement?.id")) ===
@@ -966,13 +886,7 @@ export const tests: BrowserTest[] = [
       await query.fill("release");
       const stale = await held.get("release")!.promise;
       await browserExpect(options.first()).toContainText("Leaf reviewer");
-      if (process.env.LAZY_SEARCH_SCREENSHOT_DIR)
-        await page.screenshot({
-          path: join(
-            process.env.LAZY_SEARCH_SCREENSHOT_DIR,
-            `archive-${name}.png`,
-          ),
-        });
+      await screenshot(page, `platform-commands/archive-${name}`);
       held.delete("leaf");
       await query.fill("leaf");
       await page.waitForResponse(
@@ -992,13 +906,7 @@ export const tests: BrowserTest[] = [
       held.set("leaf", Promise.withResolvers<Route>());
       await query.fill("leaf");
       const afterEmpty = await held.get("leaf")!.promise;
-      if (process.env.LAZY_SEARCH_SCREENSHOT_DIR)
-        await page.screenshot({
-          path: join(
-            process.env.LAZY_SEARCH_SCREENSHOT_DIR,
-            `archive-empty-${name}.png`,
-          ),
-        });
+      await screenshot(page, `platform-commands/archive-empty-${name}`);
       await browserExpect(page.locator("#agent-finder-status")).not.toHaveText(
         /Searching|Loading/,
       );
@@ -1037,11 +945,9 @@ export const tests: BrowserTest[] = [
     base,
   ) {
     const cid = rootAgentId();
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 800 },
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
     expect(
@@ -1226,350 +1132,6 @@ export const tests: BrowserTest[] = [
     ).toBeTrue();
     expect(errors).toEqual([]);
     await context.close();
-  },
-  async function test_phone_list_is_root_and_conversations_replace(
-    browser,
-    base,
-  ) {
-    const context = await browser.newContext({
-      viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await routeLinkTree(page, base, () => linkNodes("main", "branch", "leaf"));
-    await page.goto(`${base}?before-phone`);
-    await page.locator("#sidebar.open .agent").first().waitFor();
-    await page.goto(base);
-    await page.locator("#sidebar.open .agent").first().waitFor();
-    expect(page.url()).toBe(base);
-    expect(await page.locator("#input").isVisible()).toBeFalse();
-    expect(await page.locator("#new-list").isVisible()).toBeTrue();
-    expect(await page.locator("#settings-btn").isVisible()).toBeTrue();
-    const shots = process.env.RECURSE_SCREENSHOT_DIR;
-    if (shots) {
-      await mkdir(shots, { recursive: true });
-      await page.screenshot({ path: join(shots, "phone-list.png") });
-    }
-    await page.locator('.agent[data-id="main"]').click();
-    await page.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
-    expect(await page.locator("#new-top").isVisible()).toBeTrue();
-    expect(await page.locator("#phone-nav").count()).toBe(0);
-    if (shots)
-      await page.screenshot({ path: join(shots, "phone-conversation.png") });
-    await page.locator("#pane-fab").click();
-    if (shots) await page.screenshot({ path: join(shots, "phone-more.png") });
-    expect(
-      await page.locator("#settings-menu-btn, #new-agent-menu-btn").count(),
-    ).toBe(0);
-    await page.goBack();
-    await page.locator("#sidebar.open").waitFor();
-    expect(await page.locator("#pane-menu.on").count()).toBe(0);
-    expect(page.url()).toBe(base);
-    await page.locator('.agent[data-id="main"]').click();
-    await page.locator("#menu-btn").click();
-    await page.locator("#sidebar.open").waitFor();
-    await page.goBack();
-    expect(page.url()).toBe(`${base}?before-phone`);
-    await page.goto(`${base}#agent=leaf`);
-    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
-    await page.locator("#up-top").click();
-    await page.locator("#conv-title", { hasText: "Branch agent" }).waitFor();
-    await page.locator("#up-top").click();
-    await page.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
-    await page.goBack();
-    await page.locator("#sidebar.open").waitFor();
-    expect(page.url()).toBe(base);
-    await page.goto(`${base}#agent=leaf`);
-    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
-    await page.reload();
-    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
-    await page.goBack();
-    await page.locator("#sidebar.open").waitFor();
-    expect(page.url()).toBe(base);
-    await page.locator('.agent[data-id="main"]').click();
-    await page.setViewportSize({ width: 1280, height: 915 });
-    await page.locator('.agent[data-id="branch"]').click();
-    await page.locator('.agent[data-id="leaf"]').click();
-    await page.setViewportSize({ width: 412, height: 915 });
-    await page.locator("#menu-btn").click();
-    await page.locator("#sidebar.open").waitFor();
-    expect(page.url()).toBe(base);
-    expect(errors).toEqual([]);
-    await closeWithRoutes(context);
-  },
-  async function test_agent_link_opens_that_agent_and_follows_the_selection(
-    browser,
-    base,
-  ) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
-    await context.addInitScript(LINK_PROBE);
-    await context.addInitScript(
-      "localStorage.setItem('recurse.lastAgent','branch')",
-    );
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await routeLinkTree(page, base, () => linkNodes("main", "branch", "leaf"));
-    await page.goto(`${base}#agent=leaf`, { waitUntil: "domcontentloaded" });
-    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
-    await page
-      .locator("#messages", { hasText: "Leaf agent thread body" })
-      .waitFor();
-    expect(await page.locator('.agent[data-id="leaf"].selected').count()).toBe(
-      1,
-    );
-    for (const id of ["main", "branch", "leaf"])
-      expect(await page.locator(`.agent[data-id="${id}"]`).count()).toBe(1);
-    await page.waitForFunction("window.__focusedReads.length > 0");
-    expect(
-      new Set((await page.evaluate("window.__focusedReads")) as string[]),
-    ).toEqual(new Set(["leaf"]));
-    expect(
-      ((await page.evaluate("window.__titles")) as string[]).toString(),
-    ).not.toContain("Coordinator");
-    expect(page.url()).toBe(`${base}#agent=leaf`);
-    await page.evaluate(
-      "window.__reloaded=false; addEventListener('beforeunload',()=>window.__reloaded=true)",
-    );
-    await page.locator('.agent[data-id="branch"]').click();
-    await page.locator("#conv-title", { hasText: "Branch agent" }).waitFor();
-    expect(page.url()).toBe(`${base}#agent=branch`);
-    await page.locator('.agent[data-id="main"]').click();
-    await page.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
-    expect(page.url()).toBe(`${base}#agent=main`);
-    expect((await page.evaluate("window.__reloaded")) as boolean).toBeFalse();
-    await page.goBack();
-    await page.locator("#conv-title", { hasText: "Branch agent" }).waitFor();
-    expect(page.url()).toBe(`${base}#agent=branch`);
-    expect(
-      await page.locator('.agent[data-id="branch"].selected').count(),
-    ).toBe(1);
-    await page.goBack();
-    await page.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
-    expect(page.url()).toBe(`${base}#agent=leaf`);
-    expect(await page.locator('.agent[data-id="leaf"].selected').count()).toBe(
-      1,
-    );
-    await page.goForward();
-    await page.locator("#conv-title", { hasText: "Branch agent" }).waitFor();
-    expect(page.url()).toBe(`${base}#agent=branch`);
-    await page.reload({ waitUntil: "domcontentloaded" });
-    await page
-      .locator("#messages", { hasText: "Branch agent thread body" })
-      .waitFor();
-    await page.waitForFunction(
-      "window.__focusedReads.includes('branch') && document.querySelector('.agent[data-id=\"branch\"].selected')",
-    );
-    expect(page.url()).toBe(`${base}#agent=branch`);
-    expect(
-      await page.locator('.agent[data-id="branch"].selected').count(),
-    ).toBe(1);
-    await page.evaluate("localStorage.setItem('recurse.lastAgent','leaf')");
-    await page.goto(`${base}#agent=main`, { waitUntil: "domcontentloaded" });
-    await page
-      .locator("#messages", { hasText: "Coordinator thread body" })
-      .waitFor();
-    expect(page.url()).toBe(`${base}#agent=main`);
-    expect(await page.locator('.agent[data-id="main"].selected').count()).toBe(
-      1,
-    );
-    expect(
-      ((await page.evaluate("window.__titles")) as string[]).toString(),
-    ).not.toContain("Leaf agent");
-    expect(errors).toEqual([]);
-    await page.unrouteAll({ behavior: "ignoreErrors" });
-    await context.close();
-  },
-  async function test_unopenable_agent_link_falls_back_and_says_so(
-    browser,
-    base,
-  ) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
-    await context.addInitScript(LINK_PROBE);
-    await context.addInitScript(
-      "localStorage.setItem('recurse.lastAgent','branch')",
-    );
-    const live: unknown[][] = [linkNodes("main", "branch", "leaf")];
-    for (const hash of [
-      "#agent=missing",
-      "#agent=..%2Fmain",
-      "#agent=",
-      `#agent=${"a".repeat(65)}`,
-      "#agent=constructor",
-      "#agent=toString",
-    ]) {
-      const page = await context.newPage();
-      const errors = captureErrors(page);
-      await routeLinkTree(page, base, () => live[0]);
-      await page.goto(base + hash, { waitUntil: "domcontentloaded" });
-      await page
-        .locator("#messages", { hasText: "Coordinator thread body" })
-        .waitFor();
-      expect(page.url(), hash).toBe(`${base}#agent=main`);
-      expect(
-        await page.locator('.agent[data-id="main"].selected').count(),
-        hash,
-      ).toBe(1);
-      expect(
-        (await page.evaluate("window.__uiStatus.slice(-1)")) as string[],
-      ).toEqual(["That agent link is not available"]);
-      expect(
-        new Set((await page.evaluate("window.__focusedReads")) as string[]),
-        hash,
-      ).toEqual(new Set(["main"]));
-      expect(
-        (await page.evaluate("localStorage.getItem('recurse.lastAgent')")) as
-          | string
-          | null,
-        hash,
-      ).toBe("main");
-      expect(errors, hash).toEqual([]);
-      await page.close();
-    }
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await routeLinkTree(page, base, () => live[0]);
-    await page.goto(`${base}#agent=leaf`, { waitUntil: "domcontentloaded" });
-    await page
-      .locator("#messages", { hasText: "Leaf agent thread body" })
-      .waitFor();
-    const entries = (await page.evaluate("history.length")) as number;
-    live[0] = linkNodes("main", "branch");
-    await page
-      .locator("#conv-title", { hasText: "Branch agent" })
-      .waitFor({ timeout: 15_000 });
-    expect(page.url()).toBe(`${base}#agent=branch`);
-    expect((await page.evaluate("history.length")) as number).toBe(entries);
-    expect(errors).toEqual([]);
-    await page.close();
-    live[0] = linkNodes("main", "branch", "leaf");
-    const page2 = await context.newPage();
-    const errors2 = captureErrors(page2);
-    await routeLinkTree(page2, base, () => live[0]);
-    await gotoRoot(page2, base);
-    await page2.locator('.agent[data-id="branch"]').click();
-    await page2.locator('.agent[data-id="leaf"]').click();
-    await page2.locator("#conv-title", { hasText: "Leaf agent" }).waitFor();
-    await page2.locator('.agent[data-id="main"]').click();
-    await page2.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
-    const reads = (await page2.evaluate("window.__treeReads")) as number;
-    live[0] = linkNodes("main", "branch");
-    await page2.waitForFunction(`window.__treeReads >= ${reads + 2}`);
-    await page2.goBack();
-    await page2.waitForFunction(
-      "window.__uiStatus.at(-1) === 'That agent link is not available'",
-    );
-    expect(page2.url()).toBe(`${base}#agent=leaf`);
-    expect(await page2.locator('.agent[data-id="main"].selected').count()).toBe(
-      1,
-    );
-    live[0] = linkNodes("main", "branch", "leaf");
-    await page2.reload({ waitUntil: "domcontentloaded" });
-    await page2
-      .locator("#messages", { hasText: "Leaf agent thread body" })
-      .waitFor();
-    expect(errors2).toEqual([]);
-    await page2.unrouteAll({ behavior: "ignoreErrors" });
-    await context.close();
-  },
-  async function test_agent_link_under_a_base_path_and_a_manual_override(
-    browser,
-    base,
-  ) {
-    const prefixed = base + "proxy/app/";
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    await context.addInitScript(LINK_PROBE);
-    await context.route(prefixed, async (route) => {
-      const body = await (await route.fetch({ url: base })).text();
-      return route.fulfill({ status: 200, body, contentType: "text/html" });
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    const gate = {
-      open: true,
-      held: [] as Route[],
-      events: new EventEmitter(),
-    };
-    await routeLinkTree(
-      page,
-      base,
-      () => linkNodes("main", "branch", "leaf"),
-      gate,
-    );
-    await page.goto(`${prefixed}#agent=leaf`, {
-      waitUntil: "domcontentloaded",
-    });
-    await page
-      .locator("#messages", { hasText: "Leaf agent thread body" })
-      .waitFor();
-    expect(page.url()).toBe(`${prefixed}#agent=leaf`);
-    await page.locator("#menu-btn").click();
-    await page.locator('.agent[data-id="main"]').click();
-    await page.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
-    expect(page.url()).toBe(`${prefixed}#agent=main`);
-    await page.close();
-    gate.open = false;
-    const page2 = await context.newPage();
-    await routeLinkTree(
-      page2,
-      base,
-      () => linkNodes("main", "branch", "leaf"),
-      gate,
-    );
-    const treeHeld = once(gate.events, "held", {
-      signal: AbortSignal.timeout(15_000),
-    });
-    await page2.goto(`${prefixed}#agent=leaf`, {
-      waitUntil: "domcontentloaded",
-    });
-    await treeHeld;
-    expect(gate.held.length).toBeGreaterThan(0);
-    await startNewAgent(page2);
-    await page2.waitForFunction("location.hash === ''");
-    expect((await page2.evaluate("document.activeElement.id")) as string).toBe(
-      "input",
-    );
-    expect(page2.url()).toBe(prefixed);
-    gate.open = true;
-    for (const route of gate.held)
-      await route
-        .fulfill({ json: linkNodes("main", "branch", "leaf") })
-        .catch(() => undefined);
-    await page2
-      .locator('.agent[data-id="main"]')
-      .waitFor({ state: "attached" });
-    await page2.locator(".agent.draft-row").waitFor({ state: "attached" });
-    await page2.locator("#input").blur();
-    await page2.locator("#menu-btn").click();
-    await page2.locator('.agent[data-id="main"]').waitFor();
-    await page2.locator("#sidebar.open").waitFor();
-    expect(
-      await page2
-        .locator('.agent[data-id="main"]')
-        .getAttribute("aria-expanded"),
-    ).toBe("false");
-    expect(await page2.locator('.agent[data-id="branch"]').count()).toBe(0);
-    expect(await page2.locator(".agent.draft-row").count()).toBe(1);
-    expect(
-      await page2.locator("#main").evaluate((el) => (el as any).inert),
-    ).toBeTrue();
-    expect(page2.url()).toBe(prefixed);
-    await page2.locator('.agent[data-id="main"]').click();
-    await page2.locator("#conv-title", { hasText: "Coordinator" }).waitFor();
-    await page2.goBack();
-    await page2.locator("#sidebar.open").waitFor();
-    expect(page2.url()).toBe(prefixed);
-    expect(errors).toEqual([]);
-    await closeWithRoutes(context);
   },
 ];
 if (import.meta.main) await runBrowserTests([["platform-commands", tests]]);

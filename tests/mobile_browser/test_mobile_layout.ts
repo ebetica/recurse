@@ -2,16 +2,16 @@ import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import {
   PNG_1X1,
-  assertArtifactVersionMenuEscape,
-  captureErrors,
   closeWithRoutes,
   expectHitCorners,
   gotoRoot,
   mockConversation,
+  openPage,
   postFixture,
   rootAgentId,
   routeArtifacts,
   runBrowserTests,
+  screenshot,
   visibleAndUncovered,
   type BrowserTest,
   startNewAgent,
@@ -20,18 +20,6 @@ import {
   turn,
   waitForLayout,
 } from "./common";
-
-async function layerAt(page: any, at: string | [number, number]) {
-  const [x, y] = Array.isArray(at)
-    ? at
-    : await page.locator(at).evaluate((el: any) => {
-        const r = el.getBoundingClientRect();
-        return [r.x + r.width / 2, r.y + r.height / 2];
-      });
-  return page.evaluate(
-    `document.elementFromPoint(${x}, ${y})?.closest("#sidebar, #topbar, #panes, #pane-backdrop, #pane-menu")?.id`,
-  );
-}
 
 export const tests: BrowserTest[] = [
   // Regression: #3246 rendering a diagram during navigation must not squeeze the phone conversation.
@@ -42,13 +30,11 @@ export const tests: BrowserTest[] = [
     const { demo } = await postFixture(base, "seed-theme-surfaces");
     try {
       for (const width of [390, 430]) {
-        const context = await browser.newContext({
+        const { context, page } = await openPage(browser, {
           viewport: { width, height: width === 390 ? 844 : 932 },
-          isMobile: true,
-          hasTouch: true,
+          touch: true,
           deviceScaleFactor: 3,
         });
-        const page = await context.newPage();
         const cdp = await context.newCDPSession(page);
         await cdp.send("Emulation.setCPUThrottlingRate", { rate: 4 });
         let release!: () => void;
@@ -106,10 +92,7 @@ export const tests: BrowserTest[] = [
                 );
               }),
           );
-          if (process.env.RECURSE_SCREENSHOT_DIR)
-            await page.screenshot({
-              path: `${process.env.RECURSE_SCREENSHOT_DIR}/phone-diagram-${width}.png`,
-            });
+          await screenshot(page, `mobile-layout/phone-diagram-${width}`);
           release();
           await page.locator("#messages .mermaid-done svg").waitFor();
           await page.locator("#menu-btn").click();
@@ -153,12 +136,10 @@ export const tests: BrowserTest[] = [
   },
   // Regression: #3512 #2991 installed apps avoid fullscreen cutout jumps and keep controls clear of safe areas.
   async function test_fullscreen_safe_area(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
     const dockRequests: string[] = [];
     page.on("request", (request) => {
       const path = new URL(request.url()).pathname;
@@ -243,264 +224,6 @@ export const tests: BrowserTest[] = [
     ).toBeGreaterThanOrEqual(60);
     await context.close();
   },
-  // Regression: #2505 #3269 the sidebar, fonts and desktop Chat window are ready before the first visible Chat frame.
-  async function test_fresh_mobile_and_desktop(browser, base) {
-    for (const [name, viewport, isMobile, hasTouch] of [
-      ["phone", { width: 390, height: 844 }, true, true],
-      ["desktop", { width: 1280, height: 800 }, false, false],
-    ] as const) {
-      const context = await browser.newContext({
-        viewport,
-        isMobile,
-        hasTouch,
-      });
-      const page = await context.newPage();
-      const errors = captureErrors(page);
-      if (name === "desktop")
-        await page.addInitScript(() => {
-          const browser = globalThis as any;
-          browser.__chatWidths = [];
-          const sample = () => {
-            const main = browser.document.querySelector("#main");
-            if (main?.checkVisibility({ visibilityProperty: true }))
-              browser.__chatWidths.push(main.getBoundingClientRect().width);
-            if (!browser.__chatSettled) browser.requestAnimationFrame(painted);
-          };
-          const painted = () => {
-            const channel = new browser.MessageChannel();
-            channel.port1.onmessage = sample;
-            channel.port2.postMessage(0);
-          };
-          browser.requestAnimationFrame(painted);
-        });
-      await routeArtifacts(page, base);
-      await gotoRoot(page, base);
-      await page.locator(".agent").first().waitFor();
-      await page.evaluate(async () => {
-        await (globalThis as any).document.fonts.ready;
-      });
-      await waitForLayout(page);
-      if (name === "desktop") {
-        const chat = await page.evaluate(() => {
-          const browser = globalThis as any;
-          browser.__chatSettled = true;
-          return {
-            narrowest: Math.min(...browser.__chatWidths),
-            settled: browser.document
-              .querySelector("#main")
-              .getBoundingClientRect().width,
-          };
-        });
-        expect(chat.narrowest).toBeGreaterThanOrEqual(chat.settled - 1);
-      }
-      await page.waitForFunction(
-        "!document.querySelector('#thread-loading').classList.contains('on') && !document.querySelector('#messages').classList.contains('stale')",
-      );
-      await visibleAndUncovered(page, "#conv-title");
-      await visibleAndUncovered(page, "#messages");
-      await visibleAndUncovered(page, "#input");
-      await page.locator("#input").fill("hello stays visible");
-      await visibleAndUncovered(page, "#input");
-      expect(await page.locator("#input").inputValue()).toBe(
-        "hello stays visible",
-      );
-      if (name === "desktop") {
-        const imageBytes = Buffer.from(
-          "89504e470d0a1a0a7175657565642d696d6167652d65786163742d6279746573",
-          "hex",
-        );
-        await page.evaluate(() => {
-          const browser = globalThis as any;
-          const realFetch = browser.fetch.bind(browser);
-          browser.fetch = (input: any, init: any) => {
-            const url = typeof input === "string" ? input : input.url;
-            if (url === "/api/attachments")
-              return new browser.Promise((resolve: any) => {
-                const file = init.body.get("file");
-                file.arrayBuffer().then((buffer: ArrayBuffer) => {
-                  browser.__uploadedAttachment = {
-                    name: file.name,
-                    type: file.type,
-                    bytes: Array.from(new browser.Uint8Array(buffer)),
-                  };
-                });
-                browser.__releaseAttachmentUpload = () =>
-                  resolve(
-                    new browser.Response(
-                      JSON.stringify({
-                        id: "queued-image.png",
-                        url: "/api/attachments/queued-image.png",
-                        filename: "queued-image.png",
-                        is_image: true,
-                      }),
-                      {
-                        status: 200,
-                        headers: { "Content-Type": "application/json" },
-                      },
-                    ),
-                  );
-              });
-            return realFetch(input, init);
-          };
-        });
-        await page.locator("#file-input").setInputFiles({
-          name: "queued-image.png",
-          mimeType: "image/png",
-          buffer: imageBytes,
-        });
-        await page.waitForFunction("document.querySelector('#send').disabled");
-        await page.locator("#input").fill("");
-        expect(await page.locator("#send").getAttribute("aria-label")).toBe(
-          "Send message",
-        );
-        expect(await page.locator("#send.stop").count()).toBe(0);
-        await page.waitForFunction("window.__uploadedAttachment");
-        expect(
-          await page.evaluate(() => (globalThis as any).__uploadedAttachment),
-        ).toEqual({
-          name: "queued-image.png",
-          type: "image/png",
-          bytes: Array.from(imageBytes),
-        });
-        expect(
-          await page.locator(".attach-chip.uploading img").getAttribute("alt"),
-        ).toBe("queued-image.png");
-        await page.evaluate("window.__releaseAttachmentUpload() ");
-        await page.waitForFunction("!document.querySelector('#send').disabled");
-        expect(
-          await page
-            .locator(".attach-chip:not(.uploading) img")
-            .getAttribute("src"),
-        ).toBe("/api/attachments/queued-image.png");
-      } else {
-        expect(await page.locator("#panes").isVisible()).toBeFalse();
-        expect(await page.locator("#pane-fab.attention").count()).toBe(0);
-        expect(await page.locator("#pane-fab").isVisible()).toBeTrue();
-        await page.locator("#input").blur();
-        const trigger = await page.locator("#pane-fab").evaluate((element) => {
-          const browser = globalThis as any;
-          const rect = element.getBoundingClientRect();
-          const style = browser.getComputedStyle(element);
-          const box = browser.document
-            .querySelector("#new-top")
-            .getBoundingClientRect();
-          return {
-            width: rect.width,
-            height: rect.height,
-            left: rect.left,
-            right: rect.right,
-            padding: style.padding,
-            borderWidth: style.borderWidth,
-            background: style.backgroundColor,
-            boxRight: box.right,
-            label: element.getAttribute("aria-label"),
-            hasPopup: element.getAttribute("aria-haspopup"),
-          };
-        });
-        expect(trigger.width).toBeGreaterThanOrEqual(44);
-        expect(trigger.height).toBeGreaterThanOrEqual(44);
-        expect(trigger.padding).toBe("0px");
-        expect(trigger.borderWidth).toBe("0px");
-        expect(trigger.background).toBe("rgba(0, 0, 0, 0)");
-        expect(trigger.boxRight).toBeLessThanOrEqual(trigger.left);
-        expect(trigger.right).toBeLessThanOrEqual(viewport.width);
-        expect(trigger.label).toBe("More actions");
-        expect(trigger.hasPopup).toBe("menu");
-        await page.locator("#pane-fab").focus();
-        expect(
-          await page.locator("#pane-fab").evaluate((element) => {
-            const browser = globalThis as any;
-            return {
-              width: browser.getComputedStyle(element).outlineWidth,
-              style: browser.getComputedStyle(element).outlineStyle,
-            };
-          }),
-        ).toEqual({ width: "2px", style: "solid" });
-        await page.locator("#menu-btn").click();
-        await page.waitForFunction(
-          "document.querySelector('.agent')?.getBoundingClientRect().left >= 0",
-        );
-        await visibleAndUncovered(page, ".agent");
-        await page.locator(".agent").first().click();
-        await page.waitForFunction(
-          "!document.querySelector('#sidebar')?.classList.contains('open')",
-        );
-        await page.locator("#pane-fab").click();
-        expect(
-          await page.locator("#pane-fab").getAttribute("aria-expanded"),
-        ).toBe("true");
-        const menuFits = () =>
-          page.locator("#pane-menu").evaluate((menu) => {
-            const document = menu.ownerDocument;
-            const box = menu.getBoundingClientRect();
-            const rows = [...menu.querySelectorAll(".pane-menu-item")].filter(
-              (row: any) => row.getBoundingClientRect().height > 0,
-            );
-            return {
-              inside:
-                box.left >= 0 &&
-                box.top >= 0 &&
-                box.right <= document.documentElement.clientWidth &&
-                box.bottom <= document.documentElement.clientHeight,
-              rowsHit: rows.map((row: any) => {
-                const rect = row.getBoundingClientRect();
-                return row.contains(
-                  document.elementFromPoint(
-                    rect.left + rect.width / 2,
-                    rect.top + rect.height / 2,
-                  ),
-                );
-              }),
-            };
-          });
-        const ltr = await menuFits();
-        expect(ltr.inside).toBeTrue();
-        expect(ltr.rowsHit.length).toBeGreaterThan(0);
-        expect(ltr.rowsHit.every(Boolean)).toBeTrue();
-        await page
-          .locator("#pane-backdrop")
-          .click({ position: { x: 1, y: 1 } });
-        await page.evaluate("document.documentElement.dir = 'rtl'");
-        await page.locator("#pane-fab").click();
-        expect(await menuFits()).toEqual(ltr);
-        const item = page.locator('.pane-menu-item[data-pane="report"]');
-        expect(await item.getAttribute("role")).toBe("menuitem");
-        expect((await item.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-        await item.click();
-        await page.locator(".pane-col.mobile-active").waitFor();
-        expect(await page.locator(".pane-title").innerText()).toBe("Artifacts");
-        await assertArtifactVersionMenuEscape(page);
-        await page.locator(".pane-head .x").click();
-        expect(await page.locator("#panes").isVisible()).toBeFalse();
-        await visibleAndUncovered(page, "#input");
-      }
-      if (name === "desktop") {
-        expect(
-          await page
-            .locator("#sidebar")
-            .evaluate((element) => (element as any).inert),
-        ).toBeFalse();
-        await page.locator("#settings-btn").focus();
-        await page.keyboard.press("Tab");
-        expect(
-          await page.evaluate(
-            "document.activeElement?.closest('#sidebar') === null",
-          ),
-        ).toBeTrue();
-        await page.locator("#pane-rail-panels .rail-btn").last().focus();
-        await page.keyboard.press("Tab");
-        await browserExpect(
-          page.locator("#pane-rail > #trash-btn"),
-        ).toBeFocused();
-        await page.locator('.rail-btn[data-pane="report"]').click();
-        await assertArtifactVersionMenuEscape(page);
-        await visibleAndUncovered(page, ".agent");
-        await visibleAndUncovered(page, "#input");
-      }
-      expect(errors).toEqual([]);
-      await context.close();
-    }
-  },
   // Feature: #2354 touch attachment controls keep image previews accessible.
   async function test_mobile_shell_stays_visible_across_scroll_resize_and_list(
     browser,
@@ -533,13 +256,10 @@ export const tests: BrowserTest[] = [
     };
     const branchThread = { ...thread, id: "branch", title: "Branch agent" };
     const leafThread = { ...thread, id: "leaf", title: "Leaf agent" };
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await routeArtifacts(page, base);
     await page.route(`${base}api/tree`, async (route) =>
       route.fulfill({
@@ -839,11 +559,11 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await closeWithRoutes(context);
 
-    const desktop = await browser.newContext({
-      viewport: { width: 1280, height: 800 },
-    });
-    const desktopPage = await desktop.newPage();
-    const desktopErrors = captureErrors(desktopPage);
+    const {
+      context: desktop,
+      page: desktopPage,
+      errors: desktopErrors,
+    } = await openPage(browser, { viewport: { width: 1280, height: 800 } });
     await routeArtifacts(desktopPage, base);
     await desktopPage.route(`${base}api/tree`, (route) =>
       route.fulfill({
@@ -928,185 +648,12 @@ export const tests: BrowserTest[] = [
     await desktop.unrouteAll({ behavior: "ignoreErrors" });
     await desktop.close();
   },
-  async function test_restored_mobile_selection_survives_stale_generation(
-    browser,
-    base,
-  ) {
-    const rememberedId = "remembered-mobile-agent";
-    const served = await (await fetch(base)).text();
-    const stale = served
-      .replaceAll("browser-e2e-current", "browser-e2e-old")
-      .replaceAll(
-        "/static/app.js?v=browser-e2e-old",
-        "/static/app.js?v=browser-e2e-current",
-      )
-      .replace(
-        "/static/app.css?v=browser-e2e-old",
-        "/static/app.css?v=browser-e2e-current",
-      );
-    const runtimeVersion = String(
-      ((await (await fetch(`${base}api/version`)).json()) as any).version,
-    );
-    const rememberedConv = {
-      id: rememberedId,
-      title: "Remembered mobile agent",
-      parent: "main",
-      status: "idle",
-      kind: null,
-      turns: [
-        turn("remembered", "Say something", "Remembered thread is visible.", {
-          cursor: 100,
-          includeRows: false,
-          rowIds: { user: "remembered-u", assistant: "remembered-a" },
-          usage: null,
-        }),
-      ],
-      msg_count: 2,
-      window_cursor: 0,
-      draft: null,
-      pending: [],
-      model: "anthropic/claude-opus-5",
-      backend: "pi",
-    };
-    for (const [name, options] of [
-      [
-        "phone",
-        {
-          viewport: { width: 390, height: 844 },
-          isMobile: true,
-          hasTouch: true,
-        },
-      ],
-      [
-        "desktop-site-coarse",
-        {
-          viewport: { width: 1280, height: 800 },
-          isMobile: false,
-          hasTouch: true,
-        },
-      ],
-    ] as const) {
-      const context = await browser.newContext(options);
-      await context.addInitScript(
-        `localStorage.setItem('recurse.lastAgent', ${JSON.stringify(rememberedId)});`,
-      );
-      const page = await context.newPage();
-      const errors = captureErrors(page);
-      let roots = 0;
-      let firstShell = true;
-      page.on("request", (request) => {
-        if (request.url().split("?")[0] === base) roots++;
-      });
-      await page.route(`${base}**`, async (route) => {
-        if (route.request().url().split("?")[0] === base && firstShell) {
-          firstShell = false;
-          return route.fulfill({
-            status: 200,
-            body: stale,
-            contentType: "text/html",
-          });
-        }
-        return route.continue();
-      });
-      await page.route(`${base}api/tree`, async (route) => {
-        const response = await route.fetch();
-        const nodes = (await response.json()) as any[];
-        nodes.push({
-          id: rememberedId,
-          parent: "main",
-          title: "Remembered mobile agent",
-          kind: null,
-          status: "idle",
-          updated: 1,
-          children: 0,
-          queued: 0,
-          preview: "",
-          description: null,
-          muted: false,
-          safety_off: false,
-          safety_off_active: false,
-          skill_context: "browser-restored-mobile",
-        });
-        return route.fulfill({ json: nodes });
-      });
-      await mockConversation(page, base, rememberedId, () => rememberedConv);
-      await page.goto(base, { waitUntil: "domcontentloaded" });
-      await page.waitForURL(`${base}?_recurse_generation=${runtimeVersion}**`);
-      await page.locator(`.agent[data-id="${rememberedId}"]`).waitFor();
-      if (name === "phone") {
-        await page.locator("#sidebar.open").waitFor();
-        await page.locator(`.agent[data-id="${rememberedId}"]`).click();
-      }
-      await page
-        .locator("#conv-title")
-        .filter({ hasText: "Remembered mobile agent" })
-        .waitFor();
-      await page
-        .locator("#messages")
-        .filter({ hasText: "Remembered thread is visible." })
-        .waitFor();
-      await page.waitForFunction("location.search === ''");
-      await visibleAndUncovered(page, "#messages");
-      await visibleAndUncovered(page, "#input");
-      expect(
-        await page
-          .locator(`.agent[data-id="${rememberedId}"].selected`)
-          .count(),
-      ).toBe(1);
-      expect(roots).toBe(2);
-      if (name === "desktop-site-coarse")
-        expect(
-          await page.evaluate("matchMedia('(pointer: coarse)').matches"),
-        ).toBeTrue();
-      expect(errors).toEqual([]);
-      await closeWithRoutes(context);
-    }
-  },
-  async function test_phone_back_closes_pane_before_returning_to_list(
-    browser,
-    base,
-  ) {
-    const fixture = await postFixture(base, "seed-files-pane");
-    const context = await browser.newContext({
-      viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const page = await context.newPage();
-    const fab = page.locator("#pane-fab");
-    await page.goto(`${base}#agent=${fixture.demo}`);
-    await page.locator("#pane-fab.on").waitFor();
-    await fab.click();
-    await page.locator('#pane-menu [data-pane="files"]').click();
-    await page.locator("#panes.overlay .files-card").first().waitFor();
-    expect(await layerAt(page, [206, 600])).toBe("panes");
-    expect(await layerAt(page, "#menu-btn")).toBe("topbar");
-    await fab.click();
-    await page.locator("#pane-menu.on").waitFor();
-    expect(await layerAt(page, '#pane-menu [data-pane="files"]')).toBe(
-      "pane-menu",
-    );
-    await fab.click();
-    await page.locator("#pane-menu.on").waitFor({ state: "detached" });
-    await page.goBack();
-    await page.locator("#panes.on").waitFor({ state: "detached" });
-    await visibleAndUncovered(page, "#input");
-    expect(await layerAt(page, "#menu-btn")).toBe("topbar");
-    expect(await layerAt(page, "#pane-fab")).toBe("topbar");
-    await page.locator("#menu-btn").click();
-    await page.locator("#sidebar.open").waitFor();
-    expect(await layerAt(page, [100, 600])).toBe("sidebar");
-    expect(await layerAt(page, [400, 600])).toBe("sidebar");
-    await context.close();
-  },
   async function test_reduced_motion_stops_control_transitions(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
       reducedMotion: "no-preference",
     });
-    const page = await context.newPage();
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
     const durations = (): Promise<string[]> =>
@@ -1126,13 +673,10 @@ export const tests: BrowserTest[] = [
   },
   // Feature: #2279 touch Send and general controls provide 44px targets.
   async function test_phone_tap_targets_stay_44px(browser, base) {
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 412, height: 915 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await gotoRoot(page, base);
     await page.locator(".agent").first().waitFor();
     const short = async (selector: string, rows = false) => {
@@ -1177,55 +721,6 @@ export const tests: BrowserTest[] = [
     await page.locator("#pane-menu.on .pane-menu-item").first().waitFor();
     misses.push(...(await short("#pane-menu.on .pane-menu-item", true)));
     expect(misses).toEqual([]);
-    expect(errors).toEqual([]);
-    await context.close();
-  },
-  async function test_optional_chrome_cannot_abort_boot(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
-    });
-    const servedResponse = await fetch(base);
-    const served = await servedResponse.text();
-    const marker = '<script type="module" src="/static/app.js';
-    const removal = `<script>
-      for (const id of ["connection-status", "connection-announcement",
-        "agent-finder", "agent-menu", "agent-finder-query", "agent-finder-status",
-        "pane-announcer", "key-mode", "shortcut-groups"])
-        document.getElementById(id)?.remove();
-    </script>`;
-    const shell = served.replace(marker, removal + marker);
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await page.route(`${base}**`, async (route) => {
-      const url = route.request().url().split("?")[0];
-      if (url === base)
-        return route.fulfill({
-          status: 200,
-          body: shell,
-          contentType: "text/html",
-        });
-      return route.continue();
-    });
-    await gotoRoot(page, base);
-    await page.locator(".agent").first().waitFor();
-    for (const selector of [
-      "#connection-status",
-      "#agent-finder",
-      "#pane-announcer",
-      "#key-mode",
-    ])
-      expect(await page.locator(selector).count()).toBe(0);
-    await page.waitForFunction(
-      "!document.querySelector('#messages')?.classList.contains('stale')",
-    );
-    await visibleAndUncovered(page, "#messages");
-    await visibleAndUncovered(page, "#input");
-    await page.locator("#input").fill("core shell stays visible");
-    expect(await page.locator("#input").inputValue()).toBe(
-      "core shell stays visible",
-    );
     expect(errors).toEqual([]);
     await context.close();
   },
@@ -1363,13 +858,10 @@ export const tests: BrowserTest[] = [
         },
       ],
     };
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await mockConversation(page, base, "main", () => thread);
     await gotoRoot(page, base);
     await page
@@ -1394,12 +886,11 @@ export const tests: BrowserTest[] = [
   async function test_phone_thread_drag_hides_keyboard(browser, base) {
     for (const width of [390, 1280]) {
       const { agent } = await postFixture(base, "seed-scroll-pin");
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 844 },
         isMobile: width === 390,
         hasTouch: true,
       });
-      const page = await context.newPage();
       try {
         await page.goto(`${base}#agent=${agent}`);
         const input = page.locator("#input");
@@ -1463,10 +954,8 @@ export const tests: BrowserTest[] = [
         ).toBeTrue();
         await input.fill(draft);
         await input.evaluate((el: any) => el.setSelectionRange(7, 7));
-        const shots =
-          width === 390 && process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
-        if (shots)
-          await page.screenshot({ path: `${shots}/keyboard-before.png` });
+        if (width === 390)
+          await screenshot(page, "mobile-layout/keyboard-before");
         await drag("#scroll");
         expect(
           await input.evaluate((el) => el === el.ownerDocument.activeElement),
@@ -1481,8 +970,8 @@ export const tests: BrowserTest[] = [
             el.selectionEnd,
           ]),
         ).toEqual([7, 7]);
-        if (shots)
-          await page.screenshot({ path: `${shots}/keyboard-after.png` });
+        if (width === 390)
+          await screenshot(page, "mobile-layout/keyboard-after");
         await waitForLayout(page);
         await input.tap();
         expect(

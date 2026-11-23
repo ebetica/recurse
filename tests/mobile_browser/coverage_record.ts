@@ -19,6 +19,7 @@ const CSS_SOURCES: Record<string, readonly string[]> = {
   ],
   "/static/diff.css": ["web/diff/style.css"],
   "/static/files.css": ["web/files/style.css"],
+  "/static/excalidraw/index.css": ["web/image-preview/style.css"],
   "/static/pane-powerbar.css": ["web/panes/powerbar.css"],
 };
 
@@ -261,11 +262,6 @@ export class CoverageRecorder {
       const file = `web${pathname.slice("/static".length)}`;
       if (file === "web/katex.css") return;
       sources.push([file, 0, text]);
-    } else {
-      // test-check-allow: T1 maps the served <style> back to index.html rules
-      const html = readFileSync(join(ROOT, "web/index.html"), "utf8");
-      if (!text.trim() || !html.includes(text)) return;
-      sources.push(["web/index.html", 0, text]);
     }
     for (const [file, offset, body] of sources) {
       this.add(this.css, file, "");

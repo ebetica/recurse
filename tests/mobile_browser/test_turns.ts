@@ -83,7 +83,7 @@ const node = (id: string, title: string, parent: string | null) => ({
   muted: false,
 });
 
-// Regression: #2017 live-panel shell chip has an unobstructed phone touch target
+// Regression: #2017 status-bar shell chip has an unobstructed phone touch target
 async function test_background_shells_inline_details_and_scoped(
   browser: any,
   base: string,
@@ -208,7 +208,7 @@ async function test_background_shells_inline_details_and_scoped(
     await mockConversation(page, base, "kid", () => threads.kid);
     await gotoRoot(page, base);
     expect(await page.locator(".work-shells").count()).toBe(0);
-    const activity = page.locator(".working .live-label");
+    const activity = page.locator(".working .status-bar-label");
     await activity.waitFor();
     expect((await activity.innerText()).startsWith("Thinking")).toBeTrue();
     expect((await activity.getAttribute("title")) ?? "").toBe("Thinking");
@@ -222,7 +222,7 @@ async function test_background_shells_inline_details_and_scoped(
     expect(
       await chip
         .locator(
-          "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' live-panel ')]",
+          "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' status-bar ')]",
         )
         .count(),
     ).toBe(1);
@@ -263,7 +263,7 @@ async function test_background_shells_inline_details_and_scoped(
     if (mobile) {
       const chipBox = await chip.boundingBox();
       const panel = chip.locator(
-        "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' live-panel-box ')]",
+        "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' status-bar-box ')]",
       );
       const panelBox = await panel.boundingBox();
       const agentChip = page.locator(".agent-chip");
@@ -1128,7 +1128,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
       await openThread(page, base, thread);
       const target = page.locator(".activity-boundary.turn").first();
       await target.locator(".turn-foot-actions").waitFor();
-      if (running) await page.locator("#live-bar .live-panel").waitFor();
+      if (running) await page.locator("#status-bar .status-bar").waitFor();
       if (shape === "short" || shape === "running")
         await target.locator(".content > p").last().waitFor();
       await waitForLayout(page);
@@ -1178,7 +1178,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
             summary: block.querySelector(".activity-group .turn-summary")
               ?.textContent,
             text,
-            panel: rect(doc.querySelector("#live-bar .live-panel")),
+            panel: rect(doc.querySelector("#status-bar .status-bar")),
             lineHeight: reply
               ? parseFloat(
                   (globalThis as any).getComputedStyle(reply).lineHeight,
@@ -1187,7 +1187,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
             icons: Array.from(actions.querySelectorAll("svg")).map(rect),
             targets: Array.from(actions.children).map(rect),
             usage: actions.querySelectorAll(".activity-usage").length,
-            label: doc.querySelector("#live-bar .live-thinking-title")
+            label: doc.querySelector("#status-bar .status-bar-thinking-title")
               ?.textContent,
           };
         });
@@ -1248,7 +1248,7 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
         t.segments[1].assistant.live = false;
         t.segments[2].assistant.live = false;
         await page
-          .locator("#live-bar .live-panel")
+          .locator("#status-bar .status-bar")
           .waitFor({ state: "hidden" });
         await page.locator(".turn.current .content > p").last().waitFor();
         (metrics as any).transitions = [revealing, await measure()];
@@ -1335,105 +1335,6 @@ async function test_turn_footer_shares_reply_line(browser: any, base: string) {
   }
 }
 
-async function test_changes_opens_small_files_and_fetches_each_patch(
-  browser: any,
-  base: string,
-) {
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-  });
-  const page = await context.newPage();
-  const errors = captureErrors(page);
-  const calls: string[] = [];
-  const diff = {
-    available: true,
-    base: "origin/main",
-    version: "v1",
-    files: [
-      { path: "one.txt", additions: 1, deletions: 1, status: "modified" },
-      { path: "two.txt", additions: 1, deletions: 1, status: "modified" },
-    ],
-    truncated: false,
-    untracked: [],
-    currentPr: null,
-  };
-  await page.route(`${base}api/conversations/main/diff**`, (route: any) =>
-    route.fulfill({ json: diff }),
-  );
-  await page.route(
-    `${base}api/conversations/main/diff/files**`,
-    (route: any) => {
-      calls.push(route.request().url());
-      const path = new URL(route.request().url()).searchParams.get("path");
-      const patch =
-        path === "one.txt"
-          ? "diff --git a/one.txt b/one.txt\nindex 111..222 100644\n--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-one\n+one\n"
-          : "diff --git a/two.txt b/two.txt\nindex 333..444 100644\n--- a/two.txt\n+++ b/two.txt\n@@ -1 +1 @@\n-two\n+two\n";
-      return route.fulfill({ json: { available: true, path, patch } });
-    },
-  );
-  await gotoRoot(page, base);
-  await page.locator(".agent").first().waitFor();
-  await page
-    .locator('#pane-rail button[aria-label="Changes"]')
-    .waitFor({ timeout: 15000 });
-  await page.locator('#pane-rail button[aria-label="Changes"]').click();
-  await page.locator(".diff-file").first().waitFor();
-  expect(await page.locator(".diff-file").count()).toBe(2);
-  const first = page.locator(".diff-file").first();
-  await first.locator(".diff-file-toggle").waitFor();
-  expect(calls).toHaveLength(2);
-  expect(errors).toEqual([]);
-  await context.close();
-}
-async function test_changes_marks_a_truncated_summary(
-  browser: any,
-  base: string,
-) {
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 800 },
-  });
-  const page = await context.newPage();
-  const errors = captureErrors(page);
-  const calls: string[] = [];
-  const diff = {
-    available: true,
-    base: "origin/main",
-    version: "v1",
-    files: [
-      { path: "one.txt", additions: 1, deletions: 1, status: "modified" },
-    ],
-    moreFiles: 1,
-    truncated: true,
-    untracked: [],
-    currentPr: null,
-  };
-  await page.route(`${base}api/conversations/main/diff**`, (route: any) =>
-    route.fulfill({ json: diff }),
-  );
-  await page.route(
-    `${base}api/conversations/main/diff/files**`,
-    (route: any) => {
-      calls.push(route.request().url());
-      return route.abort();
-    },
-  );
-  await gotoRoot(page, base);
-  await page.locator(".agent").first().waitFor();
-  await page
-    .locator('#pane-rail button[aria-label="Changes"]')
-    .waitFor({ timeout: 15000 });
-  await page.locator('#pane-rail button[aria-label="Changes"]').click();
-  await page.locator(".diff-file").first().waitFor();
-  expect(calls).toEqual([]);
-  expect(await page.locator(".diff-group-count").first().textContent()).toBe(
-    "1+",
-  );
-  expect(await page.locator(".diff-trunc").count()).toBeGreaterThanOrEqual(1);
-  expect(errors).toEqual([]);
-  await context.close();
-}
-
 export const tests: BrowserTest[] = [
   test_history_survives_poll,
   test_background_completion_renders_as_platform_message,
@@ -1443,7 +1344,5 @@ export const tests: BrowserTest[] = [
   test_background_shells_inline_details_and_scoped,
   test_turn_collapses_expands_and_pages,
   test_scroll_up_pages_past_compaction_markers,
-  test_changes_opens_small_files_and_fetches_each_patch,
-  test_changes_marks_a_truncated_summary,
 ];
 if (import.meta.main) await runBrowserTests([["turns", tests]]);

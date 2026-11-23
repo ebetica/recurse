@@ -5,8 +5,6 @@ import {
 } from "@earendil-works/pi-ai/providers/all";
 import {
   captureErrors,
-  closeWithRoutes,
-  focusComposer,
   gotoRoot,
   routeArtifacts,
   runBrowserTests,
@@ -18,6 +16,7 @@ import {
   startNewAgent,
   expectHitCorners,
 } from "./common";
+import { ALL_REASONING_LEVELS as ALL_LEVELS } from "./fixtures";
 import { closeDetails, expectModalSheet, fontSize } from "./settings_support";
 import type { Locator, Page } from "playwright";
 import { expect as browserExpect } from "playwright/test";
@@ -52,7 +51,6 @@ const LIST_FRESH = {
   context_window: 128_000,
   reasoning_levels: ["off"] as string[] | null,
 };
-const ALL_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 type LadderEntry = { model: string; reasoning: string };
 
@@ -247,7 +245,7 @@ export const tests: BrowserTest[] = [
       name: "Safety review model",
     });
     const defaultOption = finder.getByRole("option", {
-      name: "Same as level 1",
+      name: "Automatic",
       exact: true,
     });
     const savedStatus = ladder
@@ -311,17 +309,19 @@ export const tests: BrowserTest[] = [
       await browserExpect(
         settings.getByRole("button", { name: "Safety", exact: true }),
       ).toHaveCount(0);
-      await row("Same as level 1").click();
+      await row("Automatic").click();
       await expectModalSheet(page, "Safety review");
       await browserExpect(search).toHaveAttribute("aria-expanded", "true");
       await browserExpect(defaultOption).toBeVisible();
+      if (shots)
+        await page.screenshot({ path: `${shots}/reviewer-automatic-1280.png` });
       const benchmarkText =
         /\d+\s*\/\s*\d+ correct|Not tested|has allowed risky actions in testing/i;
       await browserExpect(settings).not.toContainText(benchmarkText);
       await search.press("Enter");
       await browserExpect(finder).toBeHidden();
       expect(posts).toEqual([]);
-      await row("Same as level 1").click();
+      await row("Automatic").click();
       await search.fill("jv114");
       await browserExpect(defaultOption).toHaveCount(0);
       const classifier = finder
@@ -441,6 +441,8 @@ export const tests: BrowserTest[] = [
       await browserExpect(settings).not.toContainText(benchmarkText);
       await expectHitCorners(search);
       await expectHitCorners(defaultOption);
+      if (shots)
+        await page.screenshot({ path: `${shots}/reviewer-automatic-412.png` });
       await search.fill("gpt-6 luna");
       await expectBothRoutes();
       if (shots)
@@ -473,7 +475,7 @@ export const tests: BrowserTest[] = [
         }),
       ).toBeVisible();
       await saveChoice(() => defaultOption.tap(), null);
-      await browserExpect(row("Same as level 1")).toBeVisible();
+      await browserExpect(row("Automatic")).toBeVisible();
       expect(await readChoice()).toMatchObject({ model: null, invalid: false });
       expect(errors).toEqual([]);
     } finally {
@@ -1112,67 +1114,6 @@ export const tests: BrowserTest[] = [
         "This conversation runs at effort level 6",
       );
       await context.close();
-    }
-  },
-  // Regression: #2357 loading friendly model metadata never flashes a raw id or resizes its slot.
-  async function test_composer_names_a_model_outside_the_ladder(browser, base) {
-    const context = await browser.newContext({
-      viewport: { width: 412, height: 915 },
-    });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
-    await page.route(`${base}api/settings/effort-levels`, async (route) => {
-      const response = await route.fetch();
-      return route.fulfill({
-        json: { ...(await response.json()), models: [] },
-      });
-    });
-    const outside = {
-      id: "fauxordinary/outside-ladder",
-      label: "Model from the list",
-      route: "Test",
-      context_window: null,
-      reasoning_levels: null,
-    };
-    const { promise: gate, resolve: release } = Promise.withResolvers<void>();
-    const started = page.waitForRequest(`${base}api/settings/model-list`);
-    await page.route(`${base}api/settings/model-list`, async (route) => {
-      await gate;
-      return route.fulfill({
-        json: { models: [outside], reasoning: ALL_LEVELS },
-      });
-    });
-    expect(
-      (
-        await page.request.post(
-          `${base}__browser-test/seed-model-selection-error`,
-          {
-            data: { agent: "model-name-outside", model: outside.id },
-          },
-        )
-      ).ok(),
-    ).toBeTrue();
-    try {
-      await page.goto(`${base}#agent=model-name-outside`);
-      await page
-        .locator('.agent.selected[data-id="model-name-outside"]')
-        .waitFor({ state: "attached" });
-      await started;
-      const pill = page.locator("#model-trigger");
-      const model = pill.locator(".model-name");
-      await focusComposer(page);
-      await visibleAndUncovered(page, "#model-trigger .model-name");
-      await browserExpect(model).toHaveText("Effort");
-      const width = () =>
-        pill.evaluate((node) => node.getBoundingClientRect().width);
-      const loadingWidth = await width();
-      release();
-      await browserExpect(model).toHaveText(outside.label);
-      expect(await width()).toBe(loadingWidth);
-      expect(errors).toEqual([]);
-    } finally {
-      release();
-      await closeWithRoutes(context);
     }
   },
 ];

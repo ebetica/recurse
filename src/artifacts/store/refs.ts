@@ -1,6 +1,6 @@
 // Artifact versions are immutable refs; publication updates its ref by compare-and-set.
 import { Buffer } from "node:buffer";
-import { chmod, lstat, mkdir, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import * as startupMetrics from "../../observability";
 import {
@@ -16,11 +16,9 @@ import {
 import {
   ArtifactConflict,
   ArtifactCorrupt,
-  ArtifactError,
   ArtifactInvalid,
   ArtifactLimit,
   FULL_SHA_RE,
-  isMissing,
   normalizedTitle,
   safeRel,
   type ResolvedContext,
@@ -36,12 +34,7 @@ export const HISTORY_MAX = 100;
 const MAX_ENTRIES = 10_000;
 const NULL_SHA = "0".repeat(40);
 export const TITLE_CONFIG_KEY = "recurse.title";
-export type TreeRow = readonly [
-  name: string,
-  sha: string,
-  mode: string,
-  kind: string,
-];
+export type TreeRow = readonly [name: string, sha: string];
 
 export async function initRepo(
   ctx: ResolvedContext,
@@ -194,7 +187,7 @@ export async function tree(
       );
     }
     if (name !== ".artifact.json") safeRel(name);
-    rows.push([name, shaValue, mode, kind]);
+    rows.push([name, shaValue]);
     if (rows.length > MAX_ENTRIES)
       throw new ArtifactLimit("artifact contains too many files");
   }
@@ -250,25 +243,6 @@ export function expectVersion(
   }
 }
 
-async function markChanged(ctx: ResolvedContext): Promise<void> {
-  const marker = join(ctx.artifactsDir, ".changed");
-  try {
-    await mkdir(ctx.artifactsDir, { recursive: true, mode: 0o777 });
-    try {
-      const info = await lstat(marker);
-      if (!info.isFile() || info.nlink !== 1) {
-        throw new ArtifactCorrupt("artifact change marker is invalid");
-      }
-    } catch (error) {
-      if (!isMissing(error)) throw error;
-    }
-    await writeFile(marker, nowIsoInternal(ctx), "utf8");
-  } catch (error) {
-    if (error instanceof ArtifactError) throw error;
-    throw new ArtifactCorrupt("artifact change marker cannot be written");
-  }
-}
-
 // Create an immutable ref; a race refusal succeeds if the ref appears
 // after a brief bounded retry while the other publisher finishes.
 export async function createRef(
@@ -321,7 +295,6 @@ export async function publishRef(
       "artifact changed; refresh and retry with the current version",
     );
   }
-  await markChanged(ctx);
 }
 
 // Git runs with TZ=UTC. Git 2.55 prints that zero offset as "Z" in strict ISO
@@ -409,11 +382,4 @@ export async function versionMetadata(
     }
   }
   return metadata;
-}
-
-function nowIsoInternal(ctx: ResolvedContext): string {
-  return ctx
-    .now()
-    .toISOString()
-    .replace(/\.(\d{3})Z$/u, (_match, millis: string) => `.${millis}000Z`);
 }

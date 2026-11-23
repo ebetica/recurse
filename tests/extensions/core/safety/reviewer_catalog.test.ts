@@ -3,6 +3,7 @@ import { rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { durableModels } from "../../../../src/agents/durable/models";
 import { modelsJsonWorld } from "../../../backend/fixtures/models_json_world";
+import { recordedSonnet } from "../../../backend/fixtures/reviewer_routes";
 
 const { builtin, cleanupModelRoot, listed, modelRoot, responding, turns } =
   modelsJsonWorld();
@@ -39,10 +40,12 @@ test.each([
     });
     const settings = await listed(root, [provider]);
     const [defaultReviewer] = settings.config.levels.resolveEffortLevel(1);
-    const native = durableModels(root).getModel(
-      provider,
-      defaultReviewer.slice(provider.length + 1),
-    )!;
+    const claudeFileActor =
+      provider === recordedSonnet.provider && change !== "none";
+    const reviewerId = claudeFileActor
+      ? recordedSonnet.id
+      : defaultReviewer.slice(provider.length + 1);
+    const native = durableModels(root).getModel(provider, reviewerId)!;
     expect(native).toBeDefined();
     if (pin)
       await settings.config.levels.setEffortLevel(1, defaultReviewer, "low");

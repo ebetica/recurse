@@ -79,18 +79,16 @@ import { state } from "../state.js";
 import type * as ThreadRender from "../thread-render.js";
 import { userBubble } from "../thread-render/index.js";
 import {
-  clearLivePanel,
-  queuedT,
-  renderLivePanel,
+  clearStatusBar,
+  queuedStatusBarT,
+  renderStatusBar,
   shellUnavailableT,
-  waitingPanelT,
-  workingT,
-} from "./live-panel.js";
+  waitingStatusBarT,
+  runningStatusBarT,
+} from "./status-bar.js";
 import { promptBanner } from "../prompt/banner.js";
-import { activityStatusKind } from "../thread-render/tool_activity.js";
 import { copyText, toolDetailStore } from "../tool_details.js";
 import type { Conversation, Message } from "../types.js";
-import { type ViewBlock } from "../row-thread-state/view-blocks.js";
 import { type TemplateResult, html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { beginCopyFeedback, copyFeedbackIsCurrent } from "./copy.js";
@@ -581,8 +579,12 @@ if (typeof ResizeObserver !== "undefined") {
     const height = controls?.offsetHeight ?? 0;
     const controlsResized = height !== controlsHeight;
     controlsHeight = height;
-    // Opening the composer row alone doesn't move the reading position.
-    if (controlsResized && entries.every(({ target }) => target === scrollEl))
+    // Desktop controls can wrap in a narrow Chat window without a thread reflow.
+    if (
+      !phoneNavigation() &&
+      controlsResized &&
+      entries.every(({ target }) => target === scrollEl)
+    )
       return;
     applySendPin();
     if (pinHeld()) return;
@@ -683,7 +685,7 @@ function acceptedBubble(o: OptimisticEntry): TemplateResult {
 
 // Keys loaded turns and pending bubbles by identity to preserve their DOM.
 // Working turns remain visible before turn_start; cancelling a pending item
-// cannot transfer its hidden DOM node to a queued sibling. The live bar is
+// cannot transfer its hidden DOM node to a queued sibling. The status bar is
 // built after the thread renders: it reads which thinking the thread shows.
 function threadTemplate(
   conv: Conversation,
@@ -703,41 +705,6 @@ function threadTemplate(
           </div>`
         : nothing;
   const blocks = turnGroupBlocks(loaded, conv.parent ?? null);
-  // Invariant: Session offsets retain chronology when outcome markers move to
-  // their cut. Live rows follow persisted rows; ties keep incoming arrival
-  // order.
-  const position = (row: ViewBlock) =>
-    row.offset !== undefined && row.offset >= 0 ? row.offset : Infinity;
-  let latestEntry: ViewBlock | undefined;
-  let latestCompaction: ViewBlock | undefined;
-  for (const row of rowThreads.get(conv.id)?.rows ?? []) {
-    const customCompact =
-      row.kind === "marker" &&
-      row.role === "custom" &&
-      (row.meta as { compact_marker?: unknown } | null)?.compact_marker ===
-        true;
-    if (
-      row.kind === "marker" &&
-      !customCompact &&
-      !["compaction", "shell-notice", "compaction-notice"].includes(row.role)
-    )
-      continue;
-    if (!["marker", "text", "tool_call"].includes(row.kind)) continue;
-    if (!latestEntry || position(row) >= position(latestEntry))
-      latestEntry = row;
-    const related =
-      row.kind === "marker" &&
-      (row.role === "compaction" ||
-        (customCompact &&
-          (row.text === "Compacting…" ||
-            row.text.startsWith("Compaction failed:"))));
-    if (
-      related &&
-      (!latestCompaction || position(row) >= position(latestCompaction))
-    ) {
-      latestCompaction = row;
-    }
-  }
   const pending = (conv.pending || []).filter(
     (message) => !isDeliveryReceipt(message),
   );
@@ -755,8 +722,8 @@ function threadTemplate(
     (o) => acceptedBubble(o),
   );
   // Invariant: An admitted send with no live run yet (cold start, head-of-line
-  // queue, post-restart redrive) must not look dead: the queued panel shows
-  // from admission, where the working panel only starts at dispatch. Failure
+  // queue, post-restart redrive) must not look dead: the queued status bar shows
+  // from admission, where the running status bar only starts at dispatch. Failure
   // rows keep their own retry UI and never count.
   const queued =
     hasSendablePending(pending) ||
@@ -764,19 +731,16 @@ function threadTemplate(
   const currentTurnOpen = loaded.some((turn) => turn.open);
   // Invariant: Inbox steers wait for a request boundary, not run end.
   // The run remains authoritative even between rendered response rows.
-  const workingPanel =
-    running && (liveBlock || !currentTurnOpen) ? workingT(conv) : null;
-  if (!workingPanel) clearLivePanel();
-  const liveBar = running
-    ? workingPanel
+  const runningStatusBar =
+    running && (liveBlock || !currentTurnOpen) ? runningStatusBarT(conv) : null;
+  if (!runningStatusBar) clearStatusBar();
+  const statusBar = running
+    ? runningStatusBar
     : queued
-      ? queuedT(conv)
-      : activityStatusKind(
-            false,
-            activeShells(conv).shellCount,
-            activeDescendantCount(state.nodes, conv.id),
-          ) === "waiting"
-        ? waitingPanelT(conv)
+      ? queuedStatusBarT(conv)
+      : activeShells(conv).shellCount > 0 ||
+          activeDescendantCount(state.nodes, conv.id) > 0
+        ? waitingStatusBarT(conv)
         : null;
   const thread = html` ${promptBanner(conv, paint)} ${piHistoryNotice}
   ${repeat(
@@ -787,14 +751,7 @@ function threadTemplate(
       ${activityBoundaryT(conv, block, { current: index === last })}`,
   )}
   ${acceptedBefore < 0 ? acceptedT : nothing}
-  ${running ? nothing : shellUnavailableT(conv)}
-  ${pendingActionT(
-    conv,
-    latestCompaction !== undefined &&
-      ((latestCompaction.role === "custom" &&
-        latestCompaction.text === "Compacting…") ||
-        latestCompaction === latestEntry),
-  )}
+  ${running ? nothing : shellUnavailableT(conv)} ${pendingActionT(conv)}
   ${commentOutbox(conv.id)} ${outboxBubbles(conv.id)}
   ${repeat(
     pending,
@@ -806,7 +763,7 @@ function threadTemplate(
     (o) => "opt:" + o.seq,
     (o) => optimisticBubble(conv, o),
   )}`;
-  return [thread, liveBar];
+  return [thread, statusBar];
 }
 
 export function paint(conv: Conversation): void {
@@ -885,11 +842,11 @@ export function paint(conv: Conversation): void {
     );
   // Invariant: Another paint must not hold above a queued bottom write.
   if (followBottom) bottomFollowConversation = conv.id;
-  // Invariant: the thread renders before the live bar, which reads the
+  // Invariant: the thread renders before the status bar, which reads the
   // committed thinking step recorded while building the thread template.
-  const [threadT, liveBar] = threadTemplate(conv);
+  const [threadT, statusBar] = threadTemplate(conv);
   render(threadT, msgsEl);
-  renderLivePanel(liveBar);
+  renderStatusBar(statusBar);
   for (const image of msgsEl.querySelectorAll<HTMLImageElement>("img")) {
     const paused = pausedImages.get(image);
     if (!paused) continue;
@@ -958,7 +915,6 @@ export function convHash(conv: Conversation): string {
     cachedContext,
     rowThreads.get(conv.id)?.instanceId,
     rowThreads.get(conv.id)?.revision,
-    conv.compacting,
     conv.pending_actions,
     conv.provider_starting,
     conv.core_reused,
@@ -998,7 +954,7 @@ export function takeToolDetailConversation(): string | null {
   const current = toolDetailConversation;
   if (current) saveViewport(current);
   toolDetailConversation = null;
-  clearLivePanel();
-  renderLivePanel(null);
+  clearStatusBar();
+  renderStatusBar(null);
   return current;
 }

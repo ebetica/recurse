@@ -1,4 +1,5 @@
 import { afterAll, expect, test } from "bun:test";
+import { agentTempLeaf } from "../../src/state_paths";
 import { Database } from "bun:sqlite";
 import {
   existsSync,
@@ -299,7 +300,7 @@ test("a failed file migration keeps the instance unready until restart can recov
   });
   const legacy = join(
     config.paths.AGENT_TEMP_INSTANCE_DIR,
-    config.agentTempLeaf(key),
+    agentTempLeaf(config.paths, key),
     "uploads",
   );
   await mkdir(legacy, { recursive: true, mode: 0o700 });
@@ -319,7 +320,7 @@ test("a failed file migration keeps the instance unready until restart can recov
   await mkdir(config.paths.AGENT_FILES_DIR, { recursive: true });
   const obstruction = join(
     config.paths.AGENT_FILES_DIR,
-    config.agentTempLeaf(key),
+    agentTempLeaf(config.paths, key),
   );
   await writeFile(obstruction, "blocked");
   try {

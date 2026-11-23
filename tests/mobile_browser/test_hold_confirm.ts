@@ -3,11 +3,14 @@ import type { Browser, Page } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
+  gotoRoot,
+  mockConversation,
+  openPage,
   runBrowserTests,
   startNewAgent,
   type BrowserTest,
 } from "./common";
-import { idleConv, openFixtureConversation, runConv } from "./fixtures";
+import { idleConv, openFixtureConversation, runConv, tree } from "./fixtures";
 
 const idle = () => ({ ...idleConv(), pending: [] });
 const tip = async (page: any) => {
@@ -402,6 +405,148 @@ export const tests: BrowserTest[] = [
     } finally {
       await context.close();
     }
+  },
+  async function test_overflow_slide_actions(browser, base) {
+    const { context, page } = await openPage(browser, {
+      viewport: { width: 412, height: 915 },
+      touch: true,
+    });
+    await page.route(`${base}api/tree*`, (route) =>
+      route.fulfill({ json: [{ ...tree()[0], parent: "parent" }] }),
+    );
+    await mockConversation(page, base, "main", () => ({
+      ...idleConv(),
+      parent: "parent",
+    }));
+    let deletes = 0;
+    let pins = 0;
+    await page.route(`${base}api/conversations/main`, (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      deletes++;
+      return route.fulfill({ json: { ok: true } });
+    });
+    await page.route(`${base}api/conversations/main/take-over`, (route) => {
+      pins++;
+      return route.fulfill({ json: { taken_over: true } });
+    });
+    await gotoRoot(page, base);
+    const cdp = await context.newCDPSession(page);
+    const slide = async (selector: string, hot = true, cancel = false) => {
+      const button = (await page.locator("#pane-fab").boundingBox())!;
+      const x = button.x + button.width / 2;
+      const y = button.y + button.height / 2;
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x, y }],
+      });
+      await page.locator("#pane-menu.on").waitFor();
+      const item = (await page.locator(selector).boundingBox())!;
+      for (let i = 1; i <= 8; i++) {
+        await cdp.send("Input.dispatchTouchEvent", {
+          type: "touchMove",
+          touchPoints: [
+            {
+              x: x + ((item.x + item.width / 2 - x) * i) / 8,
+              y: y + ((item.y + item.height / 2 - y) * i) / 8,
+            },
+          ],
+        });
+      }
+      await page.waitForFunction(
+        ({ selector, hot }) => {
+          const document = (globalThis as any).document;
+          return hot
+            ? document.querySelector(`${selector}.hot`) !== null
+            : document.querySelector("#pane-menu .hot") === null;
+        },
+        { selector, hot },
+      );
+      expect(await page.locator(`${selector}.hot`).count()).toBe(hot ? 1 : 0);
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: cancel ? "touchCancel" : "touchEnd",
+        touchPoints: [],
+      });
+    };
+    await slide("#trash-btn", true, true);
+    expect(await page.locator("#trash-btn.armed").count()).toBe(0);
+    expect(deletes).toBe(0);
+    await slide("#scroll", false);
+    expect(await page.locator("#trash-btn.armed").count()).toBe(0);
+    expect(deletes).toBe(0);
+    await slide("#takeover-btn");
+    await page
+      .locator("#takeover-btn.active:not(:disabled)")
+      .waitFor({ state: "attached" });
+    expect(pins).toBe(1);
+    await slide("#trash-btn");
+    expect(await page.locator("#trash-btn.armed").count()).toBe(1);
+    expect(deletes).toBe(0);
+    const deleted = page.waitForResponse(
+      (response) =>
+        response.url() === `${base}api/conversations/main` &&
+        response.request().method() === "DELETE",
+    );
+    await slide("#trash-btn");
+    await deleted;
+    expect(deletes).toBe(1);
+    await context.close();
+  },
+  // Regression: #2861 confirmed Delete must not leave the conversation actions menu open.
+  async function test_overflow_touch_tap_delete(browser, base) {
+    const { context, page } = await openPage(browser, {
+      viewport: { width: 412, height: 915 },
+      touch: true,
+    });
+    await page.route(`${base}api/tree*`, (route) =>
+      route.fulfill({ json: tree() }),
+    );
+    await mockConversation(page, base, "main", () => idleConv());
+    let deletes = 0;
+    await page.route(`${base}api/conversations/main`, (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      deletes++;
+      return route.fulfill({ json: { ok: true } });
+    });
+    await gotoRoot(page, base);
+    const cdp = await context.newCDPSession(page);
+    const tap = async (selector: string) => {
+      const box = (await page.locator(selector).boundingBox())!;
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2 }],
+      });
+      await cdp.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+    };
+    await tap("#pane-fab");
+    await page.locator("#pane-menu.on").waitFor();
+    await page.locator("#trash-btn").focus();
+    await page.keyboard.press("Escape");
+    expect(await page.locator("#pane-menu.on").count()).toBe(0);
+    await tap("#pane-fab");
+    await page.locator("#pane-backdrop").tap({ position: { x: 10, y: 500 } });
+    expect(await page.locator("#pane-menu.on").count()).toBe(0);
+    await tap("#pane-fab");
+    await tap("#trash-btn");
+    await page.locator("#trash-btn.armed").waitFor();
+    expect(await page.locator("#trash-btn.armed").count()).toBe(1);
+    expect(deletes).toBe(0);
+    const deletion = page.waitForResponse(
+      (response) =>
+        response.request().method() === "DELETE" &&
+        new URL(response.url()).pathname === "/api/conversations/main",
+    );
+    await tap("#trash-btn");
+    await (await deletion).finished();
+    expect(deletes).toBe(1);
+    expect(await page.locator("#pane-menu.on").count()).toBe(0);
+    expect(await page.locator("#pane-backdrop.on").count()).toBe(0);
+    expect(await page.locator("#pane-fab").getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+    await context.close();
   },
 ];
 if (import.meta.main) await runBrowserTests([["hold-confirm", tests]]);

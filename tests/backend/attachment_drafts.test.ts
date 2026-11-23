@@ -88,11 +88,16 @@ test("draft lock reports its bounded async wait and remains usable", async () =>
     };
     const conversations = { load: () => null, save: async () => {} };
     let next = 0;
-    const drafts = new AttachmentDrafts(config, conversations as never, dirs, {
-      ids: () => (++next).toString(16).padStart(32, "0"),
-      now: () => 1_790_000_000,
-      flock: { timeoutMs: 0 },
-    });
+    const drafts = new AttachmentDrafts(
+      config.paths,
+      conversations as never,
+      dirs,
+      {
+        ids: () => (++next).toString(16).padStart(32, "0"),
+        now: () => 1_790_000_000,
+        flock: { timeoutMs: 0 },
+      },
+    );
     const token = (await drafts.createAttachmentDraft()).id;
     const lockPath = join(drafts.draftsDir, `${token}.lock`);
     const holder = await open(

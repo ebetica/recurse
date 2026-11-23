@@ -9,6 +9,8 @@ import {
 import { AgentStore } from "../../../../src/agents/storage/agent_store";
 import { ServiceBindings } from "../../../../src/agents/storage";
 import { Config } from "../../../../src/config";
+import { TreeView } from "../../../../src/agents/tree_view";
+import { logger } from "../../../../src/observability/runtime_logging";
 
 export interface ConversationCase {
   record?: ConversationRecord;
@@ -54,17 +56,9 @@ export function fixtureBindings(
 }
 export function fixtureHooks(root: string): ConversationStoreHooks {
   return {
-    nodeInputs: () => null,
-    withNodeLock: (_cid, fn, token) => fn(token ?? {}),
-    liveStatus: () => ["idle", null],
-    hasLiveShell: () => false,
+    inbox: () => [],
     defaultSpawnWorkdir: () => root,
-    treeRefresh: () => {},
-    treeRebuild: () => {},
-    treeDiscard: () => {},
-    safeRemoveTempKey: () => true,
-    dropNode: () => {},
-    withModelGuard: (_cid, fn) => fn(),
+    onRowsChanged: () => {},
   };
 }
 export function fixtureStore(root: string): ConversationStore {
@@ -82,4 +76,19 @@ export function fixtureStore(root: string): ConversationStore {
     fixtureHooks(root),
     config,
   );
+}
+
+export function fixtureTreeView(store: ConversationStore): TreeView {
+  return new TreeView({
+    records: store,
+    node: () => null,
+    liveStatus: () => ["idle", null],
+    durableSafetyOff: () => undefined,
+    hasLiveShell: () => false,
+    skills: {
+      contextForWorkdirLoopSafe: (w) => (w === null ? null : `loop:${w}`),
+      renderer: () => async (w) => (w === null ? null : `full:${w}`),
+    },
+    logger: logger("agents", { write: () => {} }),
+  });
 }

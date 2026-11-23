@@ -1,7 +1,7 @@
-// Per-agent SQLite admission precedes every projection swap; no legacy writes.
-// Volatile changes never write. Workers scan startup state off-loop.
+// Per-agent SQLite admission precedes projection swaps; no legacy or volatile writes.
+// Startup scans off-loop and recovers backend imports committed before metadata.
 // Per-cid locks serialize metadata; stale snapshots merge canonical intent.
-// An import marker commits the backend before metadata; startup recovers it.
+// Legacy pinned holds read as taken over unless a current value is stored.
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, mkdir, open, readdir } from "node:fs/promises";
@@ -9,7 +9,6 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { ptr } from "bun:ffi";
 import {
-  atomicJson,
   flockExclusive,
   libc,
   openPinnedLockFile,
@@ -84,23 +83,6 @@ const PIGGYBACK_METADATA_KEYS: ReadonlySet<string> = new Set([
   "last_interaction",
 ]);
 
-/**
- * Rename the pre-`taken_over` take-over fields (`pinned`, `pinned_order`) in
- * place; true when the record used them. Newer names win.
- */
-function renameLegacyTakeOver(record: ConversationRecord): boolean {
-  const legacy = "pinned" in record || "pinned_order" in record;
-  for (const [old, now] of LEGACY_TAKE_OVER) {
-    if (old in record && !(now in record)) record[now] = record[old];
-    delete record[old];
-  }
-  return legacy;
-}
-const LEGACY_TAKE_OVER = Object.entries({
-  pinned: "taken_over",
-  pinned_order: "taken_over_order",
-});
-
 /** Detached durable subset: mutable values must not alias a live record. */
 export function canonicalMetadata(
   record: ConversationRecord,
@@ -156,55 +138,11 @@ export interface ConversationStorePaths {
   titleLockDir: string;
   muteLockDir: string;
 }
-export interface LiveInputs {
-  status: unknown;
-  runId: unknown;
-  muted: boolean;
-  safetyOff: boolean;
-  safetyOffActive: boolean;
-  queued: number;
-  activeRunId: string | null;
-  hasLiveShells: boolean;
-}
-interface NodeInputs {
-  muteDesired: boolean | null;
-  safetyDesired: boolean | null;
-  pendingCount: number;
-  inbox: ConversationRecord[];
-  /** In-memory last activity, ahead of the piggybacked metadata when live. */
-  activityUpdated?: number | null;
-}
-interface TreeEntry {
-  record: ConversationRecord;
-  live: LiveInputs;
-  workdir: string;
-}
 export interface ConversationStoreHooks {
-  nodeInputs(cid: string): NodeInputs | null;
-  // Runtime node lock; reenter only with its explicit live token.
-  withNodeLock<T>(
-    cid: string,
-    fn: (token: object) => Promise<T>,
-    token?: object,
-  ): Promise<T>;
-  liveStatus(cid: string): [unknown, unknown];
-  // recurse.safety state once its Harness has read it.
-  durableSafetyOff?(cid: string): boolean | undefined;
-  /** Whether the conversation has a live background shell (no I/O). */
-  hasLiveShell(cid: string): boolean;
+  inbox(cid: string): ConversationRecord[];
   defaultSpawnWorkdir(): string;
-  treeRefresh(entry: TreeEntry): void;
-  treeInvalidate?(): void;
-  treeRebuild(entries: TreeEntry[]): void;
-  treeDiscard(cid: string): void;
-  safeRemoveTempKey(key: string): boolean | Promise<boolean>;
-  dropNode(cid: string): void;
-  /** config_actions' model guard; `nodeToken` re-enters a held node lock. */
-  withModelGuard<T>(
-    cid: string,
-    fn: () => Promise<T>,
-    nodeToken?: object,
-  ): Promise<T>;
+  /** Synchronous notification after publication; null replaces the projection. */
+  onRowsChanged(cid: string | null): void;
   log?(event: string, fields: Record<string, unknown>): void;
 }
 
@@ -318,12 +256,15 @@ class CidMutex {
 
 export type ConversationGuardToken = object;
 
+export interface RowReservation {
+  readonly cid: string;
+}
+
 export class ConversationStore {
   private readonly mutex = new CidMutex();
   private readonly projection = new Map<string, ConversationRecord>();
   private readonly lastSaved = new Map<string, ConversationRecord>();
-  /** Rows the last scan read with pre-rename take-over fields. */
-  private readonly legacyTakeOverRows = new Set<string>();
+  private readonly reservedRows = new Map<string, RowReservation>();
   private lastScanComplete = false;
   private projectionReadyState = true;
   private readonly guardTokens = new WeakMap<
@@ -332,7 +273,6 @@ export class ConversationStore {
       cid: string;
       kind: "title" | "mute";
       active: boolean;
-      nodeToken?: object;
     }
   >();
   constructor(
@@ -379,30 +319,38 @@ export class ConversationStore {
     }
     return snapshot;
   }
-  applyConvProjection(snapshot: Record<string, ConversationRecord>): void {
+  private applyConvProjection(
+    snapshot: Record<string, ConversationRecord>,
+  ): void {
     this.projection.clear();
     for (const [cid, row] of Object.entries(snapshot))
       this.projection.set(cid, row);
+    this.notifyRowsChanged(null);
+  }
+  private notifyRowsChanged(cid: string | null): void {
     try {
-      this.hooks.treeInvalidate?.();
-      this.hooks.treeRebuild(
-        [...this.projection.values()].map((row) => this.treeEntry(row)),
-      );
+      this.hooks.onRowsChanged(cid);
     } catch (error) {
-      this.logFailure("tree_view_replay_failed", error);
+      try {
+        this.hooks.log?.("conversation_row_listener_failed", {
+          ...(cid === null ? {} : { conversation_id: cid }),
+          error_type:
+            error instanceof Error ? error.constructor.name : "unknown",
+        });
+      } catch {}
     }
   }
   applyAgentMetadata(snapshot: Record<string, ConversationRecord>): void {
     const rows: Record<string, ConversationRecord> = {};
     this.lastSaved.clear();
-    this.legacyTakeOverRows.clear();
     for (const [cid, metadata] of Object.entries(snapshot)) {
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
         continue;
-      if (renameLegacyTakeOver(metadata)) this.legacyTakeOverRows.add(cid);
       const durable = canonicalMetadata(metadata);
       this.lastSaved.set(cid, durable);
       const row: ConversationRecord = { ...durable };
+      if (!("taken_over" in row) && metadata.pinned === true)
+        row.taken_over = true;
       for (const key of PIGGYBACK_METADATA_KEYS)
         if (key in metadata) row[key] = metadata[key];
       if (!("status" in row)) row.status = "idle";
@@ -429,34 +377,6 @@ export class ConversationStore {
     });
     return snapshot;
   }
-  /**
-   * Rewrite rows stored with pre-rename take-over fields in flushed batches;
-   * `taken-over-rename.json` records a complete pass. Returns the count.
-   */
-  async migrateTakenOverNames(): Promise<number> {
-    const marker = join(this.paths.dataDir, "taken-over-rename.json");
-    // Invariant: An unreadable agents directory scans empty; never record it.
-    if (this.projection.size === 0 || (await readJson(marker))) return 0;
-    const rows = [...this.legacyTakeOverRows];
-    let complete = this.lastScanComplete;
-    for (let start = 0; start < rows.length; start += 256) {
-      const batch = rows.slice(start, start + 256);
-      for (const cid of batch) {
-        const row = this.projection.get(cid);
-        this.lastSaved.delete(cid);
-        if (row && !this.enqueueDurableMetadata(cid, row)) complete = false;
-      }
-      const flushed = await Promise.all(
-        batch.map((cid) => this.agentStore.flush(cid, 30)),
-      );
-      if (flushed.includes(false)) complete = false;
-    }
-    if (!complete)
-      throw new Error("taken_over rename incomplete; it reruns at startup");
-    await atomicJson(marker, { version: 1, rewritten: rows.length });
-    this.legacyTakeOverRows.clear();
-    return rows.length;
-  }
   /** Freeze live ladder choices once, before startup admits turns. */
   migrateModelChoices(): Promise<number> {
     return migrateConversationModelChoices({
@@ -473,7 +393,7 @@ export class ConversationStore {
             "conversation model choices incomplete; restart to retry",
           );
         this.projection.set(cid, row);
-        this.refreshTreeRow(cid);
+        this.notifyRowsChanged(cid);
       },
     });
   }
@@ -527,7 +447,7 @@ export class ConversationStore {
     const next = { ...current, ...fields };
     if (!this.enqueueDurableMetadata(cid, next)) return false;
     this.projection.set(cid, next);
-    this.refreshTreeRow(cid);
+    this.notifyRowsChanged(cid);
     return true;
   }
   /** Caller holds configuration guards and has committed the import marker. */
@@ -540,26 +460,32 @@ export class ConversationStore {
     // failure must not allow another Pi turn to diverge from its committed
     // history.
     this.projection.set(cid, next);
-    this.refreshTreeRow(cid);
+    this.notifyRowsChanged(cid);
     this.enqueueDurableMetadata(cid, next);
   }
   /** Copies of `cid`'s live descendant conversations, parents first. */
   subtree(cid: string): ConversationRecord[] {
-    const kids = new Map<unknown, ConversationRecord[]>();
-    for (const row of this.projection.values())
-      if (kids.get(row.parent)?.push(row) === undefined)
-        kids.set(row.parent, [row]);
-    const out: ConversationRecord[] = [];
-    const seen = new Set([cid]);
-    for (let i = -1; i < out.length; i++)
-      for (const row of kids.get(i < 0 ? cid : out[i]!.id) ?? [])
-        if (!seen.has(String(row.id)) && seen.add(String(row.id)))
-          out.push(row);
-    return out.map((row) => structuredClone(row));
+    return this.walkDescendants(cid, this.projection.values(), "breadth").map(
+      (row) => structuredClone(row),
+    );
   }
-  metadataSnapshot(cid: string): ConversationRecord | null {
+  metadataSnapshot(
+    cid: string,
+    fields?: readonly string[],
+  ): ConversationRecord | null {
     const row = this.projection.get(cid);
-    return row ? structuredClone(row) : null;
+    if (!row) return null;
+    return structuredClone(
+      fields === undefined
+        ? row
+        : Object.fromEntries(
+            fields.filter((key) => key in row).map((key) => [key, row[key]]),
+          ),
+    );
+  }
+  /** Shallow copies; nested values are shared and read-only. */
+  *metadataRows(): IterableIterator<[string, ConversationRecord]> {
+    for (const [cid, row] of this.projection) yield [cid, { ...row }];
   }
   // Persist a live activity stamp without making piggyback fields write
   // triggers.
@@ -583,50 +509,8 @@ export class ConversationStore {
     const next = { ...current, ...canonicalMetadata(payload), updated };
     this.lastSaved.set(cid, canonicalMetadata(next));
     this.projection.set(cid, next);
-    this.refreshTreeRow(cid);
+    this.notifyRowsChanged(cid);
     return true;
-  }
-  displayRecord(record: ConversationRecord): ConversationRecord {
-    const view = structuredClone(record);
-    if (typeof view.id === "string")
-      this.applyLoadDefaults(view.id, view, false);
-    return view;
-  }
-  captureLiveInputs(record: ConversationRecord): LiveInputs {
-    const cid = record.id;
-    if (typeof cid !== "string")
-      throw new Error("live capture record id must be a string");
-    const [status, runId] = this.hooks.liveStatus(cid);
-    const node = this.hooks.nodeInputs(cid);
-    const activity = node?.activityUpdated;
-    if (typeof activity === "number") {
-      const stored = record.updated;
-      if (typeof stored !== "number" || activity > stored)
-        record.updated = activity;
-    }
-    // Invariant: Durable review reads its recurse.safety document, not the
-    // record.
-    const durableOff =
-      record.backend === "durable"
-        ? (this.hooks.durableSafetyOff?.(cid) ?? false)
-        : undefined;
-    const safetyOff = durableOff ?? node?.safetyDesired ?? !!record.safety_off;
-    const active = record.active_turn;
-    const safetyOffActive =
-      durableOff ??
-      (record.status === "running" && isRecord(active) && "safety_off" in active
-        ? !!active.safety_off
-        : safetyOff);
-    return {
-      status,
-      runId,
-      muted: node?.muteDesired ?? !!record.muted,
-      safetyOff,
-      safetyOffActive,
-      queued: node?.pendingCount ?? 0,
-      activeRunId: activeRunId(record),
-      hasLiveShells: this.hooks.hasLiveShell(cid),
-    };
   }
   effectiveWorkdir(record: ConversationRecord | null): string {
     if (record === null) return this.paths.dataDir;
@@ -635,44 +519,6 @@ export class ConversationStore {
     if (typeof value !== "string")
       throw new TypeError("invalid conversation workdir");
     return value;
-  }
-  private treeEntry(record: ConversationRecord): TreeEntry {
-    const view = this.displayRecord(record);
-    return {
-      record: view,
-      live: this.captureLiveInputs(view),
-      workdir: this.effectiveWorkdir(record),
-    };
-  }
-  private logFailure(event: string, error: unknown, cid?: string): void {
-    this.hooks.log?.(event, {
-      ...(cid ? { conversation_id: cid } : {}),
-      error_type: error instanceof Error ? error.constructor.name : "unknown",
-    });
-  }
-  refreshTreeRow(cid: string): void {
-    try {
-      const row = this.metadataSnapshot(cid);
-      if (row) this.hooks.treeRefresh(this.treeEntry(row));
-      else this.hooks.treeDiscard(cid);
-    } catch (error) {
-      this.logFailure("tree_view_refresh_failed", error, cid);
-    }
-  }
-  /** Shallow digest rows; nested metadata is shared and read-only. */
-  captureDigestInputs(): {
-    convs: ConversationRecord[];
-    live: Record<string, LiveInputs>;
-  } {
-    const convs: ConversationRecord[] = [];
-    const live: Record<string, LiveInputs> = {};
-    for (const [cid, projected] of this.projection) {
-      const row = { ...projected };
-      this.applyLoadDefaults(cid, row, false);
-      live[cid] = this.captureLiveInputs(row);
-      convs.push(row);
-    }
-    return { convs, live };
   }
   async loadCanonicalMetadata(cid: string): Promise<ConversationRecord | null> {
     try {
@@ -732,7 +578,27 @@ export class ConversationStore {
   discardConvProjection(cid: string): void {
     this.projection.delete(cid);
     this.lastSaved.delete(cid);
-    this.hooks.treeDiscard(cid);
+    this.notifyRowsChanged(cid);
+  }
+  // Claim a new row whose storage does not exist yet; null when a row, mailbox
+  // or file does. Only the claim may publish it (commit-first) or discard it.
+  async reserveNewRow(cid: string): Promise<RowReservation | null> {
+    const taken = () => this.projection.has(cid) || this.reservedRows.has(cid);
+    if (taken() || (await this.agentStore.storageExists(cid)) || taken())
+      return null;
+    const reservation = { cid };
+    this.reservedRows.set(cid, reservation);
+    return reservation;
+  }
+  /** Drop and trash a reserved row a commit-first save never published. */
+  async discardUnpublished(reservation: RowReservation): Promise<boolean> {
+    const { cid } = reservation;
+    if (this.reservedRows.get(cid) !== reservation || this.projection.has(cid))
+      return false;
+    this.lastSaved.delete(cid);
+    if (!(await this.agentStore.discard(cid))) return false;
+    this.reservedRows.delete(cid);
+    return true;
   }
 
   /** Default only volatile fields; inbox is derived and never persisted. */
@@ -755,8 +621,9 @@ export class ConversationStore {
     if (!("msg_count" in record)) record.msg_count = 0;
     if (!("last" in record)) record.last = null;
     if (withPending) {
-      const inbox = this.hooks.nodeInputs(cid)?.inbox ?? [];
-      record.pending = dedupePendingRows(inbox).map(stripPendingKeys);
+      record.pending = dedupePendingRows(this.hooks.inbox(cid)).map(
+        stripPendingKeys,
+      );
     }
   }
   /** Return owned values; selecting fields avoids cloning unrelated state. */
@@ -845,7 +712,7 @@ export class ConversationStore {
       if (isDeepStrictEqual(next.prs, current.prs)) return;
       if (!this.enqueueDurableMetadata(cid, next)) return;
       this.projection.set(cid, next);
-      this.refreshTreeRow(cid);
+      this.notifyRowsChanged(cid);
     });
   }
   /**
@@ -909,10 +776,12 @@ export class ConversationStore {
     return cids.filter((cid) => !changed.includes(cid));
   }
   // Admit durable metadata before replacing projection; a rejected enqueue
-  // swaps nothing.
+  // swaps nothing. A reserved new row is published only once it is committed,
+  // so no reader sees, or opens a Harness for, a row a crash can lose.
   async save(
     conv: ConversationRecord,
     titleToken?: ConversationGuardToken,
+    reservation?: RowReservation,
   ): Promise<void> {
     const cid = conv.id;
     if (typeof cid !== "string" || !CID_RE.test(cid))
@@ -937,12 +806,7 @@ export class ConversationStore {
     delete conv[SET_MODEL_MARKER];
     const record: ConversationRecord = {};
     for (const [key, value] of Object.entries(conv))
-      if (
-        key !== "pending" &&
-        key !== "messages" &&
-        key !== "_external_key_created"
-      )
-        record[key] = value;
+      if (key !== "pending" && key !== "messages") record[key] = value;
     await this.withTitleGuard(
       cid,
       async () => {
@@ -998,9 +862,19 @@ export class ConversationStore {
             record.pending_model = structuredClone(current.pending_model);
           else delete record.pending_model;
         }
+        if (
+          reservation &&
+          (current || this.reservedRows.get(cid) !== reservation)
+        )
+          throw new Error("commit-first save needs its reserved new row");
         if (!this.enqueueDurableMetadata(cid, record)) return;
+        if (reservation && !(await this.agentStore.flush(cid))) {
+          this.lastSaved.delete(cid);
+          return;
+        }
+        if (reservation) this.reservedRows.delete(cid);
         this.projection.set(cid, structuredClone(record));
-        this.refreshTreeRow(cid);
+        this.notifyRowsChanged(cid);
       },
       titleToken,
     );
@@ -1024,32 +898,6 @@ export class ConversationStore {
       return row ? [row] : [];
     });
   }
-  cliIndex(): ConversationRecord[] {
-    const keys = new Set([
-      "id",
-      "parent",
-      "title",
-      "muted",
-      "taken_over",
-      "workdir",
-      "session_id",
-      "msg_count",
-      "status",
-      "active_turn",
-      "draft",
-      "compacting",
-      "pending_auto_compaction",
-      "backend",
-    ]);
-    return this.allConvs({ withPending: false }).map((row) => {
-      const [status] = this.hooks.liveStatus(String(row.id));
-      if (status === "running" || status === "interrupting")
-        row.status = status;
-      return Object.fromEntries(
-        Object.entries(row).filter(([key]) => keys.has(key)),
-      );
-    });
-  }
   /** Find the tree root through live parents, without scanning history. */
   treeRoot(cid: string): string {
     const seen = new Set<string>();
@@ -1066,27 +914,49 @@ export class ConversationStore {
     cid: string,
     convs = this.allConvs({ withPending: false }),
   ): string[] {
-    const kids = new Map<string, string[]>();
-    for (const row of convs) {
+    return this.walkDescendants(cid, convs, "depth").map(
+      (row) => row.id as string,
+    );
+  }
+  private walkDescendants(
+    cid: string,
+    rows: Iterable<ConversationRecord>,
+    order: "breadth" | "depth",
+  ): ConversationRecord[] {
+    const kids = new Map<unknown, ConversationRecord[]>();
+    for (const row of rows) {
       const parent = row.parent;
-      if (parent === null || parent === undefined) continue;
-      if (typeof parent !== "string")
-        throw new TypeError("invalid conversation parent");
-      if (typeof row.id !== "string")
-        throw new TypeError("invalid conversation id");
-      const siblings = kids.get(parent) ?? [];
-      siblings.push(row.id);
-      kids.set(parent, siblings);
+      if (order === "depth") {
+        if (parent == null) continue;
+        if (typeof parent !== "string")
+          throw new TypeError("invalid conversation parent");
+        if (typeof row.id !== "string")
+          throw new TypeError("invalid conversation id");
+      }
+      if (kids.get(parent)?.push(row) === undefined) kids.set(parent, [row]);
     }
-    const out: string[] = [],
-      seen = new Set([cid]);
-    const stack = [...(kids.get(cid) ?? [])].reverse();
-    while (stack.length) {
-      const child = stack.pop()!;
-      if (seen.has(child)) continue;
-      seen.add(child);
-      out.push(child);
-      stack.push(...[...(kids.get(child) ?? [])].reverse());
+    const out: ConversationRecord[] = [];
+    const seen = new Set([cid]);
+    const pending: ConversationRecord[] = [];
+    const appendChildren = (parent: unknown) => {
+      const children = kids.get(parent);
+      if (!children) return;
+      if (order === "breadth") {
+        for (const row of children) pending.push(row);
+      } else {
+        for (let i = children.length - 1; i >= 0; i--)
+          pending.push(children[i]!);
+      }
+    };
+    appendChildren(cid);
+    let next = 0;
+    while (next < pending.length) {
+      const row = order === "breadth" ? pending[next++]! : pending.pop()!;
+      const id = String(row.id);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(row);
+      appendChildren(row.id);
     }
     return out;
   }
@@ -1100,63 +970,6 @@ export class ConversationStore {
     }
     throw new Error("could not allocate conversation id");
   }
-  invalidateContextUsage(record: ConversationRecord): void {
-    record.latest_context_usage = null;
-    delete record.latest_context_prompt_capture;
-    delete record.context_usage_estimate;
-    delete record.context_tokens_at_last_digest;
-  }
-  async rollbackServiceConversation(
-    conv: ConversationRecord,
-    bindings: {
-      unbindServiceConversation(cid: string): Promise<void>;
-      unbindExternalKey(
-        principal: string,
-        key: string,
-        cid: string,
-      ): Promise<void>;
-    },
-  ): Promise<void> {
-    const cid = conv.id;
-    if (typeof cid !== "string" || !CID_RE.test(cid))
-      throw new Error("unsafe conversation id for rollback");
-    const cleanup = async (
-      step: string,
-      action: () => void | Promise<void>,
-    ): Promise<void> => {
-      try {
-        await action();
-      } catch (error) {
-        this.hooks.log?.("service_conversation_rollback_failed", {
-          conversation_id: cid,
-          step,
-          error_type:
-            error instanceof Error ? error.constructor.name : "unknown",
-        });
-      }
-    };
-    this.discardConvProjection(cid);
-    await cleanup("service_binding", () =>
-      bindings.unbindServiceConversation(cid),
-    );
-    if (
-      typeof conv.external_key === "string" &&
-      typeof conv.service_principal === "string"
-    )
-      await cleanup("external_key", () =>
-        bindings.unbindExternalKey(
-          conv.service_principal as string,
-          conv.external_key as string,
-          cid,
-        ),
-      );
-    await cleanup("temp", async () => {
-      if (!(await this.hooks.safeRemoveTempKey(String(conv.tmp_key || ""))))
-        throw new Error("temp cleanup incomplete");
-    });
-    this.hooks.dropNode(cid);
-  }
-
   private async guarded<T>(
     kind: "title" | "mute",
     cid: string,
@@ -1217,70 +1030,10 @@ export class ConversationStore {
   }
   withMuteGuard<T>(
     cid: string,
-    fn: (token: ConversationGuardToken, nodeToken: object) => Promise<T>,
+    fn: (token: ConversationGuardToken) => Promise<T>,
     token?: ConversationGuardToken,
   ): Promise<T> {
-    if (typeof cid !== "string" || !CID_RE.test(cid))
-      throw new Error("invalid conversation id for guard");
-    const nodeToken =
-      token === undefined ? undefined : this.guardTokens.get(token)?.nodeToken;
-    return this.hooks.withNodeLock(
-      cid,
-      (heldNode) =>
-        this.guarded(
-          "mute",
-          cid,
-          (heldMute) => {
-            const owner = this.guardTokens.get(heldMute)!;
-            owner.nodeToken = heldNode;
-            return fn(heldMute, heldNode);
-          },
-          token,
-        ),
-      nodeToken,
-    );
-  }
-  withSafetyGuard<T>(
-    cid: string,
-    fn: () => Promise<T>,
-    nodeToken?: object,
-  ): Promise<T> {
-    if (typeof cid !== "string" || !CID_RE.test(cid))
-      throw new Error("invalid conversation id for guard");
-    return this.hooks.withNodeLock(cid, () => fn(), nodeToken);
-  }
-  // Configuration writers acquire in the same title/mute/safety/model order.
-  withConfigurationMetadataGuard<T>(
-    cid: string,
-    fn: (
-      titleToken: ConversationGuardToken,
-      muteToken: ConversationGuardToken,
-      nodeToken: object,
-    ) => Promise<T>,
-  ): Promise<T> {
-    return this.withTitleGuard(cid, (titleToken) =>
-      this.withMuteGuard(cid, (muteToken, nodeToken) =>
-        this.withSafetyGuard(
-          cid,
-          () =>
-            this.hooks.withModelGuard(
-              cid,
-              () => fn(titleToken, muteToken, nodeToken),
-              nodeToken,
-            ),
-          nodeToken,
-        ),
-      ),
-    );
-  }
-  withPermanentDeleteStateGuard<T>(
-    cid: string,
-    fn: (
-      titleToken: ConversationGuardToken,
-      muteToken: ConversationGuardToken,
-    ) => Promise<T>,
-  ): Promise<T> {
-    return this.withConfigurationMetadataGuard(cid, fn);
+    return this.guarded("mute", cid, fn, token);
   }
   readBoundedJsonObject(
     path: string,

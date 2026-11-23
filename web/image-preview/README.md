@@ -82,4 +82,8 @@ detail view, the full-screen viewer, drawing and downloads load the original
 bytes. A thumbnail that fails to load, as from a connected backend without the
 route, retries once as the original.
 
+The [drawing editor](editor.ts) loads [its stylesheet](style.css) together
+with Excalidraw's on first use. A cancellable progress dialog stays visible
+until the canvas code and stylesheet are ready.
+
 Submitting comments closes the dialog immediately. The conversation shows sending progress and keeps failed comments for retry. Command-Enter on macOS and Ctrl-Enter elsewhere submit comments, including from a comment field. Escape closes the floating comment editor first and keeps its comment; another Escape closes the viewer. Drawing Done also closes the dialog; drawing Cancel leaves it open.

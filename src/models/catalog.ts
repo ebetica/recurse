@@ -27,7 +27,7 @@ interface ModelPolicy {
   conversation_effort: Thinking;
   context_window: number | null;
 }
-export interface ModelOption {
+interface ModelOption {
   id: string;
   label: string;
   provider: string;
@@ -37,7 +37,6 @@ export interface ModelOption {
 
 type CatalogInputs = StoredPiModelList & {
   providers: Record<string, ProviderSpec>;
-  providerEntries: [string, ProviderSpec][];
   default_raw: string;
   efforts: Record<string, Thinking>;
   /** Every catalog policy, built lazily once per cache key. */
@@ -102,10 +101,6 @@ export class ModelCatalog {
       parseThinking(this.chatEffortOverride);
   }
 
-  get CHAT_EFFORT(): string {
-    return String(this.defaultEffort(this.CHAT_MODEL));
-  }
-
   canonicalModelId(model: string): string {
     const prefix = "claude-bridge/";
     return model.startsWith(prefix)
@@ -156,12 +151,7 @@ export class ModelCatalog {
   }
 
   defaultEfforts(): Record<string, string> {
-    return Object.fromEntries(
-      Object.entries(this.catalogInputs().efforts).map(([model, effort]) => [
-        model,
-        effort,
-      ]),
-    );
+    return { ...this.catalogInputs().efforts };
   }
 
   private catalogInputs(): CatalogInputs {
@@ -175,11 +165,11 @@ export class ModelCatalog {
     const revision = providers.revision + efforts.revision + pi.revision;
     if (this.catalogCache?.revision === revision)
       return this.catalogCache.value;
-    const [parsedProviders, defaultRaw, providerEntries] =
-      readProvidersDocument(providers.text);
+    const [parsedProviders, defaultRaw] = readProvidersDocument(
+      providers.value,
+    );
     const value = {
       providers: parsedProviders,
-      providerEntries,
       default_raw: defaultRaw,
       efforts: this.readDefaultEfforts(efforts.value),
       ...readPiModelList(pi.value, this.warn),
@@ -229,28 +219,25 @@ export class ModelCatalog {
     };
   }
 
-  // The actionable sentence for a model Pi's list lacks, else null. Before the
-  // server first lists Pi's models nothing is refused: Pi decides.
-  unlistedModelSentence(model: string, level: number | null): string | null {
-    const ids = this.catalogModelIds();
-    const canonical = this.canonicalModelId(model);
-    if (ids === null || ids.has(canonical)) return null;
-    return level === null
-      ? `Model ${canonical} is not in Pi's model list. Choose an effort level for this conversation.`
-      : `Model ${canonical} is not in Pi's model list. Choose another model for level ${level} in Settings > Effort levels.`;
+  suggestedEffort(model: string, catalogEffort?: Thinking): Thinking {
+    return (
+      patternEffort(model) ??
+      catalogEffort ??
+      this.modelPolicy(model).conversation_effort
+    );
   }
 
-  suggestedEffort(model: string): Thinking {
-    return patternEffort(model) ?? this.modelPolicy(model).conversation_effort;
-  }
-
-  defaultEffort(model: string): Thinking {
+  private defaultEffort(
+    model: string,
+    efforts?: CatalogInputs["efforts"],
+    catalogEffort?: Thinking,
+  ): Thinking {
     if (this.chatEffortOverride !== undefined)
       return parseThinking(this.chatEffortOverride);
-    const efforts = this.catalogInputs().efforts;
+    efforts ??= this.catalogInputs().efforts;
     return Object.hasOwn(efforts, model)
       ? efforts[model]!
-      : this.suggestedEffort(model);
+      : this.suggestedEffort(model, catalogEffort);
   }
 
   customModelProviders(): Record<string, ProviderSpec> {
@@ -267,14 +254,16 @@ export class ModelCatalog {
   }
 
   firstCustomModel(authed: Set<string>): string | undefined {
-    return this.catalogInputs().providerEntries.flatMap(([provider, spec]) =>
-      authed.has(provider)
-        ? spec.models.map((entry) => `${provider}/${entry.id}`)
-        : [],
-    )[0];
+    for (const [provider, spec] of Object.entries(
+      this.customModelProviders(),
+    )) {
+      const first = spec.models[0];
+      if (first && authed.has(provider)) return `${provider}/${first.id}`;
+    }
+    return undefined;
   }
 
-  customDefaultModel(): string {
+  private customDefaultModel(): string {
     const { default_raw: value, providers } = this.catalogInputs();
     if (!value) return "";
     const slash = value.indexOf("/");
@@ -306,7 +295,7 @@ export class ModelCatalog {
           context_window: model.context_window,
         };
       }
-    for (const [name, provider] of inputs.providerEntries)
+    for (const [name, provider] of Object.entries(inputs.providers))
       for (const model of provider.models) {
         const id = `${name}/${model.id}`;
         if (Object.hasOwn(out, id)) continue;
@@ -321,29 +310,23 @@ export class ModelCatalog {
     return out;
   }
 
-  /** The catalog for the current settings files, built once per cache key.
-   * CHAT_MODEL is always offered (first) even when Pi does not list it, so
-   * the configured default is never refused as unlisted. */
+  /** Cached Settings options, with CHAT_MODEL first even if Pi omits it. */
   private catalogOptions(): { options: ModelOption[]; ids: Set<string> } {
     const inputs = this.catalogInputs();
     if (inputs.options && inputs.ids)
       return { options: inputs.options, ids: inputs.ids };
     const policies = this.policies();
-    const effort = (id: string, policy: ModelPolicy | undefined): string =>
-      String(
-        this.chatEffortOverride !== undefined
-          ? parseThinking(this.chatEffortOverride)
-          : Object.hasOwn(inputs.efforts, id)
-            ? inputs.efforts[id]!
-            : (patternEffort(id) ??
-              (policy ?? this.modelPolicy(id)).conversation_effort),
-      );
+
     const options: ModelOption[] = Object.entries(policies).map(
       ([id, value]) => ({
         id,
         label: value.label,
         provider: value.catalog_provider,
-        effort: effort(id, value),
+        effort: this.defaultEffort(
+          id,
+          inputs.efforts,
+          value.conversation_effort,
+        ),
         ...(value.context_window === null
           ? {}
           : { context_window: value.context_window }),
@@ -358,7 +341,7 @@ export class ModelCatalog {
           id: model,
           label: model,
           provider: "Custom",
-          effort: effort(model, undefined),
+          effort: this.defaultEffort(model, inputs.efforts),
         });
     inputs.options = options;
     inputs.ids = new Set(options.map((option) => option.id));
@@ -391,25 +374,24 @@ export class ModelCatalog {
     return levels ? [...levels] : null;
   }
 
-  defaultChatModel(): string {
+  signedInChatModels(providers: ReadonlySet<string>): ModelOption[] {
+    return this.chatModels().filter((option) =>
+      providers.has(this.providerOf(option.id)),
+    );
+  }
+
+  defaultChatModel(catalog?: readonly ModelOption[]): string {
     const configured = this.customDefaultModel() || this.CHAT_MODEL;
     const want = this.isFileProviderModel(configured)
       ? DEFAULT_CHAT_MODEL
       : configured;
-    let authedCatalog: string[];
-    try {
-      const providers = this.authedModelProviders();
-      authedCatalog = this.chatModels()
-        .filter((option) => providers.has(this.providerOf(option.id)))
-        .map((option) => option.id);
-    } catch {
-      authedCatalog = [];
-    }
-    if (!authedCatalog.length) return want;
-    return authedCatalog.includes(want) ? want : authedCatalog[0]!;
+    catalog ??= this.signedInChatModels(this.authedModelProviders());
+    return catalog.some((option) => option.id === want)
+      ? want
+      : (catalog[0]?.id ?? want);
   }
 
-  validateDefaultEfforts(value: unknown): Record<string, string> {
+  private validateDefaultEfforts(value: unknown): Record<string, string> {
     if (!isObject(value))
       throw valueError("default efforts must map models to reasoning levels");
     const enabled = new Set(this.chatModels().map((option) => option.id));
@@ -444,13 +426,8 @@ export class ModelCatalog {
     return this.defaultEfforts();
   }
 
-  modelContextWindow(modelId: string): number | null {
-    return this.modelPolicy(modelId).context_window;
-  }
-
   providerOf(modelId: string): string {
-    const slash = this.canonicalModelId(modelId).indexOf("/");
-    return slash < 0 ? "" : this.canonicalModelId(modelId).slice(0, slash);
+    return this.modelParts(modelId)[0];
   }
 
   /** File endpoints require a saved choice, never automatic selection. */
@@ -464,12 +441,7 @@ export class ModelCatalog {
   }
 
   configuredCustomProviders(): Set<string> {
-    let providers: Record<string, ProviderSpec>;
-    try {
-      providers = this.customModelProviders();
-    } catch {
-      return new Set();
-    }
+    const providers = this.customModelProviders();
     const stored = new Set(this.storedCustomProviderSource());
     return new Set(
       Object.entries(providers)

@@ -71,15 +71,15 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
           };
           await page.goto(`${base}#agent=${agent}`);
           await send("Check the background work.");
-          const bar = page.locator("#live-bar");
-          const summary = bar.locator(".live-thinking-summary");
-          const titleLine = bar.locator(".live-thinking-title");
-          const disclosure = bar.locator(".live-thinking-copy");
+          const bar = page.locator("#status-bar");
+          const summary = bar.locator(".status-bar-thinking-summary");
+          const titleLine = bar.locator(".status-bar-thinking-title");
+          const disclosure = bar.locator(".status-bar-thinking-copy");
           const expectTitle = async (title: string) => {
             await browserExpect(titleLine).toHaveText(title);
-            await browserExpect(bar.locator(".live-thinking-head")).toHaveText(
-              /^Waiting/,
-            );
+            await browserExpect(
+              bar.locator(".status-bar-thinking-head"),
+            ).toHaveText(/^Waiting/);
           };
           const expectDisclosure = (expanded: boolean) =>
             browserExpect(disclosure).toHaveAttribute(
@@ -91,9 +91,7 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
           const title = thinking.startsWith("chatgpt")
             ? prose
             : "Checking the background work";
-          const thought = page
-            .locator(".turn-thinking-toggle")
-            .filter({ hasText: title });
+          const thought = page.locator(".turn-thinking-toggle").first();
           const thoughtBody = page
             .locator(".turn-thinking-body")
             .filter({ hasText: prose });
@@ -150,11 +148,11 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
               "aria-expanded",
               "false",
             );
-            await browserExpect(thought).toHaveText(/^Thought for \d+s · /, {
+            await browserExpect(thought).toHaveText(/^Thought for \d+s$/, {
               useInnerText: true,
             });
             await commands.click();
-            await browserExpect(thought).toHaveCount(1);
+            await browserExpect(thoughtBody).toHaveCount(1);
           };
           await openThread();
           await expectThreadOpen();
@@ -198,13 +196,10 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
           await release("second-tool");
           await browserExpect(stdout).toContainText("Second command finished");
           await expectSameThought();
-          const untitledNotes = page.getByRole("note", {
-            name: "Thought",
-            exact: true,
-          });
+          const nextNote = page.locator(".turn-thinking").nth(1);
           const unavailable =
             thinking === "claude-redacted" || thinking === "chatgpt-encrypted";
-          await browserExpect(untitledNotes).toHaveCount(0);
+          await browserExpect(nextNote).toHaveCount(0);
           await release("reply");
           if (unavailable) {
             const committed = page.locator(".msg.assistant").filter({
@@ -217,14 +212,13 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
               /^\d+$/,
             );
             await expectSameThought();
-            await browserExpect(untitledNotes).toBeVisible();
-            await untitledNotes.getByRole("button").click();
+            await nextNote.getByRole("button").click();
             await browserExpect(
-              untitledNotes.getByText("Thinking unavailable.", { exact: true }),
+              nextNote.getByText("Thinking unavailable.", { exact: true }),
             ).toBeVisible();
             await release("after-unreadable");
           } else {
-            await browserExpect(untitledNotes).toBeVisible();
+            await browserExpect(nextNote).toBeVisible();
             await expectSameThought();
             await page.reload();
             await expectTitle(title);
@@ -265,13 +259,16 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
           await expectNewThought();
           await release("after-run");
           await browserExpect(
-            page.locator(".live-panel-box.is-waiting"),
+            page.locator(".status-bar-box.is-waiting"),
           ).toBeVisible();
           await browserExpect(titleLine).toHaveCount(0);
           await browserExpect(summary).toHaveCount(0);
           await release("background");
           await expectIdle(agent);
-          const idleSeed = await postFixture(base, "seed-live-thinking-idle");
+          const idleSeed = await postFixture(
+            base,
+            "seed-status-bar-thinking-idle",
+          );
           idleAgent = idleSeed.agent;
           await page.goto(`${base}?direct-idle#agent=${idleAgent}`);
           await browserExpect(page.locator("#conv-title")).toHaveText(
@@ -282,7 +279,7 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
           await browserExpect(
             page.locator("#conv-status.running"),
           ).toBeVisible();
-          await bar.locator(".live-thinking-copy").click();
+          await bar.locator(".status-bar-thinking-copy").click();
           await browserExpect(summary).toHaveText(
             "I will finish without background work.",
           );
@@ -292,7 +289,7 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
             .getByText("Finished without background work.", { exact: true })
             .waitFor();
           await expectIdle(idleAgent);
-          await browserExpect(page.locator(".live-panel-box")).toHaveCount(0);
+          await browserExpect(page.locator(".status-bar-box")).toHaveCount(0);
           await browserExpect(titleLine).toHaveCount(0);
           await browserExpect(summary).toHaveCount(0);
           expect(errors).toEqual([]);
@@ -317,7 +314,7 @@ const test_last_thinking_survives_wait_and_reload: BrowserTest = async (
 // Regression: #3536 a committed unreadable-only thought shows Waiting, even after reload.
 const test_unreadable_thinking_waits_after_commit_and_reload: BrowserTest =
   async (browser, base) => {
-    const { agent } = await postFixture(base, "seed-live-thinking-idle", {
+    const { agent } = await postFixture(base, "seed-status-bar-thinking-idle", {
       redacted: true,
     });
     const page = await browser.newPage();
@@ -335,7 +332,7 @@ const test_unreadable_thinking_waits_after_commit_and_reload: BrowserTest =
         );
         await browserExpect(page.locator("#conv-status.running")).toBeVisible();
         await browserExpect(
-          page.locator("#live-bar .live-thinking-title"),
+          page.locator("#status-bar .status-bar-thinking-title"),
         ).toHaveText("Waiting");
       };
       await waiting();
@@ -393,11 +390,11 @@ export const tests: BrowserTest[] = [
           await page.screenshot({ path: `${shots}/dedupe-${state}.png` });
         const text = recordedThinking.thinking.replace(/\s+/g, " ").trim();
         const bodies = await page
-          .locator(".turn-thinking-body, .live-thinking-summary")
+          .locator(".turn-thinking-body, .status-bar-thinking-summary")
           .allInnerTexts();
         const summaries = await page
           .locator(
-            ".activity-group-summary .turn-summary, .turn-series-toggle, .live-thinking-title",
+            ".activity-group-summary .turn-summary, .turn-series-toggle, .status-bar-thinking-title",
           )
           .allInnerTexts();
         samples.push({
@@ -448,7 +445,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#send").click();
       await openGroup();
       for (const toggle of await page
-        .locator('.live-thinking-copy[aria-expanded="false"]')
+        .locator('.status-bar-thinking-copy[aria-expanded="false"]')
         .all())
         await toggle.click();
       expect(offsets).toContain(-1);
@@ -459,7 +456,7 @@ export const tests: BrowserTest[] = [
         text: recordedThinking.thinking,
         live: true,
       });
-      const summary = page.locator(".live-thinking-summary");
+      const summary = page.locator(".status-bar-thinking-summary");
       expect(
         await page
           .locator(".turn-tool")
@@ -470,7 +467,7 @@ export const tests: BrowserTest[] = [
       await page.waitForFunction(
         (text) =>
           document
-            .querySelector<HTMLElement>(".live-thinking-summary")
+            .querySelector<HTMLElement>(".status-bar-thinking-summary")
             ?.innerText.replace(/\s+/g, " ")
             .trim() === text,
         recordedThinking.thinking.replace(/\s+/g, " ").trim(),
@@ -496,7 +493,7 @@ export const tests: BrowserTest[] = [
         .slice(readsBeforeCommit)
         .some((offset) => offset >= 0);
       for (const toggle of await page
-        .locator('.live-thinking-copy[aria-expanded="false"]')
+        .locator('.status-bar-thinking-copy[aria-expanded="false"]')
         .all())
         await toggle.click();
       await summary
@@ -537,7 +534,7 @@ export const tests: BrowserTest[] = [
         .getByText("Now running the sample command.", { exact: false })
         .waitFor();
       for (const toggle of await page
-        .locator('.live-thinking-copy[aria-expanded="false"]')
+        .locator('.status-bar-thinking-copy[aria-expanded="false"]')
         .all())
         await toggle.click();
       await summary
@@ -595,7 +592,7 @@ export const tests: BrowserTest[] = [
         .locator("#input")
         .fill("Replay the recorded streaming thought.");
       await page.locator("#send").click();
-      await page.locator(".working.live-panel").waitFor();
+      await page.locator(".working.status-bar").waitFor();
       throw new Error("deliberate thinking assertion failure");
     }, "durable-thinking-failure");
     await expect(failing(browser, base, data, serverPid)).rejects.toThrow(

@@ -1,0 +1,308 @@
+/* ---------- sidebar: agent forest ---------- */
+#sidebar {
+  width: 400px; flex: none; background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; position: relative;
+}
+#brand { display: flex; align-items: center; gap: var(--space-3);
+  padding: var(--space-5) var(--space-5) var(--space-3); }
+#brand, .backend-heading strong { font-weight: 600; font-size: 0.84375rem; color: var(--text); }
+.backend-heading strong { color: color-mix(in srgb, var(--text) 70%, var(--muted)); }
+#brand img { width: 24px; height: 24px; flex: none; }
+
+#agent-list { flex: 1; min-width: 0; min-height: 0; max-width: 100%;
+  overflow-x: hidden; overflow-y: scroll; overscroll-behavior-y: contain;
+  overflow-anchor: none; padding: 0 var(--space-3) var(--space-4);
+  /* Reserve a themed track without widening the sidebar. Disabling scroll
+     anchoring makes keyed status/title/count polls preserve the operator's
+     exact position even when metadata above the viewport wraps differently. */
+  scrollbar-gutter: stable; scrollbar-width: thin;
+  scrollbar-color: var(--muted) transparent; }
+.backend-section hr { border: 0; border-top: 1px solid var(--border); margin: var(--space-4) 0 0; }
+.backend-heading { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-3); padding: var(--space-3); color: var(--muted); }
+.backend-status { font-size: 0.6875rem; }
+.backend-section-header { display: flex; align-items: center; }
+.backend-section-header .backend-heading { flex: 1; min-width: 0; padding-top: var(--space-2); }
+.backend-new-agent { position: relative; z-index: var(--z-raised); margin-block: calc(-1 * var(--space-3)); }
+.backend-new-agent:disabled { cursor: default; opacity: .45; }
+.backend-heading a, .backend-settings { color: var(--accent); }
+.backend-settings { background: none; border: 0; font: inherit; cursor: pointer; text-align: start; }
+#agent-list::-webkit-scrollbar { width: 10px; }
+#agent-list::-webkit-scrollbar-track { background: transparent; }
+#agent-list::-webkit-scrollbar-thumb { background: var(--muted);
+  border-radius: 6px; border: 2px solid var(--panel); }
+#agent-list::-webkit-scrollbar-thumb:hover { background: var(--accent-dim); }
+.agent { padding: var(--space-2) var(--space-3); margin: 1px 0; border-radius: 8px; cursor: pointer;
+  border: 1px solid transparent;
+  /* keep vertical list scrolling native, but hand horizontal swipes to JS
+     (swipe-to-dismiss) so preventDefault there doesn't fight the scroll */
+  touch-action: pan-y;
+  /* a row is a tap/long-press/swipe target, never text: stop Android from
+     firing its text-selection + callout menu on the long-press-to-rename hold */
+  -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+/* the inline rename field is real editable text — let it select/caret again */
+.agent .rename-input { -webkit-user-select: text; user-select: text; }
+/* mid-swipe: the row follows the finger with no transition lag */
+.agent.swiping { transition: none; will-change: transform, opacity; }
+/* swiped far enough that releasing will dismiss it — flag it red, like .armed */
+.agent.dismiss-armed { --row-bg: color-mix(in srgb, var(--danger) 14%, var(--panel)); background: var(--row-bg); border-color: var(--danger); }
+.agent.dismiss-armed .title { color: var(--danger); }
+.agent:hover { --row-bg: var(--panel-2); background: var(--row-bg); }
+.agent.selected { --row-bg: var(--panel-2); background: var(--row-bg); border-color: var(--border-strong); }
+.agent.cursor { border-color: var(--accent); outline: 2px solid var(--accent); outline-offset: -2px; }
+/* Spec: compact sidebar overrides apply only on phones. */
+@media (max-width: 700px) {
+  #agent-list .agent { min-height: 32px; padding: var(--space-1) var(--space-3);
+    display: flex; flex-direction: column; justify-content: center; }
+  #agent-list .agent .title { font-size: 0.9375rem; line-height: 24px; }
+  #agent-list .agent.selected:not(.dismiss-armed, .armed, .drop-ok, .drop-bad, .drag-source) { border-color: transparent;
+    --row-bg: color-mix(in srgb, var(--accent) 12%, var(--panel)); background: var(--row-bg); }
+  #agent-list .agent.cursor:not(.dismiss-armed, .armed, .drop-ok, .drop-bad, .drag-source) { border-color: transparent;
+    outline-width: 1px; outline-offset: -1px; }
+  #sidebar #brand { padding: var(--space-3) var(--space-5); gap: var(--space-3); }
+  #brand, .backend-heading strong { font-size: 0.9375rem; }
+  #agent-list .agent .agent-state { width: 12px; min-width: 12px; height: 12px; }
+  #agent-list .agent .kids { padding-block: 0; }
+}
+/* Re-parent drag: the source is dashed, legal destinations are outlined, and
+   an invalid drop target is flagged red. */
+.agent.drag-source { opacity: .6; border-style: dashed;
+  border-color: var(--accent-dim); }
+.agent.drop-ok { border-color: var(--accent);
+  --row-bg: color-mix(in srgb, var(--accent) 14%, var(--panel)); background: var(--row-bg); }
+.agent.drop-bad { border-color: var(--danger);
+  --row-bg: color-mix(in srgb, var(--danger) 12%, var(--panel)); background: var(--row-bg); cursor: no-drop; }
+.agent.drop-between { position: relative; }
+.agent-drop-line { position: absolute; right: 0; height: 2px;
+  background: var(--accent); pointer-events: none; z-index: var(--z-raised); }
+.agent-drop-line.invalid { background: var(--danger); }
+.agent .row1 { display: flex; align-items: center; gap: var(--space-2); min-width: 0; flex-wrap: nowrap; }
+/* A compact colored, shaped marker for each state — no spelled-out word, so
+   it stays small on a phone. The shape (filled dot, hollow ring, square,
+   diamond) carries the state alongside color, so it never relies on color
+   alone; the full state name lives in the row's tooltip and assistive label.
+   Fixed size keeps titles from jumping sideways as polls change state. */
+.agent .agent-state { width: 14px; min-width: 14px; height: 14px; flex: none;
+  display: inline-flex; align-items: center; justify-content: center;
+  color: var(--muted); }
+.agent .state-mark { width: 10px; height: 10px; flex: none; border-radius: 50%;
+  border: 1px solid currentColor; background: currentColor; }
+.agent .agent-state.running, .agent .agent-state.working {
+  color: var(--running-strong); }
+.agent .agent-state.running .state-mark, .agent .agent-state.working .state-mark {
+  animation: pulse 1.2s infinite; }
+.agent .agent-state.working .state-mark { background: transparent; border-width: 2px; }
+/* Waiting: the agent's own turn settled but background work continues —
+   a hollow green ring with a centered dot, deliberately static while the
+   live-turn states pulse, so a parked branch never reads as active. */
+.agent .agent-state.waiting { color: var(--running-strong); }
+.agent .agent-state.waiting .state-mark { background:
+  radial-gradient(circle, currentColor 1.5px, transparent 1.7px);
+  border-width: 1.5px; }
+.agent .agent-state.idle .state-mark { width: 8px; height: 8px;
+  border-width: 1.5px; background: transparent; }
+/* Taken over: the operator holds this agent. A yellow open ring; dashed
+   so it never reads as the solid yellow interrupted ring, and slightly
+   larger so the dashes resolve at a glance. */
+.agent .agent-state.taken-over { color: var(--warn); }
+.agent .agent-state.taken-over .state-mark { background: transparent;
+  border-width: 2px; border-style: dashed; width: 10px; height: 10px; }
+.agent .agent-state.stopping { color: var(--warn); }
+.agent .agent-state.stopping .state-mark { border-radius: 1px; } /* radius-check: allow a status mark */
+.agent .agent-state.interrupted { color: var(--warn); }
+.agent .agent-state.interrupted .state-mark { background: transparent; border-width: 2px; }
+.agent .agent-state.error { color: var(--danger); }
+.agent .agent-state.error .state-mark { border-radius: 1px; transform: rotate(45deg); } /* radius-check: allow a status mark */
+.agent .agent-state.unknown .state-mark { background: transparent; border-style: dotted; }
+.agent .agent-state.draft .state-mark { background: transparent; border-style: dashed; }
+@media (prefers-reduced-motion: reduce) {
+  .agent .agent-state.running .state-mark,
+  .agent .agent-state.working .state-mark { animation: none; }
+}
+@media (forced-colors: active) {
+  .agent .agent-state.running .state-mark,
+  .agent .agent-state.working .state-mark { animation: none; }
+  /* Gradients flatten in forced colors: keep the waiting dot painted so
+     waiting never collapses into working. */
+  .agent .agent-state.waiting .state-mark { forced-color-adjust: none; }
+}
+.agent .title { flex: 1; min-width: 0; font-size: 0.84375rem; font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* inline rename: the title turns into this field in place (F2 or long-press) */
+.agent .rename-input { flex: 1; min-width: 0; font-family: inherit;
+  font-size: 0.84375rem; font-weight: 600; color: var(--text);
+  background: var(--panel); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 1px var(--space-2);
+  margin: calc(-1 * var(--space-1)) 0; outline: none; }
+.agent .kids, .agent .queue-badge { max-width: 100%; overflow: hidden; }
+.agent .time { flex: none; font-size: 0.6875rem; color: var(--text-faint); }
+.agent .takeover-tag { flex: none; display: inline-flex; align-items: center;
+  color: var(--warn); }
+.agent .safety-off-tag { flex: none; display: inline-flex; align-items: center;
+  color: var(--danger); }
+/* armed for delete: modifier-X pressed once, awaiting the confirming second */
+.agent.armed, .agent.armed:hover { --row-bg: color-mix(in srgb, var(--danger) 14%, var(--panel)); background: var(--row-bg);
+  border-color: var(--danger); }
+.agent.armed .title { color: var(--danger); }
+.agent.draft-row .title { color: var(--accent); font-style: italic; }
+
+#sidebar-foot { padding: var(--space-3) var(--space-5) var(--space-4); border-top: 1px solid var(--border);
+  font-size: 0.6875rem; color: var(--muted); }
+#shortcut-pane > summary { cursor: pointer; color: var(--text); font-size: 0.71875rem;
+  font-weight: 600; list-style-position: inside; }
+#shortcut-pane[open] > summary { margin-bottom: var(--space-3); }
+#sidebar-foot .shortcut-group + .shortcut-group { margin-top: var(--space-3); }
+#sidebar-foot .shortcut-title { color: var(--text); font-size: 0.6875rem;
+  font-weight: 600; margin-bottom: var(--space-1); }
+#sidebar-foot .keys { display: flex; flex-wrap: wrap;
+  gap: var(--space-2) var(--space-4); }
+#sidebar-foot .k { display: inline-flex; align-items: center; gap: var(--space-2);
+  white-space: nowrap; }
+#sidebar-foot kbd { font-family: inherit; font-size: 0.6875rem; color: var(--text);
+  background: var(--panel-2); border: 1px solid var(--border);
+  border-bottom-color: var(--kbd-edge); border-radius: 6px; padding: 1px var(--space-2);
+  line-height: 1.4; }
+#settings-btn { display: flex; align-items: center; gap: var(--space-3); width: 100%;
+  background: none; border: 0; border-top: 1px solid var(--border);
+  color: var(--muted); font-family: inherit; font-size: 0.78125rem; cursor: pointer;
+  padding: var(--space-4) var(--space-5); text-align: left; }
+#settings-btn:hover { color: var(--accent); }
+#settings-btn svg { flex: none; }
+
+#sidebar.desktop-hidden { display: none; }
+.backend-new-agent[hidden] { display: none; }
+
+#agent-list-actions { display: none; }
+@media (max-width: 700px) {
+  #sidebar { position: fixed; inset: 0; z-index: calc(var(--z-drawer) + 3); width: auto;
+    max-width: none; padding-top: 0; border-right: 0;
+    padding-left: env(safe-area-inset-left); padding-bottom: env(safe-area-inset-bottom);
+    transform: translateX(-102%); }
+  #sidebar.open { transform: none; }
+  #sidebar-foot { display: block;
+    padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
+  #shortcut-pane:not([open]) { padding: 0; }
+  /* Status, queue, mute/safety, title, and child count outrank relative time
+     when the row is narrow; every actual state remains written out. */
+  .agent .time { display: none; }
+  .agent .row1 { gap: var(--space-2); }
+  #sidebar.desktop-hidden { display: flex; }
+  #agent-list { padding-bottom: max(var(--space-4), env(safe-area-inset-bottom)); }
+  /* Phones have a full-screen agent list below one conversation entry. */
+  #sidebar #brand { min-height: calc(48px + env(safe-area-inset-top));
+    box-sizing: border-box; padding: env(safe-area-inset-top) var(--space-3) 0; }
+  #brand-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #agent-list-actions { display: flex; flex: none; margin-left: auto; }
+  #agent-list .agent, .tree-section-toggle { min-height: 44px; }
+  .tree-section-toggle { align-items: center; }
+  #brand #settings-btn { width: 44px; height: 44px; padding: 0; border: 0;
+    justify-content: center; color: var(--text); }
+  #brand #settings-btn .settings-label, #sidebar-foot { display: none; }
+}
+@media (pointer: coarse) {
+  #agent-list { scrollbar-width: auto; }
+  #agent-list::-webkit-scrollbar { width: 14px; }
+}
+
+/* Desktop is flat and gapless: the agent list, the windows and the rail meet
+   edge to edge with square corners. The agent list has no outline; its panel
+   colour sets it apart, and its rows sit 4px inside the scrollbar tracks.
+   Its right margin keeps the scrollbar clear of the sidebar resize grip.
+   Times form a fixed right-aligned column so subagent counts line up. */
+@media (min-width: 701px) {
+  html:not([data-embed]) #sidebar { border-right: 0; }
+  #agent-list { padding-inline: var(--space-2); margin-right: var(--space-3);
+    scrollbar-gutter: stable both-edges; }
+  #agent-list .agent { padding-right: var(--space-2); }
+  .agent .time { min-width: 4.5ch; text-align: right; font-variant-numeric: tabular-nums; }
+}
+
+#agent-list-foot { flex: none; display: flex; align-items: center; gap: var(--space-1);
+  padding: var(--space-1) var(--space-3); border-top: 1px solid var(--border); }
+#agent-list-foot:not(:has(> button)) { display: none; }
+#agent-list-foot > #settings-btn { width: 44px; height: 44px; min-height: 44px;
+  padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted);
+  align-items: center; justify-content: center; }
+#agent-list-foot > #settings-btn:hover { color: var(--accent); background: var(--panel-2); }
+#agent-list-foot .settings-label { display: none; }
+
+/* ---------- sidebar sections and actions ----------
+   Section headers fold their rows; row and section buttons stay hidden until
+   the row or header is hovered or holds focus, overlaying its right side without
+   moving its content. A short fade covers text with the row's current surface;
+   the inset leaves selection outlines clear. Touch uses the hold menu.
+   Fold targets extend above their bottom-aligned labels on phones. */
+.tree-section-header { display: flex; align-items: center; gap: var(--space-2);
+  margin-top: var(--space-3); -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }
+.tree-section-toggle { flex: 1; min-width: 0; display: flex; align-items: flex-end;
+  gap: var(--space-2); padding: var(--space-2) var(--space-3) 0; border: 0; border-radius: 8px;
+  background: none; color: var(--muted); font: inherit; font-size: 0.6875rem; font-weight: 700;
+  text-align: start; cursor: pointer; }
+.tree-section-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.tree-section-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tree-section-count { flex: none; font-weight: 400; letter-spacing: 0; }
+.tree-section-empty { padding: var(--space-1) var(--space-3) var(--space-2) calc(var(--space-3) + 1em + var(--space-2));
+  color: var(--muted); font-size: 0.78125rem; overflow-wrap: anywhere; }
+.fold-mark { display: inline-block; width: 1em; }
+.agent, .tree-section-header { position: relative; }
+.agent .time { position: relative; display: inline-block; }
+.time:has(.agent-unread) .time-label { visibility: hidden; }
+.agent-unread { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+  width: 6px; height: 6px; border-radius: 50%; background: var(--accent); pointer-events: none; }
+.section-actions, .row-actions { display: none; position: absolute; inset-block: 0; right: 0;
+  z-index: var(--z-raised); align-items: center; gap: var(--space-1);
+  padding-inline: var(--space-5) var(--space-3); border-radius: inherit;
+  background: linear-gradient(to right, transparent, var(--row-bg, var(--panel)) var(--space-5)); }
+.section-actions { max-width: 100%; overflow: auto hidden; scrollbar-width: none; }
+.section-actions .btn { --button-min-height: 0px; flex: none; padding-inline: var(--space-2);
+  font-size: 0.6875rem; white-space: nowrap; }
+.section-actions .btn:focus-visible { outline-offset: -2px; }
+.row-actions { inset-block: 2px; right: 2px; }
+.row-actions .icon-btn { width: 24px; height: 24px; }
+@media (hover: hover) {
+  .tree-section-header:hover .section-actions, .agent:hover .row-actions { display: inline-flex; }
+}
+.tree-section-header:focus-within .section-actions, .agent:focus-within .row-actions { display: inline-flex; }
+/* Touch screens use the hold menu; a keyboard there still reaches buttons. */
+@media (hover: none) {
+  .tree-section-header:not(:has(:focus-visible)) .section-actions,
+  .agent:not(:focus-visible):not(:has(:focus-visible)) .row-actions { display: none; }
+}
+/* The sidebar script's failure banner and the notice after an agent's change. */
+#sidebar-script-notice[hidden] { display: none; }
+#sidebar-script-notice > div { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-1) var(--space-2);
+  margin: var(--space-2) var(--space-3) 0; padding: var(--space-2) var(--space-3); border-radius: 10px;
+  font-size: 0.78125rem; background: var(--panel-2); }
+#sidebar-script-notice > .sidebar-script-error { color: var(--danger); border: 1px solid var(--danger);
+  background: color-mix(in srgb, var(--danger) 8%, transparent); }
+#sidebar-script-notice span { flex: 1 1 10em; min-width: 0; max-height: 6em; overflow: auto; overflow-wrap: anywhere; }
+#sidebar-script-notice button { min-height: 32px; padding: 0 var(--space-2); border: 0; border-radius: 6px;
+  background: none; color: var(--accent); font: inherit; font-weight: 600; cursor: pointer; }
+@media (hover: none) { #sidebar-script-notice button { min-height: 44px; min-width: 44px; } }
+#hold-menu { position: fixed; z-index: var(--z-toast); display: flex; flex-direction: column;
+  align-items: center; -webkit-user-select: none; user-select: none; }
+#hold-menu[hidden] { display: none; }
+.hold-bubble { margin-bottom: var(--space-2); padding: var(--space-1) var(--space-3);
+  border-radius: 999px; background: var(--text); color: var(--bg); font-size: 0.84375rem; font-weight: 600; }
+.hold-bubble[hidden] { display: block; visibility: hidden; }
+.hold-strip { display: flex; gap: var(--space-1); padding: var(--space-1); border: 1px solid var(--border-strong);
+  border-radius: 999px; background: var(--panel); box-shadow: var(--menu-shadow); }
+.hold-strip button { display: inline-flex; align-items: center; justify-content: center;
+  width: 52px; height: 52px; padding: 0; border: 0; border-radius: 50%;
+  background: var(--panel-2); color: var(--text); cursor: pointer;
+  transition: transform var(--motion-fast) ease; }
+.hold-strip button svg { width: 22px; height: 22px; }
+.hold-strip button.over { background: var(--accent); color: var(--text-on-accent); transform: scale(1.12); }
+#sidebar-popover { position: fixed; z-index: var(--z-toast); min-width: 180px;
+  max-width: calc(100vw - 16px); box-sizing: border-box; padding: var(--space-3);
+  border: 1px solid var(--border-strong); border-radius: 10px; background: var(--panel);
+  box-shadow: var(--menu-shadow); overflow-y: auto; }
+#sidebar-popover[hidden] { display: none; }
+#sidebar-popover [role="dialog"] { display: flex; flex-direction: column; gap: var(--space-2); }
+.popover-title { margin: 0; color: var(--muted); font-size: 0.78125rem; }
+#sidebar-tag-name { width: 240px; max-width: 100%; box-sizing: border-box; }
+.tag-suggestions { display: flex; flex-direction: column; gap: var(--space-1); max-height: 180px; overflow-y: auto; }
+.tag-suggestions .btn { text-align: left; }
+.tag-suggestions .btn[aria-pressed="true"] { background: var(--panel-2); outline: 1px solid var(--accent); }
+#sidebar-tag-error { max-width: 240px; color: var(--danger); font-size: 0.78125rem; }
+@media (pointer: coarse) { #sidebar-popover .btn, #sidebar-tag-name { min-height: 44px; } }

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { readdir, stat, unlink } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { constants } from "node:os";
-import { AGENT_TEMP_KEY_RE } from "../../config";
+import { AGENT_TEMP_KEY_RE } from "../../state_paths";
 import {
   ERROR,
   INFO,
@@ -31,7 +31,6 @@ import {
   activeRunId,
   type ConversationRecord,
   type ConversationStore,
-  type ConversationStoreHooks,
   type ServiceBindings,
 } from "../storage";
 import { TreeLifecycleBusy, type TreeLifecycle } from "../lifecycle";
@@ -47,6 +46,7 @@ import {
   type NodeStore,
 } from "../runtime/agent_node";
 import type { AgentNodes } from "../runtime/agent_nodes";
+import type { ConfigActions } from "../runtime/config_actions";
 import type { CropOperation } from "../runtime/attachments/crop";
 
 /** Seconds one agent-store close may take inside a reap. */
@@ -101,12 +101,9 @@ export interface ReapDeps {
   errors: ReapErrors;
   conversations: Pick<
     ConversationStore,
-    | "load"
-    | "save"
-    | "convRowExists"
-    | "discardConvProjection"
-    | "withPermanentDeleteStateGuard"
+    "load" | "save" | "convRowExists" | "discardConvProjection"
   >;
+  configActions: Pick<ConfigActions, "withConfigurationMetadataGuard">;
   serviceBindings: Pick<
     ServiceBindings,
     "unbindExternalKey" | "unbindServiceConversation"
@@ -490,9 +487,9 @@ export class SupervisorReap {
     protectedFiles: Set<string>,
     requestedBy: string | null,
   ): Promise<MemberOutcome> {
-    const { conversations, agentStore } = this.deps;
+    const { conversations, agentStore, configActions } = this.deps;
     try {
-      const outcome = await conversations.withPermanentDeleteStateGuard(
+      const outcome = await configActions.withConfigurationMetadataGuard(
         d,
         async (titleToken): Promise<MemberOutcome> => {
           const conv = conversations.load(d, { withPending: false });
@@ -1251,20 +1248,6 @@ function pyIntStrict(value: unknown): number | null {
   if (typeof value === "string" && /^\s*[+-]?\d+\s*$/.test(value))
     return Number(value.trim());
   return null;
-}
-
-/**
- * The store hooks this PR closes: safeRemoveTempKey (agent_temp) and
- * dropNode (agent_nodes.drop_node).
- */
-export function reapStoreHooks(
-  agentTemp: { safeRemoveTempKey(key: string): Promise<boolean> },
-  nodes: Pick<AgentNodes<AgentNode, NodeStore>, "dropNode">,
-): Pick<ConversationStoreHooks, "safeRemoveTempKey" | "dropNode"> {
-  return {
-    safeRemoveTempKey: (key) => agentTemp.safeRemoveTempKey(key),
-    dropNode: (cid) => nodes.dropNode(cid),
-  };
 }
 
 export function reapTempSeams(inputs: {

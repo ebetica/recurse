@@ -1,8 +1,11 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterAll, afterEach, expect, test } from "bun:test";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { Database } from "bun:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  ServiceCreateRefusal,
   SpawnWorkdir,
   SupervisorCreate,
   type CreateDeps,
@@ -20,10 +23,15 @@ import {
 import { Cancelled, TaskSet } from "../../src/utils/tasks";
 import { buildWorld, counter } from "./fixtures/agent_node/world";
 import { switchoverWorld, until } from "./fixtures/durable_host/host";
+import { probeMetadataFlock } from "./fixtures/metadata_flock";
 
 type Json = any;
 const WALL = 1_700_000_000.0;
 const roots: string[] = [];
+const teardowns: (() => Promise<void>)[] = [];
+afterEach(async () => {
+  for (const teardown of teardowns.splice(0)) await teardown();
+});
 afterAll(() => {
   for (const root of roots) rmSync(root, { recursive: true, force: true });
 });
@@ -38,7 +46,12 @@ const BASE = {
   status: "idle",
 };
 
-function setup(options: { lifecycleBusy?: () => boolean } = {}) {
+const GATED = new URL("./fixtures/agent_store/gated_worker.ts", import.meta.url)
+  .href;
+
+function setup(
+  options: { lifecycleBusy?: () => boolean; storeWorkerUrl?: string } = {},
+) {
   const root = mkdtempSync(join(tmpdir(), "supervisor-create-"));
   roots.push(root);
   const calls: Json[] = [];
@@ -49,6 +62,7 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
     storeIds: counter("s", 3),
     sink: { write: () => {} },
     scheduler: null,
+    storeWorkerUrl: options.storeWorkerUrl,
   });
   const logs: Json[] = [];
   const log = new RuntimeLogger(
@@ -69,6 +83,7 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
   const deps: CreateDeps = {
     tasks: new TaskSet(() => {}),
     conversations: world.conversations,
+    configActions: world.configActions,
     serviceBindings: world.serviceBindings,
     nodes: world.nodes,
     lifecycle: {
@@ -79,10 +94,6 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
         return fn({} as never, null);
       },
       guardAsync: async (_site, _cid, fn) => fn({} as never, null),
-      mutateExternalStorage: async (mutation, args) =>
-        (mutation as (...a: unknown[]) => unknown)(
-          ...(args as unknown[]),
-        ) as never,
     } as CreateDeps["lifecycle"],
     config: world.config,
     importFinalized: () => true,
@@ -104,6 +115,7 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
       },
     },
     agentTemp: {
+      safeRemoveTempKey: async () => true,
       newAgentTempKey: async () => `20240101-k${++keyN}`,
       ensureAgentTemp: async (conv, o = {}) => {
         calls.push(["ensure_temp", conv.id, conv.tmp_key, o.persist ?? true]);
@@ -119,27 +131,8 @@ function setup(options: { lifecycleBusy?: () => boolean } = {}) {
       if (signal.aborted) throw new Cancelled();
     },
   };
-  const failSave = { armed: false };
-  const conversations = world.conversations;
-  const realSave = conversations.save.bind(conversations);
-  conversations.save = async (conv, token) => {
-    if (failSave.armed) {
-      failSave.armed = false;
-      throw Object.assign(new Error("scripted save failure"), {
-        name: "OSError",
-      });
-    }
-    return realSave(conv, token);
-  };
-  const realRollback =
-    conversations.rollbackServiceConversation.bind(conversations);
-  conversations.rollbackServiceConversation = async (conv, serviceBindings) => {
-    calls.push(["rollback", conv.id]);
-    return realRollback(conv, serviceBindings);
-  };
   const create = new SupervisorCreate(deps);
   return {
-    failSave,
     guardModes,
     root,
     world,
@@ -203,7 +196,7 @@ test("new conversations and spawns on a Settings custom provider use Durable", a
 test("Take over and release store inspectable notes once, without waking idle recipients", async () => {
   const w = await switchoverWorld();
   try {
-    const { create, durable, delivery, conversations } = w.instance;
+    const { create, durable, delivery, conversations, nodes } = w.instance;
     await create.create({
       cid: "boss",
       title: "Boss",
@@ -215,8 +208,58 @@ test("Take over and release store inspectable notes once, without waking idle re
       parent: "boss",
       model: "recurse-test/scripted",
     });
-    await conversations.withSafetyGuard("boss", async () => {
-      await create.setTakenOver("held", true);
+    await conversations.withMuteGuard("held", async () => {});
+    const node = nodes.node("held");
+    const release = Promise.withResolvers<void>();
+    const queued = Promise.withResolvers<void>();
+    const lock = node.withLock;
+    const withLock = lock.bind(node);
+    const held = withLock(() => release.promise);
+    node.withLock = (work, token) => {
+      const pending = withLock(work, token);
+      queued.resolve();
+      return pending;
+    };
+    await nodes.node("boss").withLock(async () => {
+      const save = conversations.save;
+      let checkedMute = false;
+      conversations.save = async (conv, token) => {
+        if (conv.id === "held" && conv.taken_over === true) {
+          await expect(
+            probeMetadataFlock(conversations.paths.muteLockDir, "held"),
+          ).rejects.toBeInstanceOf(TreeLifecycleBusy);
+          checkedMute = true;
+        }
+        return save.call(conversations, conv, token);
+      };
+      const takeover = create.setTakenOver("held", true);
+      try {
+        await Promise.race([
+          queued.promise,
+          takeover.then(() => {
+            throw new Error("Take over skipped the held node lock");
+          }),
+        ]);
+        await expect(
+          probeMetadataFlock(conversations.paths.titleLockDir, "held"),
+        ).rejects.toBeInstanceOf(TreeLifecycleBusy);
+        await probeMetadataFlock(conversations.paths.muteLockDir, "held");
+        release.resolve();
+        await takeover;
+        expect(checkedMute).toBe(true);
+        expect(await conversations.agentStore.flush("held")).toBe(true);
+        expect(await conversations.loadCanonicalMetadata("held")).toMatchObject(
+          {
+            taken_over: true,
+            muted: true,
+          },
+        );
+      } finally {
+        release.resolve();
+        await Promise.allSettled([held, takeover]);
+        conversations.save = save;
+        node.withLock = lock;
+      }
       await create.setTakenOver("held", true);
       expect(durable.metadata("boss").status).toBe("idle");
     });
@@ -347,4 +390,134 @@ test("take-over HTTP route returns a retryable refusal while the lifecycle is he
     lifecycle.release();
     await app.running.close();
   }
+});
+
+async function stalledServiceCreate(externalKey: string) {
+  const t = setup({ storeWorkerUrl: GATED });
+  const lifecycle = new TreeLifecycle({
+    dataDir: t.root,
+    muteLockDir: join(t.root, "locks"),
+    logger: t.deps.log,
+  });
+  t.deps.lifecycle = lifecycle;
+  const agents = join(t.root, "agents");
+  const started: { pending?: Promise<unknown> } = {};
+  teardowns.push(async () => {
+    await rm(join(agents, "stall-next"), { force: true });
+    const holds = (await readdir(agents)).filter((name) =>
+      name.endsWith(".sqlite.hold"),
+    );
+    for (const name of holds) await rm(join(agents, name), { force: true });
+    await started.pending;
+    for (const name of holds)
+      await until(
+        () =>
+          t.world.agentStore.status(name.slice(0, -".sqlite.hold".length))
+            .in_flight === false,
+      );
+  });
+  await mkdir(agents, { recursive: true });
+  await writeFile(join(agents, "stall-next"), "");
+  const service = (key: string) =>
+    t.create.createOrRejoinServiceConversation({
+      title: null,
+      servicePrincipal: "alpha",
+      externalKey: key,
+      allowedModels: null,
+      ownedLimit: null,
+    });
+  const pending = service(externalKey).catch((error: unknown) => error);
+  started.pending = pending;
+  let hold = "";
+  await until(async () => {
+    hold =
+      (await readdir(agents)).find((name) => name.endsWith(".sqlite.hold")) ??
+      "";
+    return hold !== "";
+  });
+  const database = join(agents, hold.slice(0, -".hold".length));
+  const cid = hold.slice(0, -".sqlite.hold".length);
+  return {
+    t,
+    lifecycle,
+    service,
+    pending,
+    cid,
+    database,
+    hold: join(agents, hold),
+  };
+}
+
+async function stalledLeaves(root: string, cid: string) {
+  const dir = join(root, "external-keys");
+  const external = await Promise.all(
+    (await readdir(dir)).map(async (name) =>
+      JSON.parse(await readFile(join(dir, name), "utf8")),
+    ),
+  );
+  return {
+    service: JSON.parse(
+      await readFile(join(root, "service-bindings", `${cid}.json`), "utf8"),
+    ),
+    external: external.filter((record) => record.conversation_id === cid),
+  };
+}
+
+// Regression: #3662 A first commit that never settled kept the creation lease, so every later create and reap waited behind it.
+test("a stalled first service commit releases the creation lease and keeps its files and bindings", async () => {
+  const { t, lifecycle, service, pending, cid, hold } =
+    await stalledServiceCreate("stalled");
+  const { agentStore, conversations } = t.world;
+  expect(await pending).toBeInstanceOf(ServiceCreateRefusal);
+  expect(lifecycle.currentHolder()).toBeNull();
+  expect((await service("unrelated")).created).toBe(true);
+  expect(conversations.load(cid)).toBeNull();
+  expect(existsSync(hold)).toBe(true);
+  const held = await stalledLeaves(t.root, cid);
+  expect(held.service).toEqual({
+    principal: "alpha",
+    create_token: "20240101-k1",
+  });
+  expect(held.external).toEqual([
+    {
+      principal: "alpha",
+      external_key: "stalled",
+      conversation_id: cid,
+      create_token: "20240101-k1",
+    },
+  ]);
+  await rm(hold);
+  await until(() => agentStore.status(cid).in_flight === false);
+  expect((await agentStore.loadPersistedAgent(cid))[0]).toMatchObject({
+    id: cid,
+  });
+  expect(conversations.load(cid)).toBeNull();
+  expect(await stalledLeaves(t.root, cid)).toEqual(held);
+});
+
+// Regression: #3662 A first commit SQLite refused left the conversation published, bound and without a stored row.
+test("a first service commit that SQLite refuses rolls back its row and bindings", async () => {
+  const { t, pending, cid, database, hold } =
+    await stalledServiceCreate("refused");
+  const { agentStore, conversations, serviceBindings } = t.world;
+  const planted = new Database(database);
+  try {
+    planted.run("CREATE TABLE agent (cid TEXT PRIMARY KEY);");
+    await rm(hold);
+    expect(await pending).toBeInstanceOf(ServiceCreateRefusal);
+    expect(
+      planted
+        .query("SELECT name FROM sqlite_master WHERE name = 'intents';")
+        .values(),
+    ).toEqual([["intents"]]);
+  } finally {
+    planted.close();
+  }
+  expect(existsSync(database)).toBe(false);
+  expect((await agentStore.loadPersistedAgent(cid))[0]).toBeNull();
+  expect(conversations.load(cid)).toBeNull();
+  expect(await serviceBindings.serviceOwnedConversationCount("alpha")).toBe(0);
+  expect(
+    await serviceBindings.lookupExternalKey("alpha", "refused"),
+  ).toBeNull();
 });

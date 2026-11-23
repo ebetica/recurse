@@ -1,6 +1,6 @@
 import { expect } from "bun:test";
 import { join } from "node:path";
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { themePalettes } from "../../src/themes";
 import { tmpdir } from "node:os";
 import type { Locator } from "playwright";
@@ -64,6 +64,7 @@ export const tests: BrowserTest[] = [
           name: "Protected sign-in CSS",
           css: "#brand > img, [data-theme-protected], .setup-key, .recovery-codes, [data-theme-protected] button { visibility: hidden !important; }",
         };
+        await mkdir(join(server.data, "data/config"), { recursive: true });
         await writeFile(
           join(server.data, "data/config/themes.json"),
           JSON.stringify({ theme: custom.name, custom: [custom] }),

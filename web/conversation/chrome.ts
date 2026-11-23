@@ -18,7 +18,7 @@ import {
   phaseFor,
 } from "./freshness.js";
 import { conversationStatusCopy } from "./chrome/status.js";
-import { $, inputEl, liveBarEl, msgsEl, titleEl } from "../dom.js";
+import { $, inputEl, statusBarEl, msgsEl, titleEl } from "../dom.js";
 import {
   effortMenuInvoker,
   hideModel,
@@ -290,18 +290,12 @@ export async function requestTakeoverToggle(
   renderAgentList();
   try {
     const backend = backendFor(id);
-    const url = `/api/conversations/${id}`;
-    let r = await backend.jpost(`${url}/take-over`, { taken_over: desired });
-    // Spec: A connected backend older than the taken_over rename only has
-    // `/pin`; drop this fallback one release after the rename.
-    if (r.status === 404)
-      r = await backend.jpost(`${url}/pin`, { pinned: desired });
+    const r = await backend.jpost(`/api/conversations/${id}/take-over`, {
+      taken_over: desired,
+    });
     if (!r.ok) throw new Error("take over failed");
-    const applied = (await r.json()) as {
-      taken_over?: boolean;
-      pinned?: boolean;
-    };
-    const took = applied.taken_over ?? applied.pinned === true;
+    const applied = (await r.json()) as { taken_over?: boolean };
+    const took = applied.taken_over === true;
     if (state.nodes[id]) {
       state.nodes[id].muted = took;
       state.nodes[id].taken_over = took;
@@ -428,7 +422,7 @@ export function applyFreshness(): void {
   threadLoadingEl.textContent = loading ? "Loading…" : "";
   msgsEl.classList.toggle("stale", loading);
   msgsEl.toggleAttribute("inert", loading);
-  liveBarEl.classList.toggle("stale", phase === "loading");
+  statusBarEl.classList.toggle("stale", phase === "loading");
   paintComposerRunState(state.currentConv);
 }
 

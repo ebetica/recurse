@@ -400,10 +400,24 @@ export function activityUsageLabel(usage: ActivityUsage): string {
 }
 
 export function activityTotalCostLabel(usage: ActivityUsage): string {
-  if (!usage.modelTotal) return "";
-  const cost = formatCost(usage.modelTotal.cost);
-  if (cost === null) return "";
-  return `Total cost: ${cost}${usage.modelTotal.costPartial ? "+" : ""}`;
+  let total: number | undefined;
+  let partial = usage.modelPartial || usage.safetyPartial;
+  for (const row of [usage.modelTotal, ...(usage.safetyTotal?.groups ?? [])]) {
+    if (!row) continue;
+    const cost = row.cost;
+    partial ||= row.costPartial === true;
+    if (
+      typeof cost !== "number" ||
+      cost < 0 ||
+      !Number.isFinite((total ?? 0) + cost)
+    ) {
+      partial = true;
+      continue;
+    }
+    total = (total ?? 0) + cost;
+  }
+  const cost = formatCost(total);
+  return cost === null ? "" : `Total cost: ${cost}${partial ? "+" : ""}`;
 }
 
 export function activityUsageCaption(usage: ActivityUsage): string {

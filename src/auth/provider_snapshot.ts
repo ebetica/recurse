@@ -1,5 +1,5 @@
 // Cached auth-provider snapshots keep Config reads synchronous.
-// Refresh at startup/Settings auth changes before rewriting the model catalog.
+// Refresh at startup and after Settings login changes so model choices reflect them.
 // External edits wait for refresh. Concurrent refreshes share work; a request
 // during a run schedules one more, so the last change wins.
 

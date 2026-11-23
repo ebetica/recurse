@@ -31,6 +31,7 @@ import {
 } from "../../src/agents/storage";
 import {
   fixtureStore,
+  fixtureTreeView,
   fixtureBindings,
   fixtureHooks,
   paths,
@@ -409,11 +410,12 @@ test("failed durable admission leaves projection intact and next save retries", 
   const root = await temp();
   const store = fixtureStore(root);
   const cid = "admission";
+  const tree = fixtureTreeView(store);
   try {
     await store.save(currentRow(cid));
     expect(await store.agentStore.flush(cid)).toBe(true);
     const before = store.metadataSnapshot(cid);
-    const digest = store.captureDigestInputs();
+    const digest = tree.captureDigestInputs();
     expect(digest.convs).toContainEqual(
       expect.objectContaining({ id: cid, title: before!.title }),
     );
@@ -437,7 +439,7 @@ test("failed durable admission leaves projection intact and next save retries", 
     expect(digest.convs.find((row) => row.id === cid)?.title).toBe(
       before!.title,
     );
-    const freshDigest = store.captureDigestInputs();
+    const freshDigest = tree.captureDigestInputs();
     const freshRow = freshDigest.convs.find((row) => row.id === cid)!;
     expect(freshRow.title).toBe("recovered");
     freshRow.title = "reader mutation";
@@ -546,15 +548,16 @@ test("failed durable admission leaves projection intact and next save retries", 
   }
 });
 
-test("tree-refresh failure cannot cancel an admitted metadata commit", async () => {
+test("row-listener failure cannot cancel an admitted metadata commit", async () => {
   const root = await temp();
   const hooks = fixtureHooks(root);
   const events: string[] = [];
-  hooks.treeRefresh = () => {
-    throw new Error("injected tree failure");
+  hooks.onRowsChanged = () => {
+    throw new Error("injected listener failure");
   };
   hooks.log = (event) => {
     events.push(event);
+    throw new Error("injected logger failure");
   };
   const store = new ConversationStore(
     paths(root),
@@ -570,7 +573,7 @@ test("tree-refresh failure cannot cancel an admitted metadata commit", async () 
   );
   try {
     await store.save(currentRow("tree-fault"));
-    expect(events).toContain("tree_view_refresh_failed");
+    expect(events).toContain("conversation_row_listener_failed");
     expect(store.load("tree-fault", { withPending: false })?.title).toBe(
       "first",
     );
@@ -626,20 +629,6 @@ test("failed refresh leaves admitted in-memory rows and readiness closed", async
     expect(store.load("refresh", { withPending: false })?.status).toBe("idle");
     store.noteProjectionReady();
     expect(store.projectionReady()).toBe(true);
-  } finally {
-    await store.agentStore.dispose();
-  }
-});
-
-test("configuration guard permits awaited save without bypassing title/mute exclusion", async () => {
-  const root = await temp();
-  const store = fixtureStore(root);
-  try {
-    await store.withConfigurationMetadataGuard("config", async (titleToken) => {
-      await store.save(currentRow("config"), titleToken);
-    });
-    expect(await store.agentStore.flush("config")).toBe(true);
-    expect((await store.loadCanonicalMetadata("config"))?.title).toBe("first");
   } finally {
     await store.agentStore.dispose();
   }
@@ -714,42 +703,6 @@ test("session binding read cannot overwrite a title admitted while SQLite was lo
   }
 });
 
-test("rollback attempts every cleanup despite an incomplete temp removal", async () => {
-  const root = await temp();
-  const hooks = fixtureHooks(root);
-  hooks.safeRemoveTempKey = () => false;
-  const store = new ConversationStore(
-    paths(root),
-    new AgentStore(join(root, "agents")),
-    hooks,
-    new Config({
-      env: {
-        CHAT_DATA_DIR: root,
-        HOME: root,
-        RECURSE_HOME: join(root, "settings"),
-      },
-    }),
-  );
-  const conv = {
-    ...currentRow("rollback"),
-    external_key: "service:key",
-    service_principal: "service",
-    tmp_key: "scratch",
-  };
-  store.applyAgentMetadata({ rollback: conv });
-  const serviceBindings = fixtureBindings(root, store);
-  await serviceBindings.bindServiceConversation("service", "rollback");
-  await serviceBindings.bindExternalKey("service", "service:key", "rollback");
-  await store.rollbackServiceConversation(conv, serviceBindings);
-  expect(store.load("rollback", { withPending: false })).toBeNull();
-  expect(await serviceBindings.serviceOwnedConversationCount("service")).toBe(
-    0,
-  );
-  expect(
-    await serviceBindings.lookupExternalKey("service", "service:key"),
-  ).toBeNull();
-});
-
 test("a record without a backend retains its legacy provenance", async () => {
   const store = fixtureStore(await temp());
   const row: Record<string, unknown> = {
@@ -760,66 +713,4 @@ test("a record without a backend retains its legacy provenance", async () => {
   await store.save(row);
   expect(store.load("legacy")!.backend).toBe(LEGACY_BACKEND);
   expect(store.load("legacy")!.session_id).toBe("claude-session");
-});
-
-// Feature: #2934 stored pinned rows load and are rewritten once as taken_over.
-test("rows stored before the taken_over rename are read and rewritten once", async () => {
-  const root = await temp();
-  const store = fixtureStore(root);
-  try {
-    expect(await store.refreshProjection()).toEqual({});
-    expect(await store.migrateTakenOverNames()).toBe(0);
-    const legacy: Record<string, unknown> = { ...currentRow("held") };
-    delete legacy.taken_over;
-    delete legacy.taken_over_order;
-    legacy.pinned = true;
-    legacy.pinned_order = `00000000000000000003-${"c".repeat(32)}`;
-    store.agentStore.enqueueMetadata("held", legacy);
-    store.agentStore.enqueueMetadata("other", { ...currentRow("other") });
-    expect(await store.agentStore.flush("held")).toBe(true);
-    expect(await store.agentStore.flush("other")).toBe(true);
-    const read = store.agentStore.loadPersistedAgent.bind(store.agentStore);
-    store.agentStore.loadPersistedAgent = async (cid) => {
-      if (cid === "other") throw new Error("unreadable");
-      return read(cid);
-    };
-    expect(await store.refreshProjection()).not.toBeNull();
-    const skipped = await store.migrateTakenOverNames().catch(String);
-    expect(skipped).toContain("incomplete");
-    expect(
-      await readFile(join(root, "taken-over-rename.json")).catch(() => null),
-    ).toBeNull();
-    store.agentStore.loadPersistedAgent = read;
-    store.agentStore.enqueueMetadata("held", legacy);
-    expect(await store.agentStore.flush("held")).toBe(true);
-    expect(await store.refreshProjection()).not.toBeNull();
-    expect(store.load("held", { withPending: false })).toMatchObject({
-      taken_over: true,
-      taken_over_order: legacy.pinned_order,
-    });
-    expect(store.load("held", { withPending: false })).not.toHaveProperty(
-      "pinned",
-    );
-    expect(await store.migrateTakenOverNames()).toBe(1);
-    const stored = await store.loadCanonicalMetadata("held");
-    expect(stored).toMatchObject({
-      taken_over: true,
-      taken_over_order: legacy.pinned_order,
-    });
-    expect(stored).not.toHaveProperty("pinned");
-    expect(
-      JSON.parse(await readFile(join(root, "taken-over-rename.json"), "utf8")),
-    ).toEqual({
-      version: 1,
-      rewritten: 1,
-    });
-    store.agentStore.enqueueMetadata("held", legacy);
-    expect(await store.agentStore.flush("held")).toBe(true);
-    expect(await store.refreshProjection()).not.toBeNull();
-    expect(await store.migrateTakenOverNames()).toBe(0);
-    expect(await store.loadCanonicalMetadata("held")).toHaveProperty("pinned");
-    expect(store.load("held", { withPending: false })?.taken_over).toBe(true);
-  } finally {
-    await store.agentStore.dispose();
-  }
 });

@@ -1,20 +1,20 @@
 # Agent guide
 
-This contract is included in every agent's context. Read task-specific guidance
-when needed; do not copy it into this file.
+Every agent's context includes this contract. Read task-specific guidance as
+needed; don't copy it here.
 
 ## Roles and the agent tree
 
-Agents form a tree. The operator can message any agent, and agents message
-each other.
+Agents form a tree. The operator and agents can message any agent.
 
+- When the operator asks for research, start a taken-over subagent
+  (`--taken-over`) so they can work with it directly.
 - Do only the task you were given. Implementers work in their own managed
   worktrees and open PRs; reviewers and verifiers edit nothing.
-- Report each result in your final message, outcome first with essential
-  evidence. Final messages are automatically relayed to your parent agent; do
-  not send messages manually unless there's an urgent question. Raise
-  decisions only the operator can make with the operator directly, or through
-  your parent. Finish and reap your children.
+- In your final message, give each outcome first, then key evidence. Final
+  messages go to your parent automatically; send messages manually only for
+  urgent questions. Ask the operator for decisions only they can make, directly
+  or via your parent. Finish and reap your children.
 - Merge, promote or deploy only when the operator asks you to.
 
 ## Non-negotiable constraints
@@ -78,9 +78,9 @@ each other.
 
 ## Repository map
 
-Read [docs/agents/repository-map.md](docs/agents/repository-map.md) before changing code, then
-the owning module header and focused tests. Headers, implementation, and tests
-are authoritative.
+Run `bun tools/code_map.ts <folder>` to find the owning code before changing it.
+Read its README, module header and focused tests. Headers, implementation and
+tests are authoritative.
 
 ## PR rules
 
@@ -95,13 +95,13 @@ are authoritative.
 3. **No PR Actions.** GitHub Actions run only after pushes to `main`; never
    request, rerun, or spend them on PR validation. CI is no substitute for
    smoke gates.
-4. **Documentation.** AGENTS.md holds the standing contract; contribution and
-   test procedures live in [docs/agents/develop.md](docs/agents/develop.md). Subsystem
-   behaviour, layout, configuration, invariants, and security belong in
-   owning-module headers and tests; a part's design goes in the `README.md`
-   beside its code, updated in the same PR. `docs/` holds narrative and guides
-   that link to code instead of restating it. Update injected JSDoc/`--help`
-   for CLI changes.
+4. **Documentation.** AGENTS.md holds the rules; [develop.md](docs/agents/develop.md)
+   covers contributions and tests. Module headers and tests own behaviour,
+   configuration, invariants and security. Update a part's README with its code.
+   Tell a new reader why the part is arranged this way today. Link to code
+   instead of repeating code, headers, tests or --help. For layout, run
+   `bun tools/code_map.ts <folder>`. Guides in docs/ link to code. CLI changes
+   update injected JSDoc/--help.
 5. **Protected branches.** Never rewrite published PR branches. Branch from
    merged `main`, never from another PR; an operator-named integration branch's
    merged tip is the base and target of its workstream until promotion is

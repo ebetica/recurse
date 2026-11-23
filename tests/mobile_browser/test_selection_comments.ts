@@ -11,12 +11,15 @@ import {
 
 import {
   captureErrors,
+  dispatchArtifactSelection,
   expectHitCorners,
   gotoRoot,
   mockConversation,
+  openPage,
   postFixture,
   runBrowserTests,
   rootAgentId,
+  screenshot,
   turn,
   type BrowserTest,
 } from "./common";
@@ -969,6 +972,51 @@ export const tests: BrowserTest[] = [
     } finally {
       await context.close();
     }
+  },
+  // Regression: #3641 an Artifact comment stays anchored when the dock moves its pane at phone width.
+  async function test_artifact_comment_draft_survives_resize(browser, base) {
+    const quote = "Keep this selected text";
+    const note = "This draft survives the resize.";
+    const { id } = await postFixture(base, "seed-pane-reading", {
+      markdown: `# Resize draft\n\nBefore. ${quote}. After.`,
+    });
+    const { page, errors } = await openPage(browser, {
+      viewport: { width: 1280, height: 844 },
+      touch: true,
+    });
+    await gotoRoot(page, base);
+    await page.locator('.rail-btn[data-pane="tips"]').click();
+    await page.locator(`a[href="#artifact=${id}"]`).click();
+    const report = '.pane-col[data-pane="report"]';
+    const doc = page.locator(`#dock ${report} .report-doc`, {
+      hasText: quote,
+    });
+    await doc.waitFor();
+    await dispatchArtifactSelection(page, "touch", quote, doc);
+    const popover = page.locator(".report-comment-popover");
+    const field = popover.locator("textarea");
+    await field.fill(note);
+    await field.evaluate((element: any) => element.setSelectionRange(2, 9));
+    await screenshot(page, "artifact-comment-draft-desktop");
+    await page.setViewportSize({ width: 412, height: 844 });
+    const phone = page.locator(`${report}.mobile-active`);
+    await phone.waitFor();
+    await browserExpect(popover).toBeVisible();
+    await browserExpect(field).toBeFocused();
+    await browserExpect(field).toHaveValue(note);
+    expect(
+      await field.evaluate((element: any) => [
+        element.selectionStart,
+        element.selectionEnd,
+      ]),
+    ).toEqual([2, 9]);
+    await screenshot(page, "artifact-comment-draft-phone");
+    await popover.getByRole("button", { name: "Comment", exact: true }).click();
+    await browserExpect(
+      phone.locator(".report-doc mark.report-cmark"),
+    ).toHaveText(quote);
+    await browserExpect(phone.locator(".report-comment-text")).toHaveText(note);
+    expect(errors).toEqual([]);
   },
   async function test_selection_comments_replacement_invalidates_offer(
     browser,

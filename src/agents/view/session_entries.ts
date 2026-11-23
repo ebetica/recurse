@@ -390,31 +390,28 @@ export class AsyncJsonlRangeReader {
           stripImages ? VIEW_RAW_LINE_BYTES : LINE_BYTES,
         );
         offset = cursor.tell();
-        let parsed: JsonObject | null = null;
+        let charge = stripImages ? Math.min(line.used, byteLimit) : line.used;
         if (line.complete && !line.oversize) {
           const raw = line.raw?.subarray(0, -1);
-          parsed =
-            raw === undefined
-              ? null
-              : stripImages
-                ? viewEntry(raw)
-                : entry(raw);
-          if (parsed !== null) rows.push([lineStart, offset, parsed]);
+          if (raw !== undefined) {
+            if (stripImages) {
+              const parsed = viewEntry(raw);
+              if (parsed !== null) {
+                rows.push([lineStart, offset, parsed[0]]);
+                charge = parsed[1];
+              }
+            } else {
+              const parsed = entry(raw);
+              if (parsed !== null) rows.push([lineStart, offset, parsed]);
+            }
+          }
           completeEnd = offset;
         } else if (line.complete) {
           completeEnd = offset;
         } else {
           break;
         }
-        if (stripImages) {
-          scanned +=
-            line.complete &&
-            !line.oversize &&
-            parsed !== null &&
-            line.raw !== null
-              ? pythonJsonBytes(parsed, line.raw.subarray(0, -1))
-              : Math.min(line.used, byteLimit);
-        } else scanned += line.used;
+        scanned += charge;
       }
     } finally {
       await handle.close();
@@ -603,9 +600,11 @@ function jsonNumberMetadata(raw: Uint8Array): JsonNumberMetadata {
   return root;
 }
 
-function pythonNumberCorrection(
+function viewNumberCorrection(
   value: unknown,
   metadata: JsonNumberMetadata,
+  owner?: JsonObject | unknown[],
+  key: string | number = "",
 ): number {
   if (typeof value === "number") {
     if (metadata?.kind !== "number")
@@ -616,6 +615,11 @@ function pythonNumberCorrection(
       : token === "-0"
         ? 1
         : token.length;
+    // Preserve the JSON batch's number values after charging the original token.
+    if (owner !== undefined) {
+      if (!Number.isFinite(value)) Reflect.set(owner, key, null);
+      else if (Object.is(value, -0)) Reflect.set(owner, key, 0);
+    }
     return pythonLength - (JSON.stringify(value)?.length ?? 4);
   }
   if (Array.isArray(value)) {
@@ -623,7 +627,7 @@ function pythonNumberCorrection(
       throw new SyntaxError("missing array metadata");
     return value.reduce(
       (sum, item, index) =>
-        sum + pythonNumberCorrection(item, metadata.items[index]!),
+        sum + viewNumberCorrection(item, metadata.items[index]!, value, index),
       0,
     );
   }
@@ -635,7 +639,7 @@ function pythonNumberCorrection(
       const child = metadata.properties.get(key);
       if (child === undefined)
         throw new SyntaxError("missing property metadata");
-      correction += pythonNumberCorrection(value[key], child);
+      correction += viewNumberCorrection(value[key], child, value, key);
     }
     return correction;
   }
@@ -643,7 +647,7 @@ function pythonNumberCorrection(
   return 0;
 }
 
-function pythonJsonBytes(value: unknown, raw?: Uint8Array): number {
+function viewEntryBytes(value: JsonObject, raw: Uint8Array): number {
   // Invariant: json.dumps uses ASCII escapes and spaces after separators by
   // default. JSON.parse erases whether a number was an int or float, so correct
   // each retained value using the original JSON token.
@@ -675,9 +679,8 @@ function pythonJsonBytes(value: unknown, raw?: Uint8Array): number {
     else bytes += 1;
     index += char.length;
   }
-  if (raw === undefined) return bytes;
   try {
-    return bytes + pythonNumberCorrection(value, jsonNumberMetadata(raw));
+    return bytes + viewNumberCorrection(value, jsonNumberMetadata(raw));
   } catch {
     return Number.POSITIVE_INFINITY;
   }
@@ -691,8 +694,10 @@ function entry(raw: Uint8Array | string): JsonObject | null {
   return isObject(value) ? value : null;
 }
 
-// Parse a view row, discarding base64 image data before it reaches the view.
-export function viewEntry(raw: Uint8Array | string): JsonObject | null {
+/** Parse and charge a view entry, discarding base64 image data. */
+export function viewEntry(
+  raw: Uint8Array | string,
+): [JsonObject, number] | null {
   const bytes = typeof raw === "string" ? encodeUtf8(raw) : copyBytes(raw);
   if (bytes.length > VIEW_RAW_LINE_BYTES) return null;
   const value = decodeJson(bytes);
@@ -708,7 +713,8 @@ export function viewEntry(raw: Uint8Array | string): JsonObject | null {
     });
     value.message = { ...(isObject(message) ? message : {}), content: parts };
   }
-  return pythonJsonBytes(value, bytes) <= LINE_BYTES ? value : null;
+  const charge = viewEntryBytes(value, bytes);
+  return charge <= LINE_BYTES ? [value, charge] : null;
 }
 
 export function entryIdentity(

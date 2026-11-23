@@ -1,5 +1,13 @@
-import { afterAll, describe, expect, test } from "bun:test";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { afterAll, afterEach, describe, expect, test } from "bun:test";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { Database } from "bun:sqlite";
 import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
 import { fauxHost, until } from "./fixtures/durable_host/host";
@@ -10,8 +18,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { ExternalKeyConflict } from "../../src/agents/storage";
-import { TreeLifecycleBusy } from "../../src/agents/lifecycle/mutation_guard";
-import { CreateSlots } from "../../src/web/service_conversations";
+import { Cancelled } from "../../src/utils/tasks";
+import {
+  markerRecord,
+  rootFromEnv,
+  withCleanerLock,
+} from "../../tools/worktree";
+import { buildApp, WebLogSink } from "../../src/web/app";
+import { appWorld } from "./web_app_support";
 import { logger } from "../../src/observability/runtime_logging";
 import { exchange, normalise, requestBytes } from "./http_corpus";
 
@@ -34,6 +48,7 @@ async function app(
 }
 
 const ALPHA = ["Authorization", "Bearer recurse_alpha_alpha-secret"] as const;
+const BETA = ["Authorization", "Bearer recurse_beta_beta-secret"] as const;
 const send = async (
   port: number,
   method: string,
@@ -107,6 +122,58 @@ test("diff follows an agent chdir into another worktree", async () => {
     await host.close();
   }
 });
+
+test("Changes deadlines respond while Durable is still opening its working directory", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "diff-cwd-deadline-"));
+  dirs.push(dir);
+  const seeded = fauxHost(dir);
+  const reached = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const host = new DurableHost({
+    ...seeded.host.deps,
+    agentEnv: async (record) => {
+      reached.resolve();
+      await release.promise;
+      return seeded.host.deps.agentEnv(record);
+    },
+  });
+  const built = await app({
+    patch: (deps, world) => {
+      const conv = { ...world.load("conv-a")!, backend: "durable" };
+      world.convs.set("conv-a", conv);
+      seeded.records["conv-a"] = conv;
+      Object.assign(deps, { durable: host });
+    },
+  });
+  const responses = Promise.all(
+    ["/diff", "/diff/candidates"].map((path) =>
+      send(built.running.port, "GET", `/api/conversations/conv-a${path}`),
+    ),
+  );
+  try {
+    await Promise.race([
+      reached.promise,
+      responses.then(() => {
+        throw new Error("Changes did not open Durable state");
+      }),
+    ]);
+    const [summary, candidates] = await responses;
+    expect(summary!.status).toBe(200);
+    expect(summary!.body).toMatchObject({
+      json: { available: false, reason: "diff-failed" },
+    });
+    expect(candidates!.status).toBe(200);
+    expect(candidates!.body).toEqual({
+      json: { branches: [], commits: [], tags: [] },
+    });
+  } finally {
+    release.resolve();
+    await responses.catch(() => undefined);
+    await built.running.close();
+    await host.close();
+    await seeded.host.close();
+  }
+}, 30_000);
 
 test("idle history loads over HTTP without opening a runtime, then a message runs", async () => {
   const dir = await mkdtemp(join(tmpdir(), "http-cold-view-"));
@@ -286,138 +353,524 @@ describe("thinking disclosure", () => {
   });
 });
 
-describe("service create", () => {
-  test("two creates hold the slots; a third waits, then 429", async () => {
-    const gates: (() => void)[] = [];
-    const built = await app({
-      slots: new CreateSlots(2),
-      patch: (deps) => {
-        const real = deps.create.createOrRejoinServiceConversation;
-        deps.create.createOrRejoinServiceConversation = async (o) => {
-          await new Promise<void>((resolve) => gates.push(resolve));
-          return real(o);
-        };
-      },
-    });
+let closeServiceApp: (() => Promise<void>) | undefined;
+
+async function withCleanup(
+  run: () => Promise<void>,
+  cleanup: () => Promise<void>,
+): Promise<void> {
+  try {
+    await run();
+  } catch (failure) {
     try {
-      const create = () =>
-        send(built.running.port, "POST", "/api/service/conversations", [ALPHA]);
-      const first = create();
-      const second = create();
-      while (gates.length < 2) await Bun.sleep(5);
-      const started = Date.now();
-      const third = await create();
-      console.log("busy create refusal ms", Date.now() - started);
+      await cleanup();
+    } catch (cleanupFailure) {
+      console.error("Service test cleanup failed", cleanupFailure);
+    }
+    throw failure;
+  }
+  await cleanup();
+}
+
+async function bindingLeaves(paths: {
+  EXTERNAL_KEY_DIR: string;
+  SERVICE_BINDINGS_DIR: string;
+}): Promise<Record<string, string>> {
+  const leaves: Record<string, string> = {};
+  for (const dir of [paths.EXTERNAL_KEY_DIR, paths.SERVICE_BINDINGS_DIR])
+    for (const name of await readdir(dir).catch(() => []))
+      leaves[join(dir, name)] = await readFile(join(dir, name), "utf8");
+  return leaves;
+}
+
+async function serviceApp(
+  ownedLimit = 5,
+  managed = false,
+  seed?: (env: Record<string, string>) => Promise<void>,
+) {
+  const { root, env } = appWorld();
+  dirs.push(root);
+  env.RECURSE_TEMP_ROOT = join(root, "tmp");
+  const worktrees = rootFromEnv(env.CHAT_DATA_DIR!);
+  if (managed) {
+    const path = join(worktrees.worktrees, "target");
+    await mkdir(path, { recursive: true });
+    await mkdir(worktrees.markers, { recursive: true });
+    await writeFile(
+      join(worktrees.markers, "target.json"),
+      JSON.stringify({ version: 1, name: "target", path, holders: {} }),
+    );
+    env.CHAT_REPO_URL = path;
+  }
+  const principals = Object.fromEntries(
+    await Promise.all(
+      ["alpha", "beta"].map(async (id) => {
+        const tokenFile = join(env.CHAT_DATA_DIR!, `${id}-token`);
+        await writeFile(tokenFile, `${id}-secret`);
+        return [
+          id,
+          {
+            token_file: tokenFile,
+            scopes: ["conversation.create", "conversation.read"],
+            quotas: { max_owned_conversations: ownedLimit },
+          },
+        ];
+      }),
+    ),
+  );
+  env.RECURSE_SERVICE_PRINCIPALS_FILE = join(
+    env.CHAT_DATA_DIR!,
+    "principals.json",
+  );
+  await writeFile(
+    env.RECURSE_SERVICE_PRINCIPALS_FILE,
+    JSON.stringify({ principals }),
+  );
+  await seed?.(env);
+  const built = await buildApp({ env, sink: new WebLogSink(() => {}) });
+  const running = await built.serve({ port: 0 });
+  closeServiceApp = running.close;
+  await until(() => built.instance.lifecycle.readinessSnapshot().ready);
+  const create = async (
+    body: Record<string, string> = {},
+    principal: readonly [string, string] = ALPHA,
+    signal?: AbortSignal,
+  ) => {
+    const response = await fetch(
+      `http://127.0.0.1:${running.port}/api/service/conversations`,
+      {
+        method: "POST",
+        headers: {
+          [principal[0]]: principal[1],
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal,
+      },
+    );
+    const json = response.headers
+      .get("Content-Type")
+      ?.includes("application/json")
+      ? await response.json()
+      : await response.text();
+    return { status: response.status, body: { json } };
+  };
+  const keyed = (key: string, principal: readonly [string, string] = ALPHA) =>
+    create({ external_key: key }, principal);
+  const replies = (cid: string, principal: readonly [string, string]) =>
+    send(running.port, "GET", `/api/service/conversations/${cid}/replies`, [
+      principal,
+    ]);
+  const view = (cid: string) =>
+    send(running.port, "GET", `/api/conversations/${cid}/view`);
+  return { instance: built.instance, worktrees, create, keyed, replies, view };
+}
+
+describe("service create", () => {
+  afterEach(async () => {
+    const close = closeServiceApp;
+    closeServiceApp = undefined;
+    await close?.();
+  });
+
+  test("two creates hold the slots; a third waits, then 429", async () => {
+    const { create, instance } = await serviceApp();
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    let active = 0;
+    const { lease } = instance;
+    const admit = lease.guardAsync.bind(lease);
+    lease.guardAsync = async (site, cid, work, token, options) => {
+      if (site === "create") {
+        if (++active === 2) entered.resolve();
+        await release.promise;
+      }
+      return admit(site, cid, work, token, options);
+    };
+    const cancellation = new AbortController();
+    const { signal } = cancellation;
+    const pending = [create({}, ALPHA, signal), create({}, ALPHA, signal)];
+    try {
+      await Promise.race([
+        entered.promise,
+        ...pending.map((request) =>
+          request.then(({ status }) => {
+            throw new Error(
+              `Create settled before both slots were held: ${status}`,
+            );
+          }),
+        ),
+      ]);
+      const third = await create({}, ALPHA, signal);
       expect([third.status, third.body]).toEqual([
         429,
         { json: { detail: "service create is busy" } },
       ]);
-      for (const gate of gates) gate();
-      expect((await first).status).toBe(200);
-      expect((await second).status).toBe(200);
+      release.resolve();
+      expect((await Promise.all(pending)).map((r) => r.status)).toEqual([
+        200, 200,
+      ]);
     } finally {
-      await built.running.close();
+      release.resolve();
+      cancellation.abort();
+      await Promise.allSettled(pending);
     }
   }, 20_000);
 
-  test("a failed bind rolls the published row back and frees the slot", async () => {
-    const built = await app({
-      patch: (deps) => {
-        deps.bindServiceConversation = async () => {
-          throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
-        };
+  // Regression: #3662 A second lease admission failure left a published service conversation unbound.
+  test("service create binds before releasing its creation lease", async () => {
+    const { keyed, instance, worktrees } = await serviceApp(5, true);
+    const { lease, config, serviceBindings } = instance;
+    const lock = join(config.paths.MUTE_LOCK_DIR, ".tree-lifecycle.lock");
+    const parked = `${lock}.parked`;
+    const { request, obstruction } = await withCleanerLock(
+      worktrees,
+      async () => {
+        const request = keyed("no-second-lease");
+        await until(() => lease.currentHolder()?.site === "create");
+        const obstruction = lease
+          .guardAsync("obstruct_next_lease", null, async () => {
+            await rename(lock, parked);
+            await mkdir(lock);
+          })
+          .catch((error: unknown) => error);
+        return { request, obstruction };
       },
-    });
-    try {
-      const got = await send(
-        built.running.port,
-        "POST",
-        "/api/service/conversations",
-        [ALPHA],
-      );
+    );
+    await withCleanup(
+      async () => {
+        const got = await request;
+        expect(await obstruction).toBeInstanceOf(Error);
+        expect(got.status).toBe(200);
+        const bound = await serviceBindings.lookupExternalKey(
+          "alpha",
+          "no-second-lease",
+        );
+        expect(got.body.json).toMatchObject({ id: bound?.id });
+      },
+      async () => {
+        await obstruction;
+        await rm(lock, { recursive: true, force: true });
+        await rename(parked, lock);
+      },
+    );
+  });
+
+  // Regression: #3662 Failed scratch setup left the conversation row and checkout hold behind, and rollback unlinked bindings it had not written.
+  test("a failed service attempt rolls back its own state and keeps another attempt's bindings", async () => {
+    const { keyed, instance, worktrees } = await serviceApp(5, true);
+    const { agentStore, conversations, config, lease, nodes, serviceBindings } =
+      instance;
+    const temp = config.paths.AGENT_TEMP_ROOT;
+    const parked = `${temp}.parked`;
+    const staged = async (key: string) =>
+      withCleanerLock(worktrees, async () => {
+        const request = keyed(key);
+        await until(() => lease.currentHolder()?.site === "create");
+        const cid = lease.currentHolder()!.conversationId!;
+        await until(() => nodes.existing(cid) !== null);
+        await serviceBindings.bindServiceConversation("alpha", cid, "other");
+        await serviceBindings.bindExternalKey("alpha", key, cid, "other");
+        return { request, cid, leaves: await bindingLeaves(config.paths) };
+      });
+    const rolledBack = async (attempt: Awaited<ReturnType<typeof staged>>) => {
+      const got = await attempt.request;
       expect([got.status, got.body]).toEqual([
         503,
         { json: { detail: "service_storage_unavailable" } },
       ]);
-    } finally {
-      await built.running.close();
-    }
+      expect(await bindingLeaves(config.paths)).toEqual(attempt.leaves);
+      expect(conversations.load(attempt.cid)).toBeNull();
+      expect((await agentStore.loadPersistedAgent(attempt.cid))[0]).toBeNull();
+      expect(markerRecord(worktrees, "target")?.holders).toEqual({});
+      expect(nodes.existing(attempt.cid)).toBeNull();
+    };
+    await mkdir(temp, { recursive: true });
+    await rename(temp, parked);
+    await writeFile(temp, "obstruct scratch setup");
+    await withCleanup(
+      async () => rolledBack(await staged("failed-temp")),
+      async () => {
+        await rm(temp);
+        await rename(parked, temp);
+      },
+    );
+    await rolledBack(await staged("reused-binding"));
+    expect((await keyed("after-rollback")).status).toBe(200);
   });
-});
 
-describe("service create bind phase", () => {
-  const keyed = (port: number, key: string) =>
-    send(
-      port,
-      "POST",
-      "/api/service/conversations",
-      [ALPHA, ["Content-Type", "application/json"]],
-      JSON.stringify({ external_key: key }),
+  // Regression: #3662 Rejected row admission left the service and external-key bindings behind.
+  test("rejected row admission removes both staged bindings and the worktree hold", async () => {
+    const { keyed, instance, worktrees } = await serviceApp(5, true);
+    const { agentStore, conversations, lease, serviceBindings } = instance;
+    const { request, cid } = await withCleanerLock(worktrees, async () => {
+      const request = keyed("closed-store");
+      await until(() => lease.currentHolder()?.site === "create");
+      const cid = lease.currentHolder()!.conversationId!;
+      expect(await agentStore.close(cid)).toBe(true);
+      return { request, cid };
+    });
+    expect((await request).status).toBe(503);
+    expect(conversations.load(cid)).toBeNull();
+    expect((await agentStore.loadPersistedAgent(cid))[0]).toBeNull();
+    expect(markerRecord(worktrees, "target")?.holders).toEqual({});
+    expect(await serviceBindings.serviceOwnedConversationCount("alpha")).toBe(
+      0,
+    );
+    expect(
+      await serviceBindings.lookupExternalKey("alpha", "closed-store"),
+    ).toBeNull();
+  });
+
+  // Regression: #3662 A service row was visible before its first commit, so a reader could open it while the write could still be lost.
+  test("a service row stays hidden until its first commit", async () => {
+    const { create, keyed, instance, view } = await serviceApp();
+    const { agentStore, conversations, durable, lease } = instance;
+    const first = await create();
+    const other = (first.body.json as { id: string }).id;
+    expect(await agentStore.flush(other)).toBe(true);
+    const lock = new Database(agentStore.dbPath(other));
+    const pending: Promise<unknown>[] = [];
+    let request: ReturnType<typeof keyed> | undefined;
+    let cid = "";
+    try {
+      lock.run("BEGIN EXCLUSIVE;");
+      for (let n = 0; n < 16; n++)
+        pending.push(agentStore.loadPersistedAgent(other).catch(() => null));
+      request = keyed("held-commit");
+      pending.push(request);
+      await until(() => lease.currentHolder()?.site === "create");
+      cid = lease.currentHolder()!.conversationId!;
+      await until(() => agentStore.status(cid).in_flight === true);
+      expect((await view(cid)).status).toBe(404);
+      expect(await Bun.file(durable.storagePath(cid)).exists()).toBe(false);
+      expect(conversations.load(cid)).toBeNull();
+    } finally {
+      try {
+        try {
+          if (lock.inTransaction) lock.run("ROLLBACK;");
+        } finally {
+          lock.close();
+        }
+      } finally {
+        await Promise.allSettled(pending);
+      }
+    }
+    expect((await request).body.json).toMatchObject({ id: cid, created: true });
+    expect((await view(cid)).status).toBe(200);
+    expect(await Bun.file(durable.storagePath(cid)).exists()).toBe(true);
+  });
+
+  // Regression: #3662 Rollback trashed agent storage that existed before the attempt.
+  test("existing agent storage is refused and kept", async () => {
+    const { keyed, instance, worktrees } = await serviceApp(5, true);
+    const { agentStore, conversations, lease, nodes, serviceBindings } =
+      instance;
+    const { request, cid, database } = await withCleanerLock(
+      worktrees,
+      async () => {
+        const request = keyed("existing-storage");
+        await until(() => lease.currentHolder()?.site === "create");
+        const cid = lease.currentHolder()!.conversationId!;
+        const database = agentStore.dbPath(cid);
+        await mkdir(dirname(database), { recursive: true });
+        await writeFile(database, "skipped by startup import");
+        return { request, cid, database };
+      },
+    );
+    expect(await request).toEqual({
+      status: 503,
+      body: { json: { detail: "service_storage_unavailable" } },
+    });
+    expect(await Bun.file(database).text()).toBe("skipped by startup import");
+    expect(conversations.load(cid)).toBeNull();
+    expect(nodes.existing(cid)).toBeNull();
+    expect(markerRecord(worktrees, "target")?.holders).toEqual({});
+    expect(
+      await serviceBindings.lookupExternalKey("alpha", "existing-storage"),
+    ).toBeNull();
+    expect((await keyed("existing-storage")).body.json).toMatchObject({
+      created: true,
+    });
+  });
+
+  // Regression: #3662 Cancelling the caller skipped binding even though creation completed.
+  test("aborting an internal service create wait still binds the conversation", async () => {
+    const { instance, worktrees, keyed } = await serviceApp(5, true);
+    const { create, createTasks, lease, serviceBindings } = instance;
+    const abort = new AbortController();
+    const cid = await withCleanerLock(worktrees, async () => {
+      const pending = create.createOrRejoinServiceConversation(
+        {
+          title: null,
+          servicePrincipal: "alpha",
+          externalKey: "internal-abort",
+          allowedModels: null,
+          ownedLimit: null,
+        },
+        abort.signal,
+      );
+      await until(() => lease.currentHolder()?.site === "create");
+      const cid = lease.currentHolder()!.conversationId;
+      abort.abort();
+      await expect(pending).rejects.toBeInstanceOf(Cancelled);
+      return cid;
+    });
+    await createTasks.drain();
+    expect(
+      (await serviceBindings.lookupExternalKey("alpha", "internal-abort"))?.id,
+    ).toBe(cid);
+    expect((await keyed("internal-abort")).body.json).toMatchObject({
+      id: cid,
+      created: false,
+    });
+  });
+
+  // Regression: #3662 Losing a bind race removed the projection but left SQLite and checkout state.
+  test("a lost bind race rolls back, rejoins its owner, and refuses a dangling leaf", async () => {
+    const { create, keyed, instance, replies, worktrees } = await serviceApp(
+      5,
+      true,
+    );
+    const { agentStore, conversations, lease, nodes, serviceBindings } =
+      instance;
+    const betaFirst = await keyed("late", BETA);
+    expect(betaFirst.body.json).toMatchObject({ created: true });
+    const winnerResponse = await create();
+    expect(winnerResponse.status).toBe(200);
+    const winner = (winnerResponse.body as { json: { id: string } }).json.id;
+    await conversations.save({
+      ...conversations.load(winner)!,
+      external_key: "late",
+    });
+    const race = (key: string, target: string) =>
+      withCleanerLock(worktrees, async () => {
+        const request = keyed(key);
+        await until(() => lease.currentHolder()?.site === "create");
+        const cid = lease.currentHolder()!.conversationId!;
+        await until(() => nodes.existing(cid) !== null);
+        await serviceBindings.bindExternalKey("alpha", key, target);
+        return { request, cid };
+      });
+    const lost = await race("late", winner);
+    const got = await lost.request;
+    const reused = {
+      json: { id: winner, status: "idle", title: null, created: false },
+    };
+    expect([got.status, got.body]).toEqual([200, reused]);
+    expect(conversations.load(lost.cid)).toBeNull();
+    expect((await agentStore.loadPersistedAgent(lost.cid))[0]).toBeNull();
+    expect(markerRecord(worktrees, "target")?.holders).toEqual({
+      [(betaFirst.body.json as { id: string }).id]: expect.any(Number),
+      [winner]: expect.any(Number),
+    });
+    expect(await serviceBindings.serviceOwnedConversationCount("alpha")).toBe(
+      1,
+    );
+    expect((await serviceBindings.lookupExternalKey("alpha", "late"))?.id).toBe(
+      winner,
     );
 
-  test("a lost bind race rolls back and rejoins the winner", async () => {
-    const built = await app({
-      patch: (deps, world) => {
-        deps.bindExternalKey = async (p, k) => {
-          world.external.set(`${p}\0${k}`, "svc-winner");
-          throw new ExternalKeyConflict("external_key binding is unavailable");
-        };
-      },
+    const dangling = await race("dangling", "missing-row");
+    expect(await dangling.request).toEqual({
+      status: 409,
+      body: { json: { detail: "external_key binding is unavailable" } },
     });
-    try {
-      const got = await keyed(built.running.port, "late");
-      expect(got.status).toBe(200);
-      expect((got.body as { json: { created: boolean } }).json.created).toBe(
-        false,
-      );
-    } finally {
-      await built.running.close();
-    }
+    expect(conversations.load(dangling.cid)).toBeNull();
+    expect(await serviceBindings.serviceOwnedConversationCount("alpha")).toBe(
+      1,
+    );
+    await expect(
+      serviceBindings.lookupExternalKey("alpha", "dangling"),
+    ).rejects.toBeInstanceOf(ExternalKeyConflict);
+
+    const repeat = await keyed("late");
+    expect([repeat.status, repeat.body]).toEqual([200, reused]);
+    const targeted = await create({ id: winner, external_key: "late" }, BETA);
+    expect([targeted.status, targeted.body]).toEqual([
+      422,
+      { json: { detail: "unsupported service create field" } },
+    ]);
+    expect(await serviceBindings.serviceOwnsConversation("alpha", winner)).toBe(
+      true,
+    );
+    expect(await serviceBindings.serviceOwnsConversation("beta", winner)).toBe(
+      false,
+    );
+    expect((await replies(winner, ALPHA)).status).toBe(200);
+    expect((await replies(winner, BETA)).status).toBe(404);
+
+    const beta = await keyed("late", BETA);
+    expect(beta.body.json).toEqual({
+      ...(betaFirst.body.json as object),
+      created: false,
+    });
+    expect((beta.body as { json: { id: string } }).json.id).not.toBe(winner);
   });
 
-  test("quota is rechecked under the bind lease", async () => {
-    let calls = 0;
-    const built = await app({
-      patch: (deps) => {
-        deps.serviceOwnedConversationCount = async () =>
-          calls++ === 0 ? 0 : 5;
-      },
+  test("concurrent creates with distinct keys cannot exceed the service quota", async () => {
+    const { keyed, instance } = await serviceApp(1);
+    const results = await Promise.all([keyed("first"), keyed("second")]);
+    expect(results.map(({ status }) => status).sort()).toEqual([200, 429]);
+    const index = results.findIndex(({ status }) => status === 200);
+    const { id } = results[index]!.body.json as { id: string };
+    expect(results[1 - index]!.body.json).toEqual({
+      detail: "max_owned_conversations exceeded",
     });
-    try {
-      const got = await keyed(built.running.port, "q");
-      expect([got.status, got.body]).toEqual([
-        429,
-        { json: { detail: "max_owned_conversations exceeded" } },
-      ]);
-    } finally {
-      await built.running.close();
-    }
+    expect(instance.conversations.allConvs().map((row) => row.id)).toEqual([
+      id,
+    ]);
+    expect(
+      await instance.serviceBindings.serviceOwnedConversationCount("alpha"),
+    ).toBe(1);
+    expect(
+      (await keyed(index === 0 ? "first" : "second")).body.json,
+    ).toMatchObject({ id, created: false });
   });
 
-  test("a busy lease is 429 and a precheck OSError is 503", async () => {
-    const built = await app({
-      patch: (deps) => {
-        let n = 0;
-        deps.mutateExternalStorage = async () => {
-          if (n++ === 0) throw new TreeLifecycleBusy("tree lifecycle is busy");
-          throw Object.assign(new Error("io"), { code: "EIO" });
-        };
+  test("a busy lease is 429 and an obstructed ownership scan is 503", async () => {
+    const { create, instance } = await serviceApp();
+    const { config, conversations, lease } = instance;
+    const admit = lease.guardAsync.bind(lease);
+    let createAttempts = 0;
+    let holdLease = true;
+    lease.guardAsync = (site, cid, work, token, options) => {
+      if (site === "create") {
+        createAttempts++;
+        if (holdLease) {
+          return lease.guard(
+            "hold_service_create",
+            null,
+            async (_token, held) => {
+              expect(held).not.toBeNull();
+              return admit(site, cid, work, token, { timeoutSeconds: 0 });
+            },
+          );
+        }
+      }
+      return admit(site, cid, work, token, options);
+    };
+    const busy = await create();
+    expect([busy.status, busy.body]).toEqual([
+      429,
+      { json: { detail: "service create is busy" } },
+    ]);
+    expect(createAttempts).toBeGreaterThan(0);
+    holdLease = false;
+
+    const bindingDir = config.paths.SERVICE_BINDINGS_DIR;
+    await writeFile(bindingDir, "obstruct the ownership quota scan");
+    await withCleanup(
+      async () => {
+        const broken = await create();
+        expect([broken.status, broken.body]).toEqual([
+          503,
+          { json: { detail: "service_storage_unavailable" } },
+        ]);
+        expect(conversations.allConvs()).toEqual([]);
       },
-    });
-    try {
-      const busy = await keyed(built.running.port, "b");
-      expect([busy.status, busy.body]).toEqual([
-        429,
-        { json: { detail: "service create is busy" } },
-      ]);
-      const broken = await keyed(built.running.port, "b");
-      expect([broken.status, broken.body]).toEqual([
-        503,
-        { json: { detail: "service_storage_unavailable" } },
-      ]);
-    } finally {
-      await built.running.close();
-    }
+      () => rm(bindingDir),
+    );
   });
 });
 

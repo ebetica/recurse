@@ -1,3 +1,4 @@
+// Share pinned file and JSON access, locks, task sets, and deferred cleanup.
 export { lstatAt, mkdirAt, openAt, renameAt, unlinkAt } from "./dir_fd";
 export { flockExclusive, TreeLifecycleBusy } from "./flock";
 export {
@@ -9,4 +10,10 @@ export {
 } from "./fs_utils";
 export { libc } from "./libc";
 export { procStat } from "./proc_stat";
-export { Cancelled, checkAbort } from "./tasks";
+export {
+  abortable,
+  anyAbortSignal,
+  Cancelled,
+  checkAbort,
+  withTimeout,
+} from "./tasks";

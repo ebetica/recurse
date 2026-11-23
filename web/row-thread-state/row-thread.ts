@@ -178,9 +178,7 @@ export function foldRowThread(
       }
       row = { ...rest, text: prefix + row.text };
     }
-    return Number.isFinite(row.tool_elapsed_ms)
-      ? [{ ...row, tool_received_at_ms: performance.now() }]
-      : [row];
+    return [row];
   });
   if (gap)
     return {
@@ -958,14 +956,17 @@ export function rowsToTurns(
         });
         return;
       }
-      // Invariant: Only compaction markers render here: the backend tags its
-      // pending/failure rows with meta.compact_marker, and anything else
-      // (bg-shell prose, monitor output, other extensions) stays dropped. Usage
-      // and shell notices are consumed above.
+      // Only compaction and known legacy notices render here. Arbitrary
+      // custom entries stay hidden; legacy notices get no compaction actions.
       const compactMarker =
         (row.meta as { compact_marker?: unknown } | null)?.compact_marker ===
         true;
-      if (row.role !== "compaction" && !compactMarker) return;
+      if (
+        row.role !== "compaction" &&
+        row.role !== "legacy-notice" &&
+        !compactMarker
+      )
+        return;
       if (build) {
         finishTurn(build, turns);
         build = null;

@@ -248,7 +248,7 @@ test("listen first: 503 Retry-After 2 until the projection applies", async () =>
   await Promise.all(app.detached);
   expect(
     existsSync(join(env.CHAT_DATA_DIR!, "config", "available-models.json")),
-  ).toBe(true);
+  ).toBe(false);
   await app.sink.file!.flush();
   const log = await Bun.file(
     join(env.CHAT_DATA_DIR!, "logs", "recurse.log"),

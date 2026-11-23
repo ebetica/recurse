@@ -245,7 +245,7 @@ export const tests: BrowserTest[] = [
         },
       );
       expect(sent.ok()).toBeTrue();
-      await page.locator(".working.live-panel").waitFor();
+      await page.locator(".working.status-bar").waitFor();
       for (const prefix of ["live", "nested"])
         for (let i = 0; i < 5; i++) {
           const name = `${prefix}-report-${i}.txt`;

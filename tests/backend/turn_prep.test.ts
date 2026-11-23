@@ -10,7 +10,7 @@ test("upload annotation refuses stale collections and reaping nodes", async () =
   const node = { reaping: false };
   const prep = new TurnPrep({
     conversations: instance.conversations,
-    config: instance.config,
+    paths: instance.config.paths,
     existingNode: () => node,
   });
   try {
@@ -28,7 +28,7 @@ test("upload annotation refuses stale collections and reaping nodes", async () =
     );
     const snapshot = collectionSnapshot(
       instance.conversations.load(cid)!,
-      instance.config,
+      instance.config.paths,
     );
     const ids = [String(file.id)];
     const [annotated, images] = await prep.uploadParts(

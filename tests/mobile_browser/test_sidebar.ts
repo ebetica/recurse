@@ -1,114 +1,29 @@
 import { expect } from "bun:test";
-import { join } from "node:path";
-import { readFile } from "node:fs/promises";
-import { ROOT } from "./common";
 import { assertSectionSpacing } from "./sidebar_section_spacing";
-import type { BrowserContext, Locator, Page, Request } from "playwright";
+import type { BrowserContext, Locator, Request } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
-  focusComposer,
   gotoRoot,
+  openPage,
   postFixture,
   rootAgentId,
-  showAgentList,
+  screenshot,
   type BrowserTest,
 } from "./common";
-
-export async function enableTagSidebar(
-  context: BrowserContext,
-  base: string,
-  projects: string[],
-): Promise<string> {
-  const settings = await (
-    await context.request.get(`${base}api/sidebar/script`)
-  ).json();
-  const demo = await readFile(
-    join(ROOT, "playground/sidebar/projects.js"),
-    "utf8",
-  );
-  const script =
-    demo
-      .replace('["recurse", "research"]', JSON.stringify(projects))
-      .replace("function sidebar(rows)", "function sidebar(rows, now)")
-      .replace(
-        `    {
-      title: "Other agents",
-      hideWhenEmpty: true,
-      rows: rows.sort(byRank),
-      rowActions: [TAG],
-    },`,
-        `    ...plain(rows, now).map(section => ({
-      ...section, rowActions: [...section.rowActions, TAG],
-    })),`,
-      ) +
-    `\nconst plain = (() => { ${settings.default.replace("export default function sidebar", "return function sidebar")} })();`;
-  await postFixture(base, "save-sidebar-script", { script, by: "operator" });
-  return script;
-}
-
-const takeScreenshot = async (page: Page, filename: string) => {
-  if (process.env.RECURSE_SCREENSHOT_DIR)
-    await page.screenshot({
-      path: join(process.env.RECURSE_SCREENSHOT_DIR, filename),
-    });
-};
-
-type Ids = Record<
-  "fresh" | "stale" | "busy" | "archived" | "child" | "grandchild",
-  string
->;
-const seedSections = async (context: BrowserContext, base: string) => {
-  const response = await context.request.post(
-    `${base}__browser-test/seed-sidebar-sections`,
-  );
-  expect(response.ok()).toBe(true);
-  const ids = (await response.json()) as Ids;
-  const archived = await context.request.post(`${base}api/sidebar/tags`, {
-    data: { ids: [ids.archived], set: { archived: null } },
-  });
-  expect(archived.ok()).toBe(true);
-  return ids;
-};
-const sectionOf = (page: Page, id: string) =>
-  page.evaluate((id) => {
-    const doc = (globalThis as any).document;
-    let section = null;
-    for (const el of doc.querySelectorAll(
-      "#agent-list .tree-section-header, #agent-list .agent",
-    )) {
-      if (el.dataset.section)
-        section = JSON.parse(el.dataset.sectionKey).slice(1).join("/");
-      else if (el.dataset.id === id) return section;
-    }
-    return null;
-  }, id);
-const edgesUncovered = (locator: Locator) =>
-  locator.evaluate((element) => {
-    const box = element.getBoundingClientRect();
-    return [
-      [box.left + 1, box.y + box.height / 2],
-      [box.right - 1, box.y + box.height / 2],
-      [box.x + box.width / 2, box.top + 1],
-      [box.x + box.width / 2, box.bottom - 1],
-    ].every(([x, y]) => {
-      const hit = element.ownerDocument.elementFromPoint(x!, y!);
-      return !!hit && element.contains(hit);
-    });
-  });
-const header = (page: Page, title: string) =>
-  page.locator(
-    `.tree-section-header[data-section-key='${JSON.stringify(["", title])}']`,
-  );
-const serverTags = async (context: BrowserContext, base: string, id: string) =>
-  ((await (await context.request.get(`${base}api/tree`)).json()) as any[]).find(
-    (row) => row.id === id,
-  ).tags;
+import {
+  edgesUncovered,
+  header,
+  sectionOf,
+  seedSections,
+  serverTags,
+  type SidebarSectionIds,
+} from "./sidebar_support";
 
 export const tests: BrowserTest[] = [
   // Feature: #3371 edge drops choose a sibling parent without promising sibling order.
   async function test_sidebar_drag_parent(browser, base) {
-    const context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 900 },
     });
     const saved = await (
@@ -124,8 +39,6 @@ export const tests: BrowserTest[] = [
       script: `export default rows => [{ title: "Agents", rows: ${JSON.stringify([ids.fresh, ids.busy, ids.stale, ids.archived])}.map(id => rows.find(r => r.id === id && r.depth === 0)).filter(Boolean) }];`,
       by: "operator",
     });
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await gotoRoot(page, base);
     const row = (id: string) =>
       page.locator(`#agent-list .agent[data-id="${id}"]`);
@@ -183,7 +96,7 @@ export const tests: BrowserTest[] = [
     await line.waitFor();
     expect(await left(line)).toBeCloseTo(await left(lower.locator(".row1")), 0);
     expect(await page.locator(".drop-ok").count()).toBe(0);
-    await takeScreenshot(page, "sidebar-sibling-insertion.png");
+    await screenshot(page, "sidebar/sidebar-sibling-insertion");
     await page.mouse.up();
     await browserExpect.poll(() => parentOf(ids.busy)).toBe(ids.fresh);
     await browserExpect(row(ids.busy)).toHaveAttribute("aria-level", "2");
@@ -248,16 +161,14 @@ export const tests: BrowserTest[] = [
   // Feature: #2526 phone-only density must not override desktop sidebar styling.
   async function test_sidebar_compact_rows(browser, base) {
     for (const width of [412, 1280]) {
-      const context = await browser.newContext({
+      const { context, page } = await openPage(browser, {
         viewport: { width, height: 915 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
+        touch: width === 412,
       });
       const response = await context.request.post(
         `${base}__browser-test/seed-sidebar-compact`,
       );
       expect(response.ok()).toBe(true);
-      const page = await context.newPage();
       await gotoRoot(page, base);
       if (width === 412) {
         await page.locator("#menu-btn").click();
@@ -277,7 +188,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#sidebar").evaluate(async () => {
         await (globalThis as any).document.fonts.ready;
       });
-      await takeScreenshot(page, `compact-sidebar-${width}.png`);
+      await screenshot(page, `sidebar/compact-sidebar-${width}`);
       const boxes = await rows.evaluateAll((elements) =>
         elements.map((el) => {
           const rect = el.getBoundingClientRect();
@@ -358,7 +269,7 @@ export const tests: BrowserTest[] = [
       const titles = () =>
         page.locator("#agent-list .tree-section-title").allTextContents();
       expect(await titles()).toEqual(["Inbox"]);
-      await takeScreenshot(page, `empty-sections-hidden-${width}.png`);
+      await screenshot(page, `sidebar/empty-sections-hidden-${width}`);
       const pin = async (pinned: boolean) => {
         const response = await context.request.post(`${base}api/sidebar/tags`, {
           data: {
@@ -372,7 +283,7 @@ export const tests: BrowserTest[] = [
       await browserExpect(header(page, "Pinned")).toHaveCount(1);
       expect(await titles()).toEqual(["Pinned", "Inbox"]);
       await example.waitFor();
-      await takeScreenshot(page, `empty-section-returned-${width}.png`);
+      await screenshot(page, `sidebar/empty-section-returned-${width}`);
       await header(page, "Pinned").locator(".tree-section-toggle").click();
       await pin(false);
       await browserExpect(header(page, "Pinned")).toHaveCount(0);
@@ -393,10 +304,9 @@ export const tests: BrowserTest[] = [
     browser,
     base,
   ) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 1280, height: 900 },
     });
-    const page = await context.newPage();
     const now = Date.now();
     await page.clock.setFixedTime(now);
     const seed = async (phase: number) => {
@@ -464,15 +374,14 @@ export const tests: BrowserTest[] = [
       "no-operator",
       "agent-active",
     ]);
-    await takeScreenshot(page, "sidebar-1280.png");
+    await screenshot(page, "sidebar/sidebar-1280");
     await context.close();
   },
   // Feature: #2869 shared tree links limit discovery and copy a subagent's root.
   async function test_shared_tree_links(browser, base) {
-    const context = await browser.newContext({
+    const { context, page } = await openPage(browser, {
       viewport: { width: 390, height: 844 },
-      isMobile: true,
-      hasTouch: true,
+      touch: true,
       permissions: ["clipboard-read", "clipboard-write"],
     });
     const response = await context.request.post(
@@ -482,7 +391,6 @@ export const tests: BrowserTest[] = [
     const { ids } = (await response.json()) as { ids: string[] };
     const [first, child, second] = ids;
     const chosen = ids.slice(0, 4);
-    const page = await context.newPage();
     const openSidebar = async () => {
       await page
         .locator("#sidebar[aria-hidden]")
@@ -551,14 +459,11 @@ export const tests: BrowserTest[] = [
     await page.locator("#pane-fab").tap();
     await page.locator("#pane-menu.on").waitFor();
     const share = page.locator("#share-link-btn");
-    const screenshotDir = process.env.RECURSE_SCREENSHOT_DIR;
-    if (screenshotDir)
-      await page.screenshot({ path: `${screenshotDir}/share-phone.png` });
+    await screenshot(page, "sidebar/share-phone");
     const phoneBox = (await share.boundingBox())!;
     await page.setViewportSize({ width: 1280, height: 844 });
     await page.locator("#pane-rail > #share-link-btn").waitFor();
-    if (screenshotDir)
-      await page.screenshot({ path: `${screenshotDir}/share-desktop.png` });
+    await screenshot(page, "sidebar/share-desktop");
     expect(await share.locator("svg").count()).toBe(1);
     expect(phoneBox.width).toBeGreaterThanOrEqual(44);
     expect(phoneBox.height).toBeGreaterThanOrEqual(44);
@@ -619,13 +524,11 @@ export const tests: BrowserTest[] = [
   },
   // Regression: #3255 keep section labels close above rows without shrinking phone targets. (also Regression #3551 fit visible section buttons within the header; #3448 show the draft row in its listed agent's place; #3289 retry a sidebar script run that timed out; #3140 scroll section headers into view before mobile touch input; #3139 wait for the initial conversation before returning to the phone list; Feature #2953 Inbox, Active and Archive sections with row actions.)
   async function test_sidebar_sections(browser, base) {
-    let context = await browser.newContext({
+    const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1280, height: 900 },
     });
     const ids = await seedSections(context, base);
     await assertSectionSpacing(browser, context, base, ids);
-    const page = await context.newPage();
-    const errors = captureErrors(page);
     await gotoRoot(page, base);
     await page.locator(`.agent[data-id="${ids.fresh}"]`).waitFor();
     expect(await sectionOf(page, ids.fresh)).toBe("Inbox");
@@ -662,7 +565,7 @@ export const tests: BrowserTest[] = [
       expect(
         await fresh.getByRole("button", { name: `${name} Fresh idle` }).count(),
       ).toBe(1);
-    await takeScreenshot(page, "sections-desktop.png");
+    await screenshot(page, "sidebar/sections-desktop");
     expect(await bounds(content)).toEqual(beforeHover);
     for (const button of await fresh.locator(".row-actions button").all()) {
       expect(await button.getAttribute("title")).toBe(
@@ -885,750 +788,31 @@ export const tests: BrowserTest[] = [
       singleLine: true,
       timeAtRight: true,
     });
-    await takeScreenshot(page, "sections-long-title.png");
+    await screenshot(page, "sidebar/sections-long-title");
     await fresh.hover();
     expect((await fresh.boundingBox())!.height).toBe(rowHeight);
     expect(errors).toEqual([]);
     await context.close();
 
-    context = await browser.newContext({
+    const phone = await browser.newContext({
       viewport: { width: 390, height: 844 },
       isMobile: true,
       hasTouch: true,
     });
-    await phoneHold(context, base, await seedSections(context, base));
-    await context.close();
+    await phoneHold(phone, base, await seedSections(phone, base));
+    await phone.close();
 
-    for (const width of [1280, 412]) {
-      context = await browser.newContext({
-        viewport: { width, height: 915 },
-        isMobile: width === 412,
-        hasTouch: width === 412,
-      });
-      await typedTags(context, base, await seedSections(context, base), width);
-      await context.close();
-    }
-
-    context = await browser.newContext({
+    const script = await browser.newContext({
       viewport: { width: 1280, height: 900 },
     });
-    await customScript(context, base, await seedSections(context, base));
-  },
-  // Regression: #3017 tag actions precede POST answers; agent tags need no poll.
-  async function test_sidebar_tag_updates(browser, base, data) {
-    const context = await browser.newContext({
-      viewport: { width: 1280, height: 900 },
-    });
-    const ids = await seedSections(context, base);
-    for (let i = 0; i < 40; i++) {
-      const response = await context.request.post(`${base}api/conversations`, {
-        data: {},
-      });
-      expect(response.ok()).toBeTrue();
-    }
-    const settings = await (
-      await context.request.get(`${base}api/sidebar/script`)
-    ).json();
-    const script = settings.default
-      .replaceAll("collapsed: true", "collapsed: false")
-      .replace(
-        "actions: stale.length ? [archiveStale] : [],",
-        'actions: [ARCHIVE, PIN].map(a => ({...a, label: a.label + " all", rows: inbox})),',
-      )
-      .replace(
-        "rowActions: [RESTORE],",
-        'rowActions: [RESTORE], actions: [{...RESTORE, label: "Restore all", rows: archive}],',
-      )
-      .replace(
-        "rowActions: [PIN],",
-        'rowActions: [PIN], actions: [{...SNOOZE, label: "Snooze all", rows: inbox}],',
-      );
-    await postFixture(base, "save-sidebar-script", { script, by: "operator" });
-    const page = await context.newPage();
-    await page.clock.install();
-    await gotoRoot(page, base);
-    const row = page.locator(`.agent[data-id="${ids.fresh}"]`);
-    await row.waitFor();
-    await header(page, "Inbox")
-      .getByRole("button", {
-        name: "Archive all",
-        exact: true,
-        includeHidden: true,
-      })
-      .waitFor({ state: "attached" });
-    const checkSection = (title: string) =>
-      browserExpect.poll(() => sectionOf(page, ids.fresh)).toBe(title);
-    const act = async (action: string, bulk: boolean) => {
-      if (bulk) {
-        const section = header(
-          page,
-          action === "Restore"
-            ? "Archive"
-            : action === "Snooze"
-              ? "Active"
-              : "Inbox",
-        );
-        await section.hover();
-        await section
-          .getByRole("button", { name: `${action} all`, exact: true })
-          .click();
-      } else {
-        await row.hover();
-        await row
-          .getByRole("button", { name: `${action} Fresh idle`, exact: true })
-          .click();
-      }
-      if (action === "Snooze")
-        await page
-          .getByRole("dialog", { name: "Snooze until" })
-          .getByRole("button", { name: "1 hour", exact: true })
-          .click();
-      if (bulk)
-        await page
-          .locator("#sidebar-popover")
-          .getByRole("button", { name: action, exact: true })
-          .click();
-    };
-    for (const bulk of [false, true]) {
-      for (const [action, destination] of [
-        ["Archive", "Archive"],
-        ["Restore", "Inbox"],
-        ["Pin", "Pinned"],
-        ["Snooze", "Archive"],
-        ["Restore", "Inbox"],
-      ]) {
-        if (action === "Snooze") {
-          if (bulk) {
-            const all = await (
-              await context.request.get(`${base}api/tree`)
-            ).json();
-            expect(
-              (
-                await context.request.post(`${base}api/sidebar/tags`, {
-                  data: {
-                    ids: all.map((node: any) => node.id),
-                    clear: ["pinned"],
-                  },
-                })
-              ).ok(),
-            ).toBeTrue();
-            await checkSection("Inbox");
-          } else {
-            await row.hover();
-            await row
-              .getByRole("button", { name: "Unpin Fresh idle", exact: true })
-              .click();
-            await checkSection("Inbox");
-          }
-        }
-        await beforeTagAnswer(
-          page,
-          () => act(action!, bulk),
-          async () => {
-            await checkSection(destination!);
-            if (bulk) {
-              const count = Number(
-                await header(page, destination!)
-                  .locator(".tree-section-count")
-                  .innerText(),
-              );
-              expect(count).toBeGreaterThanOrEqual(40);
-            }
-          },
-        );
-      }
-    }
-    await page.clock.pauseAt(await page.evaluate(() => Date.now() + 1000));
-    const proc = Bun.spawn(
-      [
-        process.execPath,
-        join(ROOT, "tools/subagent.ts"),
-        "tag",
-        ids.fresh,
-        "--add",
-        "needs-review",
-      ],
-      {
-        cwd: ROOT,
-        env: {
-          ...process.env,
-          CHAT_DATA_DIR: join(data, "data"),
-          RECURSE_HOME: join(data, "settings"),
-          RECURSE_AGENT_ID: ids.fresh,
-        },
-        stdout: "pipe",
-        stderr: "pipe",
-      },
-    );
-    expect(await proc.exited).toBe(0);
-    await row.locator('[title="Tag: needs-review"]').waitFor();
-    await context.close();
+    await customScript(script, base, await seedSections(script, base));
   },
 ];
-
-async function typedTags(
-  context: BrowserContext,
-  base: string,
-  ids: Ids,
-  width: number,
-): Promise<void> {
-  expect(
-    (
-      await context.request.post(`${base}api/sidebar/tags`, {
-        data: {
-          ids: [ids.archived],
-          set: { "recurse-dev": null, research: null },
-        },
-      })
-    ).ok(),
-  ).toBeTrue();
-  const page = await context.newPage();
-  const errors = captureErrors(page);
-  await gotoRoot(page, base);
-  if (width === 412) {
-    await page.locator("#menu-btn").click();
-    await page.waitForFunction(
-      () =>
-        (globalThis as any).document
-          .querySelector("#sidebar")
-          .getBoundingClientRect().x === 0,
-    );
-  }
-  const newButton = page.locator(width === 412 ? "#new-list" : "#new-top");
-  await page.locator(`.agent[data-id="${ids.fresh}"]`).waitFor();
-  expect(await page.getByRole("button", { name: /^Tag… / }).count()).toBe(0);
-  await newButton.click();
-  await browserExpect(page.locator("#input")).toBeFocused();
-  await page.locator("#draft-model-host").waitFor();
-  expect(await page.locator("#draft-tag").count()).toBe(0);
-  await takeScreenshot(page, `draft-built-in-${width}.png`);
-  const tagScript = await enableTagSidebar(context, base, [
-    "recurse-dev",
-    "research",
-  ]);
-  await page.reload();
-  await showAgentList(page);
-  await header(page, "recurse-dev").waitFor();
-  const row = page.locator(`.agent[data-id="${ids.fresh}"]`);
-  const openHoldMenu = async (target: Locator) => {
-    await target.scrollIntoViewIfNeeded();
-    const touch = await context.newCDPSession(page);
-    const box = (await target.boundingBox())!;
-    await touch.send("Input.dispatchTouchEvent", {
-      type: "touchStart",
-      touchPoints: [{ x: box.x + 50, y: box.y + box.height / 2 }],
-    });
-    await page.locator("#hold-menu").getByRole("menu").waitFor();
-    await touch.send("Input.dispatchTouchEvent", {
-      type: "touchEnd",
-      touchPoints: [],
-    });
-    await touch.detach();
-  };
-  const act = async (label: string) => {
-    if (width === 1280) {
-      await row.hover();
-      await row
-        .getByRole("button", { name: `${label} Fresh idle`, exact: true })
-        .click();
-    } else {
-      await openHoldMenu(row);
-      await page
-        .locator("#hold-menu")
-        .getByRole("menuitem", { name: label, exact: true })
-        .tap();
-    }
-  };
-  const input = page.getByRole("textbox", { name: "Tag name", exact: true });
-  const dialog = page.getByRole("dialog", { name: "Tag name", exact: true });
-  await row.waitFor();
-  await act("Tag…");
-  await browserExpect(input).toBeFocused();
-  await input.fill("rcd");
-  await browserExpect(dialog.locator(".tag-suggestions button")).toHaveText([
-    "recurse-dev",
-  ]);
-  expect(
-    await dialog.getByRole("button", { name: "pinned", exact: true }).count(),
-  ).toBe(0);
-  if (width === 412) {
-    for (const control of await dialog.locator("input, button").all())
-      expect(await edgesUncovered(control)).toBeTrue();
-  }
-  await takeScreenshot(page, `tag-box-${width}.png`);
-  await input.press("Escape");
-  await browserExpect(dialog).toHaveCount(0);
-  expect((await serverTags(context, base, ids.fresh))["rcd"]).toBeUndefined();
-  await act("Tag…");
-  await input.fill("cancelled");
-  await header(page, "Inbox").locator(".tree-section-title").click();
-  await browserExpect(dialog).toHaveCount(0);
-  await header(page, "Inbox").locator(".tree-section-toggle").click();
-  await act("Tag…");
-  for (const name of ["pinned", "archived", "snoozed"]) {
-    await input.fill(name);
-    await input.press("Enter");
-    await browserExpect(dialog.getByRole("status")).toHaveText(
-      "This tag is reserved. Choose another name.",
-    );
-  }
-  await input.fill("");
-  await input.pressSequentially("Recurse Dev");
-  await browserExpect(input).toHaveValue("recurse-dev");
-  await input.press("Enter");
-  await browserExpect
-    .poll(() => sectionOf(page, ids.fresh))
-    .toBe("recurse-dev/Inbox");
-  await browserExpect
-    .poll(() => serverTags(context, base, ids.fresh))
-    .toMatchObject({ "recurse-dev": { by: "operator" } });
-  await takeScreenshot(page, `tag-section-${width}.png`);
-  await act("Untag");
-  await browserExpect.poll(() => sectionOf(page, ids.fresh)).toBe("Inbox");
-  await browserExpect(header(page, "recurse-dev")).toHaveCount(1);
-  await browserExpect
-    .poll(
-      async () => (await serverTags(context, base, ids.fresh))["recurse-dev"],
-    )
-    .toBeUndefined();
-  await takeScreenshot(page, `tag-removed-${width}.png`);
-  await act("Tag…");
-  await input.fill("rcd");
-  await input.press("ArrowDown");
-  await input.press("Enter");
-  await browserExpect
-    .poll(() => sectionOf(page, ids.fresh))
-    .toBe("recurse-dev/Inbox");
-  await browserExpect(header(page, "research")).toHaveCount(0);
-  expect(
-    (
-      await context.request.post(`${base}api/sidebar/tags`, {
-        data: { ids: [ids.busy, ids.stale], set: { research: null } },
-      })
-    ).ok(),
-  ).toBeTrue();
-  const childHeader = (group: string, title: string) =>
-    page.locator(
-      `.tree-section-header[data-section-key='${JSON.stringify(["", group, title])}']`,
-    );
-  await childHeader("research", "Active").waitFor();
-  await childHeader("recurse-dev", "Archive").waitFor();
-  await browserExpect(childHeader("recurse-dev", "Active")).toHaveCount(0);
-  await takeScreenshot(page, `nested-tags-${width}.png`);
-  const recurseInbox = childHeader("recurse-dev", "Inbox").locator(
-    ".tree-section-toggle",
-  );
-  await recurseInbox.click();
-  await browserExpect(recurseInbox).toHaveAttribute("aria-expanded", "false");
-  await browserExpect(
-    childHeader("research", "Inbox").locator(".tree-section-toggle"),
-  ).toHaveAttribute("aria-expanded", "true");
-  await recurseInbox.click();
-  const groupToggle = header(page, "recurse-dev").locator(
-    ".tree-section-toggle",
-  );
-  await groupToggle.click();
-  await browserExpect(childHeader("recurse-dev", "Inbox")).toHaveCount(0);
-  await browserExpect(childHeader("recurse-dev", "Archive")).toHaveCount(0);
-  await takeScreenshot(page, `nested-folded-${width}.png`);
-  await groupToggle.press("Enter");
-  await browserExpect(recurseInbox).toHaveAttribute("aria-expanded", "true");
-  if (width === 412) {
-    await page.locator("#new-list").focus();
-    for (const toggle of await page.locator(".tree-section-toggle").all()) {
-      await toggle.scrollIntoViewIfNeeded();
-      expect((await toggle.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-      expect(await edgesUncovered(toggle)).toBeTrue();
-    }
-  }
-  await newButton.click();
-  await browserExpect(page.locator("#input")).toBeFocused();
-  await page.locator("#draft-model-host").waitFor();
-  expect(await dialog.count()).toBe(0);
-  const tagControl = page.locator("#draft-tag");
-  await browserExpect(tagControl).toHaveAccessibleName("No tag");
-  expect(
-    await tagControl.evaluate((button) => {
-      const box = button.getBoundingClientRect();
-      return [
-        [-21, -21],
-        [21, -21],
-        [21, 21],
-        [-21, 21],
-      ].every(([x, y]) => {
-        const hit = button.ownerDocument.elementFromPoint(
-          box.x + box.width / 2 + x!,
-          box.y + box.height / 2 + y!,
-        );
-        return !!hit && button.contains(hit);
-      });
-    }),
-  ).toBeTrue();
-  await takeScreenshot(page, `draft-no-tag-${width}.png`);
-  await tagControl.focus();
-  await tagControl.press("Enter");
-  await browserExpect(input).toBeFocused();
-  await takeScreenshot(page, `draft-tag-box-${width}.png`);
-  await input.press("Escape");
-  await browserExpect(dialog).toHaveCount(0);
-  await browserExpect(tagControl).toBeFocused();
-  await tagControl.click();
-  await input.fill("Recurse Dev");
-  await input.press("Enter");
-  await browserExpect(tagControl).toHaveAccessibleName("Tag: recurse-dev");
-  await takeScreenshot(page, `draft-tag-chosen-${width}.png`);
-  const sendDraft = async (text: string, tagged = true) => {
-    const created = page.waitForResponse(
-      (response) =>
-        response.url() === `${base}api/conversations` &&
-        response.request().method() === "POST",
-    );
-    await page.locator("#input").fill(text);
-    await page.evaluate(() => {
-      const browser = globalThis as any;
-      browser.newAgentPlacements = [];
-      browser.newAgentObserver = new browser.MutationObserver(() => {
-        let section = "";
-        for (const element of browser.document.querySelectorAll(
-          "#agent-list .tree-section-header, #agent-list .agent[data-id]",
-        )) {
-          if (element.dataset.section)
-            section = JSON.parse(element.dataset.sectionKey).slice(1).join("/");
-          else
-            browser.newAgentPlacements.push({
-              id: element.dataset.id,
-              section,
-            });
-        }
-      });
-      browser.newAgentObserver.observe(
-        browser.document.querySelector("#agent-list"),
-        { childList: true, subtree: true },
-      );
-    });
-    await page.locator("#send").click();
-    const response = await created;
-    expect(response.ok()).toBeTrue();
-    expect(response.request().postDataJSON().tags).toEqual(
-      tagged ? ["recurse-dev"] : undefined,
-    );
-    const agent = await response.json();
-    if (tagged)
-      expect(agent.tags["recurse-dev"]).toMatchObject({ by: "operator" });
-    else expect(agent.tags?.["recurse-dev"]).toBeUndefined();
-    const sectionPattern = tagged
-      ? /^recurse-dev\/(Active|Inbox)$/
-      : /^(Active|Inbox)$/;
-    await browserExpect
-      .poll(() => sectionOf(page, agent.id))
-      .toMatch(sectionPattern);
-    const placements = await page.evaluate((id) => {
-      const browser = globalThis as any;
-      browser.newAgentObserver.disconnect();
-      return browser.newAgentPlacements
-        .filter((placement: any) => placement.id === id)
-        .map((placement: any) => placement.section);
-    }, agent.id);
-    expect(placements.length).toBeGreaterThan(0);
-    for (const section of new Set<string>(placements))
-      expect(section).toMatch(sectionPattern);
-    await showAgentList(page);
-    return agent.id as string;
-  };
-  let deliveredFrom!: (rows: string[]) => void;
-  const rowsWhileDelivering = new Promise<string[]>(
-    (resolve) => (deliveredFrom = resolve),
-  );
-  await page.route(
-    "**/api/conversations/*/deliver",
-    async (route) => {
-      const id = new URL(route.request().url()).pathname.split("/")[3];
-      const rows = await page.waitForFunction((id) => {
-        let section = null;
-        const rows = [];
-        for (const el of (globalThis as any).document.querySelectorAll(
-          "#agent-list .tree-section-header, #agent-list .agent",
-        )) {
-          if (el.dataset.section)
-            section = JSON.parse(el.dataset.sectionKey).slice(1).join("/");
-          else if (el.dataset.id === id) rows.push(`agent in ${section}`);
-          else if (el.classList.contains("draft-row"))
-            rows.push(`draft in ${section}`);
-        }
-        return rows.some((row) => !row.endsWith(" in null")) && rows;
-      }, id);
-      deliveredFrom((await rows.jsonValue()) as string[]);
-      await route.continue();
-    },
-    { times: 1 },
-  );
-  const newId = await sendDraft("New agent inside recurse-dev");
-  const [draftRow, ...duplicates] = await rowsWhileDelivering;
-  expect(draftRow).toMatch(/^draft in recurse-dev\/(Active|Inbox)$/);
-  expect(duplicates).toEqual([]);
-  await takeScreenshot(page, `new-agent-tagged-${width}.png`);
-  const sectionAction = async (
-    title: string,
-    label: string,
-    screenshot?: string,
-  ) => {
-    const section = header(page, title);
-    if (width === 1280) await section.hover();
-    else await openHoldMenu(section);
-    if (screenshot) await takeScreenshot(page, `${screenshot}-${width}.png`);
-    if (width === 1280)
-      await section.getByRole("button", { name: label, exact: true }).click();
-    else
-      await page
-        .locator("#hold-menu")
-        .getByRole("menuitem", { name: label, exact: true })
-        .tap();
-  };
-  await sectionAction("recurse-dev", "New agent", "new-agent-section-action");
-  await page.locator(".draft-row").waitFor({ state: "attached" });
-  expect(await dialog.count()).toBe(0);
-  await browserExpect(tagControl).toHaveAccessibleName("Tag: recurse-dev");
-  await takeScreenshot(page, `draft-tag-section-${width}.png`);
-  const sectionId = await sendDraft("New agent from section action");
-  expect(sectionId).not.toBe(newId);
-  expect(
-    (await serverTags(context, base, sectionId))["recurse-dev"],
-  ).toMatchObject({ by: "operator" });
-  await sectionAction("recurse-dev", "New agent");
-  await browserExpect(tagControl).toHaveAccessibleName("Tag: recurse-dev");
-  await tagControl.click();
-  await dialog.getByRole("button", { name: "No tag", exact: true }).click();
-  await browserExpect(tagControl).toHaveAccessibleName("No tag");
-  await sendDraft("New agent with tag cleared", false);
-  const defaultsScript = tagScript
-    .replace(
-      "defaults: { recurse: { effort: 3 }, research: { effort: 4 } }",
-      'defaults: { "recurse-dev": { effort: 4 } }',
-    )
-    .replace("title: tag,", 'title: tag + " defaults",');
-  await postFixture(base, "save-sidebar-script", {
-    script: defaultsScript,
-    by: "operator",
-  });
-  let releaseWorker!: () => void;
-  const workerHeld = new Promise<void>((resolve) => (releaseWorker = resolve));
-  await page.route("**/static/sidebar-worker.js?*", async (route) => {
-    await workerHeld;
-    await route.continue();
-  });
-  await page.reload();
-  await showAgentList(page);
-  await sectionAction("recurse-dev", "New agent");
-  await browserExpect(page.locator("#input")).toBeFocused();
-  const earlyCreation = page.waitForResponse(
-    (response) =>
-      response.url() === `${base}api/conversations` &&
-      response.request().method() === "POST",
-  );
-  await page.locator("#input").fill("Send before tag defaults finish loading");
-  await page.locator("#send").click();
-  await page.locator("#messages .working").waitFor();
-  releaseWorker();
-  const earlyResponse = await earlyCreation;
-  expect(earlyResponse.ok()).toBeTrue();
-  expect(earlyResponse.request().postDataJSON().level).toBe(4);
-  expect(earlyResponse.request().postDataJSON().tags).toEqual(["recurse-dev"]);
-  const earlyAgent = await earlyResponse.json();
-  await page
-    .locator(`.agent.selected[data-id="${earlyAgent.id}"]`)
-    .waitFor({ state: "attached" });
-  await page.unroute("**/static/sidebar-worker.js?*");
-  await showAgentList(page);
-  await header(page, "recurse-dev defaults").waitFor();
-  await newButton.click();
-  await tagControl.click();
-  await input.fill("rcdv");
-  await dialog
-    .getByRole("button", { name: "recurse-dev", exact: true })
-    .click();
-  await browserExpect(page.locator("#effort-range")).toHaveValue("4");
-  await focusComposer(page);
-  await page.locator("#model-trigger").click();
-  await page.locator("#effort-range").focus();
-  await page.locator("#effort-range").press("ArrowLeft");
-  await browserExpect(page.locator("#effort-range")).toHaveValue("3");
-  await showAgentList(page);
-  const script = `export default rows => [{ title: "Projects", rows: rows.filter(r => r.depth === 0), actions: [{ label: "Tag all", ask: "tag", set: "fixed", clear: "research" }, { label: "Remove tag", ask: "tag", clear: "ask" }] }];`;
-  await postFixture(base, "save-sidebar-script", { script, by: "operator" });
-  await page.reload();
-  await showAgentList(page);
-  await header(page, "Projects").waitFor();
-  await newButton.click();
-  await page.locator(".draft-row").waitFor({ state: "attached" });
-  expect(await dialog.count()).toBe(0);
-  await browserExpect(tagControl).toHaveCount(0);
-  await showAgentList(page);
-  await sectionAction("Projects", "Tag all");
-  await input.fill("team");
-  await input.press("Enter");
-  await page
-    .locator("#sidebar-popover")
-    .getByRole("button", { name: "Tag", exact: true })
-    .click();
-  for (const id of [ids.fresh, ids.busy, ids.archived])
-    await browserExpect
-      .poll(() => serverTags(context, base, id))
-      .toMatchObject({ team: { by: "operator" }, fixed: { by: "operator" } });
-  expect(
-    (await serverTags(context, base, ids.archived)).research,
-  ).toBeUndefined();
-  await sectionAction("Projects", "Remove tag");
-  const remove = page.getByRole("dialog", { name: "Remove tag", exact: true });
-  const removeInput = remove.getByRole("textbox", {
-    name: "Remove tag",
-    exact: true,
-  });
-  await removeInput.fill("not-present");
-  await browserExpect(remove.getByRole("status")).toHaveText(
-    "Choose a tag on these conversations.",
-  );
-  await removeInput.fill("team");
-  await remove.getByRole("button", { name: "team", exact: true }).click();
-  await page
-    .locator("#sidebar-popover")
-    .getByRole("button", { name: "Remove", exact: true })
-    .click();
-  await browserExpect
-    .poll(async () => (await serverTags(context, base, ids.fresh)).team)
-    .toBeUndefined();
-  expect(errors).toEqual([]);
-  const demo = await readFile(
-    join(ROOT, "playground/sidebar/projects.js"),
-    "utf8",
-  );
-  expect(
-    (
-      await context.request.post(`${base}api/sidebar/tags`, {
-        data: { ids: [ids.busy], set: { "needs-you": null } },
-      })
-    ).ok(),
-  ).toBeTrue();
-  await postFixture(base, "save-sidebar-script", {
-    script: demo,
-    by: "operator",
-  });
-  for (const [id, tag] of [
-    [ids.fresh, "recurse"],
-    [ids.archived, "research"],
-  ])
-    expect(
-      (
-        await context.request.post(`${base}api/sidebar/tags`, {
-          data: { ids: [id], set: { [tag!]: null } },
-        })
-      ).ok(),
-    ).toBeTrue();
-  await page.reload();
-  await showAgentList(page);
-  await header(page, "Needs you").waitFor();
-  await header(page, "recurse").waitFor();
-  await header(page, "research").waitFor();
-  await takeScreenshot(page, `nested-demo-${width}.png`);
-  const all = await (await context.request.get(`${base}api/tree`)).json();
-  expect(
-    (
-      await context.request.post(`${base}api/sidebar/tags`, {
-        data: {
-          ids: all.map((row: any) => row.id),
-          clear: ["fixed", "recurse", "recurse-dev", "research", "needs-you"],
-        },
-      })
-    ).ok(),
-  ).toBeTrue();
-  expect(
-    (
-      await context.request.post(`${base}api/sidebar/script`, {
-        data: { action: "reset" },
-      })
-    ).ok(),
-  ).toBeTrue();
-  if (width === 1280) {
-    const tags = Array.from({ length: 9 }, (_, i) => `project-${i}`);
-    expect(
-      (
-        await context.request.post(`${base}api/sidebar/tags`, {
-          data: {
-            ids: [ids.archived],
-            set: Object.fromEntries(tags.map((name) => [name, null])),
-          },
-        })
-      ).ok(),
-    ).toBeTrue();
-    expect(
-      (
-        await context.request.post(`${base}api/sidebar/tags`, {
-          data: { ids: [ids.fresh], set: { "project-8": null } },
-        })
-      ).ok(),
-    ).toBeTrue();
-    await browserExpect.poll(() => sectionOf(page, ids.fresh)).toBe("Inbox");
-    const settings = await (
-      await context.request.get(`${base}api/sidebar/script`)
-    ).json();
-    const checked = await context.request.post(
-      `${base}__browser-test/save-sidebar-script`,
-      { data: { script: settings.default, by: "operator" } },
-    );
-    expect(checked.ok()).toBeTrue();
-    expect((await checked.json()).sections).toHaveLength(4);
-    expect(await page.getByRole("button", { name: /^Tag… / }).count()).toBe(0);
-    expect(await header(page, "project-8").count()).toBe(0);
-    expect(
-      (
-        await context.request.post(`${base}api/sidebar/tags`, {
-          data: { ids: [ids.fresh, ids.archived], clear: tags },
-        })
-      ).ok(),
-    ).toBeTrue();
-    expect(
-      (
-        await context.request.post(`${base}api/sidebar/script`, {
-          data: { action: "reset" },
-        })
-      ).ok(),
-    ).toBeTrue();
-  }
-}
-
-async function beforeTagAnswer(
-  page: Page,
-  act: () => Promise<void>,
-  check: () => Promise<void>,
-): Promise<void> {
-  let release!: () => void;
-  const held = new Promise<void>((resolve) => (release = resolve));
-  let arrived!: () => void;
-  const requested = new Promise<void>((resolve) => (arrived = resolve));
-  const pattern = /\/api\/sidebar\/tags$/;
-  const handler = async (route: import("playwright").Route) => {
-    arrived();
-    await held;
-    await route.continue();
-  };
-  await page.route(pattern, handler);
-  try {
-    await act();
-    await requested;
-    await check();
-  } finally {
-    const answered = page.waitForResponse((response) =>
-      pattern.test(response.url()),
-    );
-    release();
-    await answered;
-    await page.unroute(pattern, handler);
-  }
-}
 
 async function customScript(
   context: BrowserContext,
   base: string,
-  ids: Ids,
+  ids: SidebarSectionIds,
 ): Promise<void> {
   const script = [
     "export default function sidebar(rows, now) {",
@@ -1770,7 +954,7 @@ async function customScript(
 async function phoneHold(
   context: BrowserContext,
   base: string,
-  ids: Ids,
+  ids: SidebarSectionIds,
 ): Promise<void> {
   const page = await context.newPage();
   const errors = captureErrors(page);
@@ -1830,7 +1014,7 @@ async function phoneHold(
   );
   await send("touchMove", ax, ay);
   await menu.locator(".hold-bubble", { hasText: "Archive" }).waitFor();
-  await takeScreenshot(page, "sections-phone.png");
+  await screenshot(page, "sidebar/sections-phone");
   await send("touchEnd");
   await fresh.waitFor({ state: "detached" });
   await header(page, "Archive")

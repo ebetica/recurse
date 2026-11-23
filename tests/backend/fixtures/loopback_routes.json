@@ -132,7 +132,6 @@
   "POST /api/conversations/{cid}/deliver tool",
   "POST /api/conversations/{cid}/messages/{mid}/retry web",
   "POST /api/conversations/{cid}/model web",
-  "POST /api/conversations/{cid}/pin web",
   "POST /api/conversations/{cid}/promote web",
   "POST /api/conversations/{cid}/rename web",
   "POST /api/conversations/{cid}/reparent tool",

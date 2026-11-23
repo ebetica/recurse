@@ -11,12 +11,21 @@
 - [reply-html.ts](reply-html.ts) sanitizes reply Markdown and applies the image
   policy; [inline image captions](../image-preview/inline.ts) use cached filenames.
 
+Running tool counts and details belong to the transcript, not the
+[status bar](../conversation/README.md#status-bar).
+
+[Thread styles](style.css) load with the app so transcript layout and image
+controls do not depend on the Files stylesheet. The transcript and message
+inspector share preformatted text defaults.
+
 ## History and usage
 
 Compacted history uses a plain marker; earlier messages and the
 jump-to-first-kept link remain available. History details load on opening.
+Pending actions come from metadata; in-progress and completed compaction
+rows come from the thread history, not a separate compaction flag.
 `publish` counts files. Prompt-cache refresh adds turn usage, not replies.
-Tree usage matches loaded history. Usage names the served model.
+Tree usage matches loaded history. Usage names the served model. The turn usage total adds the recorded conversation and safety review costs; `+` marks a subtotal when some costs are unknown.
 
 ## Thread images
 

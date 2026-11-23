@@ -258,8 +258,8 @@ describe("owner scoping", () => {
     );
     expect(saved.source_path).toBe(document);
     const page = await listPage(
-      collectionSnapshot(app.records.get("owner-a")!, app.temp.config)!,
-      { config: app.temp.config },
+      collectionSnapshot(app.records.get("owner-a")!, app.temp.paths)!,
+      { paths: app.temp.paths },
       null,
       null,
       50,
@@ -574,7 +574,7 @@ describe("owner scoping", () => {
     expect(Buffer.from(raw).toString("latin1")).toEndWith("\r\n\r\n2345");
     expect((await get(await upload("notes.zip", "PK"))).status).toBe(404);
     await app.running.close();
-    await rm(app.temp.config.paths.AGENT_TEMP_ROOT, {
+    await rm(app.temp.paths.AGENT_TEMP_ROOT, {
       recursive: true,
       force: true,
     });
@@ -582,12 +582,12 @@ describe("owner scoping", () => {
     await app.temp.reconcileAgentTempStartup();
     const snapshot = collectionSnapshot(
       app.records.get("owner-b")!,
-      app.temp.config,
+      app.temp.paths,
     )!;
     const page = await listPage(
       snapshot,
       {
-        config: app.temp.config,
+        paths: app.temp.paths,
         boundSessionFile: () => null,
       },
       null,

@@ -123,7 +123,10 @@ test("queued attachment content survives shutdown before the queued request star
       instance.turnPrep.uploadParts(
         text,
         id,
-        collectionSnapshot(instance.conversations.load(id)!, instance.config),
+        collectionSnapshot(
+          instance.conversations.load(id)!,
+          instance.config.paths,
+        ),
         ids,
       ),
   };
@@ -244,7 +247,7 @@ test("a Durable conversation created after startup can publish from its first tu
     await writeFile(join(world.root, "report.txt"), "published text\n");
     const { collection } = collectionSnapshot(
       instance.conversations.load(cid)!,
-      instance.config,
+      instance.config.paths,
     )!;
     const item = await registerFile(
       collection,

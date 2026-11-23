@@ -369,7 +369,7 @@ export function routes(fx: Fixture): Routes {
       await instance.durable.setSafetyReviewOff(agent, true);
       const file = join(
         await mkdtemp(join(tmpdir(), "read-diagnostics-")),
-        "note.txt",
+        "café-🌱.txt",
       );
       await writeFile(file, "first\nsecond\nthird\n");
       script(agent).setResponses([
@@ -468,6 +468,11 @@ export function routes(fx: Fixture): Routes {
           throw error;
         }
       }
+      const finishGate =
+        mode === "secret-output" ? `${outputGate}-finish` : undefined;
+      const prepare = finishGate ? hold(agent, "tool-preparing") : undefined;
+      const waitForFile = (path: string) =>
+        `while [ ! -f '${path.replaceAll("'", "'\\''")}' ]; do sleep 0.05; done`;
       const commands = thinking
         ? [blockOn(backgroundGate!), blockOn(outputGate!)]
         : mode.includes("output")
@@ -481,7 +486,7 @@ export function routes(fx: Fixture): Routes {
                       : 1,
               },
               (_, i) =>
-                `printf '%020000d\\n' 0; printf 'line-%s\\n' 1 2 3 4 5 6 7 8 9; while [ ! -f '${outputGate!.replaceAll("'", "'\\''")}' ]; do sleep 0.05; done; printf '${mode === "secret-output" ? "token=sk-example123456789" : `latest-${i}`}\\n'; sleep 30 # ${"safe ".repeat(430)}END_OF_COMMAND`,
+                `printf 'Beginning of command output\\n'; printf '%020000d\\n' 0; printf 'line-%s\\n' 1 2 3 4 5 6 7 8 9; ${waitForFile(outputGate!)}; printf '${mode === "secret-output" ? "token=sk-example123456789" : `latest-${i}`}\\n'; ${finishGate ? waitForFile(finishGate) : "sleep 30"} # ${"safe ".repeat(430)}END_OF_COMMAND`,
             )
           : ["sleep 30"];
       const held = hold(agent);
@@ -525,9 +530,12 @@ export function routes(fx: Fixture): Routes {
         agent,
         undefined,
         undefined,
-        thinking
-          ? (event) =>
-              reviewing && event.type === "thinking_delta" ? content : undefined
+        thinking || prepare
+          ? (event) => {
+              if (prepare && event.type === "toolcall_end") return prepare;
+              if (reviewing && event.type === "thinking_delta") return content;
+              return undefined;
+            }
           : undefined,
       );
       fake.setResponses([
@@ -590,7 +598,7 @@ export function routes(fx: Fixture): Routes {
           ? [fauxAssistantMessage("Background work finished.")]
           : []),
       ]);
-      return { agent, outputGate };
+      return { agent, outputGate, commands, finishGate };
     },
     "seed-sticky-thinking": async ({ crowded }) => {
       const agent = `sticky-thinking-${hex(4)}`;
@@ -608,7 +616,11 @@ export function routes(fx: Fixture): Routes {
       const thinking = hold(agent, "thinking-start");
       const tool = hold(agent, "thinking-tool");
       const finished = hold(agent);
+      const acceptNext = hold(agent, "accept-next");
+      const nextTurn = hold(agent, "next-turn");
+      let next = false;
       script(agent, undefined, undefined, (event) => {
+        if (next && event.type === "thinking_delta") return nextTurn;
         if (event.type === "thinking_start") return thinking;
         if (event.type === "toolcall_start") return tool;
         return undefined;
@@ -636,11 +648,19 @@ export function routes(fx: Fixture): Routes {
           finished.then(() =>
             fauxAssistantMessage("The sample output is ready."),
           ),
+        async () => {
+          await acceptNext;
+          next = true;
+          return fauxAssistantMessage([
+            fauxThinking("**Checking another sample**"),
+            fauxText("Checked again."),
+          ]);
+        },
       ]);
       return { agent, commandGate, backgroundGate };
     },
-    "seed-live-thinking-idle": async (body) => {
-      const agent = `live-thinking-idle-${hex(4)}`;
+    "seed-status-bar-thinking-idle": async (body) => {
+      const agent = `status-bar-thinking-idle-${hex(4)}`;
       await create(agent, "Thinking before idle");
       const finished = hold(agent, "idle-finish");
       const long = body?.long === true;
@@ -824,18 +844,23 @@ export function routes(fx: Fixture): Routes {
       (await instance.durable.open(agent)).captures.forget(agent);
       return { ok: true };
     },
-    "seed-durable-compactable": async () => {
-      const cid = "durable-compactable";
+    "seed-durable-compactable": async (body) => {
+      const { fail } = body as { fail?: boolean };
+      const cid = `durable-compactable-${hex(4)}`;
       await create(cid, "Durable compactable");
       for (let n = 0; n < 30; n += 1)
         await sayDurable(cid, `Task ${n} ${"y".repeat(4000)}`, `Reply ${n}`);
       const held = hold(cid);
-      script(cid).setResponses([
-        async () => {
-          await held;
-          return fauxAssistantMessage("Summary of the early tasks.");
-        },
-      ]);
+      const summarize = async () => {
+        await held;
+        return fail
+          ? fauxAssistantMessage("", {
+              stopReason: "error",
+              errorMessage: "Summary unavailable",
+            })
+          : fauxAssistantMessage("Summary of the early tasks.");
+      };
+      script(cid).setResponses(fail ? [summarize, summarize] : [summarize]);
       return { agent: cid };
     },
   };

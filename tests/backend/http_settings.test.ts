@@ -135,6 +135,18 @@ describe("corpus", () => {
     seedPiModelList(config.paths.CONFIG_DIR);
     for (const [name, doc] of Object.entries(seed.settings))
       writeFileSync(join(config.paths.CONFIG_DIR, name), JSON.stringify(doc));
+    const marksPath = config.paths.AVAILABLE_MODELS_FILE;
+    const legacyMarks = JSON.stringify({
+      version: 1,
+      providers: {},
+      turn_marks: {
+        1: {
+          model: "anthropic/claude-opus-5-5",
+          reason: "provider server error",
+        },
+      },
+    });
+    writeFileSync(marksPath, legacyMarks);
     const shellState = join(root, "shell-state");
     mkdirSync(shellState, { recursive: true });
     const store = new OAuthStore({
@@ -345,6 +357,7 @@ describe("corpus", () => {
       );
       expect(problems).toEqual([]);
       expect(checked).toBe(90);
+      expect(readFileSync(marksPath, "utf8")).toBe(legacyMarks);
       const expectUpdatesRefused = async (base: string, reason: string) => {
         const url = `${base}/api/settings/update`;
         const status = await fetch(url);

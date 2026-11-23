@@ -41,7 +41,7 @@ import {
   collectionSnapshot,
   type CollectionSnapshot,
 } from "../runtime/node_files";
-import type { Config } from "../../config";
+import type { StatePaths } from "../../state_paths";
 import { ConversationView } from "../view/conversation";
 import {
   applyBatch,
@@ -71,7 +71,6 @@ import {
   type SessionFilesContext,
   type TextSnippet,
 } from "../../session_files";
-import { pyCompactJson } from "../../utils/python-json";
 
 /** Same cap the resident view enforces on session bytes. */
 const MAX_SESSION_BYTES = 128 * 1024 * 1024;
@@ -175,7 +174,7 @@ export interface ReadsDeps {
     contextUsage(cid: string): Promise<JsonObject>;
     prompt(cid: string, includeSafetyReview?: boolean): Promise<JsonObject>;
   };
-  readonly config: Pick<Config, "agentTempLeaf" | "paths">;
+  readonly paths: StatePaths;
   readonly sessionFiles: SessionFilesContext;
   /** PiBackend.boundSessionFile exact binding check. */
   boundSessionFile(
@@ -268,7 +267,7 @@ export class SupervisorReads {
     return historyAlive(this.deps.claims, claim);
   }
   private snapshotOf(conv: JsonObject): CollectionSnapshot | null {
-    return collectionSnapshot(conv, this.deps.config);
+    return collectionSnapshot(conv, this.deps.paths);
   }
 
   /** Recorded collection identity for one owner, without creating roots. */
@@ -484,9 +483,9 @@ export class SupervisorReads {
       sessionId: sid,
       sessionFile: binding !== null ? binding.sessionFile : null,
       sessionCwd: binding !== null ? binding.cwd : "",
-      live: "[]",
-      envelope: pyCompactJson(envelope, { separators: "default" }),
-      files: "{}",
+      live: [],
+      envelope,
+      files: {},
       maxSessionBytes: MAX_SESSION_BYTES,
       unbound: binding === null && !conv.session_id && !conv.session_file,
     };
@@ -511,7 +510,7 @@ export class SupervisorReads {
     collection: [string, string] | null,
     older: boolean | null,
     callIds: readonly string[] = [],
-  ): Promise<[ViewBatch | null, string]> {
+  ): Promise<[ViewBatch | null, ViewInputs["files"]]> {
     let batch: ViewBatch | null;
     if (inputs.unbound) {
       batch = {
@@ -522,7 +521,7 @@ export class SupervisorReads {
           tip: null,
           parent: null,
         },
-        entries: "[]",
+        entries: [],
         reset: feed.sessionKey !== "unbound",
         caughtUp: true,
         older: false,
@@ -549,7 +548,7 @@ export class SupervisorReads {
             tip: null,
             parent: null,
           },
-          entries: "[]",
+          entries: [],
           reset: feed.sessionKey !== key,
           caughtUp: true,
           older: false,
@@ -565,10 +564,10 @@ export class SupervisorReads {
       ? (await this.files.publishedCallFiles(collection[0], collection[1]))
           .files
       : {};
-    const picked: Record<string, unknown> = {};
+    const picked: ViewInputs["files"] = {};
     for (const key of callIds)
       if (Object.hasOwn(files, key)) picked[key] = files[key];
-    return [batch, pyCompactJson(picked, { separators: "default" })];
+    return [batch, picked];
   }
 
   /** Read bounded history without creating, warming or waiting for Pi. */
@@ -609,7 +608,7 @@ export class SupervisorReads {
           snapshot !== null ? [snapshot.collection, snapshot.owner] : null;
         const generation = view.rows.instance_id;
         let batch: ViewBatch | null;
-        let files: string;
+        let files: ViewInputs["files"];
         try {
           [batch, files] = await this.readViewValues(
             inputs,

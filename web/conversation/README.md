@@ -12,16 +12,22 @@
   owns delivery. [stop-view.ts](stop-view.ts) supplies Stop availability and its
   target, while [stop.ts](stop.ts) dispatches it.
 - [chrome.ts](chrome.ts) updates the conversation controls and status;
-  [live-panel.ts](live-panel.ts) and [thinking.ts](thinking.ts) show live work.
+  [status-bar.ts](status-bar.ts) and [thinking.ts](thinking.ts) show live work.
 - [disclosure.ts](disclosure.ts) and [message-disclosure.ts](message-disclosure.ts)
   keep disclosure state; [copy.ts](copy.ts) uses the shared [copy button](copy-button/README.md).
+
+[Conversation styles](style.css) follow the header, status and overlay
+renderers. [Composer styles](../composer/style.css) still own the border
+where the status bar and editor join.
 
 ## Reads and navigation
 
 Switching conversations preserves reading position and fences departed reads;
 deleting cancels reads. Focused reads come first: cancel departed work before
 pane probes or warming a Side frame. App startup supplies the Side pane's
-post-action poll.
+post-action poll. The thread renders pending actions from conversation metadata
+and history markers from the separately loaded rows. A compaction notice can
+jump to its recorded retained message even without a summary row.
 
 ## Streams
 
@@ -36,16 +42,24 @@ Foreground enqueueing and delivery use the [thread scroll policy](../thread-scro
 before sending. Composer jobs and comments reuse the transport without
 scrolling on retry or restore. Stop sends no message; a fresh read gates it.
 
-## Live bar
+## Take over
 
-The live bar joins the composer while running, queued or waiting. It keeps the
+The control sends the same operator-only [take-over request](../../src/web/conversations.ts)
+to the local or selected backend. Connected backends must support this action
+for the control to change who runs the conversation.
+
+## Status bar
+
+The status bar joins the composer while running, queued or waiting. It keeps the
 latest thought through tool calls and between requests in a running turn.
-Long-running tools show their own control beside the thought. After the turn
-ends, only ongoing background work keeps a plain Waiting bar.
+Tool counts and details stay in the transcript. Background shell and agent
+chips stay in the status bar; after the turn ends, only ongoing background
+work keeps it visible with a Waiting label.
 Only readable prose expands the thinking control. The fixed six-line area
 reserves a scrollbar gutter and follows new text unless scrolled up. Reasoning
-summaries omit titles and bold markers. The transcript's thinking disclosure
-opens the step's full text.
+summaries omit titles and bold markers. Unlike the status bar, the transcript's
+[thinking disclosure](thinking.ts) keeps finished steps' text out of the
+heading; open the step to read it.
 
 ## Rules for changes
 

@@ -3,8 +3,8 @@
 An **Artifact** is a durable, versioned deliverable shown in the Artifacts pane:
 a Markdown document or a small web app. Each Artifact is a Git repository owned
 by one agent. Agents edit its files and commit; a post-commit hook publishes
-that commit automatically. New repositories get the hook at creation; existing
-ones get it on repository access, except listings and saved app state. The hook runs
+that commit automatically. Operations that open a repository install or
+refresh the hook; listings and saved app state skip that work. The hook runs
 [publish_commit.ts](publish_commit.ts), which publishes the saved commit and
 checks an app after publication. The commit waits for the check, and hook JSON
 uses separate lines so bash's per-line trimming preserves screenshot paths.
@@ -17,13 +17,17 @@ and retries on the next start. Until the first commit the Artifact is a draft.
 Each publication is an immutable version that can be restored. Failed app
 builds report to the committing shell and leave the last working version shown.
 
-**Source files:** [../artifacts.ts](../artifacts.ts) (create, publish, versions,
-listings, repository access with hook refresh) · [store/](store/index.ts)
-(repository layout, bounded Git commands, and version refs) ·
+**Source files:** [../artifacts.ts](../artifacts.ts) (create, publish and versions) ·
+[store/](store/index.ts) (repository layout,
+bounded Git commands, tree validation and version refs) · [metadata.ts](store/metadata.ts) (listings
+and metadata cache) · [formats.ts](store/formats.ts) (entry selection and media types) ·
+[owners.ts](store/owners.ts) (repository directory admission and owner retirement) ·
+[deletion.ts](store/deletion.ts) (deletion receipts and recovery) ·
+[commit_hook.ts](store/commit_hook.ts) (hook installation and migration) ·
 [page/](page/index.ts) (isolated app builds and head insertion) · [check.ts](check.ts) (checks built
 apps in a browser) · [preview.ts](preview.ts) · [theme.ts](theme.ts) ·
 [key_relay.ts](key_relay.ts) · [app_state_script.ts](app_state_script.ts) (app API) ·
-[../artifact_app_state.ts](../artifact_app_state.ts) (saved state) ·
+[../artifact_app_state.ts](../artifact_app_state.ts) (saved state and its pinned storage) ·
 [working_path.ts](working_path.ts) (portable paths) ·
 [../extensions/core/environment/artifact.ts](../extensions/core/environment/artifact.ts)
 (the native agent tool) · [../../web/artifacts/](../../web/artifacts/) (the pane)
@@ -49,9 +53,8 @@ modified browser keys, composition and page-handled events stay native.
 The relay embeds [../keyboard_target.ts](../keyboard_target.ts)'s shared text-entry
 and native Enter/Space activation predicates; non-text controls retain pane keys.
 
-All Git work is bounded and asynchronous. Each visible change replaces one
-small revision marker for the owner; the UI polls that marker, never the
-Artifact history. Tree requests share an in-memory revision snapshot for up to
+All Git work is bounded and asynchronous. Visible changes update one revision
+marker per owner so the UI can poll without reading Artifact histories. Tree requests share an in-memory revision snapshot for up to
 one second, including missing owners. Expiry observes native-tool and post-commit hook
 changes across processes without filesystem watchers; tree ETags include the
 refreshed revisions. Colours come from the app theme when the page is served.
@@ -64,19 +67,25 @@ tools and Bash expand `$CHAT_DATA_DIR`; old versions are ordinary Git history
 (`git log`, `git restore --source=<sha>`, then commit to publish).
 
 Listings never install hooks or create owner directories. Native compact rows
-validate only title configuration against the persisted metadata snapshot, not
+validate only the config stamp recorded in the persisted metadata snapshot, not
 refs or history. A missing/stale title costs one Git config lookup and records
 a title snapshot; another process reuses it without Git. HTTP lists retain full
 metadata and validate refs/config. Empty owner roots
 are pruned on reap. A recorded startup migration (`.owner-directories-v1`)
 retires existing empty or files-only non-repository roots; its marker records
 retired, skipped-receipt and skipped-directory counts. Deletion receipts and
-uncertain trees are preserved. A short directory-inode admission lock fences
-owner/repository creation against retirement; retirement runs after unlocking.
+uncertain trees are preserved. The owner lifecycle code holds a short
+directory-inode lock to fence repository directory creation against owner
+retirement; Git work and retirement run only after unlocking.
 External retirement markers prevent new admission during that gap and startup
 recovers only markers left by dead processes, rechecking directory identity and
-contents before retirement. No lock spans Git or trash retirement. Retirement
-awaits the descriptor-pinned trash Worker before removing its admission marker.
+contents before retirement. Retirement awaits the descriptor-pinned trash Worker
+before removing its admission marker.
+
+Deleting an Artifact writes an owner-scoped JSON receipt before moving its
+repository aside. That receipt blocks subsequent opens. The server notifies
+the owner before finalizing the deletion, and startup can resume an unfinished
+deletion from its receipt.
 
 Metadata snapshots key on HEAD/current/published refs and config contents, plus
 packed-refs size/mtime, so unchanged metadata survives remounts. Older version

@@ -43,6 +43,7 @@ import {
   SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker";
 import { ConversationView } from "../../src/agents/view/conversation";
+import capturedCompactions from "./fixtures/compaction/real-shapes.json";
 import {
   applyBatch,
   readBatch,
@@ -159,6 +160,41 @@ async function opened(options: PiImportOptions) {
   );
   return { harness, conversation: await harness.root(context) };
 }
+async function legacyEntries(name: string): Promise<SessionEntry[]> {
+  return (
+    await readFile(
+      join(import.meta.dir, "fixtures/pi_import", `${name}.jsonl`),
+      "utf8",
+    )
+  )
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line))
+    .filter((entry) => entry.type !== "session");
+}
+
+async function importedView(name: string, source: SessionEntry[]) {
+  const options = await setup(name, source);
+  expect(await importPiSession(options)).toEqual({
+    status: "imported",
+    entries: source.length,
+  });
+  const { harness, conversation } = await opened(options);
+  try {
+    const { blocks } = await new DurableRows(name).page(
+      conversation,
+      context,
+      undefined,
+      {},
+      { limit: 100 },
+    );
+    const stored = await conversation.entries({}, 100, undefined, context);
+    return { blocks: blocks as Rec[], saved: stored.items };
+  } finally {
+    await harness.close(context);
+  }
+}
+
 const absent = (path: string) =>
   stat(path).then(
     () => false,
@@ -264,9 +300,9 @@ test("recorded active branch preserves model context, /view rows, settings and u
       sessionId: "pi",
       sessionFile: options.sessionFile,
       sessionCwd: root,
-      live: "[]",
-      envelope: "{}",
-      files: "{}",
+      live: [],
+      envelope: {},
+      files: {},
       maxSessionBytes: 1 << 30,
     };
     const pi = new ViewEntry(new ConversationView("parity", ""));
@@ -290,6 +326,106 @@ test("recorded active branch preserves model context, /view rows, settings and u
     entries: source.length,
   });
   expect(await readFile(options.sessionFile)).toEqual(bytes);
+});
+
+// Feature: #3667 Imported provisional compaction keeps the notice, not a second summary.
+test("recorded provisional compaction imports its completion text without a summary divider", async () => {
+  const captured = capturedCompactions.automatic;
+  const applied = captured.findIndex(
+    (entry) => entry.customType === "recurse.compact-applied",
+  );
+  const source = captured
+    .slice(0, applied + 1)
+    .map((entry, index) =>
+      index === 0 ? { ...entry, parentId: null } : entry,
+    );
+  for (const [name, entries, text, cutAt] of [
+    [
+      "linked",
+      source as SessionEntry[],
+      "Context compacted at 45k tokens.",
+      source.find((entry) => entry.id === "entry-20")!.timestamp,
+    ],
+    [
+      "point-less",
+      await legacyEntries("compaction-success"),
+      "Context compacted: 22 tokens summarized.",
+      null,
+    ],
+  ] as const) {
+    const { blocks, saved } = await importedView(
+      `legacy-compaction-${name}`,
+      entries,
+    );
+    const notice = blocks.find((row) => row.text === text);
+    if (cutAt) {
+      const kept = saved.find(
+        (entry) =>
+          entry.kind === "pi.assistant" &&
+          (entry.data as Rec | null)?.piEntry?.timestamp === cutAt,
+      );
+      expect(kept).toBeDefined();
+      expect(notice).toMatchObject({
+        kind: "marker",
+        role: "compaction-notice",
+        meta: { firstKeptEntryId: String(kept!.id) },
+      });
+    } else {
+      expect(notice).toMatchObject({
+        kind: "marker",
+        role: "legacy-notice",
+        meta: null,
+      });
+    }
+    const storedApplied = saved.find(
+      (entry) =>
+        (entry.data as Rec | null)?.piEntry?.customType ===
+        "recurse.compact-applied",
+    );
+    expect(storedApplied).toBeDefined();
+    expect(blocks.map((row) => row.id)).not.toContain(
+      String(storedApplied!.id),
+    );
+    expect(blocks.some((row) => row.role === "compaction")).toBe(false);
+  }
+});
+
+test("recorded running and ended shell events stay out of imported history", async () => {
+  const source = await legacyEntries("shell");
+  const running = source.findIndex(
+    (entry) =>
+      entry.type === "custom_message" &&
+      (entry.details as Rec | undefined)?.bgShellStream ===
+        "shell-background-running",
+  );
+  expect(running).toBeGreaterThan(0);
+  for (const [entries, stages] of [
+    [source.slice(0, running + 1), ["shell-background-running"]],
+    [source, ["shell-background-running", "shell-background-end"]],
+  ] as const) {
+    const { blocks, saved } = await importedView(
+      `legacy-shell-${stages.length}`,
+      entries,
+    );
+    const markers = saved.filter(
+      (entry) => (entry.data as Rec | null)?.piEntry?.details?.bgShellStream,
+    );
+    expect(
+      markers
+        .map((entry) => (entry.data as Rec).piEntry.details.bgShellStream)
+        .sort(),
+    ).toEqual([...stages].sort());
+    const rowIds = blocks.map((row) => row.id);
+    for (const marker of markers)
+      expect(rowIds).not.toContain(String(marker.id));
+    expect(
+      blocks.some(
+        (row) =>
+          row.role === "shell-notice" &&
+          row.text.startsWith("Background shell finished · `sleep 1`"),
+      ),
+    ).toBe(true);
+  }
 });
 
 test("a selected orphan-tool leaf stores Pi's synthesized result without adding a UI row", async () => {
@@ -531,9 +667,9 @@ for (const [name, results, counts, calls] of [
         sessionId: "pi",
         sessionFile: options.sessionFile,
         sessionCwd: root,
-        live: "[]",
-        envelope: "{}",
-        files: "{}",
+        live: [],
+        envelope: {},
+        files: {},
         maxSessionBytes: 1 << 30,
       };
       const pi = new ViewEntry(new ConversationView(cid, ""));

@@ -154,18 +154,12 @@ export const tests: BrowserTest[] = [
       expect(afterWarning390).toEqual(beforeWarning390);
       await phoneWidth(412);
       await page.locator("#input").blur();
-      const controlsWithLayout = await page
-        .locator("#conv-controls :is(#context-indicator, #model-trigger)")
-        .evaluateAll((controls) =>
-          controls
-            .filter((control) => {
-              const { width, height } = control.getBoundingClientRect();
-              return width > 0 && height > 0;
-            })
-            .map((control) => control.id),
-        );
-      expect(controlsWithLayout).toEqual([]);
-      await visibleAndUncovered(page, "#downgrade-chip");
+      for (const control of [
+        "#context-indicator",
+        "#model-trigger",
+        "#downgrade-chip",
+      ])
+        await visibleAndUncovered(page, control);
       await chip.click();
       const catalog = await (
         await page.request.get(`${base}api/models`)

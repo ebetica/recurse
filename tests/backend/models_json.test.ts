@@ -7,6 +7,7 @@ import { durableModels } from "../../src/agents/durable/models";
 import { getBuiltinModelDataGeneratedAt } from "@earendil-works/pi-ai/providers/all";
 import { FileModelsStore } from "../../node_modules/@earendil-works/pi-coding-agent/dist/core/models-store.js";
 import { modelsJsonWorld } from "./fixtures/models_json_world";
+import { recordedLuna, recordedSonnet } from "./fixtures/reviewer_routes";
 
 const {
   authRequest,
@@ -524,9 +525,6 @@ test("Settings and turns share literal models.json metadata and headers", async 
     const settings = await listed(root);
     const selected = "anthropic/operator-model";
     expect(settings.models.some((model) => model.id === selected)).toBe(true);
-    expect(
-      settings.config.models.unlistedModelSentence(selected, 1),
-    ).toBeNull();
     await settings.config.levels.setEffortLevel(1, selected, "off");
     expect(settings.config.levels.resolveEffortLevel(1)[0]).toBe(selected);
     await settings.config.levels.setEffortLevels({
@@ -544,11 +542,6 @@ test("Settings and turns share literal models.json metadata and headers", async 
     expect(settings.config.models.modelPolicy(selected).context_window).toBe(
       64000,
     );
-    await settings.config.levels.writeAvailableModels();
-    const available = await Bun.file(
-      settings.config.paths.AVAILABLE_MODELS_FILE,
-    ).json();
-    expect(available.providers.anthropic.models).toContain(selected);
     const legacy = await Bun.file(
       settings.config.paths.EFFORT_LEVELS_FILE,
     ).json();
@@ -559,12 +552,17 @@ test("Settings and turns share literal models.json metadata and headers", async 
     );
     await settings.config.refreshSettings();
     const legacyPolicy = JSON.parse(
-      await settings.config.trustedModelPolicy(selected),
+      await settings.config.safetyReview.trustedModelPolicy(selected),
     );
-    expect(legacyPolicy.reviewer.model).toBe("operator-model");
-    expect(legacyPolicy.reviewer_pin).toEqual({
-      provider: "anthropic",
-      model: "operator-model",
+    const route = ({ provider, id }: { provider: string; id: string }) => ({
+      provider,
+      model: id,
+    });
+    const luna = route(recordedLuna);
+    expect(legacyPolicy).toMatchObject({
+      reviewer_pin: luna,
+      reviewer: { ...luna, candidates: [route(recordedSonnet)] },
+      summary: luna,
     });
     const result = await turns(root, String(server.url), native, [
       selected,

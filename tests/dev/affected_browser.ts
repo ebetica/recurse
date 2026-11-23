@@ -345,18 +345,16 @@ function ruleGroups(
   map: CoverageMap,
   file: string,
   text: string,
-  css: string,
-  offset: number,
   lines: number[],
 ): number[] {
   const keys = map.css[file]!;
-  const rules = cssRules(css);
+  const rules = cssRules(text);
   const ids = new Set<number>();
   const add = (list: number[] | undefined) =>
     list?.forEach((id) => ids.add(id));
   for (const [start, end] of lineSpans(text, lines)) {
     const touched = rules.filter(
-      (rule) => offset + rule.start <= end && start < offset + rule.end,
+      (rule) => rule.start <= end && start < rule.end,
     );
     if (!touched.length) add(keys[""]);
     for (const rule of touched) {
@@ -373,13 +371,6 @@ function ruleGroups(
     }
   }
   return [...ids];
-}
-
-/** The style block of web/index.html as [start, end) offsets, or null. */
-function styleBlock(html: string): [number, number] | null {
-  const start = html.indexOf("<style>");
-  const end = html.indexOf("</style>", start);
-  return start < 0 || end < 0 ? null : [start + "<style>".length, end];
 }
 
 /**
@@ -437,10 +428,7 @@ export function frontendPlan(
         ] as const) {
           if (!lines.length) continue;
           if (text === null) partial = true;
-          else
-            ruleGroups(map, path, text, text, 0, lines).forEach((id) =>
-              ids.add(id),
-            );
+          else ruleGroups(map, path, text, lines).forEach((id) => ids.add(id));
         }
         take(
           path,
@@ -450,38 +438,6 @@ export function frontendPlan(
             : "groups that used the changed rules",
         );
       }
-    } else if (path === "web/index.html") {
-      const ids = new Set<number>();
-      let outside = "";
-      for (const [text, lines] of [
-        [change.before, change.removed],
-        [change.after, change.added],
-      ] as const) {
-        if (!lines.length) continue;
-        const block = text === null ? null : styleBlock(text);
-        if (text === null || !block || !map.css["web/index.html"]) {
-          outside = "diff lacks full context, or the map has no <style> rules";
-          continue;
-        }
-        const spans = lineSpans(text, lines);
-        const inside = lines.filter(
-          (_, k) => spans[k]![0] >= block[0] && spans[k]![1] <= block[1],
-        );
-        if (inside.length < lines.length) outside = "markup or script changed";
-        ruleGroups(
-          map,
-          "web/index.html",
-          text,
-          text.slice(...block),
-          block[0],
-          inside,
-        ).forEach((id) => ids.add(id));
-      }
-      take(
-        path,
-        outside ? null : [...ids],
-        outside || "groups that used the changed rules in its <style>",
-      );
     } else take(path, null, "frontend file the map does not cover");
   }
   return plan;

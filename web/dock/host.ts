@@ -9,6 +9,7 @@ import {
   type SerializedDockview,
 } from "dockview";
 import { createWindowCommands } from "./commands.js";
+import { captureSelectionDraftRange } from "../comments/selection-draft/index.js";
 import type { FileTabDescriptor } from "../panes/file-tabs.js";
 
 export interface DockPanelSpec {
@@ -87,6 +88,7 @@ export function adopt(
       (element) => [element, element.scrollTop, element.scrollLeft] as const,
     );
   const restoreFocus = captureFocus(child);
+  const restoreDraftRange = captureSelectionDraftRange(child);
   try {
     const move = (
       parent as { moveBefore?: (node: Node, next: Node | null) => void }
@@ -96,6 +98,7 @@ export function adopt(
   } catch {
     parent.insertBefore(child, next);
   }
+  restoreDraftRange?.();
   for (const [element, top, left] of scrollers) {
     element.scrollTop = top;
     element.scrollLeft = left;

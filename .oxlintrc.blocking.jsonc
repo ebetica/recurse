@@ -1,3 +1,7 @@
+// Use asynchronous I/O at module initialization too. Keep mixed-use modules
+// checked, remove obsolete call-site suppressions, and do not add legacy sites.
+// Default fs imports leave each call visible without suppressing named imports.
+// These syntax rules cannot distinguish Bun file .size from other .size reads.
 {
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "plugins": [],

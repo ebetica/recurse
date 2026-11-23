@@ -8,6 +8,7 @@ import {
   expectHitCorners,
   focusComposer,
   postFixture,
+  recordJumpHighlight,
   visibleAndUncovered,
   waitForLayout,
   type BrowserTest,
@@ -23,7 +24,7 @@ async function startSleepingTurn(page: Page, base: string, agent: string) {
   await page.goto(`${base}#agent=${agent}`);
   await page.locator("#input").fill("Sleep a while.");
   await page.locator("#send").click();
-  await page.locator(".working.live-panel").waitFor();
+  await page.locator(".working.status-bar").waitFor();
   await browserExpect.poll(sleeping).not.toBe("");
 }
 
@@ -90,6 +91,60 @@ export const tests: BrowserTest[] = [
       expect(errors).toEqual([]);
     } finally {
       await page.close();
+    }
+  },
+  async function test_imported_pi_compaction_jump(browser, base) {
+    const { agent } = await postFixture(base, "import-recorded-pi-compaction");
+    const page = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    try {
+      await page.goto(`${base}#agent=${agent}`);
+      const notice = page.locator(".thread-marker", {
+        hasText: "Context compacted at 45k tokens.",
+      });
+      await notice.waitFor();
+      await browserExpect(page.locator(".compacted-activity")).toHaveCount(0);
+      const view = await page.request.get(
+        `${base}api/conversations/${agent}/view?limit=100`,
+      );
+      expect(view.ok()).toBe(true);
+      const { blocks } = await view.json();
+      expect(blocks.filter((row: any) => row.role === "user")).toHaveLength(2);
+      expect(blocks.some((row: any) => row.role === "compaction")).toBe(false);
+      const replies = blocks.filter(
+        (row: any) =>
+          row.role === "assistant" && row.text === "Captured message",
+      );
+      expect(replies).toHaveLength(2);
+      const firstReplyAfterCut = replies[1];
+      const highlight = await recordJumpHighlight(page);
+      await notice
+        .getByRole("button", { name: "Jump to first kept message" })
+        .click();
+      expect(await highlight()).toBe(`row:${firstReplyAfterCut.id}`);
+    } finally {
+      await page.close();
+    }
+
+    const failure = await postFixture(
+      base,
+      "import-recorded-pi-compaction-failure",
+    );
+    const failedSession = await browser.newPage({
+      viewport: { width: 1280, height: 900 },
+    });
+    try {
+      await failedSession.goto(`${base}#agent=${failure.agent}`);
+      const failedNotice = failedSession.locator(".thread-marker", {
+        hasText: "Compaction failed: instant-summarizer-error:socket closed",
+      });
+      await browserExpect(failedNotice).toHaveText(
+        "Compaction failed: instant-summarizer-error:socket closed",
+      );
+      await browserExpect(failedNotice.getByRole("button")).toHaveCount(0);
+    } finally {
+      await failedSession.close();
     }
   },
   // Regression: #2317 #2515 #3565 show distinct Durable context categories after #2281/#2299; Shift+C preserves desktop layout; #3615 keeps the last text line close to the controls.
@@ -259,7 +314,7 @@ export const tests: BrowserTest[] = [
   },
 
   // Regression: #2333 live timer updates must not prevent pending platform notes painting. (also #2514 collapsed agent headers never preview the delivered message.)
-  async function test_agent_steer_keeps_running_panel_and_waiting_disclosure(
+  async function test_agent_steer_keeps_status_bar_and_waiting_disclosure(
     browser,
     base,
   ) {
@@ -278,7 +333,7 @@ export const tests: BrowserTest[] = [
       await page.request.post(`${base}api/conversations/${agent}/deliver`, {
         data: { content: "Run the command." },
       });
-      await page.locator(".working.live-panel").waitFor();
+      await page.locator(".working.status-bar").waitFor();
       let runningTool = false;
       for (let i = 0; !runningTool && i < 100; i++) {
         const view = await (
@@ -307,8 +362,8 @@ export const tests: BrowserTest[] = [
       expect(await waiting.locator(".agent-message-preview").count()).toBe(0);
       expect(await waiting.innerText()).not.toContain("turn started");
       expect(await page.locator(".msg.user.pending").count()).toBe(0);
-      expect(await page.locator(".live-panel-box.is-queued").count()).toBe(0);
-      expect(await page.locator(".working.live-panel").count()).toBe(1);
+      expect(await page.locator(".status-bar-box.is-queued").count()).toBe(0);
+      expect(await page.locator(".working.status-bar").count()).toBe(1);
       await waiting.tap();
       await page
         .locator(".pending.agent .agent-message-content", {
@@ -381,7 +436,7 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  // Regression: #2205 #3569 events clear Stop, the live panel and the running border while reads are held.
+  // Regression: #2205 #3569 events clear Stop, the status bar and the running border while reads are held.
   async function test_durable_stop_clears_from_the_events_frame(browser, base) {
     const { agent } = await postFixture(base, "seed-durable-stop");
     const page = await browser.newPage();
@@ -411,7 +466,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#send.stop").click();
       await page.locator("#send.stop.armed").click();
       await browserExpect(
-        page.locator("#live-bar .working.stopping"),
+        page.locator("#status-bar .working.stopping"),
       ).toContainText("Interrupting this turn…");
       await browserExpect(runningCard).toHaveCount(0);
       releaseStop();
@@ -449,7 +504,7 @@ export const tests: BrowserTest[] = [
         `#conv-status.running, #send.stop, #agent-list .agent[data-id="${agent}"] .working`,
         { timeout: 8_000 },
       );
-      expect(await page.locator("#live-bar .working").count()).toBe(0);
+      expect(await page.locator("#status-bar .working").count()).toBe(0);
       expect(
         await page
           .locator("#messages")
@@ -732,7 +787,7 @@ export const tests: BrowserTest[] = [
     expect(sent.ok()).toBe(true);
     await page.getByText("List the files.", { exact: true }).waitFor();
     await page
-      .locator(".working .live-label", { hasText: "Listing the files" })
+      .locator(".working .status-bar-label", { hasText: "Listing the files" })
       .waitFor({ timeout: 10_000 });
     if (shots) await page.screenshot({ path: `${shots}/running-footer.png` });
     await page.evaluate(() => {
@@ -741,7 +796,7 @@ export const tests: BrowserTest[] = [
         const block = document.querySelector(".activity-boundary.current");
         if (!block) throw new Error("Running block disappeared");
         const footer = block.querySelector(".turn-foot");
-        const working = document.querySelector("#live-bar .working");
+        const working = document.querySelector("#status-bar .working");
         samples.push({
           controls: Boolean(footer?.querySelector(".turn-expand")),
           usage: Boolean(footer?.querySelector(".turn-tokens")),

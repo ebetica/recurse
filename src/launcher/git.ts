@@ -4,7 +4,7 @@
 // repointing.
 import { lstat, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { RECURSE_REPO_URL } from "../config";
+import { RECURSE_REPO_URL } from "../state_paths";
 import { gitEnv } from "../git";
 import { logError, run, say, type RunResult } from "./system";
 

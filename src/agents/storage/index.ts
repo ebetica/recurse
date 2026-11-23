@@ -15,8 +15,7 @@ export {
   validLevel,
   type ConversationGuardToken,
   type ConversationRecord,
-  type ConversationStoreHooks,
-  type LiveInputs,
+  type RowReservation,
 } from "./conversation_store";
 export {
   ExternalKeyConflict,

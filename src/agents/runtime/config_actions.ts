@@ -8,6 +8,7 @@ import {
   type Thinking,
 } from "../../models";
 import {
+  CID_RE,
   CLEAR_PENDING_MODEL_MARKER,
   SET_MODEL_MARKER,
   SET_PENDING_MODEL_MARKER,
@@ -16,15 +17,14 @@ import {
   type ConversationRecord,
   type ConversationStore,
 } from "../storage";
+import type { AgentNode } from "./agent_node";
+import { invalidateContextUsage } from "./context_usage";
 
-interface NodeCache {
-  muteDesired: boolean | null;
-  safetyDesired: boolean | null;
-}
+type ConfigNode = Pick<AgentNode, "muteDesired" | "safetyDesired" | "withLock">;
 
 interface ConfigActionsDeps {
   store: ConversationStore;
-  node(cid: string): NodeCache;
+  node(cid: string): ConfigNode;
   config: {
     models: Pick<
       ModelCatalog,
@@ -62,7 +62,71 @@ export const SAFETY_ON_NOTICE =
   "run.";
 
 export class ConfigActions {
+  private readonly muteNodeTokens = new WeakMap<
+    ConversationGuardToken,
+    object
+  >();
+
   constructor(private readonly deps: ConfigActionsDeps) {}
+
+  withNodeGuard<T>(
+    cid: string,
+    fn: () => Promise<T>,
+    nodeToken?: object,
+  ): Promise<T> {
+    if (typeof cid !== "string" || !CID_RE.test(cid))
+      throw new Error("invalid conversation id for guard");
+    return this.deps.node(cid).withLock(() => fn(), nodeToken);
+  }
+
+  withMuteGuard<T>(
+    cid: string,
+    fn: (muteToken: ConversationGuardToken, nodeToken: object) => Promise<T>,
+    muteToken?: ConversationGuardToken,
+  ): Promise<T> {
+    if (typeof cid !== "string" || !CID_RE.test(cid))
+      throw new Error("invalid conversation id for guard");
+    const nodeToken =
+      muteToken === undefined ? undefined : this.muteNodeTokens.get(muteToken);
+    return this.deps.node(cid).withLock(
+      (heldNode) =>
+        this.deps.store.withMuteGuard(
+          cid,
+          (heldMute) => {
+            this.muteNodeTokens.set(heldMute, heldNode);
+            return fn(heldMute, heldNode);
+          },
+          muteToken,
+        ),
+      nodeToken,
+    );
+  }
+
+  // Acquire title → node → mute, then reenter the node guard for safety and
+  // model. Each reentry resolves the node again, as it did in the store.
+  withConfigurationMetadataGuard<T>(
+    cid: string,
+    fn: (
+      titleToken: ConversationGuardToken,
+      muteToken: ConversationGuardToken,
+      nodeToken: object,
+    ) => Promise<T>,
+  ): Promise<T> {
+    return this.deps.store.withTitleGuard(cid, (titleToken) =>
+      this.withMuteGuard(cid, (muteToken, nodeToken) =>
+        this.withNodeGuard(
+          cid,
+          () =>
+            this.withNodeGuard(
+              cid,
+              () => fn(titleToken, muteToken, nodeToken),
+              nodeToken,
+            ),
+          nodeToken,
+        ),
+      ),
+    );
+  }
 
   /** Apply the node's desired mute flag to the runner-owned record. */
   applyPendingMute(
@@ -70,7 +134,7 @@ export class ConfigActions {
     muteToken?: ConversationGuardToken,
   ): Promise<boolean> {
     const cid = conv.id as string;
-    return this.deps.store.withMuteGuard(
+    return this.withMuteGuard(
       cid,
       async () => {
         const node = this.deps.node(cid);
@@ -93,7 +157,7 @@ export class ConfigActions {
 
   /** The node's desired safety state (or null if never overridden). */
   drainSafety(cid: string, nodeToken?: object): Promise<boolean | null> {
-    return this.deps.store.withSafetyGuard(
+    return this.withNodeGuard(
       cid,
       async () => this.deps.node(cid).safetyDesired,
       nodeToken,
@@ -106,7 +170,7 @@ export class ConfigActions {
     nodeToken?: object,
   ): Promise<boolean> {
     const cid = conv.id as string;
-    return this.deps.store.withSafetyGuard(
+    return this.withNodeGuard(
       cid,
       async () => {
         const record = this.deps.node(cid);
@@ -136,15 +200,6 @@ export class ConfigActions {
         return pyTruthy(active.safety_off);
     }
     return this.safetyOffLocked(conv);
-  }
-
-  /** Serialize a model switch against the running turn's drains. */
-  withModelGuard<T>(
-    cid: string,
-    fn: () => Promise<T>,
-    nodeToken?: object,
-  ): Promise<T> {
-    return this.deps.store.hooks.withNodeLock(cid, () => fn(), nodeToken);
   }
 
   /** Apply and consume the durable composer model intent on admission. */
@@ -184,7 +239,7 @@ export class ConfigActions {
     conv[CLEAR_PENDING_MODEL_MARKER] = true;
     conv[SET_MODEL_MARKER] = true;
     const changed = before[0] !== conv.model || before[1] !== conv.effort;
-    if (changed) store.invalidateContextUsage(conv);
+    if (changed) invalidateContextUsage(conv);
     return changed;
   }
 
@@ -192,7 +247,7 @@ export class ConfigActions {
   // admitted.
   applyPendingModelAtAdmission(cid: string): Promise<boolean> {
     const { store } = this.deps;
-    return this.withModelGuard(cid, async () => {
+    return this.deps.node(cid).withLock(async () => {
       const conv = store.load(cid, { withPending: false });
       if (conv === null || !isDict(conv.pending_model)) return false;
       this.applyPendingModel(conv);
@@ -210,7 +265,7 @@ export class ConfigActions {
     operatorSelectedModel = false,
   ): Promise<Record<string, unknown> | null> {
     const { config, store } = this.deps;
-    return store.withConfigurationMetadataGuard(cid, async (titleToken) => {
+    return this.withConfigurationMetadataGuard(cid, async (titleToken) => {
       const conv = store.load(cid, { withPending: false });
       if (!pyTruthy(conv)) return null;
       let resolved: string;

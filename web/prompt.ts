@@ -276,10 +276,7 @@ export function openActivityUsageModal(
         }),
       ) || nothing}
       ${totalCostLabel
-        ? html`<p
-            class="turn-usage-cost turn-usage-total-cost"
-            aria-label="Conversation model total cost"
-          >
+        ? html`<p class="turn-usage-cost turn-usage-total-cost">
             ${totalCostLabel}
           </p>`
         : nothing}

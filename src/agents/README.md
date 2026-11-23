@@ -21,17 +21,21 @@ conversation records;
 ## Ownership and delivery
 
 HTTP routes and CLIs ask the supervisor to act; they do not run agents.
-Each node owns its queued input and controls, while Durable owns the Harness
-and turns. Work survives a browser disconnect. Worker threads handle storage
+[Service create](supervisor/create.ts) checks quotas and writes bindings under
+one lifecycle lease, then shows the conversation only after its row is
+committed. No reader sees an unbound row or opens a Harness for a row a crash
+could lose, and a failed attempt rolls back only the row, bindings, scratch and
+worktree hold it created. Cancellation stops the caller's wait, not the transaction. Each
+node owns its queued input and controls, while Durable owns the Harness and turns. Work survives a browser disconnect. Worker threads handle storage
 and other I/O, not mutations of nodes or Harnesses. Closed agent databases and
 optional journals retire in the trash Worker, which pins their parent before
 file discovery and closes its descriptors before returning. The caller fences
 recreation until retirement completes. Generated tool
 instructions check repository paths asynchronously at request boundaries.
-Presentation reads
-detached snapshots rather than live owners. Sidebar rows reuse the
-[shared Agent projection](../agent_metadata/README.md) and cached PR, model and
-effort metadata without record reads.
+[The tree view](tree_view.ts) composes detached metadata and live state when
+records or runtime state change. Sidebar reads reuse the
+[shared Agent projection](../agent_metadata/README.md) and cached tree rows;
+prompt digests capture the same inputs at the request boundary.
 The tree projection notifies visible browsers when admitted tags change. Tag
 mutations publish that in-memory change before awaiting their durable flush;
 HTTP success still means the flush completed. The same projection pushes unread

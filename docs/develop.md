@@ -22,17 +22,9 @@ For the agent workflow, evidence tiers, review and test-writing rules, see
 ## Validation
 
 `tests/check.sh` defines the CI-equivalent suite. Never run stages concurrently.
-Read tests/check.sh and test headers for environment quirks. tests/check.sh unsets
-CHAT_REPO_URL and RECURSE_SELF_DEPLOY; unset them when running individual tests too.
-
-```bash
-bun tests/checks/static.ts  # the static gate every stage runs first
-tests/check.sh web       # Prettier, Oxlint, frontend tests/types/build
-tests/check.sh ts        # backend Prettier/types/tests
-tests/check.sh browser   # rebuild web/dist, Playwright tests
-tests/check.sh provider  # reply-path tests against recorded providers
-tests/check.sh           # web, ts and browser in order
-```
+See the [test runner guide](../tests/README.md) for the stage list and linked
+suite notes. `tests/check.sh` unsets `CHAT_REPO_URL` and `RECURSE_SELF_DEPLOY`;
+unset them when running individual tests too.
 
 The Artifact browser group exercises commit hooks through real RTK as well as
 bash/codemode. It requires RTK 0.43.0 or newer on PATH; CI installs the pinned,

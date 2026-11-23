@@ -21,7 +21,11 @@ import {
   type CollectionSnapshot,
   type SessionFilesContext,
 } from "../../src/session_files";
-import { Config } from "../../src/config";
+import {
+  agentTempLeaf,
+  statePaths,
+  type StatePaths,
+} from "../../src/state_paths";
 import {
   VERSION,
   SOURCE_PUBLICATION,
@@ -40,7 +44,7 @@ interface ReplayCase {
 interface Harness {
   root: string;
   collection: string;
-  config: Config;
+  paths: StatePaths;
   snapshot: CollectionSnapshot;
   context: SessionFilesContext;
   cleanup(): void;
@@ -66,19 +70,19 @@ function harness(
   overrides: Partial<SessionFilesContext> = {},
 ): Harness {
   const root = mkdtempSync(join(tmpdir(), "session-files-ts-"));
-  const config = new Config({
-    env: {
+  const paths = statePaths(
+    {
       CHAT_DATA_DIR: join(root, "data"),
       RECURSE_TEMP_ROOT: join(root, "agent-temp"),
     },
-    cwd: root,
-    toolsDir: null,
-  });
+    root,
+    null,
+  );
   const tempKey = (testCase.temp_key as string | undefined) ?? recordedTempKey;
   const owner = (testCase.owner as string | undefined) ?? recordedOwner;
   const collection = join(
-    config.paths.AGENT_FILES_DIR,
-    config.agentTempLeaf(tempKey),
+    paths.AGENT_FILES_DIR,
+    agentTempLeaf(paths, tempKey),
     "uploads",
   );
   mkdirSync(collection, { recursive: true });
@@ -101,14 +105,14 @@ function harness(
   if (typeof session === "string") writeFileSync(sessionPath, session, "utf8");
   const snapshot = { collection, owner, temp_key: tempKey };
   const context: SessionFilesContext = {
-    config,
+    paths,
     boundSessionFile: () => (typeof session === "string" ? sessionPath : null),
     ...overrides,
   };
   return {
     root,
     collection,
-    config,
+    paths,
     snapshot,
     context,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
@@ -376,10 +380,10 @@ test("a reap during a preview read returns no bytes", async () => {
     ).not.toBeNull();
     const preview = read(context);
     await atCheck;
-    const parent = join(local.config.paths.AGENT_FILES_DIR);
+    const parent = join(local.paths.AGENT_FILES_DIR);
     const retired = join(parent, ".retired-temp-key");
     renameSync(
-      join(parent, local.config.agentTempLeaf(local.snapshot.temp_key)),
+      join(parent, agentTempLeaf(local.paths, local.snapshot.temp_key)),
       retired,
     );
     release();

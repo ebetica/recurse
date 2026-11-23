@@ -19,6 +19,9 @@ migration. Recurse updates may require editing a custom script.
   confirms them. `dialogs.ts` shares one tag, snooze or confirmation popover
   between sidebar actions and the optional draft control.
 - `sections.ts` draws sections; `script.ts` manages the worker and saved script.
+- [style.css](style.css) keeps the agent list, shared agent rows, section
+  actions, and tag and hold menus together. It ships in `app.css` so the
+  list and the active-agent dialog use the same row styles on first paint.
 - `actions.ts` and `hold.ts` handle tag actions and hold menus. App startup
   supplies `action-handlers.ts` with the tree refresh shared by link lookup
   and sidebar mutations, the draft action for sections and remote headers, and

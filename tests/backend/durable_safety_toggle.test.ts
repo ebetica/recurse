@@ -89,7 +89,7 @@ test("operator conversation actions require operator authentication", async () =
       expect((await call(path, { off: true }, headers)).status).toBe(403);
       expect(app.instance.conversations.load(cid)?.safety_off).not.toBe(true);
     }
-    for (const action of ["take-over", "pin", "promote"]) {
+    for (const action of ["take-over", "promote"]) {
       const target = `/api/conversations/${cid}/${action}`;
       for (const headers of [
         loopback,

@@ -13,7 +13,12 @@ import {
 import { basename, join } from "node:path";
 
 export const APP_CSS_SOURCES = [
+  "web/sidebar/style.css",
+  "web/conversation/style.css",
+  "web/thread-render/style.css",
   "web/composer/style.css",
+  "web/prompt/style.css",
+  "web/context/style.css",
   "web/theme.css",
   "web/panes/powerbar.css",
   "web/app.css",
@@ -76,9 +81,11 @@ export async function copyFrontendAssets(
   );
   await rm(join(outputDir, "excalidraw"), { recursive: true, force: true });
   await mkdir(join(outputDir, "excalidraw"));
-  await copyFile(
-    join(excalidraw, "index.css"),
+  await writeFile(
     join(outputDir, "excalidraw", "index.css"),
+    (await readFile(join(excalidraw, "index.css"), "utf8")) +
+      "\n" +
+      (await readFile(join(webDir, "image-preview/style.css"), "utf8")),
   );
   await cp(join(excalidraw, "fonts"), join(outputDir, "excalidraw", "fonts"), {
     recursive: true,

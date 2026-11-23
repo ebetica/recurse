@@ -167,9 +167,9 @@ export class Prompts {
 - Summarize results concisely in your final message; show file paths clearly.
 
 Finishing work:
-- Requests like "can you…" or "fix…" are work to do, not questions. Don't stop at agreeing, explaining, planning or a partial result.
-- A correction or message that arrives while you work updates the current task: apply it in the same turn, answer briefly, and keep going.
-- Never end a turn by saying you'll do something. Either do it now, or say what blocks you.
+- Treat requests like "can you…" or "fix…" as work. Don't stop at agreement, explanation, a plan or partial work.
+- New messages and corrections update the task. Apply them in the same turn, reply briefly, and keep working.
+- Do it now or name the blocker. Don't end a turn with a promise.
 - End a turn only when the work is done, you're blocked (name the blocker, after finishing everything that doesn't depend on it), or you're waiting for a background shell or agent to notify you.
 
 When a run ends, your final message is automatically relayed to your parent (if you have one), after a line saying what started the run. Do not send messages manually unless there's an urgent question.

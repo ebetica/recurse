@@ -17,6 +17,9 @@ updates; [dependencies.ts](dependencies.ts) prepares dependencies;
 and [../build_stamp.cli.ts](../build_stamp.cli.ts) define paths and build identity.
 [environment.ts](environment.ts) supplies server-safe subprocess environments.
 
+The default target URL comes from [state_paths.ts](../state_paths.ts) without
+loading model settings.
+
 Launcher-only modules use `.cli.ts`; shared helpers stay checked by the
 server-thread blocking rules. Public entrypoints keep their installed names.
 

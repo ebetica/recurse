@@ -27,6 +27,15 @@ export function checkAbort(signal: AbortSignal): void {
   if (signal.aborted) throw cancellation(signal);
 }
 
+/** Bun supports AbortSignal.any; the pinned backend types predate it. */
+export function anyAbortSignal(signals: AbortSignal[]): AbortSignal {
+  return (
+    AbortSignal as typeof AbortSignal & {
+      any(signals: AbortSignal[]): AbortSignal;
+    }
+  ).any(signals);
+}
+
 /** Cancel the wait, not the underlying work. The promise remains observed. */
 export function abortable<T>(
   work: PromiseLike<T>,

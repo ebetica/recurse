@@ -307,7 +307,7 @@ export const toolsTests: BrowserTest[] = [
         expect(box.whiteSpace).toBe("nowrap");
         expect(box.overflow).toBe("hidden");
         expect(box.pageOverflow).toBeLessThanOrEqual(0);
-        const panel = page.locator(".live-label");
+        const panel = page.locator(".status-bar-label");
         await panel.waitFor();
         const first = await panel.innerText();
         expect(first).toBe("Thinking");

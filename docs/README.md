@@ -15,13 +15,12 @@ commands in a terminal.
 
 - [Agent development workflow](agents/develop.md): evidence, review, test and docs procedures
 - [Test review](agents/test-review.md): the rules an agent applies to a PR's tests
-- [Code map](agents/repository-map.md): required reading before changing code
+- [Code map tool](../tools/code_map.ts): list a folder's source headers and subfolders
 - [AGENTS.md](../AGENTS.md): the standing agent rules
 
 ## Subsystems
 
-Each part's design lives in a `README.md` beside its code; the
-[code map](agents/repository-map.md) lists every part.
+Each part's README explains why its code is arranged as it is.
 
 - [Agents: the tree and each agent's lifecycle](../src/agents/README.md)
 - [Turns, prompts and compaction](../src/agents/durable/README.md)

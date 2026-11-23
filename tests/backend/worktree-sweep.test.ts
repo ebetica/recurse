@@ -10,7 +10,11 @@ import {
 import { join } from "node:path";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import { Router } from "../../src/web/router";
-import { registerTreeRoutes, type TreeRoutesDeps } from "../../src/web/tree";
+import {
+  cliIndex,
+  registerTreeRoutes,
+  type TreeRoutesDeps,
+} from "../../src/web/tree";
 import {
   loopbackAuthenticated,
   publishLoopbackToken,
@@ -121,7 +125,10 @@ test("enter returns while its independent sweeper is blocked on membership", asy
     cliIndex: async () => {
       reached();
       await gate;
-      return app.instance.conversations.cliIndex();
+      return cliIndex(
+        app.instance.conversations.allConvs({ withPending: false }),
+        app.instance.liveStatus,
+      );
     },
   } as Partial<TreeRoutesDeps> as TreeRoutesDeps);
   await publishLoopbackToken(env.CHAT_DATA_DIR!, served.running.port);

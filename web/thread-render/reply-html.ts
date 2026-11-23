@@ -150,12 +150,7 @@ function footerTail(fragment: DocumentFragment): void {
     } else if ((node as Element).matches("img, br, hr")) tail = null;
   }
   const match = tail?.data.match(/\S+\s*$/);
-  if (
-    !tail ||
-    !match ||
-    tail.parentElement?.closest("pre, table, .blocked-image")
-  )
-    return;
+  if (!tail || !match || tail.parentElement?.closest("pre, table")) return;
   const word =
     tail.parentElement?.closest("code") ?? tail.splitText(match.index!);
   const span = document.createElement("span");

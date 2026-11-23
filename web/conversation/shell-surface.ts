@@ -1,12 +1,11 @@
-// Owns shell/agent overlay state and working-activity affordances. Both chips
-// share one overlay slot, so at most one surface is open; thread paint renders
-// it.
+// Owns the background-shell and active-agent overlays. Both chips share one
+// overlay slot, so at most one surface is open; thread paint renders it.
 
 import { html, render, nothing, type TemplateResult } from "lit";
 import { state } from "../state.js";
 import {
   inputEl,
-  liveBarEl,
+  statusBarEl,
   msgsEl,
   phoneComposerFocused,
   scrollEl,
@@ -46,7 +45,7 @@ function liveChipKeepsFocus(event: MouseEvent): boolean {
   return (
     event.detail !== 0 &&
     phoneComposerFocused() &&
-    (event.currentTarget as HTMLElement).closest("#live-bar") !== null
+    (event.currentTarget as HTMLElement).closest("#status-bar") !== null
   );
 }
 
@@ -139,10 +138,10 @@ function positionSurface(): void {
   const button = activeSurfaceButton();
   if (!panel || !button) return;
 
-  const anchor = button.closest<HTMLElement>(".live-panel-box") || button;
+  const anchor = button.closest<HTMLElement>(".status-bar-box") || button;
   const anchorRect = anchor.getBoundingClientRect();
   const scrollRect = scrollEl.getBoundingClientRect();
-  // Invariant: The live bar sits above the composer, below the thread; its
+  // Invariant: The status bar sits above the composer, below the thread; its
   // surface opens upward from the thread's bottom edge.
   const anchorTop = Math.min(anchorRect.top, scrollRect.bottom);
   const viewportWidth =
@@ -208,7 +207,7 @@ export function agentSurfaceOpen(): boolean {
 function agentSurfaceButton(cid: string): HTMLButtonElement | null {
   const chip = `[data-agent-chip][data-agent-id="${CSS.escape(cid)}"]`;
   return (
-    liveBarEl.querySelector<HTMLButtonElement>(chip) ??
+    statusBarEl.querySelector<HTMLButtonElement>(chip) ??
     msgsEl.querySelector<HTMLButtonElement>(chip)
   );
 }
@@ -264,7 +263,7 @@ export function shellSurfaceOpen(): boolean {
 function shellSurfaceButton(cid: string): HTMLButtonElement | null {
   const chip = `[data-shell-chip][data-agent-id="${CSS.escape(cid)}"]`;
   return (
-    liveBarEl.querySelector<HTMLButtonElement>(chip) ??
+    statusBarEl.querySelector<HTMLButtonElement>(chip) ??
     msgsEl.querySelector<HTMLButtonElement>(chip)
   );
 }
@@ -517,25 +516,6 @@ document.addEventListener("click", (event) => {
     !active || active === document.body || shellOverlayEl.contains(active);
   if (!closeShellSurface(restore)) closeAgentSurface(restore);
 });
-
-// The centralized keymap treats visible live tool rows as a local layer: one
-// Escape folds them and returns to Normal, never interrupting the agent.
-export function workingActivityOpen(): boolean {
-  return Boolean(
-    msgsEl.querySelector(
-      ".activity-boundary.current .activity-body.open .work-activity",
-    ),
-  );
-}
-export function closeWorkingActivity(): boolean {
-  if (!workingActivityOpen()) return false;
-  const toggle = msgsEl.querySelector<HTMLButtonElement>(
-    '.activity-boundary.current .turn-eye[aria-expanded="true"]',
-  );
-  if (!toggle) return false;
-  toggle.click();
-  return true;
-}
 
 export function activeShells(conv: Conversation) {
   const shellView = conv.shells;

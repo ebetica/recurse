@@ -1,0 +1,8 @@
+/* Drawing editor (image-preview/editor.ts): Excalidraw fills the screen under one slim bar. */
+.drawing-editor { position: fixed; inset: 0; z-index: calc(var(--z-dialog) + 4); display: flex; flex-direction: column; background: var(--bg); }
+.drawing-editor-bar { display: flex; align-items: center; gap: var(--space-2); padding: var(--space-2) var(--space-3); padding-top: max(var(--space-2), env(safe-area-inset-top)); }
+.drawing-editor-bar [role="status"] { flex: 1; min-width: 0; color: var(--text); font-size: 0.78125rem; }
+.drawing-editor-actions { display: flex; gap: var(--space-2); }
+.drawing-editor-actions[hidden] { display: none; }
+.drawing-editor-stage { position: relative; flex: 1; min-height: 0; }
+.drawing-editor .excalidraw .default-sidebar-trigger { display: none; }

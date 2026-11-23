@@ -353,10 +353,10 @@ test("an off-ladder model create runs its first turn on that model", async () =>
     await until(async () => !app.instance.durable.isRunning(ladderCid));
     const opened = await app.instance.durable.open(ladderCid);
     await opened.reporter?.kick();
+    await Promise.all(app.detached);
     expect(
-      (await Bun.file(app.instance.config.paths.AVAILABLE_MODELS_FILE).json())
-        .turn_marks ?? {},
-    ).not.toHaveProperty("3");
+      await Bun.file(app.instance.config.paths.AVAILABLE_MODELS_FILE).exists(),
+    ).toBe(false);
     expect(turns).toHaveLength(turnCount);
     env.RECURSE_TEST_KEY = "loopback-only";
     const spec =

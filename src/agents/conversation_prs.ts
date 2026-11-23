@@ -4,8 +4,7 @@
 // never wait on GitHub and `prs_revision` marks snapshot changes.
 import type { ConversationRecord, ConversationStore } from "./storage";
 import type { TaskSet } from "../utils/tasks";
-import type { PrValue, WorkdirGit } from "../workdir_git";
-import { prIdentity } from "../pull_request";
+import { prIdentity, type PrValue, type PullRequests } from "../pull_request";
 
 interface LinkedPr {
   /** owner/repo, lower case. */
@@ -76,7 +75,7 @@ export class ConversationPrs {
   constructor(
     private readonly deps: {
       store: Pick<ConversationStore, "updatePrs" | "metadataSnapshot">;
-      git: Pick<WorkdirGit, "branchPr" | "pullRequest">;
+      prs: Pick<PullRequests, "branchPr" | "pullRequest">;
       /** The working directory the Changes pane shows, or null. */
       cwd(cid: string): Promise<string | null>;
       tasks: TaskSet;
@@ -135,7 +134,7 @@ export class ConversationPrs {
     if (!record) return;
     const cwd = await this.deps.cwd(cid);
     const branch =
-      cwd === null ? null : await this.deps.git.branchPr(cwd, reason, cid);
+      cwd === null ? null : await this.deps.prs.branchPr(cwd, reason, cid);
     const open = linkedPrs(record.prs).filter(
       (pr) => pr.source === "created" && pr.state === "open",
     );
@@ -152,7 +151,7 @@ export class ConversationPrs {
     if (!branch && !due.length) return;
     const found = new Map<string, PrValue | null>();
     for (const url of due) {
-      found.set(url, await this.deps.git.pullRequest(url, reason, cid));
+      found.set(url, await this.deps.prs.pullRequest(url, reason, cid));
       this.checked.delete(url);
       this.checked.set(url, this.deps.now());
       if (this.checked.size > CHECKED_LIMIT)

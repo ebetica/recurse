@@ -107,20 +107,18 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       await page.reload();
       await eye.click();
       expect(await series.count()).toBe(1);
-      const latest = page
-        .locator(".turn-thinking-toggle")
-        .filter({ hasText: "Checking the sample output" });
-      await browserExpect(latest).toHaveText(
-        "Thought for 7s · Checking the sample output",
-      );
-      const terminal = page
-        .locator(".turn-thinking-toggle")
-        .filter({ hasText: "Checking the final result" });
-      await browserExpect(terminal).toHaveText(
-        "Thought for 8s · Checking the final result",
-      );
-      const unreadable = page.getByRole("note", {
-        name: "Thought",
+      const latest = page.getByRole("button", {
+        name: "Thought for 7s",
+        exact: true,
+      });
+      await browserExpect(latest).toBeVisible();
+      const terminal = page.getByRole("button", {
+        name: "Thought for 8s",
+        exact: true,
+      });
+      await browserExpect(terminal).toBeVisible();
+      const unreadable = page.getByRole("button", {
+        name: "Thought for 10s",
         exact: true,
       });
       await browserExpect(unreadable).toHaveCount(0);
@@ -170,14 +168,8 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
             })),
           ),
       ).toEqual([
-        {
-          heading: "Thought for 6s · Planning the sample task",
-          nextTool: "Wait",
-        },
-        {
-          heading: "Thought for 7s · Checking the sample output",
-          nextTool: "Search",
-        },
+        { heading: "Thought for 6s", nextTool: "Wait" },
+        { heading: "Thought for 7s", nextTool: "Search" },
         { heading: "Thought for 10s", nextTool: "Update" },
       ]);
       thread.status = "running";
@@ -198,23 +190,23 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
         }),
       ];
       await page.reload();
-      const livePill = page.locator(".live-panel-box");
-      await livePill.waitFor();
-      expect(await livePill.innerText()).toContain("Drafting");
+      const statusBar = page.locator(".status-bar-box");
+      await statusBar.waitFor();
+      expect(await statusBar.innerText()).toContain("Drafting");
       expect(
-        (await livePill.locator(".live-thinking-head").innerText()).startsWith(
-          "Thinking ·",
-        ),
+        (
+          await statusBar.locator(".status-bar-thinking-head").innerText()
+        ).startsWith("Thinking ·"),
       ).toBeTrue();
       thread.rows.at(-1)!.thinking_title = "Analyzing settings and artifacts";
       await page.reload();
-      await livePill.waitFor();
-      expect(await livePill.locator(".live-thinking-title").innerText()).toBe(
-        "Analyzing settings and artifacts",
-      );
-      const pillLayout = await livePill.evaluate((element) => {
-        const title = element.querySelector(".live-thinking-title")!;
-        const elapsed = element.querySelector(".live-thinking-elapsed")!;
+      await statusBar.waitFor();
+      expect(
+        await statusBar.locator(".status-bar-thinking-title").innerText(),
+      ).toBe("Analyzing settings and artifacts");
+      const pillLayout = await statusBar.evaluate((element) => {
+        const title = element.querySelector(".status-bar-thinking-title")!;
+        const elapsed = element.querySelector(".thinking-elapsed")!;
         const style = getComputedStyle(element);
         const innerRight =
           element.getBoundingClientRect().right -
@@ -233,20 +225,22 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       );
       thread.rows.at(-1)!.thinking_title = "Drafting";
       await page.reload();
-      await livePill.waitFor();
-      expect(await page.locator(".live-thinking-summary").count()).toBe(0);
-      await livePill.locator(".live-thinking-copy").click();
-      const liveSummary = page.locator(".live-thinking-summary");
+      await statusBar.waitFor();
+      expect(await page.locator(".status-bar-thinking-summary").count()).toBe(
+        0,
+      );
+      await statusBar.locator(".status-bar-thinking-copy").click();
+      const liveSummary = page.locator(".status-bar-thinking-summary");
       await browserExpect(liveSummary).toBeVisible();
       await browserExpect
         .poll(() => liveSummary.innerText())
         .toBe("first live thought");
-      await livePill.locator(".live-thinking-copy").click();
+      await statusBar.locator(".status-bar-thinking-copy").click();
       liveThinkingText =
         "**Drafting**\nThe model is gathering the latest repository context before it chooses the smallest safe change. This long paragraph has no internal newlines and should keep its newest sentence visible.\n\nIt then compares the focused browser behavior with the settled thread and records the latest checkpoint so the operator can read what is happening now.";
       await page.reload();
-      await page.locator(".live-panel-box").waitFor();
-      await page.locator(".live-panel-box .live-thinking-copy").click();
+      await page.locator(".status-bar-box").waitFor();
+      await page.locator(".status-bar-box .status-bar-thinking-copy").click();
       await browserExpect(liveSummary).toBeVisible();
       await browserExpect
         .poll(() => liveSummary.innerText())
@@ -257,12 +251,14 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
             element.scrollHeight - element.clientHeight - element.scrollTop,
         ),
       ).toBeLessThanOrEqual(1);
-      await page.locator(".live-panel-box .live-thinking-copy").click();
-      expect(await page.locator(".live-thinking-summary").count()).toBe(0);
+      await page.locator(".status-bar-box .status-bar-thinking-copy").click();
+      expect(await page.locator(".status-bar-thinking-summary").count()).toBe(
+        0,
+      );
       await page.locator(".activity-group-toggle").click();
       expect(await page.locator(".live-thinking-step").count()).toBe(0);
-      const closedPill = page.locator(".live-panel-box");
-      const liveToggle = closedPill.locator(".live-thinking-copy");
+      const closedPill = page.locator(".status-bar-box");
+      const liveToggle = closedPill.locator(".status-bar-thinking-copy");
       expect(await liveToggle.getAttribute("aria-expanded")).toBe("false");
       await liveToggle.click();
       expect(await liveToggle.getAttribute("aria-expanded")).toBe("true");
@@ -272,8 +268,8 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       expect(await liveToggle.getAttribute("aria-expanded")).toBe("false");
       const pillBox = async () => {
         await waitForLayout(page);
-        const box = await page.locator(".live-panel-box").boundingBox();
-        if (!box) throw new Error("live pill is not laid out");
+        const box = await page.locator(".status-bar-box").boundingBox();
+        if (!box) throw new Error("status bar is not laid out");
         return { width: box.width, height: box.height };
       };
       const initialBox = await pillBox();
@@ -296,7 +292,7 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
         await page
           .locator(".turn-thinking-toggle .turn-thinking-line")
           .innerText(),
-      ).toMatch(/^Thought for 4s · Drafting$/);
+      ).toBe("Thought for 4s");
       thread.rows.at(-1)!.live = false;
       await page.reload();
       const toolEndBox = await pillBox();
@@ -311,7 +307,7 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
         }),
       ];
       await page.reload();
-      const noTimePill = page.locator(".live-panel-box");
+      const noTimePill = page.locator(".status-bar-box");
       await noTimePill.waitFor();
       expect(await noTimePill.innerText()).toContain("Drafting");
       expect(await noTimePill.innerText()).not.toContain("0s");
@@ -327,7 +323,7 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       await page.reload();
       const titleChangeBox = await pillBox();
       expect(titleChangeBox).toEqual(initialBox);
-      expect(await page.locator(".live-panel-box").innerText()).toContain(
+      expect(await page.locator(".status-bar-box").innerText()).toContain(
         "Reviewing",
       );
       expect(errors).toEqual([]);

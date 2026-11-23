@@ -2,7 +2,7 @@
 // Reject unimported state before building; agent work begins only at start().
 // Start storage, verify process cleanup, refresh spawn-workdir, then watcher.
 // Old groups must be gone before Durable resume; web app owns HTTP checks.
-import { lstat, stat } from "node:fs/promises";
+import { lstat } from "node:fs/promises";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import {
@@ -51,19 +51,11 @@ import { piRuntimeErrors } from "./runtime/runtime_factory";
 import { ConversationPrs } from "./conversation_prs";
 import { timeoutScheduler } from "./runtime/stall_timer";
 import { TurnPrep } from "./runtime/turn_prep";
-import {
-  createStoreHooks,
-  SpawnWorkdir,
-  SupervisorCreate,
-} from "./supervisor/create";
-import { deliveryStoreHooks, SupervisorDelivery } from "./supervisor/delivery";
+import { SpawnWorkdir, SupervisorCreate } from "./supervisor/create";
+import { SupervisorDelivery } from "./supervisor/delivery";
 import { SupervisorLifecycle } from "./supervisor/lifecycle";
 import { SupervisorReads } from "./supervisor/reads";
-import {
-  reapStoreHooks,
-  reapTempSeams,
-  SupervisorReap,
-} from "./supervisor/reap";
+import { reapTempSeams, SupervisorReap } from "./supervisor/reap";
 import { SupervisorRevive } from "./supervisor/revive";
 import { projectStatuses, TreeView } from "./tree_view";
 import { AnthropicAuth } from "../auth/anthropic";
@@ -109,6 +101,7 @@ import * as startupMetrics from "../observability/startup_metrics";
 import { retireConversationDetails } from "../tool_details";
 import { abortable, ignoringCancelled, TaskSet } from "../utils/tasks";
 import { gitEnv } from "../git";
+import { PullRequests } from "../pull_request";
 import { WorkdirGit } from "../workdir_git";
 import { finishedNotice, PushNotifications } from "../push_notifications";
 
@@ -127,7 +120,6 @@ const STORE_LEVELS: Record<string, number> = {
   projection_refreshed: INFO,
   external_key_binding_invalid: ERROR,
   projection_refresh_flush_failed: ERROR,
-  service_conversation_rollback_failed: WARNING,
 };
 
 /** Seconds from a Python-style float environment value. */
@@ -144,14 +136,6 @@ const sleepFor = (seconds: number, signal?: AbortSignal): Promise<void> =>
     : abortable(Bun.sleep(seconds * 1000), signal);
 
 const newHexId = (): string => randomUUID().replaceAll("-", "");
-
-async function isDir(path: string): Promise<boolean> {
-  try {
-    return (await stat(path)).isDirectory();
-  } catch {
-    return false;
-  }
-}
 
 /** The backend, assembled. Every member is the real implementation. */
 export async function buildInstance(options: InstanceOptions) {
@@ -197,12 +181,17 @@ export async function buildInstance(options: InstanceOptions) {
     termGraceMs: envSeconds(env, "RECURSE_PROCESS_TERM_GRACE", "2") * 1000,
     killGraceMs: envSeconds(env, "RECURSE_PROCESS_KILL_GRACE", "1") * 1000,
   });
+  const pullRequests = new PullRequests({
+    dataDir: paths.DATA_DIR,
+    env,
+    log: (event, fields) => logEvent(log.agents, INFO, event, { fields }),
+  });
   const workdirGit = new WorkdirGit({
     repoUrl: config.repoUrl,
     repoDir: paths.REPO_DIR,
     dataDir: paths.DATA_DIR,
     env,
-    log: (event, fields) => logEvent(log.agents, INFO, event, { fields }),
+    lastBranchPr: (wt, branch) => pullRequests.lastBranchPr(wt, branch),
   });
   const roots = resolveRoots(env);
   const mcpChecks = new McpChecks({
@@ -256,7 +245,6 @@ export async function buildInstance(options: InstanceOptions) {
   let nodes!: AgentNodes<AgentNode, NodeStore>;
   let agentTemp!: AgentTemp;
   let treeView!: TreeView;
-  let configActions!: ConfigActions;
   let spawnWorkdir!: SpawnWorkdir;
   let tree!: AgentTree;
   let prompts!: Prompts;
@@ -279,38 +267,12 @@ export async function buildInstance(options: InstanceOptions) {
     },
     agentStore,
     {
-      ...deliveryStoreHooks({
-        existing: (cid) => nodes.existing(cid),
-        node: (cid) => nodes.node(cid),
-      }),
-      ...createStoreHooks(
-        {
-          withModelGuard: (cid, fn, token) =>
-            configActions.withModelGuard(cid, fn, token),
-        },
-        { current: () => spawnWorkdir.current() } as SpawnWorkdir,
-      ),
-      ...reapStoreHooks(
-        { safeRemoveTempKey: (key) => agentTemp.safeRemoveTempKey(key) },
-        { dropNode: (cid) => nodes.dropNode(cid) },
-      ),
-      hasLiveShell: (cid) => (durableHost?.shells(cid).active_count ?? 0) > 0,
-      liveStatus: (cid) => {
-        if (
-          conversations.load(cid, { withPending: false, fields: ["backend"] })
-            ?.backend !== "durable"
-        )
-          return [null, null];
-        const live = durableHost?.metadata(cid);
-        return [live?.status ?? null, live?.active_run ?? null];
+      inbox: (cid) => nodes.existing(cid)?.inboxMessages() ?? [],
+      defaultSpawnWorkdir: () => spawnWorkdir.current(),
+      onRowsChanged: (cid) => {
+        if (cid === null) void treeView.rebuildAll();
+        else treeView.refresh(cid);
       },
-      // Invariant: Read lazily: the store is built before the Durable host.
-      durableSafetyOff: (cid): boolean | undefined =>
-        durableHost?.safetyReviewOff(cid),
-      treeRefresh: (entry) => treeView.refresh(entry),
-      treeInvalidate: () => treeView.invalidate(),
-      treeRebuild: (entries) => treeView.rebuildAll(entries),
-      treeDiscard: (cid) => treeView.discard(cid),
 
       log: (event, fields) => {
         if (event === "conversation_records_scanned")
@@ -320,6 +282,11 @@ export async function buildInstance(options: InstanceOptions) {
     },
     config,
   );
+  const configActions = new ConfigActions({
+    store: conversations,
+    node: (cid) => nodes.node(cid),
+    config,
+  });
   const serviceBindings = new ServiceBindings(
     {
       externalKeyDir: paths.EXTERNAL_KEY_DIR,
@@ -340,7 +307,23 @@ export async function buildInstance(options: InstanceOptions) {
   const skills = new SkillContext(() =>
     makeSkillRegistry(config, roots.piAgent),
   );
+  function liveStatus(cid: string): [string | null, string | null] {
+    if (
+      conversations.load(cid, { withPending: false, fields: ["backend"] })
+        ?.backend !== "durable"
+    )
+      return [null, null];
+    const live = durableHost?.metadata(cid);
+    return [live?.status ?? null, live?.active_run ?? null];
+  }
+  const refreshTreeRow = (cid: string) => treeView.refresh(cid);
   treeView = new TreeView({
+    records: conversations,
+    node: (cid) => nodes.existing(cid),
+    liveStatus,
+    durableSafetyOff: (cid) => durableHost?.safetyReviewOff(cid),
+    hasLiveShell: (cid) => (durableHost?.shells(cid).active_count ?? 0) > 0,
+    logCaptureFailure: conversations.hooks.log,
     skills: {
       contextForWorkdirLoopSafe: (workdir) =>
         skills.contextForWorkdirLoopSafe(workdir),
@@ -395,20 +378,21 @@ export async function buildInstance(options: InstanceOptions) {
     },
     expireDeletedBin: () => deletedBin.expire(deletedPaths),
   });
-  agentTemp = new AgentTemp(config, {
+  agentTemp = new AgentTemp(paths, {
     conversations,
+    configActions,
     logger: log.agentTemp,
     ownerAdmits: (cid) => nodes.ownerAdmits(cid),
-    hasCollection: (conv) => collectionSnapshot(conv, config) !== null,
+    hasCollection: (conv) => collectionSnapshot(conv, paths) !== null,
     promptSidecarNames: tempSeams.promptSidecarNames,
     expireRetained: tempSeams.expireRetained,
   });
-  const drafts = new AttachmentDrafts(config, conversations, agentTemp);
+  const drafts = new AttachmentDrafts(paths, conversations, agentTemp);
   agentTemp.attachDrafts(drafts);
   const parked = new ParkedActions({
     load: (cid) => conversations.load(cid),
     admitContextAction: async (cid, action, park) => {
-      const admitted = await conversations.withSafetyGuard(cid, async () =>
+      const admitted = await configActions.withNodeGuard(cid, async () =>
         durable.owns(conversations.load(cid))
           ? { native: true, parked: null }
           : { native: false, parked: await park() },
@@ -437,20 +421,8 @@ export async function buildInstance(options: InstanceOptions) {
   agentTools = await AgentTools.create({
     config,
     skills,
-    gitReady: async () => {
-      const local = await isDir(config.repoUrl);
-      if (
-        local &&
-        !(await stat(join(config.repoUrl, ".git")).catch(() => null))
-      )
-        return isDir(config.repoUrl);
-      return (
-        (await stat(join(paths.REPO_DIR, ".git")).catch(() => null)) !== null
-      );
-    },
-    targetIsGitRepo: async () =>
-      !(await isDir(config.repoUrl)) ||
-      (await stat(join(config.repoUrl, ".git")).catch(() => null)) !== null,
+    gitReady: () => workdirGit.ready(),
+    targetIsGitRepo: () => workdirGit.targetIsGitRepo(),
     loadConversation: async (cid) => conversations.load(cid),
     effectiveWorkdir: (conv) => conversations.effectiveWorkdir(conv),
     agentTempPath: (conv) => agentTemp.agentTempPath(conv),
@@ -492,15 +464,10 @@ export async function buildInstance(options: InstanceOptions) {
   const turnPrep = new TurnPrep({
     conversations,
     existingNode: (cid) => nodes.existing(cid),
-    config,
+    paths,
   });
 
   const importFinalized = (): boolean | null => lifecycle.importFinal;
-  configActions = new ConfigActions({
-    store: conversations,
-    node: (cid) => nodes.node(cid),
-    config,
-  });
   const nodeDeps: AgentNodeDeps = {
     nodes: null as never,
     conversations,
@@ -513,6 +480,7 @@ export async function buildInstance(options: InstanceOptions) {
     modelChanged: (cid) => durableHost?.invalidatePromptCache(cid),
     actionRequest: (kind, cid) => parked.actionRequest(kind, cid),
     requestRun: (cid) => delivery.requestRun(cid),
+    refreshTreeRow,
     tasks,
     scheduler: timeoutScheduler,
     nodeLog: log.node,
@@ -575,7 +543,7 @@ export async function buildInstance(options: InstanceOptions) {
       return turnPrep.uploadParts(
         text,
         cid,
-        conv === null ? null : collectionSnapshot(conv, config),
+        conv === null ? null : collectionSnapshot(conv, paths),
         attachmentIds,
       );
     },
@@ -596,7 +564,9 @@ export async function buildInstance(options: InstanceOptions) {
       }
       return [...byId.keys()].sort((a, b) => depth.get(b)! - depth.get(a)!);
     },
-    claimWorkdir: (cid, cwd, signal) => worktrees.hold(cwd, cid, signal, true),
+    claimWorkdir: async (cid, cwd, signal) => {
+      await worktrees.hold(cwd, cid, signal, true);
+    },
     // Invariant: A side conversation runs on its parent's model: the parent's
     // Harness has one compaction policy, sized to the parent's window.
     settings: (conv) =>
@@ -655,7 +625,7 @@ export async function buildInstance(options: InstanceOptions) {
       return snapshotRecursePrompt(
         prompts,
         conv,
-        conversations.captureDigestInputs(),
+        treeView.captureDigestInputs(),
         cwd,
         memory,
         resources,
@@ -668,8 +638,8 @@ export async function buildInstance(options: InstanceOptions) {
       (await processes.cleanupProcessObject(proc)) !== false,
     log: (event, fields, level = INFO) =>
       logEvent(log.agents, level, event, { fields }),
-    safetyChanged: (cid) => conversations.refreshTreeRow(cid),
-    rowChanged: (cid) => conversations.refreshTreeRow(cid),
+    safetyChanged: refreshTreeRow,
+    rowChanged: refreshTreeRow,
     prsCreated: (cid, urls, since) =>
       conversationPrs.recordCreated(cid, urls, since),
     titleSettings: () => config.levels.resolveEffortLevel(1),
@@ -730,7 +700,7 @@ export async function buildInstance(options: InstanceOptions) {
       return outcome;
     },
     promotion: (cid, state) =>
-      conversations.withConfigurationMetadataGuard(cid, async (token) => {
+      configActions.withConfigurationMetadataGuard(cid, async (token) => {
         const conv = conversations.load(cid, { withPending: false });
         if (conv === null || typeof conv.side_of !== "string") return;
         if (state === "running") {
@@ -745,7 +715,7 @@ export async function buildInstance(options: InstanceOptions) {
     // Invariant: A promoted subagent keeps the parent's model and effort,
     // which it ran on as a side conversation.
     promoted: async (cid) => {
-      await conversations.withConfigurationMetadataGuard(cid, async (token) => {
+      await configActions.withConfigurationMetadataGuard(cid, async (token) => {
         const conv = conversations.load(cid, { withPending: false });
         const parent = conv?.side_of;
         if (conv === null || typeof parent !== "string")
@@ -810,7 +780,7 @@ export async function buildInstance(options: InstanceOptions) {
   durableHost = durable;
   const conversationPrs = new ConversationPrs({
     store: conversations,
-    git: workdirGit,
+    prs: pullRequests,
     // Invariant: A conversation deleted or closing meanwhile links nothing.
     cwd: async (cid) => {
       const conv = conversations.load(cid, { withPending: false });
@@ -837,6 +807,7 @@ export async function buildInstance(options: InstanceOptions) {
   create = new SupervisorCreate({
     worktrees,
     conversations,
+    configActions,
     serviceBindings,
     nodes,
     lifecycle: lease,
@@ -847,6 +818,7 @@ export async function buildInstance(options: InstanceOptions) {
     agentTemp,
     bumpTreeTopology: () => tree.bumpTreeTopology(),
     log: log.agents,
+    rollbackLog: log.store,
     now,
     sleep: sleepFor,
     tasks: createTasks,
@@ -861,6 +833,7 @@ export async function buildInstance(options: InstanceOptions) {
     conversations,
     nodes,
     agentStore,
+    refreshTreeRow,
     configActions,
     lifecycle: lease,
     buildSubmission: piRuntimeErrors.buildSubmission,
@@ -895,9 +868,9 @@ export async function buildInstance(options: InstanceOptions) {
       dataDir: () => paths.DATA_DIR,
       binding: piBinding,
     },
-    config,
+    paths,
     sessionFiles: {
-      config,
+      paths,
       boundSessionFile: (sessionId, file, cwd) =>
         backend.boundSessionFile(sessionId, file, cwd),
     },
@@ -945,6 +918,7 @@ export async function buildInstance(options: InstanceOptions) {
   reap = new SupervisorReap({
     errors: { ProcessCleanupPending, TakenOverReapBlocked },
     conversations,
+    configActions,
     serviceBindings,
     nodes,
     lifecycle: lease,
@@ -1036,6 +1010,7 @@ export async function buildInstance(options: InstanceOptions) {
   });
   const switchover = new PiSwitchover({
     conversations,
+    configActions,
     durable,
     nodes,
     parked,
@@ -1088,6 +1063,7 @@ export async function buildInstance(options: InstanceOptions) {
     processes,
     mcpChecks,
     workdirGit,
+    pullRequests,
     conversationPrs,
     backend,
     lease,
@@ -1103,6 +1079,7 @@ export async function buildInstance(options: InstanceOptions) {
     retirement,
     skills,
     treeView,
+    liveStatus,
     sidebarRows,
     sidebarScript,
     agentTemp,

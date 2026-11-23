@@ -18,11 +18,11 @@ import {
   openSettingsPanel,
   expectHitCorners,
 } from "./common";
-import { enableTagSidebar } from "./test_sidebar";
+import { enableTagSidebar } from "./sidebar_support";
 import { loadRecording } from "../backend/fixtures/model_response/replay";
 
 export const tests: BrowserTest[] = [
-  // Regression: #3445 a failed remote listing keeps the linked remote; #3112 cancel stalled discovery bodies after headers; #3067 keep the remote Stop generation live until cancellation. (also Feature #2702 connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures; #2793 remote sends work through ingresses that reject chunked bodies; #2729 the optimistic Queued panel precedes keyboard Stop; #3002 remote sections, tags and tag actions.)
+  // Regression: #3445 a failed remote listing keeps the linked remote; #3112 cancel stalled discovery bodies after headers; #3067 keep the remote Stop generation live until cancellation. (also Feature #2702 connected agents support the home's operator actions, including safety, take-over, clear and delete, without exposing home failures; #2793 remote sends work through ingresses that reject chunked bodies; #2729 the optimistic Queued status bar precedes keyboard Stop; #3002 remote sections, tags and tag actions.)
   async function test_remote_sidebar(browser, base) {
     const remote = await startServer({ auth: true });
     let omitTagSupport = false;
@@ -998,7 +998,7 @@ export const tests: BrowserTest[] = [
       });
       await page.locator("#input").fill("Run until stopped");
       await page.locator("#send").click();
-      await page.locator(".working.live-panel").waitFor();
+      await page.locator(".working.status-bar").waitFor();
       await page.locator("#conv-status.running").waitFor();
       await runningTree;
       await browserExpect

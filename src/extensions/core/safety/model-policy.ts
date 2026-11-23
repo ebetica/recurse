@@ -2,11 +2,14 @@ import type {
   ClassifierApi,
   ClassifierModel,
   Model,
+  Models,
 } from "@earendil-works/pi-ai";
-import { shippedReviewModels } from "../../../safety_review_models";
+import { shippedReviewModels } from "../../../safety_review";
+import { withTimeout } from "../../../utils/index";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export const MODEL_POLICY_ENV = "RECURSE_MODEL_POLICY";
+export const REVIEW_TIMEOUT_MS = 60_000;
 
 export type ReviewEffort =
   | "minimal"
@@ -26,7 +29,7 @@ type PolicyCandidate = PolicyModel & {
 };
 
 type PolicyRoute = PolicyCandidate & {
-  /** Ordered reviewer fallbacks; only the reviewer route may carry these. */
+  /** Alternate routes for an unavailable reviewer; only the reviewer route may carry these. */
   candidates?: readonly PolicyCandidate[];
 };
 
@@ -203,7 +206,7 @@ function sameModel(
 
 export type ReviewModel = Model<any> | ClassifierModel<ClassifierApi>;
 
-export type ReviewSelection = {
+type ReviewSelection = {
   model: ReviewModel;
   effort: ReviewEffort;
 };
@@ -291,4 +294,30 @@ export function pickReviewerCandidates(
     }
   }
   return selected.length ? selected : undefined;
+}
+
+/** Select one trusted route before any review request. Null means none is signed
+ * in; undefined means no trusted model resolves. Auth check errors stay on the
+ * selected provider. */
+export async function pickReviewer(
+  ctx: ExtensionContext,
+  state: TrustedModelPolicyState,
+  purpose: "reviewer" | "summary",
+  models: Pick<Models, "checkAuth">,
+): Promise<ReviewSelection | null | undefined> {
+  const candidates = pickReviewerCandidates(ctx, state, purpose);
+  if (!candidates || candidates.length === 1) return candidates?.[0];
+  for (const candidate of candidates) {
+    try {
+      const configured = await withTimeout(
+        (signal) => models.checkAuth(candidate.model.provider, { signal }),
+        REVIEW_TIMEOUT_MS,
+        ctx.signal,
+      );
+      if (configured) return candidate;
+    } catch {
+      return candidate;
+    }
+  }
+  return null;
 }

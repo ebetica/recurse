@@ -77,7 +77,7 @@ export async function buildRoutesApp(
       },
       async releaseAttachment(aid) {
         const conv = records.get(cid);
-        const snap = conv ? collectionSnapshot(conv, temp.config) : null;
+        const snap = conv ? collectionSnapshot(conv, temp.paths) : null;
         if (this.reaping || snap === null) return false;
         return removeFile(snap.collection, cid, aid);
       },
@@ -109,10 +109,10 @@ export async function buildRoutesApp(
   };
   const reads = new SupervisorReads({
     claims,
-    config: temp.config,
+    paths: temp.paths,
   } as unknown as ReadsDeps);
   const artifactCtx: artifacts.ArtifactContext = {
-    artifactsDir: temp.config.paths.ARTIFACTS_DIR,
+    artifactsDir: temp.paths.ARTIFACTS_DIR,
     trashDir: paths.TRASH_DIR,
   };
   const delivered: [string, string][] = [];
@@ -123,7 +123,7 @@ export async function buildRoutesApp(
       });
   };
   const filesDeps: FilesRoutesDeps = {
-    themesFile: temp.config.paths.THEMES_FILE,
+    themesFile: temp.paths.THEMES_FILE,
     imageCwd: async (cid) => {
       const conv = records.get(cid);
       return !conv || nodes.get(cid)?.reaping

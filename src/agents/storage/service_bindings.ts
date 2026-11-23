@@ -100,6 +100,26 @@ export class ServiceBindings {
     private readonly ids: () => string,
   ) {}
 
+  /** Unlink a leaf only while it is still the one this create attempt wrote. */
+  private async unbindCreateLeaf(
+    path: string,
+    expected: ConversationRecord,
+  ): Promise<void> {
+    const record = await readExternalLeaf(path);
+    if (record === unreadable)
+      throw new ServiceStorageUnavailable("service binding unavailable");
+    if (
+      record !== null &&
+      record !== malformed &&
+      Object.entries(expected).every(
+        ([field, value]) => record[field] === value,
+      )
+    )
+      await unlink(path).catch((error: unknown) => {
+        if (!missing(error)) throw error;
+      });
+  }
+
   private externalPath(principal: string, key: string): string {
     if (validateExternalKey(key) === null)
       throw new Error("external_key is required");
@@ -148,13 +168,19 @@ export class ServiceBindings {
     principal: string,
     key: string,
     cid: string,
+    createToken?: string,
   ): Promise<void> {
     const path = this.externalPath(principal, key);
     const record = await readExternalLeaf(path);
     if (record === null) {
       await atomicJson(
         path,
-        { principal, external_key: key, conversation_id: cid },
+        {
+          principal,
+          external_key: key,
+          conversation_id: cid,
+          ...(createToken === undefined ? {} : { create_token: createToken }),
+        },
         this.ids,
       );
       return;
@@ -162,6 +188,7 @@ export class ServiceBindings {
     if (record === malformed) this.conflict(path, "malformed");
     if (record === unreadable) this.conflict(path, "unreadable");
     if (
+      createToken === undefined &&
       record.principal === principal &&
       record.external_key === key &&
       record.conversation_id === cid
@@ -173,8 +200,16 @@ export class ServiceBindings {
     principal: string,
     key: string,
     cid: string,
+    createToken?: string,
   ): Promise<void> {
     const path = this.externalPath(principal, key);
+    if (createToken !== undefined)
+      return this.unbindCreateLeaf(path, {
+        principal,
+        external_key: key,
+        conversation_id: cid,
+        create_token: createToken,
+      });
     const record = await readExternalLeaf(path);
     if (record === unreadable) {
       this.hooks.log?.("external_key_binding_invalid", {
@@ -252,10 +287,19 @@ export class ServiceBindings {
       await handle?.close();
     }
   }
-  async bindServiceConversation(principal: string, cid: string): Promise<void> {
+  async bindServiceConversation(
+    principal: string,
+    cid: string,
+    createToken?: string,
+  ): Promise<void> {
     const path = this.servicePath(cid);
     if (!path || typeof principal !== "string" || !PRINCIPAL_RE.test(principal))
       throw new Error("invalid service conversation binding");
+    // Invariant: a create attempt writes a fresh leaf; it never adopts one.
+    if (createToken !== undefined && (await readExternalLeaf(path)) !== null)
+      throw new ServiceStorageUnavailable(
+        "conversation already has a service binding",
+      );
     const existing = await this.readService(path);
     if (existing !== null && existing !== principal)
       throw new Error("conversation is owned by another service");
@@ -265,7 +309,14 @@ export class ServiceBindings {
       `.${cid}.json.${this.ids()}.tmp`,
     );
     try {
-      await Bun.write(temp, pyCompactJson({ principal }));
+      await Bun.write(
+        temp,
+        pyCompactJson(
+          createToken === undefined
+            ? { principal }
+            : { principal, create_token: createToken },
+        ),
+      );
       await rename(temp, path);
     } finally {
       await unlink(temp).catch((error: unknown) => {
@@ -310,11 +361,19 @@ export class ServiceBindings {
         count++;
     return count;
   }
-  async unbindServiceConversation(cid: string): Promise<void> {
+  async unbindServiceConversation(
+    cid: string,
+    createdBy?: { principal: string; createToken: string },
+  ): Promise<void> {
     const path = this.servicePath(cid);
-    if (path)
-      await unlink(path).catch((error: unknown) => {
-        if (!missing(error)) throw error;
+    if (!path) return;
+    if (createdBy)
+      return this.unbindCreateLeaf(path, {
+        principal: createdBy.principal,
+        create_token: createdBy.createToken,
       });
+    await unlink(path).catch((error: unknown) => {
+      if (!missing(error)) throw error;
+    });
   }
 }

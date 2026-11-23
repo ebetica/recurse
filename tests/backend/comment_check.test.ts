@@ -170,6 +170,11 @@ describe("comment policy", () => {
         (await captureFixture(["git", "init", "-q"], { cwd })).exitCode,
       ).toBe(0);
       put("src/correct.ts", fixture("correct"));
+      put(
+        "web/index.html",
+        "<!doctype html>\n<!-- Browser entry. -->\n<html></html>\n",
+      );
+      put("scripts/check.sh", "#!/usr/bin/env bash\n# Run the check.\ntrue\n");
       for (const file of [
         "web/vendor/a.js",
         "web/dist/a.js",
@@ -188,7 +193,7 @@ describe("comment policy", () => {
               "add",
               "src",
               "web",
-              "scripts/patches",
+              "scripts",
               "tests",
               "ignored.ts.lock",
               "linked.js",
@@ -201,20 +206,22 @@ describe("comment policy", () => {
       expect((await run()).stdout.toString()).toContain("Comment warnings: 0");
       put(".prettierrc", '{"printWidth": 10}');
       expect((await run("--strict")).exitCode).toBe(0);
-      for (const file of [
+      const headerBaseline = "tests/checks/source_header_baseline.json";
+      const missingHeaders = [
+        "src/a.tsx",
+        "src/extensions/a.cjs",
         "src/local.ts",
         "tools/a.mjs",
-        "src/extensions/a.cjs",
+        "web/a.css",
         "web/a.jsx",
-        "src/a.tsx",
-        "tests/a.js",
-      ])
+      ];
+      put(headerBaseline, JSON.stringify(missingHeaders));
+      for (const file of missingHeaders)
         put(
           file,
-          file.startsWith("tests/")
-            ? "// test comment\n"
-            : "const undocumented = 1;",
+          file.endsWith(".css") ? "body {}\n" : "const undocumented = 1;",
         );
+      put("tests/a.js", "// test comment\n");
       expect(
         (
           await captureFixture(
@@ -225,8 +232,10 @@ describe("comment policy", () => {
               "tools",
               "src/extensions",
               "web/a.jsx",
+              "web/a.css",
               "src/a.tsx",
               "tests/a.js",
+              headerBaseline,
             ],
             { cwd },
           )
@@ -244,6 +253,37 @@ describe("comment policy", () => {
           "By directory: tests=1",
         ]);
       }
+      put("tests/a.js", "export {};\n");
+      put("web/a.css", "/* Browser shell styles. */\nbody {}\n");
+      const improved = await run("--strict");
+      expect(improved.exitCode).toBe(0);
+      expect(improved.stdout.toString()).toContain(`Shrank ${headerBaseline};`);
+      expect(
+        JSON.parse(readFileSync(join(cwd, headerBaseline), "utf8")),
+      ).toEqual(missingHeaders.filter((file) => file !== "web/a.css"));
+
+      const tree = await captureFixture(
+        [
+          process.execPath,
+          new URL("../../tools/code_map.ts", import.meta.url).pathname,
+          "web",
+        ],
+        { cwd },
+      );
+      expect(tree.exitCode).toBe(0);
+      expect(tree.stdout.toString()).toBe(
+        "web/\n  a.css — Browser shell styles.\n  a.jsx — Missing source header\n  index.html — Browser entry.\n",
+      );
+
+      put(
+        "web/a.css",
+        "/* Apache License\n * Version 2.0, January 2004\n */\nbody {}\n/* This is not a leading header. */\n",
+      );
+      const regressed = await run("--strict");
+      expect(regressed.exitCode).toBe(1);
+      expect(regressed.stdout.toString()).toContain(
+        "web/a.css:1 missing-header add a leading comment describing this file's job",
+      );
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }

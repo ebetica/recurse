@@ -8,7 +8,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { createConfig } from "../../../../src/config";
+import { statePaths } from "../../../../src/state_paths";
 import type { ConversationRecord } from "../../../../src/agents/storage/conversation_store";
 import {
   AgentTemp,
@@ -17,6 +17,8 @@ import {
 import { AttachmentDrafts } from "../../../../src/agents/runtime/attachment_drafts";
 import { logger } from "../../../../src/observability/runtime_logging";
 import { flockExclusive } from "../../../../src/utils/flock";
+import { timeoutScheduler } from "../../../../src/agents/runtime/stall_timer";
+import { buildWorld } from "../agent_node/world";
 import { treeSnapshot } from "../tree_snapshot";
 
 const NOW = 1_790_000_000.5;
@@ -119,7 +121,7 @@ function counter(width: number): () => string {
   return () => (++n).toString(16).padStart(width, "0");
 }
 
-/** Build an AgentTemp + AttachmentDrafts pair over an in-memory store. */
+/** Replay metadata from the fixture map but serialize through real guards. */
 export function build(
   root: string,
   spec: TempSpec,
@@ -127,21 +129,22 @@ export function build(
   fenced = new Set(spec.fenced ?? []),
   extra: Partial<AgentTempDeps> = {},
 ) {
-  const config = createConfig({ env: { CHAT_DATA_DIR: root }, cwd: root });
-  Object.assign(config.paths, layout(root, spec.split_runtime));
+  const paths = statePaths({ CHAT_DATA_DIR: root }, root);
+  Object.assign(paths, layout(root, spec.split_runtime));
+  const locks = buildWorld({
+    root: paths.DATA_DIR,
+    lockPaths: {
+      titleLockDir: paths.TITLE_LOCK_DIR,
+      muteLockDir: paths.MUTE_LOCK_DIR,
+    },
+    scheduler: timeoutScheduler,
+    sink: { write: () => {} },
+    seedPiModels: false,
+  });
   const records = new Map<string, ConversationRecord>();
   for (const c of spec.conversations ?? [])
     records.set(String(c.id), structuredClone(c));
   const rows = new Set(spec.rows ?? [...records.keys()]);
-  const through = <T>(_cid: string, fn: (...a: never[]) => Promise<T>) =>
-    fn(...([{}, {}] as never[]));
-  // The delete-state guard is a real per-owner mutex, as reap relies on it.
-  let tail: Promise<unknown> = Promise.resolve();
-  const deleteGuard = <T>(_cid: string, fn: (...a: never[]) => Promise<T>) => {
-    const run = tail.then(() => fn(...([{}, {}] as never[])));
-    tail = run.catch(() => {});
-    return run;
-  };
   const conversations = {
     load: (cid: string) => {
       const record = records.get(cid);
@@ -152,12 +155,13 @@ export function build(
     },
     allConvs: () => [...records.values()].map((r) => structuredClone(r)),
     convRowExists: (cid: string) => rows.has(cid),
-    withTitleGuard: through,
-    withMuteGuard: through,
-    withPermanentDeleteStateGuard: deleteGuard,
+    withTitleGuard: locks.conversations.withTitleGuard.bind(
+      locks.conversations,
+    ),
   };
-  const temp = new AgentTemp(config, {
-    conversations: conversations as never,
+  const temp = new AgentTemp(paths, {
+    conversations,
+    configActions: locks.configActions,
     logger: logger("agents.agent_temp", { write: () => {} }),
     ownerAdmits: (cid) => !fenced.has(cid),
     hasCollection: (conv) => !conv._no_collection,
@@ -169,7 +173,7 @@ export function build(
     ...extra,
     ids: () => opIndex().toString(16).padStart(32, "0"),
   });
-  const drafts = new AttachmentDrafts(config, conversations as never, temp, {
+  const drafts = new AttachmentDrafts(paths, conversations as never, temp, {
     now: () => NOW,
   });
   temp.attachDrafts(drafts);
@@ -193,9 +197,6 @@ export async function runSpec(root: string, spec: TempSpec) {
           break;
         case "pool_scratch":
           result = await temp.newPoolScratch(s("owner"));
-          break;
-        case "workdir_file":
-          result = temp.workdirFile(s("key"));
           break;
         case "uploads_dir":
           result = temp.uploadsDir(s("key"));

@@ -1,6 +1,6 @@
-// Owns lazy thinking disclosures and the live pill. Tool and reply projections
+// Owns lazy thinking disclosures and the status bar. Tool and reply projections
 // use the original thinking row's identity, so a new offset or series index
-// does not close an open disclosure. The pill keeps its expansion choice for
+// does not close an open disclosure. The bar keeps its expansion choice for
 // the run and fetches enough to know whether there is readable prose to open.
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
@@ -31,7 +31,7 @@ class ThinkingStore {
     open: [],
     text: [],
   };
-  private pill: {
+  private statusBar: {
     key: string | null;
     text: string;
     conversation: string;
@@ -53,8 +53,8 @@ class ThinkingStore {
     if (!this.entries.has(key)) this.entries.set(key, {});
     return this.entries.get(key)!;
   }
-  isPill(key: string, cid: string): boolean {
-    return this.pill?.key === key && this.pill.conversation === cid;
+  isStatusBarThought(key: string, cid: string): boolean {
+    return this.statusBar?.key === key && this.statusBar.conversation === cid;
   }
   private prune(key: string): void {
     const entry = this.get(key);
@@ -94,19 +94,19 @@ class ThinkingStore {
     }
     keys.push(key);
   }
-  private pillFor(conv: Conversation) {
-    const pill = this.pill;
-    return pill?.conversation === conv.id &&
-      pill.generation === conv.message_log_generation &&
-      pill.run === conv.active_run_start
-      ? pill
+  private statusBarFor(conv: Conversation) {
+    const statusBar = this.statusBar;
+    return statusBar?.conversation === conv.id &&
+      statusBar.generation === conv.message_log_generation &&
+      statusBar.run === conv.active_run_start
+      ? statusBar
       : null;
   }
-  clearPill(): void {
-    if (this.pill?.key) this.cancelRefresh(this.pill.key);
-    this.pill = null;
+  clearStatusBar(): void {
+    if (this.statusBar?.key) this.cancelRefresh(this.statusBar.key);
+    this.statusBar = null;
   }
-  syncPill(
+  syncStatusBar(
     conv: Conversation,
     row: LiveActivityRow | undefined,
     formatBody: (text: string) => string,
@@ -123,11 +123,11 @@ class ThinkingStore {
           has_thinking: row.has_thinking,
         }
       : null;
-    const previous = this.pillFor(conv);
+    const previous = this.statusBarFor(conv);
     const expanded = previous?.expanded ?? false;
     const key = entry && this.key(conv, entry);
-    if (this.pill?.key && this.pill.key !== key)
-      this.cancelRefresh(this.pill.key);
+    if (this.statusBar?.key && this.statusBar.key !== key)
+      this.cancelRefresh(this.statusBar.key);
     if (entry && key && this.get(key)?.source !== entry.offset)
       this.load(conv.id, entry, key, true);
     const current = key ? this.get(key) : undefined;
@@ -139,7 +139,7 @@ class ThinkingStore {
       (previous?.expanded && (current?.loading || current?.retrying)
         ? previous.text
         : "");
-    this.pill = {
+    this.statusBar = {
       key,
       text,
       conversation: conv.id,
@@ -151,12 +151,12 @@ class ThinkingStore {
     this.scheduleRefresh(conv.id, entry, key);
     return { key, text, expanded };
   }
-  togglePill(key: string): void {
+  toggleStatusBar(key: string): void {
     const conv = state.currentConv;
-    const pill = this.pill;
-    if (pill?.key !== key || conv?.id !== pill.conversation) return;
-    pill.expanded = !pill.expanded;
-    if (pill.expanded) {
+    const statusBar = this.statusBar;
+    if (statusBar?.key !== key || conv?.id !== statusBar.conversation) return;
+    statusBar.expanded = !statusBar.expanded;
+    if (statusBar.expanded) {
       const current = this.ensure(key);
       this.remember("open", key);
       current.open = true;
@@ -167,9 +167,10 @@ class ThinkingStore {
   }
   private wantsRefresh(cid: string, key: string): boolean {
     const current = this.get(key);
-    const pill = this.pill;
-    return pill?.key === key && pill.conversation === cid
-      ? !!(current?.live || current?.retrying) && (pill.expanded || !pill.text)
+    const statusBar = this.statusBar;
+    return statusBar?.key === key && statusBar.conversation === cid
+      ? !!(current?.live || current?.retrying) &&
+          (statusBar.expanded || !statusBar.text)
       : !!(current?.live && current.open);
   }
   private scheduleRefresh(cid: string, entry: MessageEntry, key: string): void {
@@ -294,7 +295,7 @@ export function thinkingT(
   if (!entry || (!title && !entry.has_thinking)) return nothing;
   const key = thinkingStore.key(conv, entry);
   const live = entry.live_thinking === true;
-  if (live && thinkingStore.isPill(key, conv.id)) return nothing;
+  if (live && thinkingStore.isStatusBarThought(key, conv.id)) return nothing;
   const open = !!thinkingStore.get(key)?.open;
   const canLoad =
     entry.offset >= 0 ||
@@ -319,7 +320,8 @@ export function thinkingT(
     : duration === undefined
       ? nothing
       : html` for ${duration}s`;
-  const titleT = title ? html` · ${title}` : nothing;
+  const liveTitle = live ? title : null;
+  const titleT = liveTitle ? html` · ${liveTitle}` : nothing;
   const line = html`<span class="turn-thinking-line">
     ${label}${durationT}${titleT}
   </span>`;
@@ -341,7 +343,7 @@ export function thinkingT(
   return html`<div
     class="turn-thinking"
     role="note"
-    aria-label=${title ? `${label}${title}` : label}
+    aria-label=${liveTitle ? `${label}${liveTitle}` : label}
   >
     ${canLoad
       ? html`<button

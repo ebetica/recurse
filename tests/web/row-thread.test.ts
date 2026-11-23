@@ -72,20 +72,16 @@ describe("text deltas", () => {
       window(
         view,
         {
-          cid: "c1",
           sessionId: "pi",
-          sessionFile: "",
-          sessionCwd: "/work",
-          live: JSON.stringify([
+          live: [
             {
               type: "message",
               id: "reply",
               message: { role: "assistant", content: [{ type: "text", text }] },
             },
-          ]),
-          envelope: "{}",
-          files: "{}",
-          maxSessionBytes: 1 << 20,
+          ],
+          envelope: {},
+          files: {},
         },
         {
           caughtUp: true,

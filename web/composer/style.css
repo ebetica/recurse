@@ -1,4 +1,4 @@
-/* Composer editor, popups, controls, and the live panel above the input. */
+/* Composer editor, popups, and controls. */
 #composer-wrap { flex: none; min-width: 0; padding: var(--space-2) var(--space-5) var(--space-4);
   position: relative; }
 /* Fade only while thread content continues beneath the composer. */
@@ -22,12 +22,6 @@
   transform: translateX(-50%) translateY(0); }
 #scroll-btn:hover { color: var(--text); border-color: var(--accent-dim); }
 #composer-shell { position: relative; }
-/* The running turn's live panel stays above the composer, outside the
-   thread, so it is visible at any scroll position and covers nothing. */
-#live-bar[hidden], #live-bar.stale { display: none; }
-#live-bar .live-tool-body { max-height: 30vh; overflow-y: auto; }
-#live-bar :is(.live-thinking-summary, .live-tool-body) {
-  -webkit-user-select: text; user-select: text; }
 #composer, .composer-box { --composer-input-padding: var(--space-3); --composer-button-size: 28px;
   width: 100%; margin: 0; background: var(--panel-2);
   border: 1px solid var(--border); border-radius: 14px;
@@ -92,8 +86,8 @@
 .agent-option-name { flex: 1; min-width: 0; font-size: 0.84375rem; font-weight: 600;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .agent-option-relation { flex: none; border-radius: 999px;
-  padding: 1px var(--space-3); font-size: 0.6875rem; line-height: 1.4; }
-.agent-option-relation { color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  padding: 1px var(--space-3); font-size: 0.6875rem; line-height: 1.4;
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
 .agent-option-path { color: var(--muted); font: 0.6875rem/1.35 var(--font-mono); white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; }
 #composer > :where(#attach, #send) { flex: none; width: var(--composer-button-size);
@@ -306,121 +300,13 @@ width: min(300px, calc(100vw - 16px)); }
   color: var(--danger); font-size: 0.78125rem; line-height: 1.4; }
 .attachment-error svg { flex: none; width: 16px; height: 16px; margin-top: 1px; }
 
-/* Activity keeps one header height as status and streamed text change. */
-.live-panel-box { display: flex; flex-direction: column; align-items: stretch;
-  --live-head-height: 32px;
-  gap: 0; width: 100%; min-width: 0; max-width: 100%;
-  height: calc(var(--live-head-height) + 2px);
-  padding: 0 var(--space-4); border: 1px solid var(--border); border-radius: 10px;
-  background: var(--panel-2); overflow: hidden; }
-.live-panel-head { display: flex; align-items: center; gap: var(--space-3);
-  flex: none; min-width: 0; width: 100%; height: var(--live-head-height); white-space: nowrap; }
-.live-panel-box:has(.live-tool-status) { --live-head-height: 36px; height: auto; }
-.live-panel-head:has(.live-tool-status) { flex-wrap: wrap; row-gap: 0; height: auto; }
-.live-panel-actions { display: flex; align-items: center; flex: none; gap: var(--space-3);
-  margin-inline-start: auto; min-height: var(--live-head-height); }
-/* Panel words use the body font; only the argument fragment stays monospace
-   (shared with the tool-call rows above). */
-.live-panel-box .live-label { display: flex; align-items: center; flex: 1 1 auto;
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  color: var(--muted); font-size: 0.78125rem; font-family: inherit;
-  border: 0; padding: 0; background: none; text-align: left; cursor: default; }
-.live-panel-box button.live-label { align-self: stretch; gap: var(--space-3); cursor: pointer; }
-.live-panel-box button.live-thinking-copy { padding-inline: var(--space-2);
-  -webkit-tap-highlight-color: transparent; }
-.live-panel-head:has(.live-tool-status) > .live-label { flex-basis: 24ch; min-height: var(--live-head-height); }
-.live-panel-box button.live-tool-status { flex: none; padding-inline: var(--space-2); }
-.live-panel-box button.live-label:focus-visible {
-  outline: 2px solid var(--accent); outline-offset: -2px; }
-.live-panel-box .live-thinking-head { display: flex; align-items: center;
-  min-width: 0; width: 100%; overflow: hidden; white-space: nowrap; }
-.live-panel-box .live-thinking-title { flex: 1 1 auto; min-width: 0; overflow: hidden;
-  text-overflow: ellipsis; white-space: nowrap; }
-.live-panel-box .live-thinking-elapsed { flex: 0 0 8ch; margin-left: auto;
-  text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.live-panel-box .live-name { color: var(--text); font-weight: 600; }
-.live-panel-box .live-args { color: var(--muted); font-family: var(--font-mono); }
-.live-panel-box .shell-chip.live, .live-panel-box .agent-chip {
-  flex: none; animation: none; }
-.live-panel-box .live-title-changing { animation: thinking-cross-fade var(--motion-fast) ease-out; }
-.live-panel-box:has(.live-tool-body) { height: auto; min-height: 34px;
-  padding-bottom: var(--space-3); background: var(--expanded-bg); }
-.live-tool-body { margin: 0; user-select: text; }
-.live-tool-row + .live-tool-row { margin-top: var(--space-3); }
-.live-tool-head { display: flex; gap: var(--space-3); align-items: baseline; }
-.live-tool-head code { flex: 1; min-width: 0; white-space: pre-wrap;
-  overflow-wrap: anywhere; font: 0.71875rem/var(--line-height-compact) var(--font-mono);
-  max-height: 3lh; overflow: auto; }
-.live-tool-row pre { margin: var(--space-2) 0 0; white-space: pre-wrap;
-  overflow-wrap: anywhere; font: 0.71875rem/var(--line-height-compact) var(--font-mono);
-  max-height: 5lh; overflow: auto; }
-.live-panel-box:has(.live-thinking-summary) { height: auto; min-height: 34px;
-  padding-bottom: var(--space-3); }
-.live-thinking-summary { flex: none; block-size: 6lh; padding-inline: var(--space-2);
-  overflow-y: auto; scrollbar-gutter: stable both-edges; overscroll-behavior: contain; overflow-anchor: none;
-  white-space: pre-wrap; overflow-wrap: anywhere; line-height: var(--line-height-compact); }
-@supports (scrollbar-color: auto) {
-  .live-thinking-summary { scrollbar-width: thin; scrollbar-color: var(--muted) transparent; }
-}
-@media (pointer: fine) {
-  @supports selector(::-webkit-scrollbar) {
-    .live-thinking-summary { overflow-y: scroll; scrollbar-width: auto; scrollbar-color: auto; }
-    .live-thinking-summary::-webkit-scrollbar { width: 6px; }
-    .live-thinking-summary::-webkit-scrollbar-button { display: none; }
-    .live-thinking-summary::-webkit-scrollbar-thumb { background: var(--muted); border: 0; }
-  }
-}
-.live-thinking-summary:focus-visible { outline: 2px solid var(--accent-dim); outline-offset: -2px; }
-
-.live-panel-box:has(.live-thinking-summary) {
-  background: var(--expanded-bg); border-color: var(--expanded-border);
-  box-shadow: var(--expanded-lift); }
-.live-panel-box button.live-label[aria-expanded="true"] { color: var(--text); }
-
-@keyframes thinking-cross-fade { from { opacity: .2; } to { opacity: 1; } }
-@media (prefers-reduced-motion: reduce) {
-  .live-panel-box .live-title-changing {
-    animation: none; }
-}
-
-/* Status chips are count badges (app.css .badge): green for shells, amber
-   for agents. Both render only inside the panel (above), which owns their
-   shared pulse. */
-.shell-chip, .agent-chip { max-width: min(38vw, 190px); overflow: visible;
-  cursor: pointer; transition: color var(--motion-fast), border-color var(--motion-fast), background var(--motion-fast); }
-.shell-chip .chip-label, .agent-chip .chip-label {
-  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-/* The panel is 34 px tall, so its chips keep a height that fits the box at
-   every breakpoint. Coarse-pointer hit areas are transparent pseudo-elements
-   below; they must not stretch the chip or let its label escape the pill. */
-.shell-chip:focus-visible, .agent-chip:focus-visible {
-  outline: 2px solid var(--text); outline-offset: 2px; }
-
 @media (max-width: 700px) {
   #model-trigger { max-width: min(240px, calc(100vw - 120px)); }
-  /* A crowded phone panel shrinks the chip font instead of pushing the
-     label out of the pill. */
-  .live-panel-box .shell-chip, .live-panel-box .agent-chip { font-size: 0.6875rem; }
   #composer-wrap { padding-top: var(--space-2);
     padding-bottom: max(var(--space-3), env(safe-area-inset-bottom)); }
   #agent-finder-query { min-height: 44px; }
 }
 @media (pointer: coarse) {
-  /* Panel chips keep their 18 px badge height in the panel. Their
-     transparent pseudo-elements provide 44 px targets without changing the
-     panel layout; each target stays in its chip's horizontal slot, so the
-     adjacent shell and agent targets do not overlap. */
-  .live-panel-box { --live-head-height: 44px; overflow-x: clip; overflow-y: visible; }
-  .live-panel-box:has(.live-tool-status) { --live-head-height: 44px; }
-  .live-panel-box .shell-chip, .live-panel-box .agent-chip {
-    position: relative; z-index: var(--z-raised);
-  }
-  .live-panel-box .shell-chip::before,
-  .live-panel-box .agent-chip::before {
-    content: ""; position: absolute; z-index: 0;
-    top: 50%; left: 50%; width: max(100%, 44px); height: 44px;
-    transform: translate(-50%, -50%);
-  }
   #safety-btn { min-height: 44px; }
   #downgrade-chip { width: 44px; height: 44px; }
   #conv-controls #safety-row { align-self: stretch; }
@@ -434,17 +320,7 @@ width: min(300px, calc(100vw - 16px)); }
   align-items: center; gap: var(--space-2); min-width: 0; }
 #composer #downgrade-chip[hidden] { display: none; }
 @media (max-width: 700px) {
-  #composer:not([data-controls-press="open"],
-    :not([data-controls-press="closed"]):is(:focus-within, :has(#input:not(:placeholder-shown))),
-    :has(#conv-controls :popover-open),
-    body:has(#context-overlay.on, [data-theme-protected="safety-confirmation"]) #composer) {
-    & #conv-controls:not(:has(#safety-warning:not([hidden]), #downgrade-chip:not([hidden]), #model-row.on:not(.conversation-effort))),
-    & #conv-controls :is(#context-control, .conversation-effort) { display: none; }
-  }
-  html:not([data-embed]) #composer:is([data-controls-press="open"],
-    :not([data-controls-press="closed"]):is(:focus-within, :has(#input:not(:placeholder-shown))),
-    :has(#conv-controls :popover-open),
-    body:has(#context-overlay.on, [data-theme-protected="safety-confirmation"]) #composer) {
+  html:not([data-embed]) #composer {
     row-gap: var(--space-5); padding-bottom: var(--space-3);
     & #input { grid-column: 1 / -1; padding-inline: var(--space-3); }
     & > :is(#attach, #send) { grid-row: 2; margin: 0; align-self: center; }
@@ -509,14 +385,14 @@ width: min(300px, calc(100vw - 16px)); }
     &::after { content: ""; position: absolute; inset: -8px 0; } }
   #context-indicator::after { content: ""; position: absolute; inset: -8px 0; }
 }
-/* The live panel and editor share one card, with a divider between them. */
+/* The status bar and editor share one card, with a divider between them. */
 #composer-card { position: relative; max-width: 780px; margin-inline: auto; }
-#composer-card:has(> #live-bar:not([hidden], .stale)) {
-  & #live-bar .live-panel-box { border-radius: 14px 14px 0 0; box-shadow: none;
+#composer-card:has(> #status-bar:not([hidden], .stale)) {
+  & #status-bar .status-bar-box { border-radius: 14px 14px 0 0; box-shadow: none;
     transition: border-color var(--motion-fast); }
   & #composer { border-top-width: 0; padding-top: calc(var(--space-2) + 1px);
     border-top-left-radius: 0; border-top-right-radius: 0; }
-  &:has(#composer:focus-within) #live-bar .live-panel-box { border-color: var(--accent-dim);
+  &:has(#composer:focus-within) #status-bar .status-bar-box { border-color: var(--accent-dim);
     border-bottom-color: var(--border); }
 }
 @property --composer-shimmer-angle {

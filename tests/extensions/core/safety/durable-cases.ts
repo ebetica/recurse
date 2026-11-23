@@ -562,6 +562,15 @@ test("every case reaches the same decision, reviewer requests, and notice on bot
     const durable = await viaDurable(c);
     clearReviewerEvidenceCache();
     const { ran } = durable;
+    if (c.name === "no reviewer credentials: fail open with notice") {
+      expect(durable.reviews).toEqual([]);
+      expect(durable.logs).toEqual([
+        {
+          event: "safety_review_failed",
+          fields: expect.objectContaining({ category: "auth", attempts: 0 }),
+        },
+      ]);
+    }
     expect({ case: c.name, decisions: durable.decisions }).toEqual({
       case: c.name,
       decisions: pi.decisions,

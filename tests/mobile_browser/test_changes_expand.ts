@@ -5,6 +5,7 @@ import { join } from "node:path";
 import pythonDiff from "./fixtures/diff-highlight.json";
 import {
   captureErrors,
+  gotoRoot,
   postFixture,
   runBrowserTests,
   type BrowserTest,
@@ -106,7 +107,108 @@ async function openChanges(page: Page, base: string, mobile: boolean) {
   return { pane, seen };
 }
 
+async function test_changes_opens_small_files_and_fetches_each_patch(
+  browser: any,
+  base: string,
+) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  const errors = captureErrors(page);
+  const calls: string[] = [];
+  const diff = {
+    available: true,
+    base: "origin/main",
+    version: "v1",
+    files: [
+      { path: "one.txt", additions: 1, deletions: 1, status: "modified" },
+      { path: "two.txt", additions: 1, deletions: 1, status: "modified" },
+    ],
+    truncated: false,
+    untracked: [],
+    currentPr: null,
+  };
+  await page.route(`${base}api/conversations/main/diff**`, (route: any) =>
+    route.fulfill({ json: diff }),
+  );
+  await page.route(
+    `${base}api/conversations/main/diff/files**`,
+    (route: any) => {
+      calls.push(route.request().url());
+      const path = new URL(route.request().url()).searchParams.get("path");
+      const patch =
+        path === "one.txt"
+          ? "diff --git a/one.txt b/one.txt\nindex 111..222 100644\n--- a/one.txt\n+++ b/one.txt\n@@ -1 +1 @@\n-one\n+one\n"
+          : "diff --git a/two.txt b/two.txt\nindex 333..444 100644\n--- a/two.txt\n+++ b/two.txt\n@@ -1 +1 @@\n-two\n+two\n";
+      return route.fulfill({ json: { available: true, path, patch } });
+    },
+  );
+  await gotoRoot(page, base);
+  await page.locator(".agent").first().waitFor();
+  await page
+    .locator('#pane-rail button[aria-label="Changes"]')
+    .waitFor({ timeout: 15000 });
+  await page.locator('#pane-rail button[aria-label="Changes"]').click();
+  await page.locator(".diff-file").first().waitFor();
+  expect(await page.locator(".diff-file").count()).toBe(2);
+  const first = page.locator(".diff-file").first();
+  await first.locator(".diff-file-toggle").waitFor();
+  expect(calls).toHaveLength(2);
+  expect(errors).toEqual([]);
+  await context.close();
+}
+async function test_changes_marks_a_truncated_summary(
+  browser: any,
+  base: string,
+) {
+  const context = await browser.newContext({
+    viewport: { width: 1280, height: 800 },
+  });
+  const page = await context.newPage();
+  const errors = captureErrors(page);
+  const calls: string[] = [];
+  const diff = {
+    available: true,
+    base: "origin/main",
+    version: "v1",
+    files: [
+      { path: "one.txt", additions: 1, deletions: 1, status: "modified" },
+    ],
+    moreFiles: 1,
+    truncated: true,
+    untracked: [],
+    currentPr: null,
+  };
+  await page.route(`${base}api/conversations/main/diff**`, (route: any) =>
+    route.fulfill({ json: diff }),
+  );
+  await page.route(
+    `${base}api/conversations/main/diff/files**`,
+    (route: any) => {
+      calls.push(route.request().url());
+      return route.abort();
+    },
+  );
+  await gotoRoot(page, base);
+  await page.locator(".agent").first().waitFor();
+  await page
+    .locator('#pane-rail button[aria-label="Changes"]')
+    .waitFor({ timeout: 15000 });
+  await page.locator('#pane-rail button[aria-label="Changes"]').click();
+  await page.locator(".diff-file").first().waitFor();
+  expect(calls).toEqual([]);
+  expect(await page.locator(".diff-group-count").first().textContent()).toBe(
+    "1+",
+  );
+  expect(await page.locator(".diff-trunc").count()).toBeGreaterThanOrEqual(1);
+  expect(errors).toEqual([]);
+  await context.close();
+}
+
 export const tests: BrowserTest[] = [
+  test_changes_opens_small_files_and_fetches_each_patch,
+  test_changes_marks_a_truncated_summary,
   async function test_changes_expand_desktop(browser, base) {
     const context = await browser.newContext({
       viewport: { width: 1280, height: 800 },

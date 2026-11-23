@@ -10,6 +10,7 @@ import {
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { entries as contextEntries } from "../../../backend/fixtures/durable_context_usage/entries";
 import { promptTokens } from "../../../../src/agents/runtime/context_usage";
 import titleRecording from "../../../backend/fixtures/conversation_title/recording.json";
@@ -205,6 +206,7 @@ export function routes(fx: Fixture): Routes {
       const cid = `safety-browser-${hex(4)}`;
       const faux = fauxProvider({ provider: cid, tokensPerSecond: 20_000 });
       let unavailable = true;
+      let completedTurns = 0;
       const reply: FauxResponseFactory = (context) => {
         faux.appendResponses([reply]);
         if (
@@ -221,7 +223,11 @@ export function routes(fx: Fixture): Routes {
           return fauxAssistantMessage("OK");
         }
         return context.messages.at(-1)?.role === "toolResult"
-          ? fauxAssistantMessage("SAFETY_TURN_DONE")
+          ? fauxAssistantMessage(
+              completedTurns++ === 0
+                ? "SAFETY_TURN_DONE"
+                : "SAFETY_RECOVERY_DONE",
+            )
           : fauxAssistantMessage(
               [
                 fauxToolCall("bash", {
@@ -232,8 +238,33 @@ export function routes(fx: Fixture): Routes {
             );
       };
       faux.setResponses([reply]);
+      const priced = (
+        source: ReturnType<typeof createAssistantMessageEventStream>,
+        cost: number,
+      ) => {
+        const stream = createAssistantMessageEventStream();
+        void (async () => {
+          for await (const event of source) {
+            if (event.type === "done") {
+              const total = event.message.stopReason === "toolUse" ? 0.1 : cost;
+              event.message.usage.cost.output = total;
+              event.message.usage.cost.total = total;
+              event.message.usage.cost.totalFromProvider = true;
+            }
+            stream.push(event);
+          }
+          stream.end();
+        })();
+        return stream;
+      };
       durableModels.setProvider({
         ...faux.provider,
+        stream: (...args) => priced(faux.provider.stream(...args), 0.3),
+        streamSimple: (...args) =>
+          priced(
+            faux.provider.streamSimple(...args),
+            args[2]?.sessionId?.startsWith("pi-safety-") ? 0.2 : 0.3,
+          ),
         auth: {
           apiKey: {
             name: "Test reviewer",

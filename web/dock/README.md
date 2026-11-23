@@ -92,8 +92,10 @@ retain their staged comments.
 Closing Chat keeps its content parked. The rail's first button (Chat, `g1`)
 reopens it, as do composing, New and choosing a conversation.
 Narrowing to phone keeps the focused pane or the pane owning a floating comment
-draft, including its editor focus and selection. Cleaning up another pane must
-not cancel that draft. Global pane and agent finders are mounted outside Chat
+draft, including its editor focus and selection. The [dock's DOM move](host.ts)
+keeps the draft anchored to the same text even when the browser resets live
+ranges during reparenting. Cleaning up another pane must not cancel that draft.
+Global pane and agent finders are mounted outside Chat
 while open so hidden or closed Chat tabs cannot hide them. Their inputs stay near
 the viewport's vertical middle as results change; lists scroll within the available
 height. Mentions remain beside the composer, and phone placement is unchanged.

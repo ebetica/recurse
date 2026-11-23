@@ -504,8 +504,6 @@ export interface Conversation {
   backend?: string | null;
   description?: string | null;
   shells?: BackgroundShellView;
-  // a context summarization is running right now
-  compacting?: boolean;
   // "compact"/"clear" requested but not applied yet
   pending_actions?: string[];
   // legacy clear reconciliation epoch

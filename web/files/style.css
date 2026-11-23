@@ -141,9 +141,7 @@
 .files-nav { flex: none; display: flex; align-items: center; margin-inline-start: calc(-1 * var(--space-2)); }
 .files-position { color: var(--text); font-size: 0.71875rem; white-space: nowrap; }
 .files-detail-head [aria-disabled="true"], .files-nav [aria-disabled="true"] { opacity: .4; cursor: default; }
-#messages img[src$="/preview"] { cursor: pointer; }
-.agent-attachment-preview, #attachments .preview, .files-thumb, .files-open,
-#messages img[src$="/preview"] { -webkit-tap-highlight-color: transparent; }
+#attachments .preview, .files-thumb, .files-open { -webkit-tap-highlight-color: transparent; }
 .files-diff .files-diff-header { color: var(--accent); font-weight: 600; opacity: 1; }
 .files-text-wrap > pre { margin: 0; padding: var(--space-4) var(--space-5); color: var(--text);
   font: 0.78125rem/1.5 var(--font-mono);

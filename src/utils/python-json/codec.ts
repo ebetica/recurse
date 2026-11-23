@@ -1,17 +1,19 @@
 // Python-compatible compact JSON with optional default separators/indentation.
-// JS normalizes integral floats and small exponents; integer-like keys reorder.
-// Byte-stable callers must avoid numeric keys or carry their order in arrays.
+// JS normalizes integral floats and small exponents; unsorted integer-like keys reorder.
 import { randomUUID } from "node:crypto";
 import { slowSpan } from "../../observability/slow-span";
 
 interface PyCompactJsonOptions {
   separators?: "compact" | "default";
   indent?: number;
+  sortKeys?: boolean;
+  /** Keep the scalar encodings used in existing Settings files. */
+  javascriptScalars?: boolean;
 }
 
-function quoteString(value: string): string {
+function quoteString(value: string, javascriptScalars: boolean): string {
   return JSON.stringify(value).replace(
-    /[^\x00-\x7e]/g,
+    javascriptScalars ? /[^\x00-\x7f]/g : /[^\x00-\x7e]/g,
     (character) =>
       `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
   );
@@ -22,7 +24,7 @@ export function pyCompactJson(
   value: unknown,
   options: PyCompactJsonOptions = {},
 ): string {
-  const { indent } = options;
+  const { indent, sortKeys, javascriptScalars = false } = options;
   if (indent !== undefined && (!Number.isInteger(indent) || indent < 0))
     throw new TypeError("indent must be a non-negative integer");
   const separators =
@@ -33,10 +35,11 @@ export function pyCompactJson(
   const seen = new WeakSet<object>();
 
   function encode(item: unknown, level: number): string {
-    if (typeof item === "string") return quoteString(item);
+    if (typeof item === "string") return quoteString(item, javascriptScalars);
     if (item === null) return "null";
     if (typeof item === "boolean") return item ? "true" : "false";
     if (typeof item === "number") {
+      if (javascriptScalars) return JSON.stringify(item);
       if (Number.isNaN(item)) return "NaN";
       if (item === Infinity) return "Infinity";
       if (item === -Infinity) return "-Infinity";
@@ -63,8 +66,12 @@ export function pyCompactJson(
     seen.add(item);
     const array = Array.isArray(item);
     const entries: [string | null, unknown][] = array
-      ? item.map((value): [string | null, unknown] => [null, value])
-      : Object.entries(item).map(([key, value]) => [key, value]);
+      ? item.map((value): [null, unknown] => [null, value])
+      : Object.entries(item);
+    if (sortKeys && !array)
+      entries.sort(([left], [right]) =>
+        left! < right! ? -1 : left! > right! ? 1 : 0,
+      );
     if (entries.length === 0) {
       seen.delete(item);
       return array ? "[]" : "{}";
@@ -73,7 +80,7 @@ export function pyCompactJson(
       const member =
         key === null
           ? encode(value, level + 1)
-          : `${quoteString(key)}${colon}${encode(value, level + 1)}`;
+          : `${quoteString(key, javascriptScalars)}${colon}${encode(value, level + 1)}`;
       return indent === undefined
         ? member
         : `${" ".repeat(indent * (level + 1))}${member}`;

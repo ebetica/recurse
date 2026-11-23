@@ -15,7 +15,7 @@ export const tests: BrowserTest[] = [
       await page.goto(`${base}#agent=${agent}`);
       await page.locator("#input").fill("First public message.");
       await page.locator("#send").click();
-      await page.locator(".working.live-panel").waitFor();
+      await page.locator(".working.status-bar").waitFor();
       await browserExpect
         .poll(async () => {
           const status = await (
@@ -88,7 +88,7 @@ export const tests: BrowserTest[] = [
       await page.goto(`${base}#agent=${agent}`);
       await page.locator("#input").fill("Public stopped message.");
       await page.locator("#send").click();
-      await page.locator(".working.live-panel").waitFor();
+      await page.locator(".working.status-bar").waitFor();
       await browserExpect
         .poll(async () => {
           const status = await page.request.post(
@@ -102,7 +102,7 @@ export const tests: BrowserTest[] = [
       await page.locator("#send.stop").click();
       await page.locator("#send.stop.armed").click();
       await browserExpect(page.locator("#send.stop")).toHaveCount(0);
-      await browserExpect(page.locator(".working.live-panel")).toHaveCount(0);
+      await browserExpect(page.locator(".working.status-bar")).toHaveCount(0);
       const delivered = await page.request.post(
         `${base}__browser-test/provider-replay-status`,
         { data: { agent, message: "PUBLIC_AGENT_MESSAGE" } },

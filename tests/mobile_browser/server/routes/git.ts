@@ -58,10 +58,6 @@ export function routes(fx: Fixture): Routes {
           ],
           { replace: true },
         );
-        await writeFile(
-          instance.agentTemp.workdirFile(String(conv.tmp_key)),
-          JSON.stringify({ version: 1, cwd: conv.workdir }),
-        );
       }
       const started = join(cwd, ".git", "lookup-started");
       const release = join(cwd, ".git", "lookup-release");
@@ -107,10 +103,6 @@ exec ${Bun.$.escape(realGit)} "$@"
       await seedHistory(cid, [user("Show the branch's changes")], {
         replace: true,
       });
-      await writeFile(
-        instance.agentTemp.workdirFile(String(conv.tmp_key)),
-        JSON.stringify({ version: 1, cwd }),
-      );
       return {
         cid,
         branch: await git(cwd, "rev-parse", "HEAD"),

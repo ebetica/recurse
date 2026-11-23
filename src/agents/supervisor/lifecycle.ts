@@ -63,7 +63,6 @@ export interface LifecycleDeps {
     noteProjectionStale(): void;
     noteProjectionReady(): void;
     refreshProjection(): Promise<unknown>;
-    migrateTakenOverNames(): Promise<number>;
     migrateModelChoices(): Promise<number>;
   };
   /** conversation_store.assertNoUnimportedLegacyState over the data dir. */
@@ -424,17 +423,6 @@ export class SupervisorLifecycle {
     await step("migrate_model_choices", () =>
       conversations.migrateModelChoices(),
     );
-    checkAbort(signal);
-    try {
-      await step("migrate_taken_over_names", () =>
-        conversations.migrateTakenOverNames(),
-      );
-    } catch (error) {
-      rethrowCancelled(error);
-      logException(log, "migrate_taken_over_names_failed", error, {
-        level: WARNING,
-      });
-    }
     checkAbort(signal);
     await step("migrate_agent_files", () =>
       fenced(() => deps.agentTemp.migrateUploads()),

@@ -404,7 +404,7 @@ test("holder admission rejects a real filesystem marker-write failure", async ()
     await Bun.stdin.text();
   });`,
   );
-  let claim: Promise<void> | undefined;
+  let claim: Promise<number | null> | undefined;
   try {
     await contenderReady(holder);
     claim = new WorktreeHolders(data).hold(
@@ -441,11 +441,18 @@ test("holder admission rejects a real filesystem marker-write failure", async ()
     await expect(claim).rejects.toThrow("worktree claim failed");
     expect(markerRecord(root, "blocked")?.holders).toEqual({ absent: 0 });
     expect(existsSync(join(root.worktrees, "blocked"))).toBe(true);
-    await new WorktreeHolders(data).hold(
-      join(root.worktrees, "blocked"),
+    const holders = new WorktreeHolders(data);
+    const blocked = join(root.worktrees, "blocked");
+    const older = await holders.hold(blocked, "adopter");
+    const newer = await holders.hold(blocked, "adopter");
+    expect(newer).not.toBe(older);
+    await holders.release(blocked, "adopter", older!);
+    expect(markerRecord(root, "blocked")?.holders).toHaveProperty(
       "adopter",
+      newer,
     );
-    expect(markerRecord(root, "blocked")?.holders).toHaveProperty("adopter");
+    await holders.release(blocked, "adopter", newer!);
+    expect(markerRecord(root, "blocked")?.holders).toEqual({ absent: 0 });
   } finally {
     holder.kill();
     await holder.exited;

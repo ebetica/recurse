@@ -40,7 +40,7 @@ export const scrollEl: Omit<HTMLElement, "scrollTop"> & {
   scrollTo: never;
   scrollIntoView: never;
 } = req("#scroll");
-export const liveBarEl = req("#live-bar");
+export const statusBarEl = req("#status-bar");
 export const inputEl = req<HTMLTextAreaElement>("#input");
 export const sendEl = req<HTMLButtonElement>("#send");
 export const titleEl = req("#conv-title");

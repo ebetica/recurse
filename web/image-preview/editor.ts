@@ -8,6 +8,7 @@ import type { DrawingCanvas } from "./excalidraw.js";
 
 interface Session {
   host: HTMLElement;
+  loading: HTMLDialogElement | null;
   actions: HTMLElement;
   ask: HTMLElement;
   canvas: DrawingCanvas | null;
@@ -108,10 +109,19 @@ export function openDrawingEditor(
   );
   for (const element of inert) element.inert = true;
   host.tabIndex = -1;
-  modal.append(host);
-  host.focus();
+  const loading = document.createElement("dialog");
+  loading.className = "dialog";
+  loading.setAttribute("aria-label", "Draw on image");
+  loading.innerHTML = `<p role="status">Loading drawing editor…</p>
+    <div class="dialog-buttons"><button type="button" class="btn" autofocus>Cancel</button></div>`;
+  loading.querySelector("button")!.onclick = () => closeDrawingEditor();
+  loading.oncancel = (event) => {
+    event.preventDefault();
+    closeDrawingEditor();
+  };
   const s: Session = {
     host,
+    loading,
     actions,
     ask,
     canvas: null,
@@ -120,6 +130,8 @@ export function openDrawingEditor(
     opener,
   };
   session = s;
+  modal.append(loading);
+  loading.showModal();
   const keepEditing = () => {
     s.pending = null;
     ask.hidden = true;
@@ -174,14 +186,19 @@ export function openDrawingEditor(
     "/static/excalidraw/";
   filterFontSources();
   void Promise.all([import("./excalidraw.js"), loadStylesheet()])
-    .then(([module]) =>
-      module.mountDrawingCanvas(
+    .then(([module]) => {
+      if (session !== s) return;
+      closeLoading(s);
+      modal.append(host);
+      host.focus();
+      return module.mountDrawingCanvas(
         host.querySelector(".drawing-editor-stage")!,
         image,
-      ),
-    )
+      );
+    })
     .then(
       (canvas) => {
+        if (!canvas) return;
         if (session !== s) return canvas.unmount();
         s.canvas = canvas;
         done.disabled = false;
@@ -191,10 +208,17 @@ export function openDrawingEditor(
         recordUiTiming("drawing-editor-open", performance.now() - started);
       },
       () => {
-        if (session === s)
-          status.textContent = "Could not open the drawing editor. Try again.";
+        if (session !== s) return;
+        const target = s.loading?.querySelector("[role=status]") ?? status;
+        target.textContent = "Could not open the drawing editor. Try again.";
       },
     );
+}
+
+function closeLoading(s: Session): void {
+  s.loading?.close();
+  s.loading?.remove();
+  s.loading = null;
 }
 
 /** Discards the open drawing, if any. */
@@ -202,7 +226,10 @@ export function closeDrawingEditor(): void {
   const s = session;
   if (!s) return;
   session = null;
-  const focused = s.host.contains(document.activeElement);
+  const focused =
+    s.loading?.contains(document.activeElement) ||
+    s.host.contains(document.activeElement);
+  closeLoading(s);
   s.canvas?.unmount();
   s.host.remove();
   for (const element of s.inert) element.inert = false;

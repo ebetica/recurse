@@ -2,7 +2,7 @@
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { createConfig } from "../../../../src/config";
+import { statePaths } from "../../../../src/state_paths";
 import type { ConversationRecord } from "../../../../src/agents/storage/conversation_store";
 import {
   AttachmentDrafts,
@@ -76,10 +76,10 @@ export async function runSpec(
   spec: DraftSpec,
 ): Promise<RunOutput> {
   setup(root, spec);
-  const config = createConfig({
-    env: { CHAT_DATA_DIR: root, RECURSE_TEMP_ROOT: `${root}-scratch` },
-    cwd: root,
-  });
+  const paths = statePaths(
+    { CHAT_DATA_DIR: root, RECURSE_TEMP_ROOT: `${root}-scratch` },
+    root,
+  );
   const records = new Map<string, ConversationRecord>();
   if (spec.conversation && typeof spec.conversation.id === "string")
     records.set(spec.conversation.id, structuredClone(spec.conversation));
@@ -93,7 +93,7 @@ export async function runSpec(
     },
   };
   const drafts = new AttachmentDrafts(
-    config,
+    paths,
     conversations as never,
     draftDirs(root),
     {

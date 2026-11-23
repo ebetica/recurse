@@ -41,12 +41,11 @@ import {
   RESERVED_RESULT_DETAILS,
   reviewedToolNames,
   reviewFailureMessage,
-  reviewWithCandidates,
   safeLog,
 } from "./index.ts";
 import {
   loadTrustedModelPolicy,
-  pickReviewerCandidates,
+  pickReviewer,
   reviewerConfigurationCategory,
   type TrustedModelPolicyState,
 } from "./model-policy.ts";
@@ -506,10 +505,11 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       sessionId,
     );
     const pathTool = name === "write" || name === "edit" ? name : undefined;
-    const reviewers = pickReviewerCandidates(
+    const reviewer = await pickReviewer(
       ctx,
       run.modelPolicy,
       pathTool ? "summary" : "reviewer",
+      reviewModels,
     );
     const action = pathTool
       ? formatPathOnlyProposedAction(pathTool, args)
@@ -571,16 +571,20 @@ export function createDurableSafety(host: SafetyOptions): Extension {
             : configurationCategory === "acting_identity_mismatch"
               ? "The safety reviewer configuration does not match this conversation's model, and no trusted fallback is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings."
               : "No trusted safety reviewer is available. Choose a listed conversation model and a built-in model or custom provider for effort level 1 in Settings.";
+    const configurationFailure = reviewer === undefined;
     let verdict: SafetyVerdict;
-    if (reviewers && !journalFailure) {
-      verdict = await reviewWithCandidates(review, ctx, reviewers, {
-        rules: run.config.additionalRules,
+    if (reviewer && !journalFailure) {
+      verdict = await review(
+        ctx,
+        reviewer.model,
+        reviewer.effort,
+        run.config.additionalRules,
         transcript,
         action,
+        complete,
         durableEvidence,
         conversationId,
-        complete,
-        inputs: {
+        {
           history,
           historyVersion:
             run.modelPolicy.status === "valid"
@@ -591,19 +595,20 @@ export function createDurableSafety(host: SafetyOptions): Extension {
           processSnapshot: await ownedProcessSnapshot(host.shells()),
           actingAgent: { id: agent.id, title: agent.title },
         },
-      });
+      );
     } else {
       verdict = {
         decision: "deny",
-        reason: !reviewers
+        reason: configurationFailure
           ? configurationReason
-          : `Safety reviewer journal failed: ${journalFailure}`,
+          : journalFailure
+            ? `Safety reviewer journal failed: ${journalFailure}`
+            : "Safety reviewer authentication is unavailable. Sign in to a reviewer provider in Settings.",
         procedural: true,
       };
     }
-    const configurationFailure = !reviewers;
     const safetyWaitMs =
-      reviewers && !journalFailure
+      reviewer && !journalFailure
         ? positiveElapsedMs(safetyStartedMs, now())
         : undefined;
     const failure =
@@ -615,20 +620,14 @@ export function createDurableSafety(host: SafetyOptions): Extension {
         stage: "configuration",
         category: configurationCategory,
       };
-      const reviewer =
-        verdict.reviewer ??
-        (reviewers?.[0]
-          ? {
-              provider: reviewers[0].model.provider,
-              model: reviewers[0].model.id,
-            }
-          : undefined);
       try {
         host.log?.("safety_review_failed", {
           cid: conversationId,
           stage: logged.stage,
           category: logged.category,
-          ...reviewer,
+          ...(reviewer
+            ? { provider: reviewer.model.provider, model: reviewer.model.id }
+            : {}),
           elapsed_ms: positiveElapsedMs(safetyStartedMs, now()) ?? 0,
           attempts: verdict.reviewAttempts?.length ?? 0,
           ...(verdict.operatorFailure?.status === undefined

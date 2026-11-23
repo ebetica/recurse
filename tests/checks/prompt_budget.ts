@@ -1,7 +1,7 @@
-// Render a fresh fake-provider request; require fewer than 15,000 characters.
-// Fix ladder/model names, memory/tree inputs and checkout/runtime paths.
-// Production renderers still load real context, skills and CLI help; only
-// known fixture-root paths are canonicalized after capture.
+// Capture a fresh fake-provider request with fixed model, ladder, memory and tree.
+// Require project_context (wrapper included) below 10,000 characters and the rest below 7,500.
+// Load real context, skills and CLI help with the production renderers.
+// Canonicalize only known checkout/runtime fixture roots after capture.
 import { mkdtemp, rmdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -153,7 +153,15 @@ export async function renderPromptBudget(
   }
 }
 
-/** Enforce the size limit and reject Pi's obsolete native-tool pointer. */
+function promptBudgets(report: PromptBudget) {
+  const project = report.sections.project_context?.length ?? 0;
+  return [
+    ["AGENTS.md (project_context)", project, 10_000],
+    ["Recurse system prompt", report.total - project, 7_500],
+  ] as const;
+}
+
+/** Enforce both size limits and reject Pi's obsolete native-tool pointer. */
 export function checkPromptBudget(report: PromptBudget): void {
   const description = report.codemodeDescription
     .replaceAll("`", "")
@@ -166,16 +174,18 @@ export function checkPromptBudget(report: PromptBudget): void {
     throw new Error(
       "codemode must describe script calls without referring to a codemode system-prompt section",
     );
-  if (report.total >= 15_000)
-    throw new Error(
-      `system prompt: ${report.total} characters (must be fewer than 15000)`,
-    );
+  for (const [part, size, limit] of promptBudgets(report))
+    if (size >= limit)
+      throw new Error(
+        `${part}: ${size} characters (must be fewer than ${limit})`,
+      );
 }
 
 if (import.meta.main) {
   const report = await renderPromptBudget();
   for (const [name, value] of Object.entries(report.sections))
     console.log(`${name}: ${value.length}`);
-  console.log(`system prompt: ${report.total} / 15000 characters`);
+  for (const [part, size, limit] of promptBudgets(report))
+    console.log(`${part}: ${size} / ${limit} characters`);
   checkPromptBudget(report);
 }

@@ -1,20 +1,20 @@
-// Shares the elapsed-seconds counter between thinking rows and the live panel.
+// Shares the elapsed-seconds counter between thinking rows and the status bar.
 import { html, type TemplateResult } from "lit";
-import { liveBarEl, msgsEl } from "../dom.js";
+import { statusBarEl, msgsEl } from "../dom.js";
 
-let thinkingPillTimer: number | null = null;
+let thinkingElapsedTimer: number | null = null;
 
-function updateThinkingPillTimer(): void {
+function updateThinkingElapsedTimer(): void {
   if (typeof performance === "undefined") return;
-  const selector = ".live-thinking-elapsed[data-thinking-received]";
+  const selector = ".thinking-elapsed[data-thinking-received]";
   const spans = [
     ...msgsEl.querySelectorAll<HTMLElement>(selector),
-    ...liveBarEl.querySelectorAll<HTMLElement>(selector),
+    ...statusBarEl.querySelectorAll<HTMLElement>(selector),
   ];
   if (!spans.length) {
-    if (thinkingPillTimer !== null && typeof window !== "undefined") {
-      window.clearInterval(thinkingPillTimer);
-      thinkingPillTimer = null;
+    if (thinkingElapsedTimer !== null && typeof window !== "undefined") {
+      window.clearInterval(thinkingElapsedTimer);
+      thinkingElapsedTimer = null;
     }
     return;
   }
@@ -31,9 +31,9 @@ function updateThinkingPillTimer(): void {
   }
 }
 
-function ensureThinkingPillTimer(): void {
-  if (thinkingPillTimer !== null || typeof window === "undefined") return;
-  thinkingPillTimer = window.setInterval(updateThinkingPillTimer, 1000);
+function ensureThinkingElapsedTimer(): void {
+  if (thinkingElapsedTimer !== null || typeof window === "undefined") return;
+  thinkingElapsedTimer = window.setInterval(updateThinkingElapsedTimer, 1000);
 }
 
 // The interval changes textContent; keep Lit child markers outside the span.
@@ -41,11 +41,11 @@ export function thinkingElapsedT(
   elapsedMs: number,
   hasTitle: boolean,
 ): TemplateResult {
-  ensureThinkingPillTimer();
+  ensureThinkingElapsedTimer();
   const received = typeof performance === "undefined" ? 0 : performance.now();
   const seconds = Math.floor(elapsedMs / 1000);
   return html`<span
-    class="live-thinking-elapsed"
+    class="thinking-elapsed"
     data-thinking-elapsed=${elapsedMs}
     data-thinking-received=${received}
     data-thinking-has-title=${String(hasTitle)}

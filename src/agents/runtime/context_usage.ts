@@ -1,5 +1,5 @@
 // Shared UI/API occupancy and text/image-estimated split, with bounded reads.
-// Status projects committed live usage without opening stores or history.
+// Model or session changes invalidate usage and its prompt capture together.
 // No-follow reads require stable single-link files; tail usage follows links.
 // BigInt largest-remainder splits prefer earlier ties; floats normalize in JS.
 import { constants } from "node:fs";
@@ -14,6 +14,13 @@ type JsonObject = Record<string, unknown>;
 type Conv = Record<string, unknown>;
 type Bytes = Buffer;
 type Counts = Record<(typeof COUNT_KEYS)[number], number>;
+
+export function invalidateContextUsage(record: Conv): void {
+  record.latest_context_usage = null;
+  delete record.latest_context_prompt_capture;
+  delete record.context_usage_estimate;
+  delete record.context_tokens_at_last_digest;
+}
 
 const TAIL_SCAN_BYTES = 64 * 1024;
 const TAIL_SCAN_LINES = 400;

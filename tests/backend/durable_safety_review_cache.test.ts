@@ -4,17 +4,198 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   createModels,
+  createProvider,
   fauxAssistantMessage,
   fauxProvider,
   fauxToolCall,
 } from "@earendil-works/pi-ai";
-import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import {
+  builtinProviders,
+  getBuiltinModels,
+} from "@earendil-works/pi-ai/providers/all";
+import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
 import { DurableHost } from "../../src/agents/durable/host";
 import { Config } from "../../src/config";
 import { stampMessage } from "../../src/agents/runtime/prompt_stamp";
 import { clearReviewerEvidenceCache } from "../../src/extensions/core/safety/review-journal";
 import { idle, testDeps, until } from "./fixtures/durable_host/host";
 import { requestBody, type Recording } from "./fixtures/provider_replay/server";
+import {
+  recordedActor,
+  recordedLuna,
+  recordedSonnet,
+} from "./fixtures/reviewer_routes";
+
+// Regression: #3616 Claude bash and path-only reviews use Luna on the chosen billing route, without request failover.
+test.each([
+  "anthropic-only",
+  "custom-level-one",
+  "platform-level-one",
+  "platform-signed-out",
+])("Claude selects one reviewer: %s", async (scenario) => {
+  const luna = recordedLuna;
+  const anthropic = getBuiltinModels("anthropic");
+  const actor = anthropic.find((model) => model.id === recordedActor.modelId)!;
+  const sonnet = anthropic.find((model) => model.id === recordedSonnet.id)!;
+  const platform = getBuiltinModels("openai");
+  const platformLuna = platform.find((model) => model.id === luna.id)!;
+  const platformChoice = platform.find(
+    (model) => model.reasoning && model.id !== luna.id,
+  )!;
+  const custom = fauxProvider({
+    provider: "reviewer-choice",
+  }).provider.getModels()[0]!;
+  const platformPinned = scenario.startsWith("platform-");
+  const choice = platformPinned
+    ? platformChoice
+    : scenario === "custom-level-one"
+      ? custom
+      : undefined;
+  const expected =
+    scenario === "platform-level-one"
+      ? platformLuna
+      : scenario === "custom-level-one"
+        ? luna
+        : sonnet;
+  const fails = expected !== sonnet;
+  const selector = (model: { provider: string; id: string }) =>
+    `${model.provider}/${model.id}`;
+  const signedIn = new Set([actor.provider]);
+  if (choice) {
+    signedIn.add(luna.provider);
+    signedIn.add(choice.provider);
+  }
+  const root = mkdtempSync(join(tmpdir(), "durable-claude-reviewer-"));
+  const work = join(root, "work");
+  mkdirSync(work);
+  const config = new Config({
+    env: { HOME: root, CHAT_DATA_DIR: root },
+    authenticatedProviders: () => signedIn,
+  });
+  await Bun.write(
+    config.paths.MODEL_PROVIDERS_FILE,
+    JSON.stringify({
+      providers: {
+        [custom.provider]: {
+          base_url: "https://provider.example.invalid/v1",
+          env_key: "REVIEWER_FIXTURE_KEY",
+          wire_api: "completions",
+          models: [{ id: custom.id, context_window: custom.contextWindow }],
+        },
+      },
+    }),
+  );
+  await config.models.setPiModelList(
+    [actor, sonnet, luna, platformLuna, platformChoice].map((model) => ({
+      provider: model.provider,
+      id: model.id,
+      name: model.name,
+      context_window: model.contextWindow,
+    })),
+  );
+  if (choice) await config.levels.setEffortLevel(1, selector(choice), "low");
+  if (scenario === "platform-signed-out")
+    signedIn.delete(platformLuna.provider);
+  const models = createModels();
+  const faux = createFauxCore({ tokensPerSecond: 20_000 });
+  for (const catalog of [
+    anthropic,
+    [luna],
+    [platformLuna, platformChoice],
+    [custom],
+  ]) {
+    const provider = catalog[0]!.provider;
+    models.setProvider(
+      createProvider({
+        id: provider,
+        models: catalog,
+        auth: {
+          apiKey: {
+            name: "Test",
+            resolve: async () =>
+              signedIn.has(provider)
+                ? { auth: { apiKey: "test-key" } }
+                : undefined,
+          },
+        },
+        api: { stream: faux.stream, streamSimple: faux.streamSimple },
+      }),
+    );
+  }
+  const logs: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  const host = new DurableHost({
+    ...testDeps(
+      root,
+      () => ({ id: "c1", backend: "durable", workdir: work }),
+      () => ["c1"],
+      selector(actor),
+    ),
+    models,
+    config,
+    log: (event, fields) => logs.push({ event, fields }),
+  });
+  try {
+    for (const tool of ["write", "bash"] as const) {
+      const file = join(work, tool);
+      const reviews: string[] = [];
+      const respond = (model: Parameters<typeof selector>[0]) => {
+        reviews.push(selector(model));
+        return model.id === luna.id
+          ? fauxAssistantMessage("", {
+              stopReason: "error",
+              errorMessage: "401: Unauthorized reviewer request",
+            })
+          : fauxAssistantMessage("DENY: fixture refusal");
+      };
+      faux.setResponses([
+        fauxAssistantMessage(
+          tool === "bash"
+            ? fauxToolCall(tool, { command: `touch ${file}` })
+            : fauxToolCall(tool, {
+                path: file,
+                content: "Task-owned fixture.",
+              }),
+          { stopReason: "toolUse" },
+        ),
+        (_request, _options, _state, model) => respond(model),
+        (_request, _options, _state, model) =>
+          selector(model) === selector(actor)
+            ? fauxAssistantMessage("done")
+            : respond(model),
+        fauxAssistantMessage("done"),
+      ]);
+      await host.send("c1", `Create ${tool}.`, tool);
+      await until(idle(host));
+      expect(reviews).toEqual([selector(expected)]);
+      expect(existsSync(file)).toBe(fails);
+      if (fails)
+        expect(host.metadata("c1").safety_unavailable).toBe(
+          "no reviewer login",
+        );
+      const view = JSON.stringify((await host.view("c1")).blocks);
+      expect(view).toContain(
+        fails ? "allowed without review" : "fixture refusal",
+      );
+    }
+    const failed = {
+      event: "safety_review_failed",
+      fields: expect.objectContaining({
+        provider: expected.provider,
+        model: expected.id,
+        category: "auth",
+        attempts: 1,
+        http_status: 401,
+      }),
+    };
+    expect(logs.filter(({ event }) => event === failed.event)).toEqual(
+      fails ? [failed, failed] : [],
+    );
+  } finally {
+    await host.close();
+    await config.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 type Review = {
   instructions?: string;

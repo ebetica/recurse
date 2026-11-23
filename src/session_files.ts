@@ -1,5 +1,5 @@
 // Bounded owner-scoped accepted-file pages/previews, without history scans.
-// Derive collections from Config/validated lifetime key; no-follow final paths
+// Derive collections from state paths and a validated lifetime key; no-follow final paths
 // and recheck after async reads. Binding/claim callbacks fail closed.
 
 import { createHash } from "node:crypto";
@@ -8,7 +8,12 @@ import { constants } from "node:fs";
 import { lstat, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { extname, isAbsolute, resolve } from "node:path";
-import { Config, AGENT_DRAFT_KEY_RE, AGENT_TEMP_KEY_RE } from "./config";
+import {
+  AGENT_DRAFT_KEY_RE,
+  AGENT_TEMP_KEY_RE,
+  agentTempLeaf,
+  type StatePaths,
+} from "./state_paths";
 import * as base from "./agents/runtime/attachments/base";
 import { lstatAt, openAt, readdirAt } from "./utils/dir_fd";
 import {
@@ -54,7 +59,7 @@ export type ReferenceProof = readonly [
   offset: number,
 ];
 export interface SessionFilesContext {
-  readonly config: Config;
+  readonly paths: StatePaths;
   /** Same exact binding check as PiBackend.boundSessionFile. */
   readonly boundSessionFile?: (
     sessionId: string,
@@ -159,7 +164,7 @@ function byteView(value: Buffer): Bytes {
 
 interface OpenCollection {
   readonly snapshot: CollectionSnapshot;
-  readonly config: Config;
+  readonly paths: StatePaths;
   readonly instance: FileHandle;
   readonly ownerDirectory: FileHandle;
   readonly directory: FileHandle;
@@ -397,7 +402,7 @@ function validTempKey(value: string): boolean {
 
 function expectedCollection(
   snapshot: CollectionSnapshot,
-  config: Config,
+  paths: StatePaths,
 ): string | null {
   if (
     typeof snapshot.owner !== "string" ||
@@ -411,8 +416,8 @@ function expectedCollection(
   let expected: string;
   try {
     expected = resolve(
-      config.paths.AGENT_FILES_DIR,
-      config.agentTempLeaf(snapshot.temp_key),
+      paths.AGENT_FILES_DIR,
+      agentTempLeaf(paths, snapshot.temp_key),
       "uploads",
     );
   } catch {
@@ -479,21 +484,19 @@ async function openCollection(
   snapshot: CollectionSnapshot,
   context: SessionFilesContext,
 ): Promise<OpenCollection | null> {
-  if (expectedCollection(snapshot, context.config) === null) return null;
+  if (expectedCollection(snapshot, context.paths) === null) return null;
   let instance: FileHandle | null = null;
   let ownerDirectory: FileHandle | null = null;
   try {
-    instance = await openVerifiedDirectory(
-      context.config.paths.AGENT_FILES_DIR,
-    );
+    instance = await openVerifiedDirectory(context.paths.AGENT_FILES_DIR);
     ownerDirectory = await openVerifiedChild(
       instance,
-      context.config.agentTempLeaf(snapshot.temp_key),
+      agentTempLeaf(context.paths, snapshot.temp_key),
     );
     const directory = await openVerifiedChild(ownerDirectory, "uploads");
     return {
       snapshot,
-      config: context.config,
+      paths: context.paths,
       instance,
       ownerDirectory,
       directory,
@@ -511,14 +514,12 @@ async function collectionIsCurrent(opened: OpenCollection): Promise<boolean> {
   let ownerNow: FileHandle | null = null;
   let collectionNow: FileHandle | null = null;
   try {
-    instanceNow = await openVerifiedDirectory(
-      opened.config.paths.AGENT_FILES_DIR,
-    );
+    instanceNow = await openVerifiedDirectory(opened.paths.AGENT_FILES_DIR);
     if (!sameDirectory(await instanceNow.stat(), await opened.instance.stat()))
       return false;
     ownerNow = await openVerifiedChild(
       instanceNow,
-      opened.config.agentTempLeaf(opened.snapshot.temp_key),
+      agentTempLeaf(opened.paths, opened.snapshot.temp_key),
     );
     if (
       !sameDirectory(await ownerNow.stat(), await opened.ownerDirectory.stat())
