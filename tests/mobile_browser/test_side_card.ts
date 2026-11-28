@@ -203,7 +203,12 @@ export const tests: BrowserTest[] = [
         const page = globalThis as any;
         page.blurs = 0;
         page.toggles = 0;
+        page.exposed = 0;
         input.addEventListener("focusout", () => page.blurs++);
+        addEventListener("touchstart", (event) => {
+          if (document.activeElement === input && !event.defaultPrevented)
+            page.exposed++;
+        });
         document
           .querySelector("#send-menu")!
           .addEventListener("toggle", () => page.toggles++);
@@ -214,7 +219,11 @@ export const tests: BrowserTest[] = [
             () => (page.chosen = `${document.activeElement?.id}:${page.blurs}`),
           );
       });
-      const blurs = () => phone.evaluate(() => (globalThis as any).blurs);
+      const blurs = () =>
+        phone.evaluate(() => {
+          const page = globalThis as any;
+          return page.blurs + page.exposed;
+        });
 
       await holdSend(phone);
       await browserExpect(menu).toBeVisible();
@@ -242,6 +251,7 @@ export const tests: BrowserTest[] = [
       expect(await phone.evaluate(() => (globalThis as any).chosen)).toBe(
         "input:0",
       );
+      expect(await blurs()).toBe(0);
       await phone
         .frameLocator("iframe.side-frame")
         .locator(".msg.assistant .content", { hasText: "Phone side answer" })
@@ -261,6 +271,9 @@ export const tests: BrowserTest[] = [
       expect(await phone.evaluate(() => (globalThis as any).toggles)).toBe(
         opened,
       );
+      await browserExpect(
+        phone.locator(".msg.user", { hasText: "Plain phone send" }),
+      ).toHaveCount(1);
     } finally {
       await context.close();
     }

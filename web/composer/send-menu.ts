@@ -1,7 +1,7 @@
 // The touch Send menu consumes the held press without moving the phone caret.
-// It opens after half the shared hold so it feels quick. Presses on Send, and
-// any press while the menu is open, never take focus from the composer, so the
-// phone keyboard stays up while holding, choosing, or dismissing.
+// It opens after half the shared hold so it feels quick. While the composer is
+// focused, touches on Send or anywhere while the menu is open never take focus
+// from it, so the phone keyboard stays up while holding, choosing, dismissing.
 import { $, inputEl, sendEl } from "../dom.js";
 import { primaryPointerIsCoarse } from "../state.js";
 import { HOLD_MS, SLOP_PX } from "../touch-hold.js";
@@ -80,14 +80,41 @@ export function configureSendMenu(
   });
   for (const type of ["pointerup", "pointercancel", "pointerleave"])
     sendEl.addEventListener(type, cancel);
+  // A touch whose default runs can blur the composer (Chrome Android's native
+  // long-press), so a kept press cancels its touchstart and replays the tap
+  // from where the finger lifts.
+  let kept: Node | null = null;
   document.addEventListener(
-    "mousedown",
+    "touchstart",
     (event) => {
+      const target = event.target as Node;
+      kept = null;
       if (
-        document.activeElement === inputEl &&
-        (isOpen() || (available() && sendEl.contains(event.target as Node)))
+        event.touches.length !== 1 ||
+        document.activeElement !== inputEl ||
+        !(isOpen() || (available() && sendEl.contains(target)))
       )
-        event.preventDefault();
+        return;
+      event.preventDefault();
+      kept = target;
+    },
+    { capture: true, passive: false },
+  );
+  document.addEventListener(
+    "touchend",
+    (event) => {
+      const target = kept;
+      kept = null;
+      const touch = event.changedTouches[0];
+      if (!target || !touch) return;
+      event.preventDefault();
+      const end = document.elementFromPoint(touch.clientX, touch.clientY);
+      const within = (node: Element) => !!end && node.contains(end);
+      if (sendEl.contains(target)) {
+        if (held) held = false;
+        else if (within(sendEl)) sendEl.click();
+      } else if (!menu.contains(target)) menu.hidePopover();
+      else if (item.contains(target) && within(item)) item.click();
     },
     true,
   );
