@@ -2,7 +2,7 @@
 // captured request, tool payloads, context usage, and stored entries by id.
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { EntryId } from "@earendil-works/pi-durable";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import { modelResponse } from "../../view/model_response";
 import { runtime } from "./load.ts";
 import { slowSpan } from "../../../observability/slow-span";

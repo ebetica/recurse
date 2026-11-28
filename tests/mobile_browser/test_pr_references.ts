@@ -60,6 +60,55 @@ export const tests: BrowserTest[] = [
       await page.close();
     }
   },
+  // Regression: #3685 Cross-repository references must not link to the checkout's origin.
+  async function test_cross_repo_references(browser, base) {
+    const { checkout, plain } = await postFixture(
+      base,
+      "seed-cross-repo-references",
+    );
+    const page = await browser.newPage();
+    const reply = page.locator(".msg.assistant .content");
+    const links = reply.getByRole("link");
+    const hrefs = () =>
+      links.evaluateAll((nodes) =>
+        nodes.map((a) => [a.textContent, a.getAttribute("href")]),
+      );
+    const crossRepo = [
+      [
+        "chanzuckerberg/agentic-cli-hooks#155",
+        "https://github.com/chanzuckerberg/agentic-cli-hooks/pull/155",
+      ],
+      [
+        "chanzuckerberg/biohub-ai-infra#610",
+        "https://github.com/chanzuckerberg/biohub-ai-infra/pull/610",
+      ],
+    ];
+    const repoLink = [
+      "evolutionaryscale",
+      "https://github.com/chanzuckerberg/biohub-ai-infra",
+    ];
+    const markdown = [
+      "Full PR link",
+      "https://github.com/chanzuckerberg/agentic-cli-hooks/pull/156",
+    ];
+    await page.goto(`${base}#agent=${checkout}`);
+    await reply.getByRole("link", { name: "#12", exact: true }).waitFor();
+    expect(await hrefs()).toEqual([
+      ...crossRepo,
+      repoLink,
+      ["#12", "https://github.com/evolutionaryscale/evolutionaryscale/pull/12"],
+      ["#13", "https://github.com/evolutionaryscale/evolutionaryscale/pull/13"],
+      ["#14", "https://github.com/evolutionaryscale/evolutionaryscale/pull/14"],
+      ["#15", "https://github.com/evolutionaryscale/evolutionaryscale/pull/15"],
+      ["#16", "https://github.com/evolutionaryscale/evolutionaryscale/pull/16"],
+      ["#17", "https://github.com/evolutionaryscale/evolutionaryscale/pull/17"],
+      ["#18", "https://github.com/evolutionaryscale/evolutionaryscale/pull/18"],
+      markdown,
+    ]);
+    await page.goto(`${base}#agent=${plain}`);
+    await browserExpect.poll(hrefs).toEqual([...crossRepo, repoLink, markdown]);
+    await page.close();
+  },
   // Regression: #3332 #2929 #2941 PR links; PR diffs skip untracked, HEAD caps.
   async function test_pr_links(browser, base) {
     const { root, notes, links, calls, createdCalls } = await postFixture(

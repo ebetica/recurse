@@ -9,7 +9,7 @@ import { backends } from "./backends/backend.js";
 import {
   buildClaudeSection,
   buildOpenAISection,
-  buildOpenRouterSection,
+  buildProviderApiKeySection,
   buildCustomKeysSection,
   buildMuseSubscriptionSection,
   SHOW_MUSE_SUBSCRIPTION,
@@ -27,7 +27,10 @@ import { buildSidebarSection } from "./settings/sidebar.js";
 import { buildTwoFactorSection } from "./settings/two-factor.js";
 import { buildMcpStatus } from "./settings/mcp.js";
 import { buildConnectedBackends } from "./settings/backends.js";
-import { buildNotificationsSection } from "./settings/notifications.js";
+import {
+  buildHooksSection,
+  buildNotificationsSection,
+} from "./settings/index.js";
 import { hideVersion, showVersion } from "./settings/updates.js";
 import {
   CATEGORY_LABELS,
@@ -65,7 +68,12 @@ const remoteSections = [
   ...(SHOW_MUSE_SUBSCRIPTION
     ? [section("Muse", "providers", buildMuseSubscriptionSection)]
     : []),
-  section("OpenRouter", "providers", buildOpenRouterSection),
+  section("Gemini", "providers", (body) =>
+    buildProviderApiKeySection(body, "Gemini"),
+  ),
+  section("OpenRouter", "providers", (body) =>
+    buildProviderApiKeySection(body, "OpenRouter"),
+  ),
   section("Custom model keys", "providers", buildCustomKeysSection),
   section("Effort levels", "models", buildLadderSection),
   section("Context", "models", buildPromptCacheSection),
@@ -75,6 +83,7 @@ const remoteSections = [
 /** This Recurse's own sections, before the chosen Recurse's in a category. */
 const homeSections = [
   section("Notifications", "agents", buildNotificationsSection),
+  section("Hooks", "agents", buildHooksSection),
   section("Deleted agents' history", "agents", buildDeletedHistorySection),
   section("Theme", "appearance", buildThemeSection),
   section("Name and icon", "appearance", buildBrandingSection),
@@ -87,7 +96,7 @@ const homeSections = [
 /** The category last chosen in this browser; Settings reopens on it. */
 const LAST_CATEGORY_KEY = "recurse.settingsCategory";
 // Login sections show the provider's tile and login state.
-const PROVIDERS = new Set(["Claude", "OpenAI", "Muse", "OpenRouter"]);
+const PROVIDERS = new Set(["Claude", "OpenAI", "Muse", "Gemini", "OpenRouter"]);
 
 const settingsOverlay = $("#settings-overlay")!;
 const settingsModal = $("#settings-modal")!;

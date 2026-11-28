@@ -30,6 +30,7 @@ const WORKER_ENV_STRIP = [
   "ANTHROPIC_API_KEY",
   "OPENAI_API_KEY",
   "OPENROUTER_API_KEY",
+  "GEMINI_API_KEY",
 ];
 
 type Json = Record<string, unknown>;

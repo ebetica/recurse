@@ -38,7 +38,7 @@ export interface SidebarRow extends Agent {
 
   /** Experimental: active state, including working/waiting descendants. */
   busy: boolean;
-  /** Experimental: qualifying finish not yet viewed on any device. */
+  /** Experimental: a new reply from this agent not yet viewed on any device. */
   unread: boolean;
   /** Experimental: ancestry depth; roots are 0. */
   depth: number;

@@ -52,7 +52,7 @@ export interface TreeNode {
   tags?: Record<string, { at: number; by: string; until?: number }>;
   // When its latest turn finished (epoch seconds).
   replied_at?: number | null;
-  /** Finished with nothing waiting, and not yet viewed on any device. */
+  /** A new reply from this agent not yet viewed on any device. */
   unread?: boolean;
   // Restart-interrupted; active parked work may resume automatically.
   restart_parked?: boolean;
@@ -91,6 +91,7 @@ export interface Message {
   // Marker is platform context summarization/reset, never authored input.
   role: "user" | "assistant" | "marker";
   content: string;
+  text_is_authored?: true;
   // latest bounded bold heading
   thinking_title?: string | null;
   /** Internal normalized title used by activity projection. */
@@ -516,6 +517,7 @@ export interface Conversation {
   message_log_generation?: number;
   active_run?: string | null;
   active_run_start?: number | null;
+  running_hooks?: { label: string; at: number }[];
   run_state_clock?: [string, number];
   retry_notice?: string | null;
 }

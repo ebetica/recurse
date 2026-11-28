@@ -2,9 +2,8 @@
 
 Vendored from https://github.com/ebetica/pi-bg-shell at commit
 `2d2fa08795b5d47d6c164e0b808dbd854810ce6b`; this copy is the source of truth for
-Recurse. `src/agents/durable/host.ts` imports `shells.ts` to provide the
-Durable `bash` and `wait` tools. This package no longer loads as a Pi extension;
-its former extension entry and terminal UI are removed.
+Recurse. The [Durable host](../../../agents/durable/host/) uses this package
+for its `bash` and `wait` tools without loading it as a Pi extension.
 
 ## Shell tools
 

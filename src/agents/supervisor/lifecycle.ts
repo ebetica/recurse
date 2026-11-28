@@ -72,7 +72,7 @@ export interface LifecycleDeps {
     existing(cid: string): LifecycleNode | null;
     node(cid: string): LifecycleNode;
   };
-  /** Durable conversations (src/agents/durable/host.ts). */
+  /** Durable conversations (src/agents/durable/host). */
   durable?: {
     runningCount(): number;
     /** Resume unfinished Durable work without opening idle conversations. */

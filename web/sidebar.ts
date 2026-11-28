@@ -104,6 +104,7 @@ import {
   keepSubagentsOpen,
   noteSelection,
   refreshSidebarTree,
+  restoreMovedListControl,
   rowActions,
   rowButtons,
   sectionForBackend,
@@ -119,7 +120,7 @@ interface TreeEntry {
   draftRow?: boolean;
   /** A backend section's header row. */
   header?: Section;
-  /** A top-level row's actions. */
+  /** Actions available on this row. */
   actions?: Action[];
   depth: number;
   sectionDepth?: number;
@@ -275,9 +276,14 @@ function sectioned(): TreeEntry[] {
     for (const id of section.ids) {
       const rows = blocks.get(id);
       if (!rows?.length) continue;
-      const writable = !section.backend || !!state.nodes[id]?.agent?.tags;
-      rows[0]!.actions = writable ? rowActions(section, id) : [];
-      actionsById.set(id, rows[0]!.actions);
+      for (const row of rows) {
+        const node = row.n!;
+        const writable = !section.backend || !!node.agent?.tags;
+        row.actions = writable
+          ? rowActions(section, node.id, row.depth > 0)
+          : [];
+        actionsById.set(node.id, row.actions);
+      }
       if (!folded || rows.some((e) => e.n!.id === state.selectedId))
         out.push(
           ...rows.map((row) => ({
@@ -499,7 +505,7 @@ function rowT(
       }
       <span class="time" title="Last activity ${relTime(n.updated)}">
         <span class="time-label">${relTime(n.updated)}</span>
-        ${n.unread ? html`<span class="agent-unread" role="img" aria-label=${`${n.title} — finished, not yet viewed`} title="Finished, not yet viewed"></span>` : nothing}
+        ${n.unread ? html`<span class="agent-unread" role="img" aria-label=${`${n.title} — new reply, not yet viewed`} title="New reply, not yet viewed"></span>` : nothing}
       </span>
     </div>
   </${tag}>`;
@@ -545,6 +551,9 @@ export function renderSidebar(): void {
     clearTimeout(disarmTimer);
     titleEl.classList.remove("armed");
   }
+  const focused = document.activeElement;
+  const hadListFocus =
+    focused instanceof HTMLElement && listEl.contains(focused);
   // Invariant: One section per backend, in backends() order; the home's rows
   // sit directly in the list, each remote's below its divider and header.
   render(
@@ -602,10 +611,11 @@ export function renderSidebar(): void {
     )}`,
     listEl,
   );
+  rowTouch.sync();
 
   // Invariant: Opening gets one centring pass after keyed row creation, and
   // again when the open row moves to another section. Polls never otherwise
-  // recenter or override scrolling; DOM focus remains untouched.
+  // recenter or override scrolling.
   let section: string | null = null;
   let title = "";
   for (const entry of entries) {
@@ -625,6 +635,13 @@ export function renderSidebar(): void {
     (id) =>
       listEl.querySelector<HTMLElement>(`.agent[data-id="${CSS.escape(id)}"]`),
   );
+  // Lit's keyed moves can blur a control even when it survives the render.
+  if (
+    hadListFocus &&
+    document.activeElement === document.body &&
+    listEl.contains(focused)
+  )
+    restoreMovedListControl(focused);
 }
 
 window.addEventListener("recurse:stop-pending", () => renderSidebar());
@@ -1062,7 +1079,7 @@ export function hasPendingDeleteSelection(id: string): boolean {
   );
 }
 
-// Keyboard and swipe deletion share the same confirmation and navigation path.
+// Keyboard and swipe deletion share the same navigation path.
 // A refused deletion carries the server's own diagnostic: prefer it, fall
 // back to the bare status, and keep the line bounded for the status banner.
 function deleteFailureMessage(status: number, body: unknown): string {
@@ -1470,6 +1487,7 @@ export function startRename(id: string): void {
 }
 
 const rowTouch = initRowTouch({
+  repaint: renderSidebar,
   remove: killAgent,
   rename: startRename,
   renaming: isRenaming,

@@ -7,13 +7,18 @@ second URL. The [browser build](../src/launcher/build.cli.ts) bundles [app.ts](a
 starts `/static/sidebar-worker.js`; [the server](../src/web/notifications.ts)
 serves [push-worker.ts](push-worker.ts) at `/push-worker.js`.
 
+A failed desktop windows load leaves Chat usable and asks the shared
+[connection monitor](connection.ts) to check for an update. The fallback
+reload action uses the same unsent-work guard as automatic updates.
+
 ## Source files
 
 - Chat: [conversation](conversation/README.md), [composer](composer/README.md),
   [thread rendering](thread-render/README.md), [thread scrolling](thread-scroll/README.md),
   [held rows](row-thread-state/README.md), [pending queue](pending-queue/README.md),
   [conversation UI state](conversation-ui-state/), [context](context/),
-  [stop control](stop-control/) and [uploads](attachments.ts).
+  [stop control](stop-control/), [uploads](attachments.ts), and
+  [selection comments](selection-comments.ts), which quote native selections into the composer.
 - Navigation: [sidebar](sidebar/README.md), [agent finder](agent-finder/),
   [deep links](deep-link.ts), [pane finder](pane-finder.ts) and [keys](keymap.ts).
   The [shared script contracts](../src/sidebar_script/README.md) validate
@@ -23,15 +28,17 @@ serves [push-worker.ts](push-worker.ts) at `/push-worker.js`.
   [Changes](diff.ts) and its [diff viewer](diff/README.md), [Side chats](side-pane.ts),
   [hourly tips](tips/README.md), and [image previews](image-preview/README.md).
 - Shared pane content: [comments](comments/), [selection text](comments/selection-text/README.md)
-  and [document media](document-media/). See [document previews in Files](files/README.md#documents).
-- Settings and input choices: [Settings](settings/README.md), [models](models.ts)
-  and [model finders](models/), [prompt](prompt.ts) and its [banner](prompt/banner.ts),
+  and [document media](document-media/). [Document Markdown](document-markdown.ts) and its
+  [heading styles](artifacts/style.css) keep Files and Artifacts consistent without changing chat replies.
+- Settings and input choices: [Settings](settings/README.md), the shared
+  [effort picker](models.ts) for New agent and the conversation composer,
+  [model finders](models/), [prompt](prompt.ts) and its [banner](prompt/banner.ts),
   and [skills](skills/).
 - Requests: [API](api.ts), [backends](backends/README.md),
   [connections](connection.ts) and [transport helpers](connection/).
   [Polling](polling/) coordinates tree and focused reads across features.
 - Shared assets and helpers: [brand](brand/), [theme](theme.css),
-  [icons](icons.ts), and [utilities](util/).
+  [icons](icons.ts), and [utilities](util.ts).
 
 For [Changes](diff.ts), Default compares the working tree to the merge base and
 HEAD shows local edits (both report the 500-name cap and fold the untracked list
@@ -58,7 +65,8 @@ automatic movement keep focus.
 
 Desktop Settings is a gear; Delete agent ends the right rail. Shift+H toggles
 the agent list. Normal and Insert badges are screen-reader only; there is no
-Dialog badge. Losing focus to the body keeps `g`/`w` prefixes.
+Dialog badge. Losing focus to the body or restoring it after a sidebar
+reorder keeps `g`/`w` prefixes.
 
 ## Working-folder Explorer
 
@@ -111,7 +119,10 @@ before worker control; other profiles or discarded tabs may have none to reuse.
 
 [index.html](index.html) links the [server's web manifest](../src/web/notifications.ts).
 The browser controls installation for the current origin; the app has no
-install button or install-prompt hook.
+install button or install-prompt hook. An iPhone Home Screen launch draws the
+page behind the translucent status bar. [Shared layout](app.css) reserves space
+for cutouts, including fixed surfaces outside the page flow. The
+[active palette](settings/themes.ts) supplies the browser chrome colour.
 
 ## Styles and assets
 
@@ -125,6 +136,11 @@ stylesheet on first use. Run `bun run build:assets` to see CSS edits in live mod
 
 [theme.css](theme.css) defines tokens; [icons.ts](icons.ts) supplies inline icons.
 Sidebar overlays fade into their row surface, preserving selection outlines.
+Put hover paint behind `(hover: hover)` so tapping never leaves it behind.
+Keep focus and press states independent of hover. The shared field size in
+[app.css](app.css) prevents focus zoom on coarse pointers.
+[Touch press feedback](touch-press.ts) observes pointer events without changing
+what a tap or drag does.
 Controls use safe insets. [brand](brand/) holds ouroboros SVGs and PNGs traced
 from [logo.png](brand/logo.png). [branding.ts](../src/branding.ts) replaces
 marks, favicons and manifest icons with the custom icon.

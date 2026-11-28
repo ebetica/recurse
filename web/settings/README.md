@@ -8,11 +8,15 @@
   edits safety review. [Draft defaults](draft-defaults/README.md) supplies
   preferences and new-subagent default snapshots.
 - [auth.ts](auth.ts) and [two-factor.ts](two-factor.ts) own sign-in and two-factor
-  settings. [backends.ts](backends.ts) and [backend-keys.ts](backend-keys.ts) manage
+  settings. Gemini and OpenRouter share the API-key form but sign in separately.
+  [backends.ts](backends.ts) and [backend-keys.ts](backend-keys.ts) manage
   remote connections and keys.
 - [theme.ts](theme.ts) selects themes; [theme-css.ts](theme-css.ts) filters and
   adopts custom CSS. [notifications.ts](notifications.ts) manages per-browser Web Push.
 - [updates.ts](updates.ts) shows release and update status and actions.
+- [hooks.ts](hooks.ts) adds, edits and deletes the operator's
+  [hook files](../../src/extensions/extra/hooks/README.md) and holds the
+  "Run hooks" switch.
 
 ## Categories and saving
 

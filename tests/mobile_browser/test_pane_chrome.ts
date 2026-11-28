@@ -2,6 +2,7 @@ import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import { waitForPaneScroll, waitForPaneTransition } from "./pane_layout";
 import { mkdir } from "node:fs/promises";
+import { tipsForDevice } from "../../web/tips/list";
 import {
   gotoRoot,
   postFixture,
@@ -398,7 +399,9 @@ export const tests: BrowserTest[] = [
       .waitFor();
     await rail.click();
     const pane = page.locator('.pane-col[data-pane="tips"]');
-    await pane.locator(".tips-count", { hasText: "1 of 29" }).waitFor();
+    const count = pane.locator(".tips-count");
+    const total = tipsForDevice("desktop").length;
+    await browserExpect(count).toHaveText(`1 of ${total}`);
     expect(await pane.locator(".tip-title").textContent()).toBe(
       "Your sidebar is a script",
     );
@@ -414,7 +417,7 @@ export const tests: BrowserTest[] = [
       .locator(".tip-title", { hasText: "Your sidebar is a script" })
       .waitFor();
     await pane.getByRole("button", { name: "Next tip" }).click();
-    await pane.locator(".tips-count", { hasText: "2 of 29" }).waitFor();
+    await browserExpect(count).toHaveText(`2 of ${total}`);
     expect(await pane.locator(".tip-title").textContent()).toBe(
       "Group agents by project",
     );
@@ -434,7 +437,7 @@ export const tests: BrowserTest[] = [
     await desktop.clock.fastForward(hour);
     await page.locator('.rail-btn.attention[data-pane="tips"]').waitFor();
     await rail.click();
-    await pane.locator(".tips-count", { hasText: "3 of 29" }).waitFor();
+    await browserExpect(count).toHaveText(`3 of ${total}`);
     expect(await pane.locator(".tip-title").textContent()).toBe(
       "Let agents flag you",
     );
@@ -473,6 +476,7 @@ export const tests: BrowserTest[] = [
     const ids = await rows.evaluateAll((nodes) =>
       nodes.map((node) => node.getAttribute("data-tip")),
     );
+    expect(ids).toHaveLength(total);
     const cursor = pane.locator(".pane-item-cursor");
     await page.keyboard.press("Shift+G");
     expect(await cursor.getAttribute("data-tip")).toBe(ids.at(-1)!);
@@ -620,7 +624,9 @@ export const tests: BrowserTest[] = [
     expect(await item.getAttribute("class")).toContain("attention");
     await item.tap();
     const sheet = mobile.locator('.pane-col[data-pane="tips"]');
-    await sheet.locator(".tips-count", { hasText: "1 of 27" }).waitFor();
+    const phoneCount = sheet.locator(".tips-count");
+    const phoneTotal = tipsForDevice("phone").length;
+    await browserExpect(phoneCount).toHaveText(`1 of ${phoneTotal}`);
     expect(await sheet.locator(".tips-filter").count()).toBe(0);
     if (shots)
       await mobile.screenshot({ path: `${shots}/tips-native-412.png` });
@@ -643,14 +649,17 @@ export const tests: BrowserTest[] = [
     await fab.tap();
     await item.tap();
     await sheet.getByRole("button", { name: "Next tip" }).tap();
-    await sheet.locator(".tips-count", { hasText: "2 of 27" }).waitFor();
+    await browserExpect(phoneCount).toHaveText(`2 of ${phoneTotal}`);
     await sheet.getByRole("button", { name: "Previous" }).tap();
-    await sheet.locator(".tips-count", { hasText: "1 of 27" }).waitFor();
+    await browserExpect(phoneCount).toHaveText(`1 of ${phoneTotal}`);
     await sheet.getByRole("button", { name: "Open Settings" }).tap();
     await mobile.locator("#settings-overlay.on").waitFor();
     await mobile.locator("#settings-close").tap();
     await mobile.locator("#settings-overlay.on").waitFor({ state: "hidden" });
     await sheet.locator(".tips-all > summary").tap();
+    await browserExpect(sheet.locator(".tips-all-item")).toHaveCount(
+      phoneTotal,
+    );
     await sheet
       .getByRole("button", { name: "Teach agents your workflows" })
       .tap();

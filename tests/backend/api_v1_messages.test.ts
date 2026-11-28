@@ -68,12 +68,23 @@ test("send v1 message through the fake provider", async () => {
       "x-recurse-agent": sender,
       "content-type": "application/json",
     };
-    const post = (body: unknown) =>
+    const post = (body: unknown, from = sender) =>
       fetch(`${running.url}/api/v1/agents/${target}/messages`, {
         method: "POST",
-        headers,
+        headers: { ...headers, "x-recurse-agent": from },
         body: JSON.stringify(body),
       });
+    for (const from of ["missing-agent", ""]) {
+      const denied = await post(
+        { text: "Message with unresolved sender" },
+        from,
+      );
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toMatchObject({
+        detail: "sender agent is unavailable",
+      });
+    }
+    expect(faux.state.callCount).toBe(0);
     const sent = await post({ text: "hello v1", client_message_id: "v1-test" });
     expect(sent.status).toBe(200);
     expect(sent.headers.get("cache-control")).toBe("no-store");

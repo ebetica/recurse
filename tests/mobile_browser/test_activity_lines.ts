@@ -1,20 +1,57 @@
 import { expect } from "bun:test";
 import { writeFile } from "node:fs/promises";
-import { expect as browserExpect } from "playwright/test";
+import { expect as browserExpect, type Locator } from "playwright/test";
 
 declare const getComputedStyle: any;
 import {
   captureErrors,
+  checkedTap,
   expectHitCorners,
   gotoRoot,
   mockConversation,
   postFixture,
+  screenshot,
   waitForLayout,
   type BrowserTest,
 } from "./common";
 import { row } from "./fixtures";
 import recorded from "./fixtures/activity-lines.json";
 import thinking from "./fixtures/activity-thinking.json";
+
+export function expectActivityRowCorners(row: Locator) {
+  return expectHitCorners(row, 44, { horizontalInset: 1, verticalInset: 1 });
+}
+
+async function expectSingleSpacedActivity(rows: Locator) {
+  const spacing = await rows.evaluateAll((buttons) => {
+    const reply = buttons[0]!.ownerDocument.querySelector(
+      ".msg.assistant > .content p",
+    )!;
+    const replyPitch = Number.parseFloat(getComputedStyle(reply).lineHeight);
+    const measured = buttons.map((button) => ({
+      row: button.getBoundingClientRect(),
+      labelTop: button.lastElementChild!.getBoundingClientRect().top,
+    }));
+    return measured.slice(1).map(({ row, labelTop }, index) => {
+      const previous = measured[index]!;
+      return {
+        rowGap: row.top - previous.row.bottom,
+        pitchDifference: labelTop - previous.labelTop - replyPitch,
+      };
+    });
+  });
+  for (const { rowGap, pitchDifference } of spacing) {
+    expect(
+      Math.abs(rowGap),
+      "gap between collapsed activity rows",
+    ).toBeLessThanOrEqual(2);
+    expect(
+      Math.abs(pitchDifference),
+      "activity row pitch versus reply line pitch",
+    ).toBeLessThanOrEqual(1);
+  }
+  for (const row of await rows.all()) await expectActivityRowCorners(row);
+}
 
 // Regression: #3672 expanded activity has even single-line rows on phones and desktops and folds shell completions into command details.
 export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
@@ -33,7 +70,50 @@ export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
       await page.request.get(`${base}api/conversations/${id}/view?limit=100`)
     ).json();
   try {
+    const wake = await postFixture(base, "seed-activity-card", {
+      agentWake: true,
+    });
+    await page.goto(`${base}#agent=${wake.agent}`);
+    await page
+      .getByText("The sample results agree.", { exact: true })
+      .waitFor();
+    await page.locator(".activity-group-toggle").tap();
+    const wakeCard = page.locator(".activity-group-body");
+    const wakeRows = wakeCard.locator(
+      ":scope > :is(.agent-message, .turn-thinking, .turn-series) > button",
+    );
+    await browserExpect(wakeRows).toHaveText([
+      /^\s*Message from Sample reviewer\s*child agent\s*$/,
+      /^\s*Thought for \d+s\s*$/,
+      "Poked 1 agent",
+    ]);
+    for (const viewport of [phone.viewport, { width: 412, height: 915 }]) {
+      await page.setViewportSize(viewport);
+      await waitForLayout(page);
+      await expectSingleSpacedActivity(wakeRows);
+    }
+    await page.setViewportSize(phone.viewport);
+    await waitForLayout(page);
+    const message = wakeRows.first();
+    await checkedTap(message, { x: 1, y: 1 });
+    await browserExpect(message).toHaveAttribute("aria-expanded", "true");
+    await browserExpect(wakeRows.nth(1)).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    const messageBody = wakeCard.locator(".agent-message-body");
+    await browserExpect(messageBody).toContainText("I compared both samples.");
+    expect(
+      await messageBody.evaluate(
+        (body) =>
+          body.parentElement!.nextElementSibling!.getBoundingClientRect().top -
+          body.getBoundingClientRect().bottom,
+      ),
+    ).toBeGreaterThan(2);
     await page.goto(`${base}#agent=${agent}`);
+    await page
+      .locator("#conv-title", { hasText: "Review command results" })
+      .waitFor();
     await page.locator("#input").fill("Check the sample results.");
     await page.locator("#send").click();
     await browserExpect
@@ -61,7 +141,7 @@ export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
     ] as const) {
       await screen.setViewportSize({
         width,
-        height: width === 1280 ? 800 : 844,
+        height: width === 1280 ? 800 : width === 412 ? 915 : 844,
       });
       await waitForLayout(screen);
       const card = screen.locator(".activity-group-body");
@@ -86,10 +166,10 @@ export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
           const label = button.lastElementChild!;
           const range = button.ownerDocument.createRange();
           range.selectNodeContents(label);
-          const { color, fontWeight, height } = getComputedStyle(button);
+          const { color, fontWeight } = getComputedStyle(button);
           const { lineHeight, textOverflow } = getComputedStyle(label);
           return {
-            style: { color, fontWeight, height, lineHeight },
+            style: { color, fontWeight, lineHeight },
             lines: new Set(
               Array.from(range.getClientRects(), (rect) => rect.top),
             ).size,
@@ -103,40 +183,18 @@ export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
       expect(styles.map((row) => row.style)).toEqual(
         styles.map(() => styles[0]!.style),
       );
-      const { edges, gaps } = await rows.evaluateAll((buttons) => {
-        const boxes = buttons.map((button) => button.getBoundingClientRect());
-        const card = buttons[0]!
-          .closest(".activity-group-body")!
-          .getBoundingClientRect();
-        return {
-          edges: [boxes[0]!.top - card.top, card.bottom - boxes.at(-1)!.bottom],
-          gaps: boxes
-            .slice(1)
-            .map((box, index) => box.top - boxes[index]!.bottom),
-        };
-      });
-      const gap = gaps[0]!;
-      expect(gap).toBeGreaterThan(0);
-      expect(gaps).toEqual(gaps.map(() => gap));
-      expect(edges).toEqual(width === 1280 ? [gap, gap] : [0, 0]);
-      if (width === 1280) {
-        const { height, lineHeight } = styles[0]!.style;
-        expect(
-          Math.abs(Number.parseFloat(height) - Number.parseFloat(lineHeight)),
-        ).toBeLessThanOrEqual(2);
-      } else {
-        for (const row of await rows.all()) await expectHitCorners(row);
-        await expectHitCorners(
-          card.getByRole("button", { name: "Hide activity" }),
-        );
-      }
+      await expectSingleSpacedActivity(rows);
+      await screenshot(screen, `activity-card-${width}`);
+      await expectHitCorners(
+        card.getByRole("button", { name: "Hide activity" }),
+      );
     }
     const card = page.locator(".activity-group-body");
-    await card
-      .getByRole("button", {
-        name: /Ran 1 command, waited, 1 background shell finished/,
-      })
-      .tap();
+    const command = card.getByRole("button", {
+      name: /Ran 1 command, waited, 1 background shell finished/,
+    });
+    await checkedTap(command, { x: 1, y: 1 });
+    await browserExpect(command).toHaveAttribute("aria-expanded", "true");
     await browserExpect(
       card.getByText(/Background shell finished.*· exit 0 · \d+s/),
     ).toBeVisible();
@@ -193,8 +251,8 @@ export const testExpandedActivityCard: BrowserTest = async (browser, base) => {
             };
           }),
       ).toEqual({ lines: 1, clipped: true, ellipsis: true });
-      await expectHitCorners(standalone);
-      await standalone.tap();
+      await expectActivityRowCorners(standalone);
+      await checkedTap(standalone, { x: 1, y: 1 });
       const output = isolatedPage.locator(".shell-notice pre");
       await browserExpect(output).toBeVisible();
       await browserExpect(output).toContainText(
@@ -319,8 +377,8 @@ export const testRecordedActivityLines: BrowserTest = async (browser, base) => {
       });
       await browserExpect(unreadable).toHaveCount(0);
       if (mobile) {
-        await expectHitCorners(latest);
-        await latest.tap();
+        await expectActivityRowCorners(latest);
+        await checkedTap(latest, { x: 1, y: 1 });
       } else {
         await latest.press("Enter");
       }

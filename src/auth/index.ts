@@ -2,6 +2,8 @@
 // Providers load lazily; keep the coding runtime off this import path.
 export { CODEX_PROVIDER, withCodexCliAccess } from "./codex_cli";
 export {
+  GEMINI_CREDENTIAL,
+  GEMINI_MIN_KEY_LENGTH,
   OPENAI_CHOICE_MARKER,
   pyStrip,
   validCredential,

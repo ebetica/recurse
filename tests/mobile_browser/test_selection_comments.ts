@@ -54,6 +54,129 @@ async function selectWithMouse(
   }
 }
 
+async function cancelTouchOnWord(
+  paragraph: Locator,
+  word: string,
+  {
+    preserveSelection = false,
+    whileSelected,
+  }: { preserveSelection?: boolean; whileSelected?: () => Promise<void> } = {},
+) {
+  const page = paragraph.page();
+  await paragraph.scrollIntoViewIfNeeded();
+  const point = await paragraph.evaluate((element, word) => {
+    const text = element.firstChild as Text;
+    const start = text.data.indexOf(word);
+    const range = document.createRange();
+    range.setStart(text, start);
+    range.setEnd(text, start + word.length);
+    const { x, y, width, height } = range.getBoundingClientRect();
+    const point = {
+      x: Math.round(x + width / 2),
+      y: Math.round(y + height / 2),
+    };
+    if (!element.contains(document.elementFromPoint(point.x, point.y)))
+      throw new Error(`Touch target is covered: ${word}`);
+    return point;
+  }, word);
+  const touch = await page.context().newCDPSession(page);
+  const gesture = await page.evaluateHandle((preserveSelection) => {
+    const listeners = new AbortController();
+    const events: { type: string; text: string }[] = [];
+    for (const type of [
+      "pointerdown",
+      "selectionchange",
+      "pointercancel",
+      "touchcancel",
+    ])
+      document.addEventListener(
+        type,
+        (event) => {
+          if (event.isTrusted)
+            events.push({ type, text: String(getSelection()) });
+        },
+        { capture: true, signal: listeners.signal },
+      );
+    const range = preserveSelection ? getSelection()!.getRangeAt(0) : null;
+    const before = range && {
+      start: range.startContainer,
+      end: range.endContainer,
+      startOffset: range.startOffset,
+      endOffset: range.endOffset,
+    };
+    return { events, listeners, before };
+  }, preserveSelection);
+  try {
+    await touch.send("Emulation.setEmitTouchEventsForMouse", {
+      enabled: true,
+      configuration: "mobile",
+    });
+    await touch.send("Input.emulateTouchFromMouseEvent", {
+      type: "mousePressed",
+      ...point,
+      button: "left",
+      clickCount: 1,
+    });
+    await page.waitForFunction(
+      ({ gesture, word, ready }) =>
+        gesture.events.some(
+          ({ type, text }) => type === ready && text === word,
+        ),
+      {
+        gesture,
+        word,
+        ready: preserveSelection ? "pointerdown" : "selectionchange",
+      },
+    );
+    await whileSelected?.();
+    await touch.send("Emulation.setEmitTouchEventsForMouse", {
+      enabled: false,
+    });
+    await page.waitForFunction(
+      ({ gesture, word }) =>
+        ["pointercancel", "touchcancel"].every((end) =>
+          gesture.events.some(
+            ({ type, text }) => type === end && text === word,
+          ),
+        ),
+      { gesture, word },
+    );
+    if (preserveSelection) {
+      expect(
+        await gesture.evaluate(({ before }) => {
+          const range = getSelection()!.getRangeAt(0);
+          return (
+            !!before &&
+            range.startContainer === before.start &&
+            range.endContainer === before.end &&
+            range.startOffset === before.startOffset &&
+            range.endOffset === before.endOffset
+          );
+        }),
+      ).toBe(true);
+    }
+  } finally {
+    await gesture.evaluate(({ listeners }) => listeners.abort());
+    await gesture.dispose();
+    await touch.detach();
+  }
+}
+
+async function expectUnchangedTouchDoesNotOffer(
+  paragraph: Locator,
+  word: string,
+  offer: Locator,
+) {
+  await cancelTouchOnWord(paragraph, word, { preserveSelection: true });
+  await paragraph.page().evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => setTimeout(resolve, 0));
+      }),
+  );
+  await browserExpect(offer).toBeHidden();
+}
+
 const thread = {
   id: "main",
   title: "Selection comments",
@@ -1029,6 +1152,101 @@ export const tests: BrowserTest[] = [
   },
   async function test_selection_comments_mobile(browser, base) {
     await runSelectionComment(browser, base, true);
+  },
+  // Regression: #3692 a cancelled touch long-press offers a Chat comment even with a focused composer.
+  async function test_chat_comments_after_cancelled_long_press(browser, base) {
+    const answer = "Highlight these words for later review.";
+    const { page, errors } = await openPage(browser, {
+      viewport: { width: 412, height: 844 },
+      touch: true,
+    });
+    const conversation = await page.request.post(`${base}api/conversations`, {
+      data: { parent: null },
+    });
+    expect(conversation.ok()).toBe(true);
+    const { id } = await conversation.json();
+    await page.goto(`${base}#agent=${id}`, { waitUntil: "domcontentloaded" });
+    const composer = page.locator("#input");
+    await composer.fill(`Reply only ${answer}`);
+    await page.locator("#send").tap();
+    const paragraph = page.locator(".msg.assistant .content p", {
+      hasText: answer,
+    });
+    const offer = page.getByRole("button", { name: "Comment", exact: true });
+    let quoted = "";
+    for (const word of ["Highlight", "later"]) {
+      await cancelTouchOnWord(paragraph, word);
+      await browserExpect(offer).toBeVisible();
+      await expectHitCorners(offer, 44, { scroll: false });
+      if (!quoted) await shot(page, "chat-long-press-comment-412.png");
+      await offer.tap();
+      quoted += `${quoted ? "\n" : ""}> ${word}\n`;
+      await browserExpect(composer).toHaveValue(quoted);
+      await browserExpect(composer).toBeFocused();
+    }
+    await cancelTouchOnWord(paragraph, "words");
+    await browserExpect(offer).toBeVisible();
+    await expectUnchangedTouchDoesNotOffer(paragraph, "words", offer);
+    expect(errors).toEqual([]);
+  },
+  // Regression: #3692 a cancelled touch long-press offers a new Artifact comment after the first is staged.
+  async function test_artifact_comments_after_cancelled_long_press(
+    browser,
+    base,
+  ) {
+    const { id } = await postFixture(base, "seed-pane-reading", {
+      markdown: [
+        "# Selection comments",
+        "Highlight the first word.",
+        "Choose a separate passage later.",
+        "Keep the current selection.",
+        ...Array.from({ length: 30 }, (_, i) => `Reading paragraph ${i + 1}.`),
+      ].join("\n\n"),
+    });
+    const { page, errors } = await openPage(browser, {
+      viewport: { width: 412, height: 844 },
+      touch: true,
+    });
+    await gotoRoot(page, base);
+    await page.locator(`a[href="#artifact=${id}"]`).first().tap();
+    const popover = page.locator(".report-comment-popover");
+    const offer = popover.getByRole("button", { name: "Comment", exact: true });
+    for (const word of ["Highlight", "separate"]) {
+      await cancelTouchOnWord(
+        page.locator(".report-doc p", { hasText: word }),
+        word,
+      );
+      await browserExpect(offer).toBeVisible();
+      await expectHitCorners(offer, 44, { scroll: false });
+      if (word === "Highlight")
+        await shot(page, "artifact-long-press-comment-412.png");
+      await popover.getByRole("textbox").fill(`Discuss ${word}`);
+      await offer.tap();
+      await browserExpect(popover).toBeHidden();
+    }
+    await browserExpect(page.locator(".report-comment-quote")).toHaveText([
+      "Highlight",
+      "separate",
+    ]);
+    const paragraph = page.locator(".report-doc p", {
+      hasText: "Keep the current selection",
+    });
+    const pane = page.locator('.pane-col[data-pane="report"].mobile-active');
+    await cancelTouchOnWord(paragraph, "current", {
+      whileSelected: () =>
+        pane.evaluate(
+          (element) =>
+            new Promise<void>((resolve) => {
+              element.addEventListener("scroll", () => resolve(), {
+                once: true,
+              });
+              element.scrollBy(0, 8);
+            }),
+        ),
+    });
+    await browserExpect(offer).toBeHidden();
+    await expectUnchangedTouchDoesNotOffer(paragraph, "current", offer);
+    expect(errors).toEqual([]);
   },
 ];
 

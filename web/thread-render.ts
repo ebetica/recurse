@@ -71,7 +71,7 @@ import {
   isInternalNoticeOnly,
   isNoticeOnlyAssistant,
   isPlatformInterruption,
-  stripInternalNoticeLines,
+  userBodyText,
   toolExpansion,
   codemodeCallBlockReason,
   codemodeHeaderLabel,
@@ -331,7 +331,7 @@ function userEntryT(
   entry: MessageEntry,
 ): TemplateResult | typeof nothing {
   if (isAgentActivityMessage(entry)) return activityMessageT(conv, entry);
-  const bubble = userBubble(stripInternalNoticeLines(entry.content));
+  const bubble = userBubble(userBodyText(entry));
   return html`<div
     class="msg user"
     data-theme="user-message"
@@ -664,7 +664,7 @@ function toolRowT(
   }
   const inlineKey = `${conv.id}:${toolRowKey(entry)}`;
   const hasInline = Boolean(
-    expansion.args || expansion.output || expansion.calls,
+    expansion.args || expansion.ranArgs || expansion.output || expansion.calls,
   );
   const expanded = entry.artifact_id
     ? open
@@ -761,6 +761,15 @@ function toolRowT(
                   : "Full arguments"}
               >
                 <pre>${expansion.args}</pre>
+              </section>`
+            : nothing}
+          ${expansion.ranArgs
+            ? html`<section
+                class="tool-payload"
+                aria-label="Ran as changed by a hook"
+              >
+                <div class="tool-ran-label">Ran as changed by a hook</div>
+                <pre>${expansion.ranArgs}</pre>
               </section>`
             : nothing}
           ${expansion.calls

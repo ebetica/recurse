@@ -7,6 +7,8 @@ import { performance } from "node:perf_hooks";
 import { isDeepStrictEqual } from "node:util";
 import {
   codemodeCalls,
+  hookArguments,
+  displayToolArgs,
   displayResult,
   entryRows,
   LOST_STOP_REASON,
@@ -33,6 +35,7 @@ type Pending = {
   timing: ToolTiming | null;
   readLines: number;
   calls: JsonObject[] | null;
+  ranArgs: JsonObject | null;
 };
 
 // Native, nested and historical publication calls look up owned files.
@@ -362,6 +365,7 @@ export class ConversationView {
           timing: pending.timing,
           readLines: pending.readLines,
           calls: pending.calls,
+          ranArgs: pending.ranArgs,
           artifactId: pending.artifactId,
         })
       ) {
@@ -452,6 +456,7 @@ export class ConversationView {
         timing: resultTiming(messageValue),
         readLines: readLines(messageValue),
         calls: codemodeCalls(messageValue.details),
+        ranArgs: hookArguments(messageValue.details),
       });
       return 0;
     }
@@ -466,6 +471,7 @@ export class ConversationView {
         safetyUsage: summarizeSafetyResults([messageValue]),
         timing: resultTiming(messageValue),
         calls: codemodeCalls(messageValue.details),
+        ranArgs: hookArguments(messageValue.details),
       }),
     );
   }
@@ -607,6 +613,7 @@ export class ConversationView {
       artifactId?: string;
       readLines?: number;
       calls?: JsonObject[] | null;
+      ranArgs?: JsonObject | null;
     } = {},
   ): boolean {
     const current = this.feed.get(rowId);
@@ -626,6 +633,9 @@ export class ConversationView {
       safety_usage: options.safetyUsage ?? current.safety_usage,
       ...(timing === undefined ? {} : { timing }),
       ...(options.calls ? { calls: options.calls } : {}),
+      ...(options.ranArgs
+        ? { ran_args: displayToolArgs(current.name, options.ranArgs) }
+        : {}),
       ...(options.artifactId ? { artifact_id: options.artifactId } : {}),
     });
     if (isDeepStrictEqual(current, updated)) return false;
@@ -720,6 +730,7 @@ export class ConversationView {
         ...(timing === undefined ? {} : { timing }),
         ...(modelTime === undefined ? {} : { model_time_ms: modelTime }),
         ...(current.calls && !row.calls ? { calls: current.calls } : {}),
+        ...(current.ran_args ? { ran_args: current.ran_args } : {}),
       });
       if (isDeepStrictEqual(updated, current)) return false;
       this.feed.replace(updated);

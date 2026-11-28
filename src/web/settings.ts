@@ -48,7 +48,11 @@ import type {
   UsageLimits,
   UsageProvider,
 } from "../extensions/extra/usage-limits/usage-limits.ts";
-import { pyStrip } from "../auth/provider_store";
+import {
+  GEMINI_CREDENTIAL,
+  GEMINI_MIN_KEY_LENGTH,
+  pyStrip,
+} from "../auth/provider_store";
 import {
   McpConfigError,
   MCP_FILE_NAME,
@@ -68,6 +72,7 @@ type Rec = Record<string, unknown>;
 const PI_PROVIDER_LABELS: readonly (readonly [string, string])[] = [
   ["claude", "Claude"],
   ["openai", "OpenAI"],
+  ["gemini", "Gemini"],
   ["openrouter", "OpenRouter"],
 ];
 
@@ -103,7 +108,7 @@ function ladderModels(
 
 /** Every model a Settings model box offers: logged-in routes and configured
  * custom providers only, Anthropic, ChatGPT subscription, OpenAI API key,
- * OpenRouter, then custom, each in Pi's order. `reasoning_levels` is null
+ * Gemini, OpenRouter, then custom, each in Pi's order. `reasoning_levels` is null
  * when Pi's list does not give a model's levels; any level is then allowed. */
 function settingsModelList(config: Config): Rec[] {
   return config.models.authedChatModels().map((option) => ({
@@ -122,6 +127,7 @@ function logicalProviderAuthed(
   if (provider === "claude") return authed.has("anthropic");
   if (provider === "openai")
     return authed.has("openai-codex") || authed.has("openai");
+  if (provider === "gemini") return authed.has("google");
   if (provider === "openrouter") return authed.has("openrouter");
   return false;
 }
@@ -454,13 +460,16 @@ export function registerSettingsRoutes(
     // `providers` reports each login state so the UI can prompt a first login.
     await deps.providers.refreshOpenAI();
     const authed = config.models.authedModelProviders();
-    const providers: Rec[] = PI_PROVIDER_LABELS.map(([id, label]) => ({
+    const custom = config.models.customModelProviders();
+    const providers: Rec[] = PI_PROVIDER_LABELS.filter(
+      ([id]) => id !== "gemini" || !Object.hasOwn(custom, "google"),
+    ).map(([id, label]) => ({
       id,
       label,
       authed: logicalProviderAuthed(id, authed),
     }));
     const catalog = config.models.signedInChatModels(authed);
-    for (const name of Object.keys(config.models.customModelProviders()))
+    for (const name of Object.keys(custom))
       providers.push({
         id: name,
         label: name,
@@ -468,7 +477,7 @@ export function registerSettingsRoutes(
         authed: authed.has(name),
       });
     return conditionalJson(ex.request, {
-      default: catalog.length ? config.models.defaultChatModel(catalog) : null,
+      default: config.models.signedInDefaultChatModel(catalog),
       models: catalog,
       backend: "pi",
       providers,
@@ -842,6 +851,50 @@ export function registerSettingsRoutes(
     async () => {
       await deps.muse.logout();
       return json(await providerAuthUpdated(await deps.muse.authStatus()));
+    },
+    long,
+  );
+
+  router.get("/api/pi/gemini-auth", async () =>
+    json({
+      configured:
+        (await deps.credentials.storedModelProviders()).get(
+          GEMINI_CREDENTIAL,
+        ) === "api_key",
+    }),
+  );
+  router.post(
+    "/api/pi/gemini-auth/api-key",
+    async (ex) => {
+      const { key: raw } = await jsonDictBody(ex);
+      const key = typeof raw === "string" ? pyStrip(raw) : "";
+      if (
+        key.length < GEMINI_MIN_KEY_LENGTH ||
+        /[^\x21-\x7e]/u.test(key) ||
+        /^[{!]/u.test(key)
+      )
+        throw new HttpError(
+          422,
+          "Enter a Gemini API key from Google AI Studio.",
+        );
+      if (Object.hasOwn(config.models.customModelProviders(), "google"))
+        throw new HttpError(
+          409,
+          'Rename the custom provider named "google" before adding a Gemini key.',
+        );
+      await deps.credentials.replaceCredentials(GEMINI_CREDENTIAL, {
+        type: "api_key",
+        key,
+      });
+      return json(await providerAuthUpdated({ configured: true }));
+    },
+    long,
+  );
+  router.post(
+    "/api/pi/gemini-auth/logout",
+    async () => {
+      await deps.credentials.removeCredentials([GEMINI_CREDENTIAL]);
+      return json(await providerAuthUpdated({ configured: false }));
     },
     long,
   );

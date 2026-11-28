@@ -15,3 +15,4 @@ export {
   setComposerSendState,
   setComposerStopAvailability,
 } from "./action.js";
+export { configureSendMenu } from "./send-menu.js";

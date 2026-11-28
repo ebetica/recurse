@@ -7,6 +7,22 @@ let themePreviewActive = false;
 let themeRevision = 0;
 const initialCustomCss = document.getElementById("theme")?.dataset.customCss;
 if (initialCustomCss) applyCustomThemeCss(initialCustomCss);
+
+const themeColor = document.querySelector<HTMLMetaElement>(
+  'meta[name="theme-color"]',
+);
+function syncThemeColor(): void {
+  if (!themeColor) return;
+  themeColor.content = getComputedStyle(document.documentElement)
+    .getPropertyValue("--bg")
+    .trim();
+}
+syncThemeColor();
+matchMedia("(prefers-color-scheme: light)").addEventListener(
+  "change",
+  syncThemeColor,
+);
+
 export function setThemePreview(active: boolean): void {
   themeRevision++;
   themePreviewActive = active;
@@ -22,6 +38,7 @@ export function applyTheme(theme: {
   style.textContent = theme.css;
   style.dataset.version = theme.version;
   applyCustomThemeCss(theme.customCss ?? "");
+  syncThemeColor();
   window.dispatchEvent(new Event("recurse:theme-changed"));
 }
 

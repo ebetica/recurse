@@ -108,6 +108,22 @@ export function runningStatusBarT(conv: Conversation): TemplateResult {
   const stopping =
     conv.status === "interrupting" || state.stopPostInFlightId === conv.id;
   const overlay = stopping ? "Interrupting this turn…" : null;
+  const hook = conv.running_hooks?.[0];
+  if (!overlay && !retryNotice && hook) {
+    const more = (conv.running_hooks?.length ?? 0) - 1;
+    const title = `Running hook: ${hook.label}${more ? ` (+${more})` : ""}`;
+    return statusBarBoxT(
+      conv,
+      "",
+      html`<span class="status-bar-label" title=${title}
+        >${title}${thinkingElapsedT(
+          Math.max(0, Date.now() - hook.at),
+          false,
+        )}</span
+      >`,
+      title,
+    );
+  }
   const thinking = thinkingStore.syncStatusBar(conv, bar.thinkingRow, (text) =>
     thinkingSummaryBody(text, bar.title),
   );

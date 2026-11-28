@@ -18,7 +18,8 @@ retry. App startup supplies rendering and connects the comment outbox to the
 thread; panes own actions. [Quote text](../comments/selection-text/README.md)
 limits quote length. Source highlighting waits while a selection draft owns the
 viewer. Send controls stay outside native selections, including ones added
-later. Earlier queued scrolls do not cancel selection comment offers.
+later. [Text selection](selection-comments.ts) can finish when the browser
+cancels the touch for a native long-press. Scrolling still suppresses new offers.
 
 New comments focus their cards. Click an Artifact highlight or press Enter or
 Space on it to edit. Links still navigate; use cards for overlapping or
@@ -42,7 +43,13 @@ Discovery never opens the Artifacts pane; clicks and saved layouts do. Markdown
 pages share the Artifact pane and its browser history, so a page link does not
 change the selected Artifact. A historical page link identifies its published
 version so it opens the same revision in another tab. Other files use the shared
-[Files](../files/README.md) viewers.
+[Files](../files/README.md) viewers. A list refresh can temporarily omit the
+open Artifact; [the list cache](list-cache.ts) preserves it unless the server
+confirms its deletion. A confirmed deletion removes the preview without
+removing unsent comments.
+
+The [document review action](../document-review.ts) shares the pane’s bottom
+edge with the comment controls so both stay reachable while reading.
 
 ## Rules for changes
 

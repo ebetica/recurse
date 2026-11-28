@@ -2,6 +2,7 @@ import { expect } from "bun:test";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { Browser } from "playwright";
+import { expect as browserExpect } from "playwright/test";
 import * as artifacts from "../../src/artifacts";
 import {
   ARTIFACT,
@@ -407,15 +408,38 @@ export const tests: BrowserTest[] = [
             .getByRole("button", { name: "Refresh artifact", exact: true })
             .click(),
         ]);
-        await publish("Automatically refreshed disk content");
-        await page
-          .getByText("Automatically refreshed disk content", { exact: true })
-          .waitFor({ timeout: 2000 });
+        const text = "Automatically refreshed disk content";
+        await publish(text);
+        const paragraph = page.getByRole("paragraph").filter({ hasText: text });
+        await paragraph.waitFor({ timeout: 2000 });
         expect(
           fileRequests.every((url) =>
             new URL(url).pathname.startsWith(apiBase + "/"),
           ),
         ).toBeTrue();
+        if (label) {
+          await paragraph.scrollIntoViewIfNeeded();
+          const box = (await paragraph.boundingBox())!;
+          const y = box.y + box.height / 2;
+          await page.mouse.move(box.x + 1, y);
+          await page.mouse.down();
+          await page.mouse.move(box.x + box.width - 1, y, { steps: 6 });
+          await page.mouse.up();
+          await page
+            .getByRole("textbox", { name: "Comment on selected text" })
+            .fill("Keep this unsent comment");
+          const latest = await artifacts.get(context, owner, String(item.id));
+          await artifacts.deleteArtifact(
+            context,
+            owner,
+            String(item.id),
+            String(latest.version),
+          );
+          await browserExpect(paragraph).toBeHidden();
+          await browserExpect(
+            page.getByRole("textbox", { name: `Comment on “${text}”` }),
+          ).toHaveValue("Keep this unsent comment");
+        }
         expect(errors).toEqual([]);
         await page.close();
       }

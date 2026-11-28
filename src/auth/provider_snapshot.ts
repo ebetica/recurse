@@ -1,6 +1,7 @@
 // Cached auth-provider snapshots keep Config reads synchronous.
 // Model listings recheck only OpenAI, whose Codex CLI sign-in can change
 // outside Settings. A Settings write always schedules a post-write refresh.
+import { GEMINI_CREDENTIAL } from "./provider_store";
 
 interface ProviderSnapshotSources {
   readonly anthropic: { claudeConfigured(): Promise<boolean> };
@@ -100,6 +101,11 @@ export class ProviderSnapshot {
     } catch {
       names = [];
     }
+    const [, geminiKey] = await quiet(
+      () => sources.storedApiKey(GEMINI_CREDENTIAL),
+      [false, null],
+    );
+    if (geminiKey) authed.add(GEMINI_CREDENTIAL);
     for (const name of names) {
       const [, key] = await quiet(() => sources.storedApiKey(name), [
         false,

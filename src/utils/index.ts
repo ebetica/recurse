@@ -9,7 +9,7 @@ export {
   readJson,
 } from "./fs_utils";
 export { libc } from "./libc";
-export { procStat } from "./proc_stat";
+export { bootId, procStat } from "./proc_stat";
 export {
   abortable,
   anyAbortSignal,

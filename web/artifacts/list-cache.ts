@@ -15,7 +15,7 @@ import { fetchPaneData, syncPanes } from "../panes.js";
 import { phoneListEntry } from "../phone-nav.js";
 import { DRAFT, state } from "../state.js";
 import { reviewedVersion } from "../document-review.js";
-import { commentKey } from "./selection-comments.js";
+import { commentKey, keepUnsentSelection } from "./selection-comments.js";
 import { ARTIFACTS_REFRESH_EVENT, UI_REFRESH_EVENT } from "../ui-events.js";
 import {
   ARTIFACTS_PANE_ID,
@@ -105,16 +105,31 @@ export async function refreshList(
     stableArtifactView(artifactMount.current?._rs ?? null, agentId);
   if (artifactMount.current?._rs.agentId === agentId && !preserveBeforeFetch)
     artifactMount.current.renderShell();
+  const selected = preserveBeforeFetch
+    ? artifactMount.current?._rs.selId
+    : null;
   const pending = (async () => {
     try {
-      const response = await backendFor(agentId).api(artifactListUrl(agentId), {
-        signal: controller.signal,
-      });
+      const response = await backendFor(agentId).api(
+        artifactListUrl(agentId, selected),
+        { signal: controller.signal },
+      );
       if (!response.ok)
         throw new Error(errorText("Couldn’t load artifacts", response));
-      const next = normalizeArtifactList(await response.json());
+      const result = (await response.json()) as {
+        deleted_selected?: unknown;
+      } | null;
+      const next = normalizeArtifactList(result);
+      const deleted = result?.deleted_selected === selected ? selected : null;
+      if (deleted) {
+        contentCache.invalidateArtifact(agentId, deleted);
+        const pane = artifactMount.current;
+        if (pane?._rs.agentId === agentId && pane._rs.selId === deleted)
+          keepUnsentSelection(pane);
+      }
       const preserve =
         artifactMount.current?._rs.agentId === agentId &&
+        artifactMount.current._rs.selId !== deleted &&
         !artifactMount.current._rs.revalidating &&
         shouldPreserveArtifactView(
           artifactViewSnapshot(artifactMount.current._rs, agentId),

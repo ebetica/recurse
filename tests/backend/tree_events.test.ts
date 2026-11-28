@@ -6,6 +6,57 @@ import { appWorld } from "./web_app_support";
 import { openSseConnection } from "../../web/connection/sse-transport";
 import { until } from "./fixtures/durable_host/host";
 
+// Regression: #3679 Viewing an already-read conversation invalidated its browser metadata.
+test("viewing an already-read conversation leaves its tree and record unchanged", async () => {
+  const world = appWorld();
+  const app = await buildApp({
+    env: world.env,
+    sink: new WebLogSink(() => {}),
+  });
+  const server = await app.serve({ port: 0 });
+  const abort = new AbortController();
+  try {
+    await until(() => app.instance.lifecycle.readinessSnapshot().ready);
+    const agent = await app.instance.create.create({ title: "Already read" });
+    const url = `${server.url}/api/conversations/${agent.id}`;
+    const before = await fetch(url);
+    const etag = before.headers.get("etag");
+    expect(etag).not.toBeNull();
+    await before.json();
+    expect(
+      app.instance.treeView.serve().find((row) => row.id === agent.id)?.unread,
+    ).toBe(false);
+    let notices = 0;
+    const unsubscribe = app.instance.treeView.subscribe(() => notices++);
+    try {
+      const view = await fetch(`${url}/events?viewing=true`, {
+        signal: abort.signal,
+      });
+      expect(view.status).toBe(200);
+      const reader = view.body!.getReader();
+      expect((await reader.read()).done).toBe(false);
+      await reader.cancel();
+      await until(
+        () => !app.instance.notifications.hasViewer(String(agent.id)),
+      );
+      expect(notices).toBe(0);
+      const after = await fetch(url, { headers: { "if-none-match": etag! } });
+      expect(after.status).toBe(304);
+    } finally {
+      unsubscribe();
+    }
+  } finally {
+    abort.abort();
+    await server.close();
+    await app.instance.shutdown();
+    await Promise.all(app.detached);
+    retire(
+      world.root,
+      join(dirname(world.root), `tree-events-trash-${process.pid}`),
+    );
+  }
+});
+
 // Regression: #3403 Browser tree streams share one upstream and release it on disconnect.
 test("tree event subscribers share and release a remote follower", async () => {
   const worlds = [appWorld(), appWorld()];

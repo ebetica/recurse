@@ -114,6 +114,7 @@ function rowEqual(a: ViewBlock, b: ViewBlock): boolean {
     a.origin === b.origin &&
     a.name === b.name &&
     a.args === b.args &&
+    a.ran_args === b.ran_args &&
     a.result === b.result &&
     a.result_truncated === b.result_truncated &&
     a.tool_output_tail === b.tool_output_tail &&
@@ -1235,7 +1236,8 @@ export function rowsToTurns(
         offset: row.offset ?? -1,
         role: "user",
         id: `row:${row.id}`,
-        content: stripRowEnvelope(row.text),
+        content: row.text_is_authored ? row.text : stripRowEnvelope(row.text),
+        ...(row.text_is_authored ? { text_is_authored: true } : {}),
       };
       if (origin) entry.origin = origin;
       if (typeof row.sender === "string" && row.sender) entry.from = row.sender;

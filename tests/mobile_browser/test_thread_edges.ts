@@ -2,6 +2,8 @@ import { expect } from "bun:test";
 import { expect as browserExpect } from "playwright/test";
 import { idleConv, row, tree } from "./fixtures";
 import {
+  checkedTap,
+  expectHitCorners,
   gotoRoot,
   mockConversation,
   runBrowserTests,
@@ -107,7 +109,7 @@ const threadEdges: BrowserTest = async (browser, base) => {
         await waitForLayout(page);
         await visibleAndUncovered(page, "#model-trigger");
         await page.mouse.up();
-        await browserExpect(copy).toHaveText("Copied");
+        await browserExpect(copy).toHaveAccessibleName("Code copied");
         await visibleAndUncovered(page, "#model-trigger");
         expect(await composer.boundingBox()).toEqual(card);
       } else await input.blur();
@@ -134,5 +136,119 @@ const threadEdges: BrowserTest = async (browser, base) => {
   }
 };
 
-export const tests = [threadEdges];
+const longCode = `echo ${"wide-token ".repeat(30)}END`;
+
+// Regression: #3732 a phone Copy pill covered one-line code text; #3736 the code bar was 48px tall at 390 (5ce65a18f).
+const codeHeaderClearOfCode: BrowserTest = async (browser, base) => {
+  for (const width of [390, 412, 1280]) {
+    const touch = width < 1000;
+    const context = await browser.newContext({
+      viewport: { width, height: 844 },
+      isMobile: touch,
+      hasTouch: touch,
+      permissions: ["clipboard-read", "clipboard-write"],
+    });
+    const page = await context.newPage();
+    await mockConversation(page, base, "main", () =>
+      idleConv([
+        row("u", "user", "Show one line."),
+        row(
+          "a",
+          "assistant",
+          "Run:\n\n```sh\n" +
+            longCode +
+            "\n```\n\n```\nplain\n```\n\n```<img/src=x/onerror=alert(1)>\nodd\n```" +
+            "\n\n```ts\nconst a = 1;\nconst b = 2;\nconst c = 3;\nconst d = 4;\n```",
+        ),
+      ]),
+    );
+    await gotoRoot(page, base);
+    const block = page.locator(".code-wrap").first();
+    const pre = block.locator("pre");
+    const copy = block.getByRole("button", { name: "Copy code" });
+    const expand = block.getByRole("button", { name: "Expand code" });
+    await pre.waitFor();
+    expect(await block.locator(".code-lang").innerText()).toBe("Shell");
+    expect(
+      await page.locator(".code-wrap").nth(1).locator(".code-lang").innerText(),
+    ).toBe("Text");
+    const odd = page.locator(".code-wrap").nth(2).locator(".code-lang");
+    expect(await odd.innerText()).toBe("<img/src=x/onerror=alert(1)>");
+    expect(await odd.locator("img").count()).toBe(0);
+    for (const scroll of [0, 200, 100000]) {
+      await pre.evaluate((el, left) => (el.scrollLeft = left), scroll);
+      await waitForLayout(page);
+      const overlap = await pre.evaluate((el) => {
+        const s = getComputedStyle(el);
+        const r = el.getBoundingClientRect();
+        const text = {
+          left: r.left + parseFloat(s.paddingLeft),
+          right: r.right - parseFloat(s.paddingRight),
+          top: r.top + parseFloat(s.paddingTop),
+          bottom: r.bottom - parseFloat(s.paddingBottom),
+        };
+        return [
+          ...el.parentElement!.querySelectorAll(".code-head button"),
+        ].some((button) => {
+          const b = button.getBoundingClientRect();
+          return (
+            b.left < text.right &&
+            b.right > text.left &&
+            b.top < text.bottom &&
+            b.bottom > text.top
+          );
+        });
+      });
+      expect(overlap, `Copy covers code at ${width} scroll ${scroll}`).toBe(
+        false,
+      );
+    }
+    expect(
+      await page.locator(".code-wrap").nth(3).locator(".code-lang").innerText(),
+    ).toBe("TypeScript");
+    const compact = await page
+      .locator(".code-wrap")
+      .nth(3)
+      .evaluate((wrap) => {
+        const pre = wrap.querySelector("pre")!;
+        const s = getComputedStyle(pre);
+        const lines =
+          pre.clientHeight -
+          parseFloat(s.paddingTop) -
+          parseFloat(s.paddingBottom);
+        return {
+          bar: wrap.querySelector(".code-head")!.getBoundingClientRect().height,
+          pitch: lines / 4 / parseFloat(s.fontSize),
+          gap:
+            pre.getBoundingClientRect().top +
+            parseFloat(s.paddingTop) -
+            wrap.querySelector(".code-head")!.getBoundingClientRect().bottom,
+        };
+      });
+    expect(compact.bar, `bar height at ${width}`).toBeLessThanOrEqual(32);
+    expect(compact.pitch, `code line pitch at ${width}`).toBeLessThanOrEqual(
+      1.45,
+    );
+    expect(compact.gap, `gap above code at ${width}`).toBeLessThanOrEqual(10);
+    if (!touch) {
+      await context.close();
+      continue;
+    }
+    await expectHitCorners(copy, 44, { centerOnHitArea: true });
+    await expectHitCorners(expand, 44, { centerOnHitArea: true });
+    await checkedTap(copy);
+    await block.getByRole("button", { name: "Code copied" }).waitFor();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+      longCode + "\n",
+    );
+    await checkedTap(expand);
+    const viewer = page.getByRole("dialog", { name: "Code viewer" });
+    await browserExpect(viewer.locator("pre")).toHaveText(longCode);
+    await viewer.getByRole("button", { name: "Close code" }).tap();
+    await viewer.waitFor({ state: "detached" });
+    await context.close();
+  }
+};
+
+export const tests = [threadEdges, codeHeaderClearOfCode];
 if (import.meta.main) await runBrowserTests([["thread-edges", tests]]);

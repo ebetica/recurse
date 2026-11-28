@@ -165,6 +165,14 @@ test("loopback audiences classify every registered route and restrict scripts", 
   ).not.toBe(403);
   expect(
     (
+      await fetch(`${running.url}/api/conversations/abc123/unread`, {
+        method: "POST",
+        headers: { cookie, "x-recurse-agent": "abc123" },
+      })
+    ).status,
+  ).toBe(403);
+  expect(
+    (
       await fetch(`${running.url}/api/late-route`, {
         method: "POST",
         headers: { ...baseHeaders, "x-recurse-bundled-tool": "subagent" },

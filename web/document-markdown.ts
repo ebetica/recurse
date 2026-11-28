@@ -1,7 +1,6 @@
-// Shared inert Markdown for Artifacts and Files: embeds, images, links, code,
-// Mermaid, and math. Published siblings precede local paths; web images require
-// a click. Relative links require an in-app policy. Each pane registers its
-// images with the shared click-to-view handler.
+// Shared document Markdown for Artifacts, Files and Explorer: embeds, images,
+// links, code, Mermaid, and math. Published siblings precede local paths; web
+// images require a click. Panes without a local link resolver leave local links inert.
 import {
   htmlPreviewSrcdoc,
   loadDecodedArtifactImage,
@@ -17,6 +16,7 @@ import {
   externalImageButton,
   imageFailure,
   imageHost,
+  makeDocumentImageOpenable,
   originalPathImage,
   referenceImageUrl,
   registerDocumentImages,
@@ -78,6 +78,18 @@ function removeUrlSurfaces(root: ParentNode): void {
   }
 }
 
+function imageDimension(
+  image: HTMLImageElement,
+  attribute: "width" | "height",
+): { value: number; unit: "px" | "%" } | null {
+  const raw = image.getAttribute(attribute);
+  const percent = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+))%$/.exec(raw?.trim() ?? "");
+  if (percent)
+    return { value: Math.min(100, Math.max(1, Number(percent[1]))), unit: "%" };
+  const pixels = Number(raw);
+  return pixels > 0 ? { value: pixels, unit: "px" } : null;
+}
+
 export function imagePlaceholder(
   image: HTMLImageElement,
   standalone = false,
@@ -89,11 +101,13 @@ export function imagePlaceholder(
     frame.setAttribute("role", "img");
     frame.setAttribute("aria-label", image.alt);
   }
-  const width = Number(image.getAttribute("width"));
-  const height = Number(image.getAttribute("height"));
-  if (width > 0 && height > 0) {
-    frame.style.aspectRatio = `${width} / ${height}`;
-    frame.style.width = `${width}px`;
+  const width = imageDimension(image, "width");
+  const height = imageDimension(image, "height");
+  if (width?.unit === "%") {
+    frame.style.width = `${width.value}%`;
+  } else if (width && height?.unit === "px") {
+    frame.style.aspectRatio = `${width.value} / ${height.value}`;
+    frame.style.width = `${width.value}px`;
   } else {
     frame.style.width = "min(100%, 640px)";
   }
@@ -125,16 +139,19 @@ export async function revealArtifactImage(
       return loadDecodedArtifactImage(image, original, signal);
     });
     if (signal.aborted || !frame.parentNode) return false;
-    const width = Number(image.getAttribute("width"));
-    const height = Number(image.getAttribute("height"));
-    const requestedWidth =
-      width > 0
-        ? width
-        : height > 0
-          ? (height * dimensions.width) / dimensions.height
-          : dimensions.width;
+    const width = imageDimension(image, "width");
+    const height = imageDimension(image, "height");
     frame.style.aspectRatio = `${dimensions.width} / ${dimensions.height}`;
-    frame.style.width = `${Math.min(requestedWidth, dimensions.width)}px`;
+    if (width?.unit === "%") {
+      frame.style.width = `min(${width.value}%, ${dimensions.width}px)`;
+    } else {
+      let requestedWidth = dimensions.width;
+      if (width) requestedWidth = width.value;
+      // A document flows vertically, so a height percentage uses the image's own height.
+      else if (height?.unit === "%") requestedWidth *= height.value / 100;
+      else if (height) requestedWidth *= height.value / dimensions.height;
+      frame.style.width = `${Math.min(requestedWidth, dimensions.width)}px`;
+    }
     image.hidden = false;
     frame.querySelector(".artifact-image-placeholder")?.remove();
     frame.removeAttribute("aria-busy");
@@ -147,17 +164,18 @@ export async function revealArtifactImage(
 }
 
 interface DocumentMarkdownOptions {
-  resolveRelative: (
+  resolveRelative?: (
     path: string,
     image: boolean,
     fragment: string,
   ) => string | null;
-  openRelative: (path: string, fragment: string) => boolean;
+  openRelative?: (path: string, fragment: string) => boolean;
   signal: AbortSignal;
   title: string;
   agentId: string;
   documentPath?: string;
   artifactId?: string;
+  doubleClickImages?: boolean;
   onImageFrame?: (
     frame: HTMLElement,
     position: number,
@@ -209,7 +227,7 @@ function markdownFragment(
     );
     const resolved =
       (isRelative(source)
-        ? options.resolveRelative(source!, true, "")
+        ? options.resolveRelative?.(source!, true, "")
         : null) || fallback;
     if (resolved) {
       if (!(image.alt || "").trim()) image.alt = "Image without a description";
@@ -240,6 +258,7 @@ function markdownFragment(
           used = fallback;
         }
         if (loaded) {
+          makeDocumentImageOpenable(image);
           const original = originalPathImage(used);
           if (original) image.dataset.pathImage = original;
           return original ? null : used;
@@ -264,7 +283,7 @@ function markdownFragment(
     const path = separator < 0 ? href : href.slice(0, separator);
     const fragment = separator < 0 ? "" : href.slice(separator);
     const resolved = relative
-      ? options.resolveRelative(path, false, fragment)
+      ? options.resolveRelative?.(path, false, fragment)
       : null;
     if (resolved?.startsWith("#")) {
       link.href = resolved;
@@ -287,14 +306,14 @@ function markdownFragment(
           !event.ctrlKey &&
           !event.shiftKey &&
           !event.altKey &&
-          options.openRelative(path, fragment)
+          options.openRelative?.(path, fragment)
         )
           event.preventDefault();
       });
       continue;
     }
     if (
-      options.artifactId &&
+      (options.artifactId || !options.resolveRelative) &&
       (relative || (href.startsWith("/") && !href.startsWith("//")))
     ) {
       link.classList.add("artifact-blocked-link");
@@ -398,7 +417,7 @@ function appendMarkdown(
 ): void {
   const section = document.createElement("section");
   section.className = "content artifact-markdown";
-  registerDocumentImages(section, options.agentId, options.signal);
+  registerDocumentImages(section, options);
   section.appendChild(markdownFragment(source, options));
   body.appendChild(section);
   queueMicrotask(() => renderMathIn(section));
@@ -495,7 +514,7 @@ function renderChanges(
 ): void {
   const section = document.createElement("section");
   section.className = "content artifact-markdown";
-  registerDocumentImages(section, options.agentId, options.signal);
+  registerDocumentImages(section, options);
   const current = flatDocument(source, options);
   // Invariant: The earlier version is only compared, never shown: its image
   // loads start aborted and its embeds are never attached.

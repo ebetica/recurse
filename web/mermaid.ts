@@ -196,9 +196,11 @@ export function renderMermaidIn(root: ParentNode): void {
       if (svg) openDiagram(svg, open);
     };
     actions.append(open);
-    const copy = pre.nextElementSibling;
-    if (copy?.matches(".copy-btn") && pre.parentElement?.matches(".code-wrap"))
-      actions.append(copy);
+    const head = pre.previousElementSibling;
+    if (head?.matches(".code-head")) {
+      actions.append(head.querySelector(".copy-btn")!);
+      head.remove();
+    }
     host.append(actions, drawing);
     pre.replaceWith(host);
     void renderOne(host, code);

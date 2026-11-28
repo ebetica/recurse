@@ -4,13 +4,14 @@ import { join } from "node:path";
 import type { Page } from "playwright";
 import { waitForPaneTransition } from "./pane_layout";
 import { complexHtml } from "./fixtures/html_preview";
+import { checkedTap } from "./common";
 
 export async function openExplorer(page: Page, width: number): Promise<void> {
   const selector = '.pane-col[data-pane="explorer"]';
   if (!(await page.locator(selector).isVisible())) {
-    if (width === 412) {
-      await page.locator("#pane-fab").click();
-      await page.locator('.pane-menu-item[data-pane="explorer"]').click();
+    if (width <= 700) {
+      await checkedTap(page.locator("#pane-fab"));
+      await page.locator('#pane-menu [data-pane="explorer"]').tap();
     } else await page.locator('.rail-btn[data-pane="explorer"]').click();
   }
   await waitForPaneTransition(page, selector);
@@ -67,7 +68,7 @@ ${`<!-- ${"Complete file, not only its first chunk. ".repeat(430)} -->`}
   );
   await Promise.all(
     Array.from({ length: 70 }, (_, i) =>
-      writeFile(join(root, `notes-${i}.md`), `# Note ${i}\n`),
+      writeFile(join(root, `notes-${i}.txt`), `Note ${i}\n`),
     ),
   );
   const otherRoot = join(root, "other");

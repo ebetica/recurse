@@ -15,7 +15,7 @@ import {
 async function imageGesture(
   page: Page,
   image: Locator,
-  gesture: "mouse" | "touch" | "hold",
+  gesture: "mouse" | "touch" | "hold-with-jitter",
 ) {
   await image.scrollIntoViewIfNeeded();
   const { x, y, width, height } = (await image.boundingBox())!;
@@ -28,23 +28,33 @@ async function imageGesture(
       touchPoints: [from],
     });
     await image.locator("..").locator("mark.files-box-start").waitFor();
-    if (gesture === "touch")
-      await touch.send("Input.dispatchTouchEvent", {
-        type: "touchMove",
-        touchPoints: [to],
-      });
+    const moved = gesture === "touch" ? to : { x: from.x + 5, y: from.y + 5 };
+    await touch.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [moved],
+    });
     await touch.send("Input.dispatchTouchEvent", {
       type: "touchEnd",
       touchPoints: [],
     });
   } else {
-    await page.mouse.move(from.x, from.y);
-    await page.keyboard.down("Control");
-    await page.mouse.down();
-    await page.mouse.move(to.x, to.y, { steps: 4 });
-    await page.mouse.up();
-    await page.keyboard.up("Control");
+    await dragImageBox(page, from, to);
   }
+}
+
+async function dragImageBox(
+  page: Page,
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+  beforeRelease?: () => Promise<void>,
+) {
+  await page.mouse.move(from.x, from.y);
+  await page.keyboard.down("Control");
+  await page.mouse.down();
+  await page.mouse.move(to.x, to.y, { steps: 4 });
+  await beforeRelease?.();
+  await page.mouse.up();
+  await page.keyboard.up("Control");
 }
 
 async function selectParagraph(page: Page, text: Locator) {
@@ -91,7 +101,7 @@ const selectedCrop: Awaited<ReturnType<typeof readCrop>> = {
 };
 
 export const tests: BrowserTest[] = [
-  // Feature: #3554 comment directly on an image embedded in Artifact Markdown.
+  // Regression: #3686 keep a small visible drag on a tall image; #3554 comment directly on an Artifact Markdown image.
   async function test_comments_on_embedded_artifact_images(
     browser,
     base,
@@ -135,14 +145,32 @@ export const tests: BrowserTest[] = [
       await Bun.write(join(repo, "marker.png"), PNG_1X1);
       const raster = Uint8Array.from(imageBytes);
       await Bun.write(join(repo, "diagram.png"), raster);
-      if (!phone) await Bun.write(mutablePath, raster);
+      if (!phone) {
+        await Bun.write(mutablePath, raster);
+        const tall = await page.evaluate(() => {
+          const canvas = document.createElement("canvas");
+          canvas.width = 900;
+          canvas.height = 6000;
+          const context = canvas.getContext("2d")!;
+          context.fillStyle = "steelblue";
+          context.fillRect(0, 0, canvas.width, canvas.height);
+          context.fillStyle = "wheat";
+          for (let y = 120; y < canvas.height; y += 360)
+            context.fillRect(180, y, 540, 120);
+          return canvas.toDataURL("image/png").split(",")[1]!;
+        });
+        await Bun.write(
+          join(repo, "tall.png"),
+          Uint8Array.from(Buffer.from(tall, "base64")),
+        );
+      }
       const entry = join(repo, "index.md");
       await Bun.write(
         entry,
         "# Image review\n\n![External](https://example.com/map.png)\n\n![Marker](marker.png)\n\n![Diagram](diagram.png)\n\n**Check the explanation.**\n" +
           (phone
             ? ""
-            : "\n![Live diagram](live-diagram.png)\n\n**Check the explanation.**\n"),
+            : "\n![Live diagram](live-diagram.png)\n\n**Check the explanation.**\n\n![Tall diagram](tall.png)\n"),
       );
       const published = await artifacts.publish(store, owner, String(item.id));
       if (!phone) {
@@ -186,6 +214,28 @@ export const tests: BrowserTest[] = [
       expect(await readCrop(page, (await crop.getAttribute("src"))!)).toEqual(
         selectedCrop,
       );
+      if (!phone) {
+        const tall = doc.locator('img[alt="Tall diagram"]:not([hidden])');
+        await tall.scrollIntoViewIfNeeded();
+        const { x, y, width, height } = (await tall.boundingBox())!;
+        const bounds = (await pane.boundingBox())!;
+        const top = Math.max(y, bounds.y);
+        const bottom = Math.min(y + height, bounds.y + bounds.height);
+        const from = { x: x + width / 4, y: (top + bottom) / 2 };
+        const to = { x: x + width / 2, y: from.y + 20 };
+        await dragImageBox(page, from, to, async () => {
+          await browserExpect(
+            tall.locator("..").locator("mark.report-cbox"),
+          ).toBeVisible();
+          await screenshot(page, "artifact-tall-image-dragging-1280");
+        });
+        await browserExpect(popover).toBeVisible();
+        await browserExpect(input).toBeFocused();
+        await screenshot(page, "artifact-tall-image-editor-1280");
+        await popover
+          .getByRole("button", { name: "Cancel", exact: true })
+          .click();
+      }
       const paragraph = doc.locator("strong").first();
       await selectParagraph(page, paragraph);
       await input.fill("Clarify this paragraph");
@@ -198,7 +248,7 @@ export const tests: BrowserTest[] = [
         await imageGesture(page, mutable, "mouse");
         expect(confirmation).toContain("Discard what you typed");
         await browserExpect(input).toHaveValue("Clarify this paragraph");
-        await imageGesture(page, image, "hold");
+        await imageGesture(page, image, "hold-with-jitter");
         await doc.locator(".files-box-hint").waitFor();
       }
       await stage.click();

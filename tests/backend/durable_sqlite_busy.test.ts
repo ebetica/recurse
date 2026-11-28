@@ -8,7 +8,7 @@ import {
   fauxAssistantMessage,
   fauxProvider,
 } from "@earendil-works/pi-ai";
-import { DurableHost } from "../../src/agents/durable/host.ts";
+import { DurableHost } from "../../src/agents/durable/host";
 import { WARNING } from "../../src/observability/runtime_logging";
 import { idle, testDeps, until } from "./fixtures/durable_host/host";
 

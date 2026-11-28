@@ -77,7 +77,11 @@ import { contextUsageKey } from "../context/tokens.js";
 import { conversationPainted } from "../show-timing.js";
 import { state } from "../state.js";
 import type * as ThreadRender from "../thread-render.js";
-import { userBubble } from "../thread-render/index.js";
+import {
+  highlightCodeIn,
+  openCodeViewer,
+  userBubble,
+} from "../thread-render/index.js";
 import {
   clearStatusBar,
   queuedStatusBarT,
@@ -92,6 +96,7 @@ import type { Conversation, Message } from "../types.js";
 import { type TemplateResult, html, nothing, render } from "lit";
 import { repeat } from "lit/directives/repeat.js";
 import { beginCopyFeedback, copyFeedbackIsCurrent } from "./copy.js";
+import { CHECK_ICON, COPY_ERROR_ICON, COPY_ICON } from "../icons.js";
 
 type ThreadTemplates = Pick<
   typeof ThreadRender,
@@ -139,28 +144,36 @@ msgsEl.addEventListener("dragstart", (event) => {
 });
 
 msgsEl.addEventListener("click", async (e) => {
-  const btn = (e.target as HTMLElement).closest<HTMLButtonElement>(".copy-btn");
+  const target = e.target as HTMLElement;
+  const expand = target.closest<HTMLButtonElement>(".code-expand-btn");
+  const wrap = expand?.closest<HTMLElement>(".code-wrap");
+  if (expand && wrap) return openCodeViewer(wrap, expand);
+  const btn = target.closest<HTMLButtonElement>(".copy-btn");
   if (!btn) return;
   const code =
     btn.closest<HTMLElement>(".mermaid-host")?.dataset.mermaidSource ??
-    btn.parentElement?.querySelector("pre")?.innerText;
+    btn.closest(".code-wrap")?.querySelector("pre")?.innerText;
   const scope =
     btn.closest<HTMLElement>("[data-copy-scope]")?.dataset.copyScope;
   if (code === undefined || !scope) return;
   const attempt = beginCopyFeedback(btn, scope);
-  btn.textContent = "Copy";
-  btn.classList.remove("copied");
+  const show = (icon: string, label: string, copied = false) => {
+    btn.innerHTML = icon;
+    btn.setAttribute("aria-label", label);
+    btn.title = label;
+    btn.classList.toggle("copied", copied);
+  };
+  show(COPY_ICON, "Copy code");
   const copied = await copyText(code);
   const currentScope = () =>
     btn.closest<HTMLElement>("[data-copy-scope]")?.dataset.copyScope;
   if (!copyFeedbackIsCurrent(attempt, btn.isConnected, currentScope())) return;
-  btn.textContent = copied ? "Copied" : "Copy failed";
-  btn.classList.toggle("copied", copied);
+  if (copied) show(CHECK_ICON, "Code copied", true);
+  else show(COPY_ERROR_ICON, "Couldn't copy code");
   setTimeout(() => {
     if (!copyFeedbackIsCurrent(attempt, btn.isConnected, currentScope()))
       return;
-    btn.textContent = "Copy";
-    btn.classList.remove("copied");
+    show(COPY_ICON, "Copy code");
   }, 1200);
 });
 
@@ -731,17 +744,21 @@ function threadTemplate(
   const currentTurnOpen = loaded.some((turn) => turn.open);
   // Invariant: Inbox steers wait for a request boundary, not run end.
   // The run remains authoritative even between rendered response rows.
+  const hookRunning = Boolean(conv.running_hooks?.length);
   const runningStatusBar =
-    running && (liveBlock || !currentTurnOpen) ? runningStatusBarT(conv) : null;
+    hookRunning || (running && (liveBlock || !currentTurnOpen))
+      ? runningStatusBarT(conv)
+      : null;
   if (!runningStatusBar) clearStatusBar();
-  const statusBar = running
-    ? runningStatusBar
-    : queued
-      ? queuedStatusBarT(conv)
-      : activeShells(conv).shellCount > 0 ||
-          activeDescendantCount(state.nodes, conv.id) > 0
-        ? waitingStatusBarT(conv)
-        : null;
+  const statusBar =
+    running || hookRunning
+      ? runningStatusBar
+      : queued
+        ? queuedStatusBarT(conv)
+        : activeShells(conv).shellCount > 0 ||
+            activeDescendantCount(state.nodes, conv.id) > 0
+          ? waitingStatusBarT(conv)
+          : null;
   const thread = html` ${promptBanner(conv, paint)} ${piHistoryNotice}
   ${repeat(
     blocks,
@@ -858,6 +875,7 @@ export function paint(conv: Conversation): void {
   paintAgentSurface(conv);
   renderMermaidIn(msgsEl);
   renderMathIn(msgsEl);
+  highlightCodeIn(msgsEl);
   recordThreadScroll();
   applySendPin();
   if (viewportHold) applyViewportHold();
@@ -909,6 +927,7 @@ export function convHash(conv: Conversation): string {
     rowReadStatus.get(conv.id),
     conv.status,
     conv.active_run,
+    conv.running_hooks,
     conv.retry_notice,
     ...contextUsageKey(conv),
     cachedContext !== undefined,

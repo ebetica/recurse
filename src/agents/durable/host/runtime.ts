@@ -1,6 +1,7 @@
 // Loaded lazily by DurableHost; keep the server's --check import path light.
 export {
   AgentDoc,
+  CompactionTask,
   Harness,
   InboxDoc,
   LiveDoc,
@@ -8,6 +9,7 @@ export {
   configure,
   createRegistry,
   defineExtension,
+  GenerationTask,
   hook,
   ToolTask,
   wrapSection,
@@ -89,6 +91,7 @@ export {
   stopConversationShells,
   recoverInterruptedCommands,
   groupOf,
+  RegistryStore,
   SHELL_TASK,
 } from "../../../extensions/core/shells/shells.ts";
 export {

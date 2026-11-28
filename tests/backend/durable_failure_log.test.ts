@@ -18,7 +18,7 @@ import {
   openWorkerSqliteStorage,
   SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker";
-import { DurableHost } from "../../src/agents/durable/host.ts";
+import { DurableHost } from "../../src/agents/durable/host";
 import {
   recordMessage,
   WARNING,
@@ -78,40 +78,121 @@ function hostOn(responses: FauxResponseStep[]) {
 const rows = async (host: DurableHost) =>
   (await host.view("c1", { limit: 50 })).blocks as Rec[];
 
-test("a provider error logs one warning and still shows the error row", async () => {
-  const message =
-    "invalid_request_error: unsupported parameter (api_key=sk-ant-abc123def456)";
-  const { host, failures } = hostOn([
-    fauxAssistantMessage("", { stopReason: "error", errorMessage: message }),
-  ]);
-  try {
-    await host.send("c1", "hello", "r1");
-    await until(() => failures().length > 0);
-    await until(async () => host.runningCount() === 0);
-    expect(failures()).toEqual([
-      [
-        "durable_task_failed",
+// Regression: #3711 upstream credentials reached stored failure state and browser rows.
+test("a provider error hides the sent credential without changing failure handling", async () => {
+  const key = "q7Pz";
+  const quota =
+    "subscription_sharing_workplace_individual_usage_limit_exceeded";
+  const restored = "Recovered after a transient failure.";
+  const requests: (string | null)[] = [];
+  const server = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      await request.json();
+      const auth = request.headers.get("authorization");
+      const sent = auth?.slice("Bearer ".length);
+      const attempt = requests.push(auth);
+      if (attempt === 1 || attempt === 2) {
+        const message =
+          attempt === 1
+            ? `The request was rejected. Authorization: ${auth}, invalid API key.`
+            : `${sent}: ${quota}, network error.`;
+        return Response.json(
+          { error: { message } },
+          { status: attempt === 1 ? 400 : 429 },
+        );
+      }
+      const completion = {
+        id: attempt === 3 ? `reply-${sent}` : "reply",
+        object: "chat.completion.chunk",
+        model: "small",
+        choices: [
+          {
+            index: 0,
+            delta: attempt === 3 ? {} : { content: restored },
+            finish_reason: attempt === 3 ? `${sent}: network error` : "stop",
+          },
+        ],
+      };
+      return new Response(
+        `data: ${JSON.stringify(completion)}\n\ndata: [DONE]\n\n`,
         {
-          cid: "c1",
-          task: expect.any(Number),
-          kind: "pi.generation",
-          status: "failed",
-          reason: "model_error",
-          provider: "faux",
-          model: "faux-1",
-          error: "invalid_request_error:_unsupported_parameter__REDACTED",
+          headers: { "Content-Type": "text/event-stream" },
         },
-        WARNING,
-      ],
-    ]);
-    expect(recordMessage("durable_task_failed", failures()[0]![1])).toBe(
-      `event=durable_task_failed cid=c1 error=invalid_request_error:_unsupported_parameter__REDACTED kind=pi.generation model=faux-1 provider=faux reason=model_error status=failed task=${failures()[0]![1].task}`,
+      );
+    },
+  });
+  const dataDir = mkdtempSync(join(root, "provider-error-"));
+  const record = { id: "c1", backend: "durable", workdir: dataDir };
+  const failures: string[] = [];
+  const host = new DurableHost({
+    ...testDeps(
+      dataDir,
+      () => record,
+      () => [record.id],
+      "local-llm/small",
+    ),
+    customProviders: () => ({
+      "local-llm": {
+        base_url: `http://127.0.0.1:${server.port}/v1`,
+        env_key: "LOCAL_LLM_KEY",
+        wire_api: "completions",
+        models: [{ id: "small", context_window: 100000, effort: null }],
+      },
+    }),
+    customProviderEnvValue: () => key,
+    log: (event, fields, level) => {
+      if (event === "durable_task_failed" && level === WARNING)
+        failures.push(recordMessage(event, fields));
+    },
+  });
+  try {
+    await host.send("c1", "Use the invalid key", "r1");
+    await until(() => failures.length === 1);
+    await until(idle(host));
+    expect(requests).toHaveLength(1);
+    await host.send("c1", "Hit the quota", "r2");
+    await until(() => failures.length === 2);
+    await until(idle(host));
+    expect(requests).toHaveLength(2);
+    await host.send("c1", "Hit the transient error", "r3");
+    await until(async () =>
+      (await rows(host)).some((row) => row.text === restored),
     );
-    const answer = (await rows(host)).at(-1)!;
-    expect(answer.role).toBe("assistant");
-    expect(String(answer.error)).toContain("unsupported parameter");
+    await until(idle(host));
+    expect(requests).toEqual(Array(4).fill(`Bearer ${key}`));
+    expect(failures).toHaveLength(2);
+    expect(failures[0]).toContain("The_request_was_rejected");
+
+    const view = await rows(host);
+    const { harness, conversation } = await host.open("c1");
+    const entries = await conversation.entries({}, 10, undefined, context);
+    const persisted = JSON.stringify({
+      entries: entries.items,
+      live: await harness.snapshot(LiveDoc, conversation.id, context),
+    });
+    await host.messageSearch.drain();
+    const transcript = await Bun.file(
+      join(host.storagePath("c1"), "..", "transcript.txt"),
+    ).text();
+    expect(transcript).toContain(restored);
+    const surfaces = { persisted, view: JSON.stringify(view), transcript };
+    expect(
+      Object.entries(surfaces)
+        .filter(([, text]) => text.includes(key))
+        .map(([name]) => name),
+    ).toEqual([]);
+    expect(surfaces.view).toContain("invalid API key");
+    expect(surfaces.view).toContain(
+      "Pick an effort level again for this conversation.",
+    );
+    expect(surfaces.view).toContain(quota);
+    expect(persisted).toContain('"rawStopReason":"[redacted]: network error"');
+    expect(persisted).toContain('"responseId":"reply-[redacted]"');
   } finally {
     await host.close();
+    server.stop(true);
   }
 });
 

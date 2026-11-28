@@ -43,6 +43,7 @@ import { paneItem } from "./panes/navigation.js";
 import { copyText } from "./tool_details.js";
 import { scrollDocumentFragment } from "./document-markdown.js";
 import { noteReviewed } from "./files/markdown.js";
+import { renderReviewButton } from "./document-review.js";
 import {
   abandon,
   allFiles,
@@ -628,7 +629,10 @@ function detailTemplate(
         : previewTemplate(cid, file, true, element)}
     </article>
     <div class="report-comments"></div>
-    <div class="report-bar"></div>`;
+    <div class="doc-review-actions">
+      <div class="report-bar"></div>
+      <div class="doc-review-foot"></div>
+    </div>`;
 }
 
 function fileErrorBanner(
@@ -707,15 +711,17 @@ function renderPane(element: FilesEl, id: string): void {
   const hash = JSON.stringify({
     id,
     shown: shown?.key ?? (selections.has(id) ? "pending" : null),
-    initialized: value.initialized,
-    complete: value.complete,
-    capped: value.capped,
-    inflight: value.inflight,
+    list: !shown && {
+      initialized: value.initialized,
+      complete: value.complete,
+      capped: value.capped,
+      inflight: value.inflight,
+      filter: value.filter,
+      query,
+    },
     error: value.error,
     notice: value.notice,
     failedDeletion: value.failedDeletion?.key,
-    filter: value.filter,
-    query,
     changes: shown && previewChangesStamp(id, shown),
     files: all.map((file) => [
       file.key,
@@ -725,10 +731,13 @@ function renderPane(element: FilesEl, id: string): void {
       value.previews.get(file.key)?.truncated,
     ]),
   });
-  // Invariant: Another pane may have taken selection comments since the last
-  // paint, so an unchanged view still reclaims them.
-  if (element._filesHash === hash)
+  if (element._filesHash === hash) {
+    // A refresh can abort a preview request without changing its placeholder.
+    if (shown && value.previews.get(shown.key)?.status === "idle")
+      observePreviews(element, id);
+    // Another pane can take selection comments between paints.
     return syncComments(element, id, selections.has(id) ? shown : null);
+  }
   element._filesHash = hash;
   element._markdownAbort?.abort();
   if (!shown) renderPowerbarControls(element, nothing);
@@ -761,6 +770,7 @@ function renderPane(element: FilesEl, id: string): void {
           : html`<div class="files-state" role="status">Loading file…</div>`,
       element,
     );
+    if (shown) renderReviewButton(element);
     mountViewers(element);
     syncDraw();
     syncComments(element, id, shown);
@@ -871,20 +881,20 @@ function renderFile(element: FilesEl, cid: string, file: SessionFile): void {
     position,
     previewChangesStamp(cid, file),
   ]);
-  if (
-    element._filesHash !== hash &&
-    !(
-      (preview?.status === "evicted" || !preview) &&
-      element.querySelector(".files-detail .report-doc")
-    )
-  ) {
-    element._filesHash = hash;
-    element._markdownAbort?.abort();
-    render(
-      html`<div class="files-errors"></div>
-        ${detailTemplate(element, cid, file, versions, position)}`,
-      element,
-    );
+  if (element._filesHash !== hash) {
+    if (
+      (preview && preview.status !== "evicted") ||
+      !element.querySelector(".files-detail .report-doc")
+    ) {
+      element._filesHash = hash;
+      element._markdownAbort?.abort();
+      render(
+        html`<div class="files-errors"></div>
+          ${detailTemplate(element, cid, file, versions, position)}`,
+        element,
+      );
+    }
+    renderReviewButton(element);
   }
   render(
     fileErrorBanner(cid, value, file.key),

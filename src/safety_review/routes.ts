@@ -86,6 +86,9 @@ export class SafetyReviewRoutes {
       reviewer = PLATFORM_LUNA_ROUTE;
       fallbacks = [];
       summary = { ...reviewer };
+    } else if (provider === "google") {
+      reviewer = CODEX_LUNA_ROUTE;
+      fallbacks = [];
     } else {
       [reviewer, fallbacks] = this.codexFirstRoute(current);
       summary = current;
@@ -154,12 +157,14 @@ export class SafetyReviewRoutes {
     } else {
       const { authed } = levelOne;
       // The extension shares the shipped reviewer catalog without loading Settings' model catalog.
-      const [{ getBuiltinModels }, { PI_MODEL_ROUTES, validModelScopeKey }] =
-        await Promise.all([
-          import("@earendil-works/pi-ai/providers/all"),
-          import("../models"),
-        ]);
-      const native = PI_MODEL_ROUTES.filter(([provider]) =>
+      const [
+        { getBuiltinModels },
+        { AUTOMATIC_REVIEW_ROUTES, validModelScopeKey },
+      ] = await Promise.all([
+        import("@earendil-works/pi-ai/providers/all"),
+        import("../models"),
+      ]);
+      const native = AUTOMATIC_REVIEW_ROUTES.filter(([provider]) =>
         authed.has(provider),
       )
         .flatMap(([provider]) =>
@@ -167,9 +172,13 @@ export class SafetyReviewRoutes {
         )
         .find((entry) => validModelScopeKey(`${entry.provider}/${entry.id}`));
       const custom = this.models.firstCustomModel(authed);
+      const fallback = this.models.CHAT_MODEL;
       model = native
         ? `${native.provider}/${native.id}`
-        : (custom ?? this.models.CHAT_MODEL);
+        : (custom ??
+          (this.models.providerOf(fallback) === "google"
+            ? this.models.automaticFallbackModel()
+            : fallback));
     }
     const [provider, modelId] = this.models.modelParts(model);
     return route(provider, modelId, "low");

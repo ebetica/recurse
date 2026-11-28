@@ -16,6 +16,7 @@ export {
   normalizedId,
   normalizedOwner,
   normalizedTitle,
+  openRepository,
   ownedBytes,
   pythonInt,
   readFileBounded,
@@ -35,6 +36,7 @@ export {
   cancelStaleDeletion,
   deleteArtifact,
   finalizeDelete,
+  hasDeletionReceipt,
   recoverableDeletions,
 } from "./deletion";
 export {

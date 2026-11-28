@@ -392,12 +392,14 @@ function applyFrameRunState(id: string, page: ViewPage, at: number) {
   if (
     conv.status === page.turn_status &&
     (conv.active_run ?? null) === run &&
-    (conv.active_run_start ?? null) === start
+    (conv.active_run_start ?? null) === start &&
+    JSON.stringify(conv.running_hooks) === JSON.stringify(page.running_hooks)
   )
     return;
   conv.status = page.turn_status as Conversation["status"];
   conv.active_run = run;
   conv.active_run_start = start;
+  conv.running_hooks = page.running_hooks;
   state.openConvHash = convHash(conv);
   renderConv(conv);
 }
@@ -486,6 +488,7 @@ export async function refreshConv(
     conv.status = current.status;
     conv.active_run = current.active_run;
     conv.active_run_start = current.active_run_start;
+    conv.running_hooks = current.running_hooks;
     conv.run_state_clock = current.run_state_clock;
   } else {
     latestRunRead = { id, started: requestedAt };

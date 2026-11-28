@@ -78,7 +78,12 @@ export function routes(fx: Fixture): Routes {
       await artifacts.publish(dirs, agent, String(item.id));
       script(agent).setResponses([
         fauxAssistantMessage(
-          `[Section](#artifact=${item.id}&section=browser-control-first-1) · [Missing section](#artifact=${item.id}&section=unknown)`,
+          [
+            body.replyMarkdown,
+            `[Section](#artifact=${item.id}&section=browser-control-first-1) · [Missing section](#artifact=${item.id}&section=unknown)`,
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
         ),
       ]);
       await submitDurable(agent, "Show the second browser control section.");
@@ -184,12 +189,13 @@ export function routes(fx: Fixture): Routes {
       const published = await artifacts.publish(dirs, agent, String(item.id));
       return { id: String(item.id), version: String(published.version) };
     },
-    "seed-saved-app-state": async () => {
+    "seed-saved-app-state": async ({ draft }) => {
       const owner = rootAgentId();
       const app = await artifacts.create(dirs, {
         owner,
         title: "Saved counter",
       });
+      if (draft) return app;
       await Bun.write(
         join(String(app.repo_path), "index.html"),
         Bun.file(
@@ -198,18 +204,25 @@ export function routes(fx: Fixture): Routes {
       );
       return artifacts.publish(dirs, owner, String(app.id));
     },
-    "run-artifact-state-tool": async ({ id, replacement }) => {
-      const actor = `state-tool-${hex(8)}`;
+    "run-artifact-tool": async ({ action, id, replacement }) => {
+      const actor = `artifact-tool-${hex(8)}`;
       const scratch = await mkdtemp(join(tmpdir(), "browser-saved-app-"));
       try {
-        await create(actor, "Saved app state tool");
-        const args: { action: string; id: string; set_file?: string } = {
-          action: "state",
-          id,
+        await Bun.write(
+          instance.config.safetyReview.settingsPath,
+          JSON.stringify({ model: "browser-reviewer/faux-1" }),
+        );
+        await create(actor, "Artifact tool", null);
+        const args = {
+          action,
+          ...(id !== undefined && { id }),
+          ...(action === "list" && { all: true }),
+          ...(replacement !== undefined && {
+            set_file: join(scratch, "state.json"),
+          }),
         };
         if (replacement !== undefined) {
-          args.set_file = join(scratch, "state.json");
-          await Bun.write(args.set_file, JSON.stringify(replacement));
+          await Bun.write(args.set_file!, JSON.stringify(replacement));
         }
         let result: unknown;
         script(actor).setResponses([
@@ -222,16 +235,20 @@ export function routes(fx: Fixture): Routes {
                 message.role === "toolResult" &&
                 message.toolName === "artifact",
             );
-            return fauxAssistantMessage(
-              "Finished using the saved app state tool.",
-            );
+            return fauxAssistantMessage("Finished using the Artifact tool.");
           },
         ]);
+        const request =
+          action === "delete"
+            ? `Delete Artifact ${id}.`
+            : action === "list"
+              ? "List all Artifacts."
+              : replacement === undefined
+                ? "Read the saved app state."
+                : "Replace the saved app state with the supplied JSON.";
         await submitDurable(
           actor,
-          replacement === undefined
-            ? "Read the saved app state."
-            : "Replace the saved app state with the supplied JSON.",
+          `## Message\n[recurse-origin: operator]\n${request}`,
         );
         return { result };
       } finally {

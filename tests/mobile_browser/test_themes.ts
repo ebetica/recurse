@@ -18,6 +18,7 @@ import {
   themeColors,
   type BrowserTest,
   openSettingsPanel,
+  MERMAID_DIAGRAM,
 } from "./common";
 import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -746,19 +747,18 @@ export const tests: BrowserTest[] = [
       });
       const button = (name: string) =>
         appearance.getByRole("button", { name, exact: true });
-      const bg = (name: string) =>
-        page.waitForFunction(
-          (value) => {
-            const browser = globalThis as any;
-            return (
-              browser
-                .getComputedStyle(browser.document.documentElement)
-                .getPropertyValue("--bg")
-                .trim() === value
-            );
-          },
-          (themePalettes.find((p) => p.name === name) ?? custom).background,
+      const themeColor = page.locator('meta[name="theme-color"]');
+      const bg = async (name: string) => {
+        const palette = themePalettes.find((p) => p.name === name) ?? custom;
+        await browserExpect(page.locator("body")).toHaveCSS(
+          "background-color",
+          (await themeColors(page, palette.background))[0]!,
         );
+        await browserExpect(themeColor).toHaveAttribute(
+          "content",
+          palette.background,
+        );
+      };
       await browserExpect(button("System")).toBeDisabled();
       await browserExpect(button("System")).toHaveCSS("opacity", "1");
       await browserExpect(page.locator(".theme-appearance")).toHaveAttribute(
@@ -1293,7 +1293,7 @@ export const tests: BrowserTest[] = [
       await page.goto(`${base}#agent=${demo}`, {
         waitUntil: "domcontentloaded",
       });
-      const diagram = page.locator(".mermaid-done svg");
+      const diagram = page.locator(`.mermaid-done ${MERMAID_DIAGRAM}`);
       await diagram.waitFor();
       await page.locator('.rail-btn[data-pane="diff"]').click();
       await page.locator(".diff-patch .hljs-keyword").first().waitFor();
@@ -1306,10 +1306,9 @@ export const tests: BrowserTest[] = [
           window.dispatchEvent(new Event("recurse:theme-changed"));
         }, css);
         await page.waitForFunction(
-          (oldId) =>
-            (globalThis as any).document.querySelector(".mermaid-done svg")
-              ?.id !== oldId,
-          oldId,
+          ({ oldId, selector }) =>
+            (globalThis as any).document.querySelector(selector)?.id !== oldId,
+          { oldId, selector: `.mermaid-done ${MERMAID_DIAGRAM}` },
         );
         const colors = await page.evaluate(() => {
           const { document, getComputedStyle } = globalThis as any;

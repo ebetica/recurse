@@ -41,6 +41,7 @@ import { tests as agentNavigation } from "./test_agent_navigation";
 import { tests as conversationTitle } from "./test_conversation_title";
 import { tests as firstLoad } from "./test_first_load";
 import { tests as mobileLayout } from "./test_mobile_layout";
+import { tests as touchFeedback } from "./test_touch_feedback";
 import { tests as panesArtifacts } from "./test_panes_artifacts";
 import { tests as artifactUpdates } from "./test_artifact_updates";
 import { tests as artifactVisit } from "./test_artifact_visit";
@@ -117,7 +118,7 @@ export const groups: Array<[string, BrowserTest[]]> = [
   ["new-agent-focus", [...newAgentFocus, ...agentNavigation]],
   ["conversation-title", conversationTitle],
   ["first-load", firstLoad],
-  ["mobile-layout", mobileLayout],
+  ["mobile-layout", [...mobileLayout, ...touchFeedback]],
   [
     "panes-artifacts",
     [

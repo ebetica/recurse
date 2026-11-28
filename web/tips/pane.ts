@@ -23,7 +23,7 @@ import { paneItem } from "../panes/navigation.js";
 import { copyText } from "../tool_details.js";
 import { DRAFT, embedded, state as appState } from "../state.js";
 import type { PaneContext, PaneNavigation } from "../types.js";
-import { TIPS, type Tip, type TipControl } from "./list.js";
+import { tipsForDevice, type Tip, type TipControl } from "./list.js";
 
 const PANE_ID = "tips";
 const STORAGE_KEY = "recurse.tips";
@@ -94,8 +94,7 @@ function update(change: (next: Saved) => void, sync = true): void {
 }
 
 function deviceTips(): readonly Tip[] {
-  const other = phone.matches ? "desktop" : "phone";
-  return TIPS.filter((tip) => tip.device !== other);
+  return tipsForDevice(phone.matches ? "phone" : "desktop");
 }
 
 function unseenAfter(tips: readonly Tip[], from: number): Tip | undefined {

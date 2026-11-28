@@ -31,7 +31,7 @@ stopping agent, queued messages, or background shells. Monitor shells do not
 make a subtree busy. Status is the agent's own state, not a descendant overlay.
 `workdir` is the configured initial work directory, not the directory most
 recently selected with `chdir`. Optional `tags`, `operator_message_at` and
-`replied_at` fields support sidebar sections; absent fields mean an older remote. Idle reads return 503 with retry guidance while
+`replied_at` fields support sidebar sections; absent fields mean an older remote. Since revision 9, optional `running_hooks` lists the hook files running for the agent now. Idle reads return 503 with retry guidance while
 the tree is rebuilding, rather than declaring an incomplete tree idle.
 
 `GET /api/v1/agents/<id>/messages` reads a bounded transcript page with
@@ -42,9 +42,9 @@ for newer entries; one entry may contain multiple messages. `truncated` also
 marks summarized tool arguments and output. Timestamps are epoch seconds or null.
 `POST /api/v1/agents/<id>/messages` admits text through the same delivery path
 as the web app, with optional `interrupt` and `client_message_id`. The optional
-`x-recurse-agent` header identifies a live local sender; otherwise the message
-is sent by the operator. A backend key's authenticated agent marker instead
-identifies a relayed sender as `id@key-name` without a title. Backend keys cannot
+`x-recurse-agent` header identifies a live local sender. An unresolved sender
+is rejected, not treated as the operator. A backend key's authenticated agent
+marker instead identifies a relayed sender as `id@key-name` without a title. Backend keys cannot
 claim a local sender with `x-recurse-agent`. The response acknowledges admission,
 not completion. Retrying an admitted `client_message_id` does not repeat an
 explicit interrupt; `interrupted` is false when that attempt stops no run.

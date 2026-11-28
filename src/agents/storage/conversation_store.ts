@@ -150,6 +150,7 @@ export interface ConversationStorePaths {
 export interface ConversationStoreHooks {
   inbox(cid: string): ConversationRecord[];
   defaultSpawnWorkdir(): string;
+  mayHaveUnreportedReply?(cid: string): boolean;
   /** Synchronous notification after publication; null replaces the projection. */
   onRowsChanged(cid: string | null): void;
   log?(event: string, fields: Record<string, unknown>): void;
@@ -284,6 +285,8 @@ export class ConversationStore {
   private readonly mutex = new CidMutex();
   private readonly projection = new Map<string, ConversationRecord>();
   private readonly lastSaved = new Map<string, ConversationRecord>();
+  private readonly viewedTimes = new Map<string, number>();
+  private readonly manualUnreadMarks = new Map<string, object>();
   private readonly reservedRows = new Map<string, RowReservation>();
   // Retired agent databases whose record is not yet discarded.
   private readonly ended = new Set<string>();
@@ -368,11 +371,15 @@ export class ConversationStore {
   applyAgentMetadata(snapshot: Record<string, ConversationRecord>): void {
     const rows: Record<string, ConversationRecord> = {};
     this.lastSaved.clear();
+    this.viewedTimes.clear();
+    this.manualUnreadMarks.clear();
     for (const [cid, metadata] of Object.entries(snapshot)) {
       if (!metadata || typeof metadata !== "object" || Array.isArray(metadata))
         continue;
       const durable = canonicalMetadata(metadata);
       this.lastSaved.set(cid, durable);
+      if (typeof metadata.viewed_at === "number")
+        this.viewedTimes.set(cid, metadata.viewed_at);
       const row: ConversationRecord = { ...durable };
       if (!("taken_over" in row) && metadata.pinned === true)
         row.taken_over = true;
@@ -449,24 +456,32 @@ export class ConversationStore {
   private enqueueDurableMetadata(
     cid: string,
     record: ConversationRecord,
+    viewedAt?: number,
   ): boolean {
     if (this.agentStore.status(cid).closed) {
       this.hooks.log?.("metadata_enqueue_owner_gone", { conversation_id: cid });
       return false;
     }
     const durable = canonicalMetadata(record);
-    if (isDeepStrictEqual(durable, this.lastSaved.get(cid) ?? {})) return true;
-    const payload: ConversationRecord = {
-      ...durable,
-      [IMPORT_REV_KEY]: IMPORT_REV_CURRENT,
-    };
+    if (
+      viewedAt === undefined &&
+      isDeepStrictEqual(durable, this.lastSaved.get(cid) ?? {})
+    )
+      return true;
+    const payload = { ...durable };
     for (const key of PIGGYBACK_METADATA_KEYS)
       if (key in record) payload[key] = record[key];
-    if (!this.admitMetadata(cid, payload)) return false;
+    if (!this.admitMetadata(cid, payload, viewedAt)) return false;
     this.lastSaved.set(cid, durable);
     return true;
   }
-  private admitMetadata(cid: string, payload: ConversationRecord): boolean {
+  private admitMetadata(
+    cid: string,
+    payload: ConversationRecord,
+    viewedAt = this.viewedAt(cid),
+  ): boolean {
+    payload[IMPORT_REV_KEY] = IMPORT_REV_CURRENT;
+    if (viewedAt !== undefined) payload.viewed_at = viewedAt;
     try {
       this.agentStore.enqueueMetadata(cid, payload);
     } catch (error) {
@@ -576,10 +591,7 @@ export class ConversationStore {
   ): boolean {
     const current = this.projection.get(cid);
     if (!current) return false;
-    const payload: ConversationRecord = {
-      ...canonicalMetadata(current),
-      [IMPORT_REV_KEY]: IMPORT_REV_CURRENT,
-    };
+    const payload = canonicalMetadata(current);
     for (const key of PIGGYBACK_METADATA_KEYS)
       if (key in current) payload[key] = current[key];
     payload.updated = updated;
@@ -639,7 +651,6 @@ export class ConversationStore {
     const payload: ConversationRecord = { ...current };
     if (fresh === null) for (const key of triple) delete payload[key];
     else Object.assign(payload, fresh);
-    payload[IMPORT_REV_KEY] = IMPORT_REV_CURRENT;
     if (!this.admitMetadata(cid, payload)) return;
     this.lastSaved.set(cid, canonicalMetadata(payload));
     const row = this.projection.get(cid);
@@ -665,6 +676,8 @@ export class ConversationStore {
     this.safetyRequests.delete(cid);
     this.projection.delete(cid);
     this.lastSaved.delete(cid);
+    this.viewedTimes.delete(cid);
+    this.manualUnreadMarks.delete(cid);
     this.notifyRowsChanged(cid);
   }
   // Claim a new row whose storage does not exist yet; null when a row, mailbox
@@ -816,7 +829,7 @@ export class ConversationStore {
     if (!(await this.agentStore.flush(cid)))
       throw new Error("reply stamp flush failed");
   }
-  /** Record a qualifying finish once, even if its report is replayed. */
+  /** Record unread state once per reply report, even if it is replayed. */
   async finishUnread(cid: string, key: string, unread: boolean): Promise<void> {
     const current = this.projection.get(cid);
     if (!current) return;
@@ -828,13 +841,48 @@ export class ConversationStore {
     if (!(await this.agentStore.flush(cid)))
       throw new Error("finished state flush failed");
   }
-  /** Opening a visible main conversation acknowledges its latest finish. */
-  async markViewed(cid: string): Promise<void> {
+  /** Set the operator's unread mark without acknowledging future replies. */
+  async setUnread(cid: string, unread: boolean): Promise<boolean> {
     const current = this.projection.get(cid);
-    if (!current || typeof current.finished_run !== "string") return;
-    if (current.unread === true && !this.patch(cid, { unread: false })) return;
+    if (!current || this.ended.has(cid) || typeof current.side_of === "string")
+      return false;
+    if ((current.unread === true) !== unread && !this.patch(cid, { unread }))
+      return false;
+    if (unread) this.manualUnreadMarks.set(cid, {});
     if (!(await this.agentStore.flush(cid)))
+      throw new Error("unread state flush failed");
+    return true;
+  }
+  viewedAt(cid: string): number | undefined {
+    return this.viewedTimes.get(cid);
+  }
+  /** Admit a view acknowledgement; return whether it cleared a dot. */
+  private recordViewed(cid: string): boolean {
+    const current = this.projection.get(cid);
+    if (!current || this.ended.has(cid) || typeof current.side_of === "string")
+      return false;
+    const unread = current.unread === true;
+    if (!unread && !this.hooks.mayHaveUnreportedReply?.(cid)) return false;
+    const previous = this.viewedAt(cid);
+    const viewedAt = Math.max(previous ?? 0, Date.now());
+    if (!unread && previous === viewedAt) return false;
+    const next = unread ? { ...current, unread: false } : current;
+    if (!this.enqueueDurableMetadata(cid, next, viewedAt)) return false;
+    this.viewedTimes.set(cid, viewedAt);
+    if (unread) {
+      this.projection.set(cid, next);
+      this.notifyRowsChanged(cid);
+    }
+    return unread;
+  }
+  /** A closing viewer cannot acknowledge a newer manual unread mark. */
+  async markViewed(cid: string): Promise<() => void> {
+    const mark = this.manualUnreadMarks.get(cid);
+    if (this.recordViewed(cid) && !(await this.agentStore.flush(cid)))
       throw new Error("viewed state flush failed");
+    return () => {
+      if (this.manualUnreadMarks.get(cid) === mark) this.recordViewed(cid);
+    };
   }
   /**
    * Apply one tag change for `by` to each of `cids`; returns the ids not

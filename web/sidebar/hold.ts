@@ -8,6 +8,7 @@ import { unsafeHTML } from "lit/directives/unsafe-html.js";
 export interface HoldItem {
   label: string;
   icon: string;
+  danger?: boolean;
   run(anchor: DOMRect): void;
 }
 
@@ -20,6 +21,8 @@ let open: {
   y: number;
   moved: boolean;
   over: number;
+  labelled: boolean;
+  restoreFocus: HTMLElement | null;
 } | null = null;
 
 const tick = () =>
@@ -31,23 +34,36 @@ function paint(): void {
     if (host) host.hidden = true;
     return;
   }
-  const { items, over } = open;
+  const { items, over, labelled } = open;
   render(
-    html`<div class="hold-bubble" ?hidden=${over < 0} aria-hidden="true">
-        ${items[over]?.label ?? ""}
-      </div>
-      <div class="hold-strip" role="menu" aria-label="Actions">
+    html`${labelled
+        ? nothing
+        : html`<div class="hold-bubble" ?hidden=${over < 0} aria-hidden="true">
+            ${items[over]?.label ?? ""}
+          </div>`}
+      <div
+        class=${labelled ? "hold-strip labelled" : "hold-strip"}
+        role="menu"
+        aria-label="Actions"
+        @keydown=${labelled ? moveFocus : nothing}
+      >
         ${items.map(
           (item, i) =>
             html`<button
               type="button"
               role="menuitem"
-              class=${i === over ? "over" : ""}
+              class=${labelled
+                ? `btn quiet${item.danger ? " danger" : ""}`
+                : i === over
+                  ? "over"
+                  : ""}
               aria-label=${item.label}
               title=${item.label}
               @click=${(e: Event) => choose(i, e)}
             >
-              ${unsafeHTML(item.icon)}
+              ${unsafeHTML(item.icon)}${labelled
+                ? html`<span>${item.label}</span>`
+                : nothing}
             </button>`,
         )}
       </div>`,
@@ -71,12 +87,37 @@ function escape(e: KeyboardEvent): void {
   if (open && e.key === "Escape") closeHold();
 }
 
-/** Open the strip for a finger at (x, y). */
-export function openHold(items: HoldItem[], x: number, y: number): void {
+function moveFocus(e: KeyboardEvent): void {
+  if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+  const buttons = [...host!.querySelectorAll("button")];
+  const current = buttons.indexOf(e.target as HTMLButtonElement);
+  const next = current + (e.key === "ArrowDown" ? 1 : -1);
+  buttons[(next + buttons.length) % buttons.length]?.focus();
+  e.preventDefault();
+}
+
+/** Open the compact hold strip or a labelled row action menu. */
+export function openHold(
+  items: HoldItem[],
+  x: number,
+  y: number,
+  labelled = false,
+): void {
   if (!items.length) return;
   host ??= document.body.appendChild(document.createElement("div"));
   host.id = "hold-menu";
-  open = { items, x, y, moved: false, over: -1 };
+  open = {
+    items,
+    x,
+    y,
+    moved: false,
+    over: -1,
+    labelled,
+    restoreFocus:
+      labelled && document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null,
+  };
   host.hidden = false;
   paint();
   const box = host.getBoundingClientRect();
@@ -84,9 +125,15 @@ export function openHold(items: HoldItem[], x: number, y: number): void {
     Math.max(8, x - box.width / 2),
     innerWidth - box.width - 8,
   );
-  const top = y - box.height - 28 > 8 ? y - box.height - 28 : y + 28;
+  const topInset =
+    parseFloat(
+      getComputedStyle(host).getPropertyValue("--standalone-top-inset"),
+    ) || 0;
+  const above = y - box.height - 28;
+  const top = above > topInset + 8 ? above : y + 28;
   host.style.left = `${left}px`;
-  host.style.top = `${top}px`;
+  host.style.top = `${labelled ? Math.max(topInset + 8, Math.min(top, innerHeight - box.height - 8)) : top}px`;
+  if (labelled) host.querySelector("button")?.focus({ preventScroll: true });
   tick();
   document.addEventListener("pointerdown", outside, true);
   document.addEventListener("keydown", escape, true);
@@ -125,8 +172,10 @@ export function releaseHold(x: number, y: number): void {
 }
 
 function closeHold(): void {
+  const restore = open?.restoreFocus;
   open = null;
   document.removeEventListener("pointerdown", outside, true);
   document.removeEventListener("keydown", escape, true);
   paint();
+  restore?.focus({ preventScroll: true });
 }

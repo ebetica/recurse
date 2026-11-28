@@ -1,7 +1,7 @@
 // Selection comments own quote offers and snapshots; pre-gesture scrolls do not cancel offers.
-// Cmd/Ctrl+Enter stages and focuses the viewer, then sends. Adding a comment focuses its card.
-// Artifact highlight controls never nest in links or buttons.
-// Overlapping highlights can share an inline Tab stop; use cards to edit the others.
+// Invariant: a cancelled touch pointer ends selection even without a separate touch end.
+// Adding a comment focuses its card; Cmd/Ctrl+Enter stages and focuses the viewer, then sends.
+// Overlapping highlights can share a Tab stop, never inside a link or button; use cards for the others.
 import { selectionCommentRange } from "../comments/selection-text/index.js";
 import {
   commentMount,
@@ -243,7 +243,7 @@ function finishPendingEdit(): void {
 }
 popoverCancel.addEventListener("click", finishPendingEdit);
 popoverInput.addEventListener("input", () => {
-  if (popover.classList.contains("composer-box")) resizeTextarea(popoverInput);
+  if (popover.classList.contains("composer-box")) positionPopover();
   if (selectionDraft?.edit)
     popoverComment.disabled = !popoverInput.value.trim();
 });
@@ -342,18 +342,35 @@ function positionPopover(): void {
   popoverComment.textContent = draft.edit ? "Save" : "Comment";
   popoverComment.disabled = !!draft.edit && !popoverInput.value.trim();
   popover.hidden = false;
+  popover.style.maxHeight = "";
+  popover.style.overflowY = "";
   if (file) resizeTextarea(popoverInput);
   const paneRight = draft.edit
     ? pane.getBoundingClientRect().right
     : innerWidth;
-  const left = Math.min(rect.right + 8, paneRight - popover.offsetWidth - 8);
+  const width = popover.offsetWidth;
+  const height = popover.offsetHeight;
+  const left = Math.max(8, Math.min(rect.right + 8, paneRight - width - 8));
+  const review = pane
+    .querySelector(".doc-reviewed:not([inert])")
+    ?.getBoundingClientRect();
+  const limit =
+    review?.height && left < review.right && left + width > review.left
+      ? review.top
+      : innerHeight;
   const below = rect.bottom + 8;
-  const top =
-    below + popover.offsetHeight <= innerHeight - 8
+  const top = Math.max(
+    8,
+    below + height <= limit - 8
       ? below
-      : rect.top - popover.offsetHeight - 8;
-  popover.style.left = `${Math.max(8, left)}px`;
-  popover.style.top = `${Math.max(8, top)}px`;
+      : Math.min(rect.top, limit) - height - 8,
+  );
+  popover.style.left = `${left}px`;
+  popover.style.top = `${top}px`;
+  if (limit !== innerHeight) {
+    popover.style.maxHeight = `${Math.max(0, limit - top - 8)}px`;
+    popover.style.overflowY = "auto";
+  }
 }
 interface SelectionSnapshot {
   range: Range;
@@ -407,6 +424,7 @@ function createSelectionSource(
     interactionStarted: 0,
     touch: false,
     changed: false,
+    rangeAtStart: null,
     blocked: false,
     blockedRange: null,
     offerToken: 0,
@@ -542,7 +560,9 @@ export function canEditPendingComment(
   pane: CommentPane,
   comment: Comment,
 ): boolean {
-  return pane.dataset.pane === "report" && !comment.box;
+  return (
+    pane.dataset.pane === "report" && !comment.box && !!displayedInfo(pane)
+  );
 }
 
 function canReplaceDraft(): boolean {
@@ -610,12 +630,14 @@ export function handleCommentShortcut(
   root: Element,
 ): void {
   if (!isSendShortcut(event)) return;
+  const bar = root.querySelector(".report-bar");
+  if (!bar) return;
   if (
     selectionDraft?.pane === root &&
     !stageSelectionForSend(selectionDraft.pane)
   )
     return;
-  const button = root.querySelector<HTMLButtonElement>(".report-sendbar-send");
+  const button = bar.querySelector<HTMLButtonElement>(".report-sendbar-send");
   if (!button || button.disabled) return;
   event.preventDefault();
   event.stopPropagation();
@@ -694,11 +716,24 @@ function onSelectionPointerDown(
       commentMount.current = node as CommentPane;
       break;
     }
-  if (!selectionInteractionActive(source)) source.changed = false;
+  beginSelectionInteraction(source, event);
+  source.pointerIds.add(event.pointerId);
+}
+function currentSelectionRange(source: SelectionSource): Range | null {
+  const selection = source.doc.getSelection();
+  return selection?.rangeCount ? selection.getRangeAt(0) : null;
+}
+function beginSelectionInteraction(
+  source: SelectionSource,
+  event: Event,
+): void {
+  if (!selectionInteractionActive(source)) {
+    source.changed = false;
+    source.rangeAtStart = currentSelectionRange(source)?.cloneRange() ?? null;
+  }
   source.interactionStarted = event.timeStamp;
   source.blocked = false;
   source.blockedRange = null;
-  source.pointerIds.add(event.pointerId);
   source.offerToken++;
 }
 function onSelectionPointerUp(
@@ -706,48 +741,54 @@ function onSelectionPointerUp(
   event: PointerEvent,
 ): void {
   source.pointerIds.delete(event.pointerId);
-  if (!selectionInteractionActive(source)) {
-    if (source.changed && !source.blocked) scheduleSelectionOffer(source);
-    source.changed = false;
-  }
+  finishSelectionInteraction(source);
+}
+function finishSelectionInteraction(
+  source: SelectionSource,
+  cancelled = false,
+): void {
+  if (selectionInteractionActive(source)) return;
+  const range = cancelled ? currentSelectionRange(source) : null;
+  const changed = cancelled
+    ? range &&
+      !range.collapsed &&
+      (!source.rangeAtStart || !sameRange(range, source.rangeAtStart))
+    : source.changed;
+  source.changed = false;
+  source.rangeAtStart = null;
+  if (changed && !source.blocked) scheduleSelectionOffer(source);
+  else if (cancelled) invalidateSelectionSequence(source);
 }
 function invalidateSelectionSequence(source: SelectionSource): void {
   source.changed = false;
   source.blocked = true;
-  const selection = source.doc.defaultView?.getSelection();
-  source.blockedRange = selection?.rangeCount
-    ? selection.getRangeAt(0).cloneRange()
-    : null;
+  source.blockedRange = currentSelectionRange(source)?.cloneRange() ?? null;
   source.offerToken++;
 }
 function onSelectionPointerCancel(
   source: SelectionSource,
   event: PointerEvent,
 ): void {
-  source.pointerIds.delete(event.pointerId);
-  invalidateSelectionSequence(source);
+  if (!source.pointerIds.delete(event.pointerId)) return;
+  if (event.pointerType !== "touch") return invalidateSelectionSequence(source);
+  source.touch = false;
+  finishSelectionInteraction(source, true);
 }
 function onSelectionTouchStart(source: SelectionSource, event: Event): void {
-  if (!selectionInteractionActive(source)) source.changed = false;
-  source.interactionStarted = event.timeStamp;
-  source.blocked = false;
-  source.blockedRange = null;
+  beginSelectionInteraction(source, event);
   source.touch = true;
-  source.offerToken++;
 }
-function onSelectionTouchEnd(source: SelectionSource): void {
+function onSelectionTouchEnd(source: SelectionSource, cancelled = false): void {
+  if (!source.touch) return;
   source.touch = false;
-  if (!selectionInteractionActive(source)) {
-    if (source.changed && !source.blocked) scheduleSelectionOffer(source);
-    source.changed = false;
-  }
-}
-function onSelectionTouchCancel(source: SelectionSource): void {
-  source.touch = false;
-  invalidateSelectionSequence(source);
+  finishSelectionInteraction(source, cancelled);
 }
 function onSelectionScroll(source: SelectionSource, event: Event): void {
-  if (event.timeStamp < source.interactionStarted) return;
+  if (
+    event.timeStamp < source.interactionStarted ||
+    (event.target instanceof Node && popover.contains(event.target))
+  )
+    return;
   invalidateSelectionSequence(source);
   positionPopover();
 }
@@ -760,8 +801,7 @@ function installSelectionInteractions(source: SelectionSource): void {
       return;
     }
     if (source.blocked) {
-      const selection = source.doc.defaultView?.getSelection();
-      const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+      const range = currentSelectionRange(source);
       if (range && source.blockedRange && sameRange(range, source.blockedRange))
         return;
       source.blocked = false;
@@ -779,7 +819,7 @@ function installSelectionInteractions(source: SelectionSource): void {
     onSelectionPointerCancel(source, event as PointerEvent);
   const onTouchStart = (event: Event) => onSelectionTouchStart(source, event);
   const onTouchEnd = () => onSelectionTouchEnd(source);
-  const onTouchCancel = () => onSelectionTouchCancel(source);
+  const onTouchCancel = () => onSelectionTouchEnd(source, true);
   const onScroll = (event: Event) => onSelectionScroll(source, event);
   doc.addEventListener("selectionchange", onChange);
   doc.addEventListener("pointerdown", onPointerDown, true);
@@ -798,6 +838,11 @@ addEventListener(
   true,
 );
 addEventListener("resize", () => positionPopover());
+export function keepUnsentSelection(pane: CommentPane): void {
+  if (selectionDraft?.pane === pane && popoverInput.value.trim())
+    stageSelectionComment(false, false);
+}
+
 function stageSelectionComment(allowEmpty = false, focusCard = true): void {
   const draft = selectionDraft;
   if (!draft) return;

@@ -28,3 +28,5 @@ Keep the public entry thin and named. Held state has no runtime dependency on
 rendering, polling, model controls or navigation. Do not duplicate its maps or
 snapshot live presentation bindings. The row owner retains its never-reused drop
 serials, union cache bound and Clear guards; moving state does not change them.
+When the server marks row text as authored, keep it unchanged instead of
+looking for legacy delivery framing in it.

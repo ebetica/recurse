@@ -1163,7 +1163,8 @@ export const tests: BrowserTest[] = [
       await page.keyboard.press("Escape");
       await page.keyboard.press("t");
       await page.keyboard.press("t");
-      await page.locator("#draft-model-host").waitFor();
+      const draftHeading = page.getByRole("heading", { name: "New agent" });
+      await draftHeading.waitFor();
       await page.locator("#input").fill("Keep my new draft");
       const rows = page.waitForResponse(
         (response) =>
@@ -1181,7 +1182,7 @@ export const tests: BrowserTest[] = [
             );
           }),
       );
-      expect(await page.locator("#draft-model-host").isVisible()).toBeTrue();
+      await browserExpect(draftHeading).toBeVisible();
       expect(await page.locator("#input").inputValue()).toBe(
         "Keep my new draft",
       );

@@ -16,6 +16,8 @@ export interface ViewBlock {
   kind: string;
   role: string;
   text: string;
+  /** The server already separated user text from delivery framing. */
+  text_is_authored?: true;
   /** On a text-delta page: `text` follows this many held characters. */
   text_from?: number;
   /** With `text_from`: hash of the held text it follows (`textHash`). */
@@ -57,6 +59,8 @@ export interface ViewBlock {
   files?: AgentAttachment[];
   pr_links?: TurnSummary["pr_links"];
   calls?: CodemodeCall[] | null;
+  /** The arguments that ran, when a hook changed them. */
+  ran_args?: string;
 }
 
 export interface ViewPage {
@@ -69,6 +73,7 @@ export interface ViewPage {
   turn_status?: string;
   active_run?: string | null;
   active_run_start?: number | null;
+  running_hooks?: { label: string; at: number }[];
   run_state_clock?: [string, number];
   latest_thinking?: {
     run_start: number | null;

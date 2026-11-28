@@ -55,6 +55,8 @@ export interface Block {
   readonly meta: JsonObject | null;
   /** Codemode nested calls from the result's details.calls, bounded. */
   readonly calls?: readonly JsonObject[];
+  /** The arguments that ran, shown like `args`, when a hook changed them. */
+  readonly ran_args?: string;
   /** On a text-delta change page: text follows this many held characters. */
   readonly text_from?: number;
   /** With `text_from`: `textHash` of the held text it follows. */
@@ -298,7 +300,10 @@ function completeArgs(argumentsValue: unknown): boolean {
   }
 }
 
-function displayToolArgs(name: unknown, argumentsValue: unknown): string {
+export function displayToolArgs(
+  name: unknown,
+  argumentsValue: unknown,
+): string {
   if (name === "bash" && object(argumentsValue))
     return displayArgs(
       Object.hasOwn(argumentsValue, "command")
@@ -319,6 +324,14 @@ function displayToolArgs(name: unknown, argumentsValue: unknown): string {
 const CODEMODE_CALLS_MAX = 100;
 const CODEMODE_TEXT_MAX = 300;
 const CODEMODE_STATUSES = new Set(["running", "ok", "error", "cancelled"]);
+
+/** The arguments a `tool_call` hook changed the call to, from its result's
+ * details (hooks/extension.ts). */
+export function hookArguments(details: unknown): JsonObject | null {
+  return object(details) && object(details.recurseHookArguments)
+    ? details.recurseHookArguments
+    : null;
+}
 
 /** Bound a codemode result's details.calls to plain one-line display fields. */
 export function codemodeCalls(details: unknown): JsonObject[] | null {

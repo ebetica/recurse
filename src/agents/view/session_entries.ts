@@ -7,6 +7,7 @@ import { Buffer } from "node:buffer";
 import { constants } from "node:fs";
 import { lstat, open as openAsync, type FileHandle } from "node:fs/promises";
 import type { Stats } from "node:fs";
+import { splitSkillInvocation } from "../../skill_context";
 
 export type JsonObject = Record<string, unknown>;
 type JsonlRange = [start: number, end: number, entry: JsonObject];
@@ -973,20 +974,74 @@ function consumeSenderLines(
   return [sender, name || null, rest.slice(1)];
 }
 
-/** Remove Recurse delivery framing from one Pi user payload. */
-export function splitPiUserText(
-  original: string,
-): [
+type PiUserText = [
   origin: string | null,
   sender: string | null,
   senderName: string | null,
   text: string,
-] {
-  let text = original;
+];
+
+function stripDeliveryTrailer(text: string): string {
   const trailer = DELIVERY_TRAILER_RE.exec(text);
-  if (trailer && trailer.index + trailer[0].length === text.length) {
-    text = text.slice(0, trailer.index);
+  return trailer && trailer.index + trailer[0].length === text.length
+    ? text.slice(0, trailer.index)
+    : text;
+}
+
+interface StampedSkillText {
+  parts: PiUserText;
+  text_is_authored?: true;
+}
+
+/** Undo only the skill stamp used by Recurse, for display. */
+export function splitStampedSkillText(
+  original: string,
+): StampedSkillText | null {
+  const skill = splitSkillInvocation(original);
+  if (skill === null) return null;
+  const [command, rest] = skill;
+  let stamped = rest;
+  const frame = "## Message\n";
+  if (rest.startsWith(frame)) stamped = rest.slice(frame.length);
+  else if (!rest.startsWith("[recurse-origin:")) {
+    const hiddenFrame = `\n\n${frame}`;
+    const index = rest.indexOf(`${hiddenFrame}[recurse-origin: `);
+    if (index < 0) return null;
+    stamped = rest.slice(index + hiddenFrame.length);
   }
+  const newline = stamped.indexOf("\n");
+  if (newline < 0) return null;
+  const origin = ORIGIN_LINE_RE.exec(stamped.slice(0, newline))?.[1];
+  if (origin === undefined) return null;
+  const [sender, senderName, lines] = consumeSenderLines(
+    stripDeliveryTrailer(stamped.slice(newline + 1)).split("\n"),
+  );
+  const args = lines.join("\n");
+  const text = args ? `${command} ${args}` : command;
+  return {
+    parts: [origin, sender, senderName, text],
+    ...(splitPiUserText(text)[0] === null ? { text_is_authored: true } : {}),
+  };
+}
+
+/** Display fields for a queued user row, independent of admission. */
+export function pendingUserFields(original: string): JsonObject {
+  const {
+    parts: [origin, from, from_name, content],
+    ...display
+  } = splitStampedSkillText(original) ?? { parts: splitPiUserText(original) };
+  return {
+    content,
+    ...(origin ? { origin } : {}),
+    ...(from ? { from } : {}),
+    ...(from_name ? { from_name } : {}),
+    ...display,
+  };
+}
+
+/** Remove Recurse delivery framing from one Pi user payload. */
+export function splitPiUserText(original: string): PiUserText {
+  const text = stripDeliveryTrailer(original);
   const tag = ORIGIN_TAG_RE.exec(text);
   if (tag) {
     const [sender, senderName, split] = consumeSenderLines(

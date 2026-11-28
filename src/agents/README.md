@@ -38,11 +38,13 @@ records or runtime state change. Sidebar reads reuse the
 prompt digests capture the same inputs at the request boundary.
 The tree projection notifies visible browsers when admitted tags change. Tag
 mutations publish that in-memory change before awaiting their durable flush;
-HTTP success still means the flush completed. The same projection pushes unread
-finish changes. Notification eligibility owns the decision; a qualifying run key
-and unread flag persist with conversation metadata, independently of push devices.
-Visible main-conversation streams acknowledge the finish across devices; replaying
-the same report never restores an acknowledged dot.
+HTTP success still means the flush completed. Unread replies persist with
+conversation metadata so opening a conversation acknowledges them across devices.
+[Run reports](instance.ts) mark replies unread independently of whether they
+qualify for a push notification. Replaying a report does not mark a read reply unread.
+[Reply image checks](reply_image_notice.ts) share Markdown and path resolution
+with previews, but never read file contents. The note is stored for the next
+turn; it cannot start one.
 
 A send is queued for persistence and handed to Pi without waiting for storage.
 After a restart, uncertain dispatch requires an operator decision to retry or
@@ -93,7 +95,8 @@ File-defined provider models require an operator-selected model or a saved
 Settings effort level. Child defaults never inherit a file-provider model pin.
 
 Taking or returning operator control stores a platform note for the agent and
-its parent without waking idle recipients. Setting the same control state again
+its parent without waking idle recipients, except that a return of control
+starts a parent turn so the parent can direct the agent again. Setting the same control state again
 does not add a note.
 
 Revival moves closed storage before publishing its conversation record. A

@@ -2,7 +2,7 @@
 // Close and deletion abort the naming task and wait for it to settle.
 import { AbortScope } from "../../../utils/tasks";
 import { WARNING } from "../../../observability/runtime_logging";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import type { Opened } from "./open.ts";
 
 /** Start naming `cid` unless titles are off or naming already runs. */

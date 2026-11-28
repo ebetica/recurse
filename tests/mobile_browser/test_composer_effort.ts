@@ -506,8 +506,94 @@ export const tests: BrowserTest[] = [
       }
     }
   },
-  // Feature: #2009 draft effort picker remains visibly accessible
+  // Regression: #3708 New agent shows the chosen reasoning; #2009 the picker stays visible and accessible.
   async function test_effort_picker_and_draft_level(browser, base) {
+    for (const width of [390, 412, 1280]) {
+      const touch = width < 700;
+      const { context, page, errors } = await openPage(browser, {
+        viewport: { width, height: 844 },
+        touch,
+      });
+      try {
+        if (touch) {
+          await page.goto(base);
+          await page.locator("#new-list").tap();
+        } else {
+          await gotoRoot(page, base);
+          await page.locator("#new-top").click();
+        }
+        const composer = page.locator("#composer");
+        const trigger = composer.locator("#conv-controls #model-trigger");
+        const menu = composer.locator("#model-menu:popover-open");
+        const range = menu.getByRole("slider", { name: "Effort level" });
+        await browserExpect(trigger).toHaveText("Opus 5.5 Medium");
+        await browserExpect(menu).toBeHidden();
+        await screenshot(page, `new-agent-effort-closed-${width}`);
+        if (touch) {
+          await expectHitCorners(trigger);
+          await checkedTap(trigger);
+        } else {
+          await trigger.click();
+          await browserExpect(menu).toBeFocused();
+          await page.keyboard.press("Tab");
+          await browserExpect(range).toBeFocused();
+        }
+        await browserExpect(trigger).toHaveAttribute("aria-expanded", "true");
+        const label = menu.locator("#effort-model");
+        await browserExpect(label).toBeVisible();
+        await browserExpect(label).toHaveText("Claude Opus 5.5 Medium");
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          "Level 3: Claude Opus 5.5 · Medium",
+        );
+        if (touch) {
+          await expectHitCorners(range);
+          const track = (await range.boundingBox())!;
+          await checkedTap(range, {
+            x: track.width * ((4 - 1) / (EFFORT_LEVELS.length - 1)),
+            y: track.height / 2,
+          });
+        } else await range.press("ArrowRight");
+        await browserExpect(label).toHaveText("Claude Opus 5.5 High");
+        await browserExpect(range).toHaveAttribute(
+          "aria-valuetext",
+          "Level 4: Claude Opus 5.5 · High",
+        );
+        await browserExpect(trigger).toHaveText("Opus 5.5 High");
+        await screenshot(page, `new-agent-effort-open-${width}`);
+        if (touch) await checkedTap(trigger);
+        else {
+          await page.keyboard.press("Escape");
+          await browserExpect(trigger).toBeFocused();
+        }
+        await browserExpect(menu).toBeHidden();
+        await composer.locator("#input").fill("Reply only Effort selected.");
+        const send = composer.locator("#send");
+        if (touch) await send.tap();
+        else {
+          await trigger.press("Enter");
+          await browserExpect(menu).toBeFocused();
+          await page.keyboard.press("Tab");
+          await page.keyboard.press("Tab");
+          await browserExpect(send).toBeFocused();
+          await page.keyboard.press("Escape");
+          await browserExpect(menu).toBeHidden();
+          await browserExpect(trigger).toBeFocused();
+          await send.click();
+        }
+        await page
+          .locator("#messages .msg.assistant .content", {
+            hasText: "Effort selected.",
+          })
+          .waitFor();
+        await browserExpect(trigger).toHaveAccessibleName(
+          "Level 4: Claude Opus 5.5 · High: choose effort level",
+        );
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+      }
+    }
     const { context, page, errors } = await openPage(browser, {
       viewport: { width: 1100, height: 800 },
     });
@@ -555,8 +641,8 @@ export const tests: BrowserTest[] = [
     await page.keyboard.press("Escape");
     await page.keyboard.press("t");
     await page.keyboard.press("t");
-    await page.locator("#draft-model-host").waitFor();
-    const trigger = page.locator("#model-trigger");
+    await page.getByRole("heading", { name: "New agent" }).waitFor();
+    const trigger = page.locator("#composer #model-trigger");
     const chip = trigger.locator(".model-name");
     const input = page.locator("#input");
     const fits = (field: Locator) =>
@@ -575,7 +661,7 @@ export const tests: BrowserTest[] = [
           chip.evaluate((name) => {
             const r = name.getBoundingClientRect();
             return (
-              name.scrollWidth <= name.clientWidth &&
+              name.scrollWidth > name.clientWidth &&
               [r.left + 2, r.right - 2].every((x) =>
                 [r.top + 2, r.bottom - 2].every((y) =>
                   name.contains(name.ownerDocument.elementFromPoint(x, y)),
@@ -604,7 +690,7 @@ export const tests: BrowserTest[] = [
     ).toBe("H2");
     await browserExpect(trigger).toHaveAttribute(
       "aria-label",
-      `Level 3: ${long}: choose effort level`,
+      `Level 3: ${long} · High: choose effort level`,
     );
     await trigger.click();
     const menu = page.getByRole("dialog", {
@@ -616,34 +702,34 @@ export const tests: BrowserTest[] = [
     const status = menu.getByRole("status");
     await browserExpect(trigger).toBeVisible();
     await browserExpect(range).toHaveValue("3");
-    await browserExpect(label).toHaveText(long);
-    await browserExpect(status).toHaveText(`Level 3: ${long}`);
+    await browserExpect(label).toHaveText(`${long} High`);
+    await browserExpect(status).toHaveText(`Level 3: ${long} · High`);
     await expectVisuallyHidden(status);
     await browserExpect(range).toHaveAttribute(
       "aria-valuetext",
-      `Level 3: ${long}`,
+      `Level 3: ${long} · High`,
     );
     await page.keyboard.press("Escape");
     await trigger.click();
     await range.press("ArrowRight");
     await browserExpect(range).toHaveValue("4");
-    await browserExpect(label).toHaveText("GPT-6 Sol");
-    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol");
+    await browserExpect(label).toHaveText("GPT-6 Sol Max");
+    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol · Max");
     await expectVisuallyHidden(status);
     await browserExpect(range).toHaveAttribute(
       "aria-valuetext",
-      "Level 4: GPT-6 Sol",
+      "Level 4: GPT-6 Sol · Max",
     );
     await browserExpect(chip).toHaveText("6 Sol");
     await browserExpect(trigger).toHaveAttribute(
       "aria-label",
-      "Level 4: GPT-6 Sol: choose effort level",
+      "Level 4: GPT-6 Sol · Max: choose effort level",
     );
     await range.press("ArrowRight");
     await browserExpect(chip).toHaveText("6.2 Sol");
     await browserExpect(trigger).toHaveAttribute(
       "aria-label",
-      "Level 5: GPT-6.2 Sol: choose effort level",
+      "Level 5: GPT-6.2 Sol · Max: choose effort level",
     );
     await range.press("ArrowRight");
     await browserExpect(chip).toHaveText("Gemini 3.5 Flash");
@@ -653,17 +739,17 @@ export const tests: BrowserTest[] = [
     await menu.focus();
     await page.keyboard.press("j");
     await browserExpect(menu).toBeFocused();
-    await browserExpect(label).toHaveText("GPT-6.2 Sol");
+    await browserExpect(label).toHaveText("GPT-6.2 Sol Max");
     await browserExpect
       .poll(() => status.ariaSnapshot())
-      .toBe('- status: "Level 5: GPT-6.2 Sol"');
+      .toBe('- status: "Level 5: GPT-6.2 Sol · Max"');
     await expectVisuallyHidden(status);
     await browserExpect(range).toHaveAttribute(
       "aria-valuetext",
-      "Level 5: GPT-6.2 Sol",
+      "Level 5: GPT-6.2 Sol · Max",
     );
     await page.keyboard.press("k");
-    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol");
+    await browserExpect(status).toHaveText("Level 4: GPT-6 Sol · Max");
     await page.locator("#input").fill("Use the selected effort level");
     const req = page.waitForRequest(`${base}api/conversations`);
     await page.locator("#send").click();

@@ -211,7 +211,14 @@ export function stripInternalNoticeLines(content: unknown): string {
   return kept.join("\n").replace(TRAILING_TRAILER, "").trim();
 }
 
+export function userBodyText(entry: MessageEntry): string {
+  return entry.text_is_authored
+    ? entry.content
+    : stripInternalNoticeLines(entry.content);
+}
+
 export function isInternalNoticeOnly(entry: MessageEntry): boolean {
+  if (entry.text_is_authored) return false;
   const content = typeof entry.content === "string" ? entry.content : "";
   if (!content.trim() || !mayHoldInternalNotice(content)) return false;
   const stripped = stripInternalNoticeLines(content);
@@ -227,9 +234,8 @@ export function isInternalNoticeOnly(entry: MessageEntry): boolean {
 
 // Strips delivery chrome; empty fragments render no bubble or placeholder.
 export function activityBodyText(entry: MessageEntry): string {
-  return stripTurnDeliveryChrome(
-    stripInternalNoticeLines(entry.content),
-  ).trim();
+  const body = userBodyText(entry);
+  return entry.text_is_authored ? body : stripTurnDeliveryChrome(body).trim();
 }
 
 interface AgentMessageHeaderView {
@@ -346,10 +352,13 @@ interface ServedToolData {
   running?: boolean;
   tool_output_tail?: string;
   calls?: CodemodeCall[] | null;
+  ran_args?: string;
 }
 
 interface ToolExpansion {
   args: string | null;
+  /** The arguments that ran, when a hook changed them. */
+  ranArgs?: string | null;
   output: string | null;
   outputTruncated: boolean;
   calls?: CodemodeCall[] | null;
@@ -446,16 +455,21 @@ export function toolExpansion(
   if (tail === "Output withheld") output = tail;
   else if (tail && (!output || outputTruncated))
     output = output ? `${output}\n\n${tail}` : tail;
+  const ranArgs = block?.ran_args || null;
   if (entry.name === "codemode" && block)
     return {
       args: block.args ? codemodeScript(block.args) : null,
+      ranArgs,
       output,
       outputTruncated,
       calls: block.calls?.length ? block.calls : null,
     };
   return {
     args:
-      !entry.artifact_id && full && full !== (entry.input || "") ? full : null,
+      !entry.artifact_id && full && (full !== (entry.input || "") || ranArgs)
+        ? full
+        : null,
+    ranArgs,
     output,
     outputTruncated,
   };

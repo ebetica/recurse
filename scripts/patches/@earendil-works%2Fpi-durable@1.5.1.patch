@@ -37,10 +37,20 @@ index aa51bd5..d6a929f 100644
          return { ok: true, value };
      const message = structured ? "" : value;
 diff --git a/dist/harness/generation.js b/dist/harness/generation.js
-index 27e60bb..0b6ad2f 100644
+index 27e60bb..f1e3f88 100644
 --- a/dist/harness/generation.js
 +++ b/dist/harness/generation.js
-@@ -119,6 +119,8 @@ export const GenerationTask = defineTask({
+@@ -22,7 +22,8 @@ const DEFAULT_POLL_AFTER_MS = 5000;
+  */
+ export const GenerationTask = defineTask({
+     name: "pi.generation",
+-    version: 2,
++    // Version 3 stores were written by Recurse's earlier input-hook patch; their checkpoints are otherwise version 2's.
++    version: 3,
+     initial: () => ({ phase: "prepare", attempt: 1 }),
+     // Version 2 leaves calls to tools not offered in a sequential round's `pending`, flagged `unoffered` in their slots.
+     // A version 1 Harness would start their tool tasks unflagged, resolving the name, so it leaves version 2 blocked
+@@ -119,6 +120,8 @@ export const GenerationTask = defineTask({
              }, context);
          },
          request: async (task, runtime, context) => {
@@ -49,7 +59,7 @@ index 27e60bb..0b6ad2f 100644
              // Charging the attempt may itself be what keeps failing, such as converting a huge partial: the limit ends it.
              if (cutOffTooOften(task, runtime))
                  return endCutOff(runtime, task, context);
-@@ -132,7 +134,7 @@ export const GenerationTask = defineTask({
+@@ -132,7 +135,7 @@ export const GenerationTask = defineTask({
              await runtime.commit(async (tx) => {
                  const live = await tx.doc(LiveDoc, conversationId);
                  await convertPartial(tx, live, conversationId);
@@ -58,7 +68,7 @@ index 27e60bb..0b6ad2f 100644
                  return undefined;
              }, context, PROGRESS_COMMIT);
              const model = runtime.models.getModel(ref.provider, ref.modelId);
-@@ -154,6 +156,8 @@ export const GenerationTask = defineTask({
+@@ -154,6 +157,8 @@ export const GenerationTask = defineTask({
                  onPayload: (payload) => providerPayload(runtime, model, payload, context),
              };
              const message = await streamResponse(runtime, model, messages, options, attempt, context);
@@ -67,7 +77,7 @@ index 27e60bb..0b6ad2f 100644
              const request = { attempt, compacted, model: ref, thinkingLevel, cutoff, messages: view.messages };
              await classify(runtime, request, message, context);
          },
-@@ -509,6 +513,26 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
+@@ -509,6 +514,26 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
      let timer;
      let inFlight;
      let stopped = false;
@@ -94,7 +104,7 @@ index 27e60bb..0b6ad2f 100644
      const changes = new PartialChanges();
      const flush = () => {
          timer = undefined;
-@@ -546,25 +570,70 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
+@@ -546,25 +571,70 @@ async function streamResponse(runtime, model, messages, options, attempt, contex
          });
      };
      try {
@@ -167,6 +177,21 @@ index 27e60bb..0b6ad2f 100644
  /** Classify a terminal provider message in one commit that also clears the partial. */
  async function classify(runtime, request, message, context) {
      // An abort mark or close: the abort invocation or the reopened run handles the committed state.
+diff --git a/dist/harness/inbox.js b/dist/harness/inbox.js
+index 415ef36..ecc9a65 100644
+--- a/dist/harness/inbox.js
++++ b/dist/harness/inbox.js
+@@ -3,7 +3,9 @@ import { defineDoc } from "../documents.js";
+ import { UserEntry } from "../entries.js";
+ export const InboxDoc = defineDoc({
+     kind: "pi.inbox",
+-    version: 1,
++    // Version 2 stores were written by Recurse's earlier input-hook patch; their unused fields are ignored.
++    version: 2,
++    migrate: (value) => value,
+     scope: "conversation",
+     history: "latest",
+     fork: "initial",
 diff --git a/dist/harness/submissions.js b/dist/harness/submissions.js
 index 512b247..1288e29 100644
 --- a/dist/harness/submissions.js

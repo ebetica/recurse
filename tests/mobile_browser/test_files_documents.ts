@@ -57,12 +57,13 @@ async function codeStyle(pre: Locator) {
   return pre.evaluate((element) => {
     const view = (target: any) => (globalThis as any).getComputedStyle(target);
     const block = view(element);
+    const frame = view(element.closest(".code-wrap") ?? element);
     const code = view(element.querySelector("code"));
     return {
       background: block.backgroundColor,
-      border: block.borderTopStyle,
-      radius: block.borderRadius,
-      padding: block.padding,
+      border: frame.borderTopStyle,
+      radius: frame.borderRadius,
+      padding: [block.paddingLeft, block.paddingRight, block.paddingBottom],
       family: code.fontFamily,
       size: code.fontSize,
     };

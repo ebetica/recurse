@@ -1,7 +1,9 @@
 import { expect } from "bun:test";
+import type { Locator } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   dispatchArtifactSelection,
+  expectHitCorners,
   postFixture,
   runBrowserTests,
   waitForLayout,
@@ -15,6 +17,83 @@ import {
   openListedFile,
   type Fixture,
 } from "./files_support";
+
+async function expectPinnedReviewed(
+  pane: Locator,
+  width: number,
+  shot: string,
+) {
+  const mobile = width === 412;
+  const reviewed = pane.getByRole("button", { name: "Reviewed", exact: true });
+  const scroller = mobile ? pane : pane.locator(".pane-body");
+  await reviewed.waitFor();
+  await expectHitCorners(reviewed, mobile ? 44 : 36, { scroll: false });
+  const relativePosition = () =>
+    reviewed.evaluate((button, mobile) => {
+      const viewport = button.closest(mobile ? ".pane-col" : ".pane-body")!;
+      const bounds = viewport.getBoundingClientRect();
+      const rect = button.getBoundingClientRect();
+      return {
+        right: Math.round(bounds.right - rect.right),
+        bottom: Math.round(bounds.bottom - rect.bottom),
+      };
+    }, mobile);
+  const start = await relativePosition();
+  expect(start.right).toBeGreaterThan(0);
+  expect(start.right).toBeLessThan(32);
+  expect(start.bottom).toBeGreaterThan(0);
+  expect(start.bottom).toBeLessThan(32);
+  const page = pane.page();
+  await fileShot(page, shot);
+  const view = (await scroller.boundingBox())!;
+  await page.mouse.move(view.x + view.width / 2, view.y + view.height / 2);
+  await page.mouse.wheel(0, await scroller.evaluate((el) => el.scrollHeight));
+  const last = pane.getByText("End of the plan.", { exact: true });
+  await browserExpect(last).toBeInViewport({ ratio: 1 });
+  await expectHitCorners(reviewed, mobile ? 44 : 36, { scroll: false });
+  const end = await relativePosition();
+  expect(end.right).toBe(start.right);
+  expect(Math.abs(end.bottom - start.bottom)).toBeLessThanOrEqual(1);
+  const { y, height } = (await last.boundingBox())!;
+  expect(y + height).toBeLessThan((await reviewed.boundingBox())!.y);
+  return reviewed;
+}
+
+async function commentNearReviewed(
+  pane: Locator,
+  reviewed: Locator,
+  width: number,
+) {
+  const page = pane.page();
+  const heading = pane.getByRole("heading", {
+    name: "Milestone 26",
+    exact: true,
+  });
+  const textBounds = () =>
+    heading.evaluate((el) => {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const { left, right, top, bottom } = range.getBoundingClientRect();
+      return { left, right, top, bottom };
+    });
+  const text = await textBounds();
+  const y = (text.top + text.bottom) / 2;
+  await page.mouse.move(text.left + 1, y);
+  await page.mouse.down();
+  await page.mouse.move(text.right - 1, y, { steps: 8 });
+  await page.mouse.up();
+  const composer = page.locator(".report-comment-popover");
+  await composer.waitFor();
+  const editor = (await composer.boundingBox())!;
+  const target = page.viewportSize()!.height - editor.height - 24;
+  await page.mouse.move(text.left + 1, y);
+  await page.mouse.wheel(0, Math.round(text.bottom - target));
+  await browserExpect
+    .poll(async () => Math.abs((await textBounds()).bottom - target))
+    .toBeLessThan(2);
+  await expectHitCorners(reviewed, width === 412 ? 44 : 36, { scroll: false });
+  return composer;
+}
 
 export const tests: BrowserTest[] = [
   // Feature: #2666 selected text in a Files text preview stages Artifact-style comments; #3365 desktop drags stay in their starting window without breaking comment anchors.
@@ -706,20 +785,25 @@ export const tests: BrowserTest[] = [
     expect(errors).toEqual([]);
     await phone.context.close();
   },
-  // Feature: #3380 the latest Markdown version highlights what is new since it was last reviewed.
+  // Regression: #3699 an unchanged Files refresh keeps the focused Markdown comment draft; #3380 the latest version highlights changes since review.
   async function test_markdown_changes_since_reviewed(browser, base) {
     const agent = "files-document-review";
+    const sections = Array.from(
+      { length: 28 },
+      (_, index) =>
+        `\n\n### Milestone ${index + 1}\n\nReview the notes with the team and agree on what to do next.`,
+    ).join("");
     const plan = (count: string, extra = "") =>
-      `# Plan\n\nThere are ${count} decisions left.\n\nKeep this paragraph as it is.\n${extra}`;
+      `# Plan\n\nThere are ${count} decisions left.\n\nKeep this paragraph as it is.\n${extra}${sections}\n\nEnd of the plan.`;
     await postFixture(base, "publish-document-review", {
       agent,
       text: plan("three"),
     });
     for (const [width, count, note] of [
       [1280, "two", "A note for the wide screen."],
-      [390, "one", "One more line for phones."],
+      [412, "one", "One more line for phones."],
     ] as const) {
-      const mobile = width === 390;
+      const mobile = width === 412;
       const { context, page, errors } = await filePage(
         browser,
         width,
@@ -767,31 +851,62 @@ export const tests: BrowserTest[] = [
           .locator("select")
           .evaluate((select: any) => select.selectedOptions[0].label),
       ).toStartWith(`Version ${mobile ? 2 : 1} · `);
-      await fileShot(page, `files-markdown-changes-${width}.png`);
-      const reviewed = pane.getByRole("button", {
-        name: "Reviewed",
-        exact: true,
-      });
+      const reader = pane.filter({ has: page.locator(".files-markdown") });
+      const reviewed = await expectPinnedReviewed(
+        reader,
+        width,
+        `files-markdown-reviewed-${width}.png`,
+      );
       if (mobile) {
-        await reviewed.scrollIntoViewIfNeeded();
-        expect(
-          await reviewed.evaluate((button) => {
-            const rect = button.getBoundingClientRect();
-            const round = rect.height / 2;
-            return [
-              [rect.left + round, rect.top + 2],
-              [rect.right - round, rect.top + 2],
-              [rect.left + round, rect.bottom - 2],
-              [rect.right - round, rect.bottom - 2],
-            ].map(([x, y]) =>
-              button.contains(button.ownerDocument.elementFromPoint(x!, y!)),
-            );
-          }),
-        ).toEqual([true, true, true, true]);
-        await fileShot(page, `files-markdown-reviewed-button-${width}.png`);
-        await reviewed.click();
+        const editor = await commentNearReviewed(reader, reviewed, width);
+        await page.setViewportSize({ width, height: 440 });
+        await page.waitForFunction(() => {
+          const review = document
+            .querySelector(".doc-reviewed")
+            ?.getBoundingClientRect();
+          const popover = document
+            .querySelector(".report-comment-popover:not([hidden])")
+            ?.getBoundingClientRect();
+          return (
+            review &&
+            popover &&
+            review.bottom <= innerHeight &&
+            popover.bottom <= review.top
+          );
+        });
+        const input = editor.locator("textarea");
+        const firstHeight = (await input.boundingBox())!.height;
+        await input.click();
+        for (const line of [
+          "Check the count.",
+          "Confirm the dates.",
+          "Share the next steps.",
+        ]) {
+          await input.pressSequentially(line);
+          await input.press("Enter");
+        }
+        await browserExpect
+          .poll(async () => (await input.boundingBox())!.height)
+          .toBeGreaterThan(firstHeight);
+        const refreshed = page.waitForResponse(
+          (response) =>
+            new URL(response.url()).pathname ===
+              `/api/conversations/${agent}/files` && response.ok(),
+        );
+        await postFixture(base, "finish-document-review-turn", { agent });
+        await refreshed;
+        await browserExpect(input).toBeFocused();
+        await browserExpect(input).toHaveValue(
+          "Check the count.\nConfirm the dates.\nShare the next steps.\n",
+        );
+        await expectHitCorners(reviewed, 44, { scroll: false });
+        await editor.getByRole("button", { name: "Cancel" }).click();
+        await page.emulateMedia({ reducedMotion: "reduce" });
+        await reviewed.tap();
+        await pane.locator(".doc-reviewed").waitFor({ state: "detached" });
         await header.waitFor({ state: "detached" });
       } else {
+        await doc.locator("h1").scrollIntoViewIfNeeded();
         for (const highlighted of [true, false]) {
           expect(await doc.locator("ins.doc-diff-added").count()).toBe(
             highlighted ? 1 : 0,
@@ -845,7 +960,8 @@ export const tests: BrowserTest[] = [
       waitUntil: "domcontentloaded",
     });
     await page.locator('.rail-btn[data-pane="report"]').click();
-    const doc = page.locator(".report-doc");
+    const pane = page.locator('.pane-col[data-pane="report"]');
+    const doc = pane.locator(".report-doc");
     await doc.locator("p", { hasText: "Keep this paragraph" }).waitFor();
     expect(await page.locator(".doc-changes").count()).toBe(0);
     await postFixture(base, "publish-review-artifact", {
@@ -867,7 +983,6 @@ export const tests: BrowserTest[] = [
     ]);
     const compare = page.locator(".doc-changes select");
     expect(await compare.inputValue()).toBe(seen.version);
-    await fileShot(page, "artifact-markdown-changes-1280.png");
     await compare.selectOption(older.version);
     await page.waitForFunction(
       "!document.querySelector('.report-doc ins.doc-diff-added') && !!document.querySelector('.report-doc p.doc-diff-added')",
@@ -904,6 +1019,75 @@ export const tests: BrowserTest[] = [
     expect(await doc.innerText()).toContain("A note for the wide screen.");
     expect(errors).toEqual([]);
     await context.close();
+
+    for (const width of [1280, 412]) {
+      const mobile = width === 412;
+      const { context, page, errors } = await filePage(
+        browser,
+        width,
+        844,
+        mobile,
+      );
+      await page.goto(`${base}#agent=${owner}`, {
+        waitUntil: "domcontentloaded",
+      });
+      if (mobile) {
+        await page.locator("#pane-fab").click();
+        await page.locator('.pane-menu-item[data-pane="report"]').click();
+      } else await page.locator('.rail-btn[data-pane="report"]').click();
+      const pane = page.locator('.pane-col[data-pane="report"]');
+      const doc = pane.locator(".report-doc");
+      await doc.getByText("End of the plan.").waitFor();
+      await browserExpect(
+        pane.getByRole("button", { name: "Reviewed" }),
+      ).toHaveCount(0);
+      const desktopNote = "Desktop follow-up.";
+      const note = mobile ? "Phone instructions." : desktopNote;
+      await postFixture(base, "publish-review-artifact", {
+        agent: owner,
+        id: older.id,
+        markdown: plan(
+          "one",
+          mobile ? `\n${desktopNote}\n\n${note}\n` : `\n${note}\n`,
+        ),
+      });
+      await page.evaluate((agentId) => {
+        window.dispatchEvent(
+          new CustomEvent("recurse:ui-refresh", { detail: { agentId } }),
+        );
+      }, owner);
+      const added = doc.locator("p.doc-diff-added", { hasText: note });
+      await added.waitFor();
+      const reviewed = await expectPinnedReviewed(
+        pane,
+        width,
+        `artifact-markdown-reviewed-${width}.png`,
+      );
+      if (mobile) await reviewed.tap();
+      else {
+        const editor = await commentNearReviewed(pane, reviewed, width);
+        await editor.getByRole("button", { name: "Cancel" }).click();
+        await reviewed.press("Enter");
+        const focus = pane.locator(".pane-body");
+        await browserExpect(focus).toBeFocused();
+        const appearance = () =>
+          focus.evaluate((el) => {
+            const { outline, boxShadow, borderColor, backgroundColor } =
+              getComputedStyle(el);
+            return { outline, boxShadow, borderColor, backgroundColor };
+          });
+        const focused = await appearance();
+        await page.keyboard.press("Tab");
+        await browserExpect(focus).not.toBeFocused();
+        expect(await appearance()).not.toEqual(focused);
+      }
+      await pane.locator(".doc-reviewed").waitFor({ state: "detached" });
+      await pane.locator(".doc-changes").waitFor({ state: "detached" });
+      await browserExpect(doc.locator(".doc-diff-added")).toHaveCount(0);
+      await browserExpect(doc.getByText(note, { exact: true })).toBeVisible();
+      expect(errors).toEqual([]);
+      await context.close();
+    }
   },
 ];
 if (import.meta.main) await runBrowserTests([["files-comments", tests]]);

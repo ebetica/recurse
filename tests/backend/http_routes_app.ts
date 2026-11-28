@@ -174,9 +174,19 @@ export async function buildRoutesApp(
     artifacts: artifactCtx,
     mutateExternalStorage: (work) => work(),
     fenced: (work) => fenced(work),
-    deliverPlatformNote: async (owner, text) => {
-      delivered.push([owner, text]);
-    },
+    removeArtifact: (owner, id, expected) =>
+      artifacts.removeArtifact(
+        {
+          artifacts: artifactCtx,
+          mutateExternalStorage: (work) => work(),
+          deliverPlatformNote: async (owner, text) => {
+            delivered.push([owner, text]);
+          },
+        },
+        owner,
+        id,
+        expected,
+      ),
   };
   const router = new Router();
   registerFileRoutes(router, filesDeps);

@@ -4,7 +4,8 @@
 import { pyStrip } from "../auth";
 import { deliverRelayed, CLIENT_KEY_RE } from "../agents/supervisor/delivery";
 import { pyTruthy } from "../agents/runtime";
-import { HttpError } from "./router";
+import { agentMarked, authMethod } from "./request_auth";
+import { HttpError, type Exchange } from "./router";
 import type { ConversationsRoutesDeps } from "./conversations";
 
 type Rec = Record<string, unknown>;
@@ -38,7 +39,7 @@ export function createMessageSender(
   return async (
     cid: string,
     body: Rec,
-    sender: string | null,
+    ex: Exchange,
     relayed: Relay = null,
   ): Promise<Rec> => {
     deps.requireActionReady();
@@ -73,21 +74,35 @@ export function createMessageSender(
           },
         }
       : {};
-    // Invariant: Only a live named agent supplies local sender provenance.
+    const relay =
+      relayed ??
+      (typeof ex.state.backend_agent === "string"
+        ? { sender: ex.state.backend_agent, title: null }
+        : null);
+    const sender = ex.request.headers.get("x-recurse-agent");
+    // Invariant: Unresolved agent provenance never becomes operator input.
+    if (
+      !relay &&
+      agentMarked(ex) &&
+      (authMethod(ex) === "backend-key" ||
+        !sender ||
+        store.load(sender) === null)
+    )
+      throw new HttpError(403, "sender agent is unavailable");
     const send = () =>
-      relayed
+      relay
         ? deliverRelayed(
             deps.delivery,
             cid,
             content,
-            relayed,
+            relay,
             clientMessageId as string | null,
             pyTruthy(body.interrupt),
           )
         : deps.delivery.deliver(
             cid,
             content,
-            sender && store.load(sender) !== null
+            sender !== null
               ? {
                   start: false,
                   ...interrupt,
@@ -114,7 +129,7 @@ export function createMessageSender(
         ok: true,
         status: statusOf(),
         message_id: mid,
-        ...(!relayed ? { interrupted } : {}),
+        ...(!relay ? { interrupted } : {}),
       };
     }
     const steer = messageIsLiveSteer(cid);

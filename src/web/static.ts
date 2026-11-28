@@ -315,7 +315,7 @@ export function generationReloadScript(generation: string): string {
   window.addEventListener("DOMContentLoaded", () => {
     const notice = document.createElement("div");
     notice.setAttribute("role", "alert");
-    notice.style.cssText = "position:fixed;z-index:2147483647;inset:12px 12px auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:12px;background:var(--panel);color:var(--text);border:1px solid var(--warn);border-radius:10px;font-size:0.84375rem";
+    notice.style.cssText = "position:fixed;z-index:2147483647;inset:calc(12px + var(--standalone-top-inset, 0px)) 12px auto;display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;padding:12px;background:var(--panel);color:var(--text);border:1px solid var(--warn);border-radius:10px;font-size:0.84375rem";
     const button = document.createElement("button");
     button.type = "button";
     button.className = "btn sm";

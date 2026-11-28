@@ -29,6 +29,7 @@ import {
   armPreparedComposerStop,
   autosize,
   consumeComposerStopHold,
+  configureSendMenu,
   disarmComposerStop,
   focusComposerAtEnd,
   pendingSavedRecovery,
@@ -630,6 +631,39 @@ setComposerCommandRunner((name) => {
   return startComposerCommand(name, convId);
 });
 
+function composerCommandError(
+  name: string,
+  convId: string,
+  question?: string,
+): string {
+  if (name === "btw" && hasStagedAttachments())
+    return "Remove attachments to ask in side chat";
+  if (!convId || !composerCommandAvailable(name, convId))
+    return `/${name} unavailable`;
+  if (name === "btw" && !question) return "/btw needs a question";
+  return "";
+}
+
+function submitComposerCommand(
+  name: string,
+  convId: string,
+  question?: string,
+): void {
+  const error = composerCommandError(name, convId, question);
+  if (error) setSendStatus(error, "command-error");
+  else if (startComposerCommand(name, convId, question)) clearComposer(convId);
+}
+
+export function sendBtw(): void {
+  if (pendingSavedRecovery) return;
+  submitComposerCommand("btw", state.selectedId, inputEl.value.trim());
+}
+
+configureSendMenu(
+  () => composerCommandError("btw", state.selectedId, inputEl.value.trim()),
+  sendBtw,
+);
+
 export function send(): void {
   if (pendingSavedRecovery) return;
   const rename = matchComposerCommand(inputEl.value);
@@ -657,17 +691,9 @@ export function send(): void {
     const cmd = matchComposerCommand(inputEl.value);
     const convId = state.selectedId;
     if (cmd && convId && convId !== DRAFT) {
-      if (!composerCommandAvailable(cmd.name, convId)) {
-        // Invariant: Reserved platform syntax never falls through into pi just
-        // because the action is unavailable here.
-        setSendStatus(`/${cmd.name} unavailable`, "command-error");
-      } else if (cmd.name === "btw" && !cmd.question) {
-        setSendStatus("/btw needs a question", "command-error");
-      } else if (startComposerCommand(cmd.name, convId, cmd.question)) {
-        clearComposer(convId);
-      }
       // Invariant: A cancelled confirmation / duplicate/unavailable command
       // retains the exact text; it must never become a model prompt instead.
+      submitComposerCommand(cmd.name, convId, cmd.question);
       return;
     }
   }

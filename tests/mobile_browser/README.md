@@ -31,7 +31,9 @@ without running the general composer send or layout cases.
 
 The [composer cases](test_composer.ts) own `#` file completion, including
 cancellation when switching workspaces. The [Explorer cases](test_explorer.ts)
-cover browsing, previews, and search.
+cover browsing, previews, and search. Target actionable controls: the phone pane
+menu can repaint during startup, and Markdown figures cannot take keyboard focus
+until the image has loaded.
 
 ## Sidebar tags
 
@@ -57,6 +59,12 @@ summaries alongside line expansion. [Turns](test_turns.ts) covers conversation
 history and reply controls.
 
 ## Touch selection
+
+The [long-press comment tests](test_selection_comments.ts) use Chromium's touch
+emulator to select words natively and cancel the active press. Directly injecting
+a touch down and up does not let Chromium recognize the hold. The Artifact
+case scrolls during selection to keep a native highlight without opening the
+editor, then cancels a new touch on that same range.
 
 The [edge-drag test](test_long_selection.ts) uses live drag targets because
 background refreshes can repaint the title and composer between moves.

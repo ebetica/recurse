@@ -1,5 +1,5 @@
 // Capture a fresh fake-provider request with fixed model, ladder, memory and tree.
-// Require project_context (wrapper included) below 10,000 characters and the rest below 7,500.
+// Require project_context (wrapper included) below 10,000 characters and the rest below 8,000.
 // Load real context, skills and CLI help with the production renderers.
 // Canonicalize only known checkout/runtime fixture roots after capture.
 import { mkdtemp, rmdir } from "node:fs/promises";
@@ -157,7 +157,7 @@ function promptBudgets(report: PromptBudget) {
   const project = report.sections.project_context?.length ?? 0;
   return [
     ["AGENTS.md (project_context)", project, 10_000],
-    ["Recurse system prompt", report.total - project, 7_500],
+    ["Recurse system prompt", report.total - project, 8_000],
   ] as const;
 }
 

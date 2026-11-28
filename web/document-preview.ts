@@ -5,10 +5,10 @@ import DOMPurify from "dompurify";
 import { html, nothing, render } from "lit";
 import { htmlPreviewSrcdoc } from "./document-media/index.js";
 import {
-  htmlFileModes,
+  fileViewModes,
   HTML_OFFLINE_NOTE,
   HTML_PREVIEW_FAILED,
-  HTML_TOO_LARGE,
+  PREVIEW_TOO_LARGE,
   isHtmlFile,
   MAX_HTML_PREVIEW_BYTES,
 } from "./html-file-view.js";
@@ -254,7 +254,7 @@ async function displayHtml(
   signal: AbortSignal,
 ): Promise<void> {
   let frame: HTMLIFrameElement | undefined;
-  let reason = truncated ? HTML_TOO_LARGE : "";
+  let reason = truncated ? PREVIEW_TOO_LARGE : "";
   if (!reason) {
     try {
       frame = await htmlFileFrame(markup, title, signal);
@@ -267,7 +267,7 @@ async function displayHtml(
   container.replaceChildren(root);
   const select = (preview: boolean) => {
     render(
-      html`${htmlFileModes(preview, !!reason, select)}
+      html`${fileViewModes("HTML view", preview, !!reason, select)}
       ${preview || reason
         ? html`<p class="html-file-note">
             ${preview

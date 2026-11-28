@@ -55,6 +55,7 @@ import { expandToolCallPaths } from "./path-expansion.ts";
 import {
   allowedByPathScope,
   loadTrustedPathScope,
+  protectedFileTarget,
   type TrustedPathScope,
 } from "./path-scope.ts";
 import { isReadOnlyBashCommand } from "./read-only-bash.ts";
@@ -454,12 +455,15 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       const trusted = host.trusted();
       const [config, pathScope] = await Promise.all([
         loadConfig(host.configDir),
-        loadTrustedPathScope({
-          RECURSE_WORKSPACE_ROOT: trusted.workspaceRoot,
-          RECURSE_WORKTREES_ROOT: trusted.worktreesRoot,
-          RECURSE_AGENT_TMPDIR: trusted.tempRoot,
-          CHAT_DATA_DIR: trusted.dataDir,
-        }),
+        loadTrustedPathScope(
+          {
+            RECURSE_WORKSPACE_ROOT: trusted.workspaceRoot,
+            RECURSE_WORKTREES_ROOT: trusted.worktreesRoot,
+            RECURSE_AGENT_TMPDIR: trusted.tempRoot,
+            CHAT_DATA_DIR: trusted.dataDir,
+          },
+          host.configDir,
+        ),
       ]);
       if (config.error) safeLog(invalidConfigMessage());
       const acting = (await api.snapshot(AgentDoc, api.conversationId, context))
@@ -568,7 +572,11 @@ export function createDurableSafety(host: SafetyOptions): Extension {
       reviewModels,
     );
     const action = pathTool
-      ? formatPathOnlyProposedAction(pathTool, args)
+      ? formatPathOnlyProposedAction(
+          pathTool,
+          args,
+          protectedFileTarget(host.configDir, agent.cwd, args.path),
+        )
       : formatProposedAction(
           name,
           args,
@@ -647,6 +655,7 @@ export function createDurableSafety(host: SafetyOptions): Extension {
               ? run.modelPolicy.policy.reviewer_revision
               : undefined,
           dataDir: host.trusted().dataDir,
+          configDir: host.configDir,
           statsRoot: host.trusted().statsRoot,
           processSnapshot: await ownedProcessSnapshot(host.shells()),
           actingAgent: { id: agent.id, title: agent.title },

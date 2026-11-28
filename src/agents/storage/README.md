@@ -18,6 +18,11 @@ but a write still running after a bounded wait keeps the row's files;
 [conversation_model_choices.ts](conversation_model_choices.ts) freezes existing
 model choices in a recorded startup pass.
 
+Unread acknowledgements live with conversation metadata, not in the run cursor,
+so a cursor replay after a restart cannot restore an acknowledged dot. A view
+with no dot to clear records a private timestamp only if a reply might still
+be reported; that timestamp never invalidates a browser record or tree row.
+
 Legacy pinned records read as taken over unless the record already has a
 Take over value. This preserves the operator's hold without a startup migration.
 

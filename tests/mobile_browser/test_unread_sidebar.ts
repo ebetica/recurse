@@ -59,7 +59,7 @@ export const tests: BrowserTest[] = [
         };
         await finish();
         await browserExpect(dot).toHaveAccessibleName(
-          "Finished agent — finished, not yet viewed",
+          "Finished agent — new reply, not yet viewed",
         );
         await row.scrollIntoViewIfNeeded();
         const layout = await row.evaluate((el) => {

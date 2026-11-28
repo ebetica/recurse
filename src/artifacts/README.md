@@ -82,10 +82,11 @@ recovers only markers left by dead processes, rechecking directory identity and
 contents before retirement. Retirement awaits the descriptor-pinned trash Worker
 before removing its admission marker.
 
-Deleting an Artifact writes an owner-scoped JSON receipt before moving its
-repository aside. That receipt blocks subsequent opens. The server notifies
-the owner before finalizing the deletion, and startup can resume an unfinished
-deletion from its receipt.
+Browser and agent deletions share [the same operation](../artifacts.ts) and
+require a published version. Stopping the deleting agent cancels deletion until
+the receipt is committed. The receipt blocks subsequent opens and lets startup
+resume an unfinished deletion. The deleting agent gets the tool result; a
+notice for a different owner is saved without starting or steering its run.
 
 Metadata snapshots key on HEAD/current/published refs and config contents, plus
 packed-refs size/mtime, so unchanged metadata survives remounts. Older version

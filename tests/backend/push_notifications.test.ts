@@ -16,6 +16,7 @@ import {
   fauxToolCall,
   type FauxResponseFactory,
 } from "@earendil-works/pi-ai";
+import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { buildApp, WebLogSink } from "../../src/web/app";
 import type { DurableHostDeps } from "../../src/agents/durable/host";
 import type { RuntimeLogRecord } from "../../src/observability/runtime_logging";
@@ -140,8 +141,8 @@ test("finished notices wait for shells and descendants; top-level and taken-over
 
   const { root, env } = appWorld();
   const fixture = fauxHost(join(root, "faux"));
-  let open!: () => void;
-  const gate = new Promise<void>((resolve) => (open = resolve));
+  const beta = Promise.withResolvers<void>();
+  const slowly = Promise.withResolvers<void>();
   const reply: FauxResponseFactory = async (request) => {
     fixture.faux.appendResponses([reply]);
     const last = JSON.stringify(request.messages.at(-1)?.content);
@@ -157,7 +158,9 @@ test("finished notices wait for shells and descendants; top-level and taken-over
         { stopReason: "toolUse" },
       );
     const word = /say (\w+)/.exec(last)?.[1];
-    if (word === "slowly") await gate;
+    if (word === "beta") await beta.promise;
+    if (word === "slowly") await slowly.promise;
+    if (word === "silent") return fauxAssistantMessage([]);
     return fauxAssistantMessage(`**Done**: ${word}\nsecond line`);
   };
   fixture.faux.setResponses([reply]);
@@ -166,16 +169,26 @@ test("finished notices wait for shells and descendants; top-level and taken-over
   sink.write = (record: RuntimeLogRecord) => void logs.push(record.message);
   const app = await buildApp({ env, sink });
   const fake = (fixture.host as unknown as { deps: DurableHostDeps }).deps;
-  Object.assign(
-    (app.instance.durable as unknown as { deps: DurableHostDeps }).deps,
-    {
-      models: fake.models,
-      settings: fake.settings,
-      agentEnv: fake.agentEnv,
-      promptSnapshot: fake.promptSnapshot,
-      titleSettings: () => ["faux/faux-1", "off"],
-    },
-  );
+  const { durable } = app.instance;
+  const deps = (durable as unknown as { deps: DurableHostDeps }).deps;
+  Object.assign(deps, {
+    models: fake.models,
+    settings: fake.settings,
+    agentEnv: fake.agentEnv,
+    promptSnapshot: fake.promptSnapshot,
+    titleSettings: () => ["faux/faux-1", "off"],
+  });
+  const reportRun = deps.report!;
+  const reportPaused = Promise.withResolvers<void>();
+  const reportReleased = Promise.withResolvers<void>();
+  deps.report = async (cid, report) => {
+    const outcome = await reportRun(cid, report);
+    if (report.requestId === "pause-report") {
+      reportPaused.resolve();
+      await reportReleased.promise;
+    }
+    return outcome;
+  };
   const running = await app.serve({ port: 0 });
   const api = async (path: string, body?: object, headers: Rec = {}) =>
     fetch(`${running.url}${path}`, {
@@ -329,9 +342,23 @@ test("finished notices wait for shells and descendants; top-level and taken-over
       { cid: top, title: "Top agent", body: "Done: alpha" },
     ]);
 
+    await acknowledge(top);
     const child = await agent("Child agent", top);
-    await say(child, "beta");
-    await until(() => pushes.length === 2);
+    expect(
+      (
+        await api(`/api/conversations/${child}/deliver`, {
+          content: "say beta",
+        })
+      ).status,
+    ).toBe(200);
+    await until(() => durable.liveStatus(child)[0] === "running");
+    await say(top, "whilechild");
+    expect(await unread(top)).toBe(true);
+    expect(pushes.length).toBe(1);
+    beta.resolve();
+    await until(() => reported(child) === 1 && pushes.length === 2);
+    expect(await unread(child)).toBe(true);
+    await acknowledge(child);
     await json(`/api/conversations/${child}/take-over`, { taken_over: true });
     await say(child, "gamma");
     await until(() => pushes.length === 3);
@@ -355,7 +382,7 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     await until(() => logged("durable_report_held", child));
     expect(pushes.length).toBe(3);
     expect(await unread(child)).toBe(false);
-    open();
+    slowly.resolve();
     await until(() => pushes.length === 4);
     expect(notices().at(-1)).toEqual({
       cid: child,
@@ -372,7 +399,7 @@ test("finished notices wait for shells and descendants; top-level and taken-over
       await until(() => app.instance.durable.reportHolds.settled(top));
       expect(app.instance.durable.shells(top).active_count).toBe(1);
       expect(pushes.length).toBe(before);
-      expect(await unread(top)).toBe(false);
+      expect(await unread(top)).toBe(true);
       await writeFile(join(root, "finish-shell"), "");
       await until(() => reported(top) >= beforeReports + 2);
       await until(() => pushes.length === before + 1);
@@ -386,6 +413,33 @@ test("finished notices wait for shells and descendants; top-level and taken-over
         endpoint: device("/device").endpoint,
       }),
     ).toEqual({ subscribed: false });
+    await durable.send(top, "say silent", "pause-report");
+    await reportPaused.promise;
+    const { conversation, reporter } = await durable.open(top);
+    const abort = new AbortController();
+    const viewing = await fetch(
+      `${running.url}/api/conversations/${top}/events?viewing=true`,
+      { signal: abort.signal },
+    );
+    expect(viewing.status).toBe(200);
+    const reader = viewing.body!.getReader();
+    try {
+      await reader.read();
+      await durable.send(top, "say delayed", "delayed-report");
+      await conversation.waitForIdle(context);
+      await until(async () =>
+        new TextDecoder()
+          .decode((await reader.read()).value)
+          .includes("**Done**: delayed"),
+      );
+    } finally {
+      abort.abort();
+      await reader.cancel().catch(() => {});
+    }
+    await until(() => !app.instance.notifications.hasViewer(top));
+    reportReleased.resolve();
+    await reporter!.kick();
+    expect(await unread(top)).toBe(false);
     await say(top, "delta");
     expect(pushes.length).toBe(6);
     expect(await unread(top)).toBe(true);
@@ -446,7 +500,15 @@ test("finished notices wait for shells and descendants; top-level and taken-over
         () => !app.instance.tasks.names().includes(`agent-notification:${top}`),
       );
       expect(pushes.length).toBe(beforeViews);
+      expect(
+        await json(`/api/conversations/${top}/unread`, { unread: true }),
+      ).toEqual({ unread: true });
       closeSecond();
+      await until(() => !app.instance.notifications.hasViewer(top));
+      expect(await unread(top)).toBe(true);
+      const closeReopened = await view(top);
+      expect(await unread(top)).toBe(false);
+      closeReopened();
       await until(() => !app.instance.notifications.hasViewer(top));
 
       const other = await agent("Other conversation");
@@ -468,6 +530,9 @@ test("finished notices wait for shells and descendants; top-level and taken-over
     await say(top, "disconnected");
     await until(() => pushes.length === beforeViews + 2);
   } finally {
+    beta.resolve();
+    slowly.resolve();
+    reportReleased.resolve();
     await running.close();
     await app.instance.shutdown();
     await Promise.all(app.detached);

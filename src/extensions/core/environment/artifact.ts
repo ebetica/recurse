@@ -1,4 +1,4 @@
-// The native Artifact tool reads and replaces saved app state as ordinary tool output.
+// Manage Artifacts and read or replace saved app state as ordinary tool output.
 import { Type } from "typebox";
 import { resolve } from "node:path";
 import {} from "@earendil-works/pi-ai";
@@ -18,14 +18,21 @@ import {
 import { artifactWorkingPath } from "../../../artifacts/working_path";
 
 /** Markdown documents may link to other files in the Artifact with relative links. */
-export function createArtifact(context: ArtifactContext, owner: string) {
+export function createArtifact(
+  context: ArtifactContext,
+  owner: string,
+  removeArtifact?: (
+    id: string,
+    signal?: AbortSignal,
+  ) => Promise<{ complete: boolean }>,
+) {
   return defineExtension({
     name: "recurse-artifact",
     tools: [
       defineTool({
         name: "artifact",
         description:
-          "Create only on explicit operator request; update requested Artifacts instead of duplicating them. Create/list/rename return ids, titles and working paths. " +
+          "Create/delete only on explicit operator request; update requested Artifacts instead of duplicating them. Create/list/rename return ids, titles and working paths. " +
           "Edit the returned working path; git commit publishes automatically. Restore with git restore --source=<sha>, then commit. " +
           "File tools/bash expand $CHAT_DATA_DIR. Documents use index.md; apps use index.html with local imports, bundled by Bun. " +
           "Markdown documents may link to other files in the Artifact with relative links. " +
@@ -37,6 +44,7 @@ export function createArtifact(context: ArtifactContext, owner: string) {
             Type.Literal("create"),
             Type.Literal("list"),
             Type.Literal("rename"),
+            Type.Literal("delete"),
             Type.Literal("state"),
           ]),
           title: Type.Optional(
@@ -47,7 +55,9 @@ export function createArtifact(context: ArtifactContext, owner: string) {
               description: "Source .md/.html for create; relative to cwd.",
             }),
           ),
-          id: Type.Optional(Type.String({ description: "For rename/state." })),
+          id: Type.Optional(
+            Type.String({ description: "For rename/delete/state." }),
+          ),
           set_file: Type.Optional(
             Type.String({
               description:
@@ -61,7 +71,21 @@ export function createArtifact(context: ArtifactContext, owner: string) {
           ),
         }),
         executionMode: "sequential",
-        async execute(args, api) {
+        async execute(args, api, execution) {
+          if (args.action === "delete") {
+            if (!args.id) throw new Error("id is required for delete");
+            if (!removeArtifact)
+              throw new Error("Artifact deletion unavailable");
+            const { complete } = await removeArtifact(
+              args.id,
+              execution.abortSignal,
+            );
+            if (!complete)
+              throw new Error("Artifact was deleted, but cleanup is pending");
+            return {
+              output: [{ type: "text", text: `Deleted Artifact ${args.id}.` }],
+            };
+          }
           if (args.action === "state") {
             if (!args.id) throw new Error("id is required for state");
             const artifactOwner = await resolveOwner(context, args.id);

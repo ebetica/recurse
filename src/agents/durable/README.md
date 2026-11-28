@@ -3,7 +3,7 @@
 Pi Durable gives each conversation one Harness for storage, input, request
 capture and run reports.
 
-**Source files:** [host.ts](host.ts) and [host/](host/) own Harness lifecycles;
+**Source files:** [the host](host/) owns Harness lifecycles and promotions;
 [run-state clock](run_state_clock.ts) stamps snapshots;
 [shared refusal](stopping_error/) fences admission;
 [sqlite_worker.ts](sqlite_worker.ts) owns storage execution;
@@ -11,7 +11,7 @@ capture and run reports.
 [../runtime/prompts.ts](../runtime/prompts.ts) and [request_capture.ts](request_capture.ts) and its
 [serialization worker](request_capture_worker.ts) build and capture requests; [report.ts](report.ts) and
 [report_holds.ts](report_holds.ts) report runs; [side_conversations.ts](side_conversations.ts)
-and [promotion.ts](promotion.ts) manage forks; the
+and [promotion](host/promotion.ts) manage forks; the
 [compaction extension](../../extensions/core/context/durable-compaction.ts)
 manages context summaries.
 
@@ -25,7 +25,7 @@ input, undelivered reports, pending clears, revivals or promotions reopen;
 idle conversations remain lazy. Unknown or older storage opens normally so
 inspection failures never suppress recovery. Send and clear share
 [submission.ts](host/submission.ts). Pi owns the turn, tool calls and
-request boundaries; Recurse admits input and projects live state. Runs outlive HTTP requests. Explicit interrupt sends check the committed request
+request boundaries; Recurse admits input and [projects live state](../view/README.md). Runs outlive HTTP requests. Explicit interrupt sends check the committed request
 ledger inside serialized admission before stopping a run; retrying an accepted
 request cannot abort its replacement. Input held by a clear is appended and
 persisted before Stop can let rotation proceed; that Stop is fenced to the
@@ -82,8 +82,7 @@ dispatch/startup, execution and reply-delivery durations; these contain no SQL.
 The native SQLite and migration timings overlap those transport measurements.
 SQLite remains at schema version 2 in Pi 1.5; opening a 1.4 store alone does
 not change its schema. Reading `pi.live` migrates its value from version 1 to
-version 3, and its next write stores version 3. New generation tasks use version
-2 and tool tasks version 3. Older Pi cannot resume these newer document/task
+version 3, and its next write stores version 3. New generation and tool tasks use version 3. Older Pi cannot resume these newer document/task
 versions; revive imports migrate only their staged copy.
 When crashes cut a task off Pi's restart limit times in a row, Pi ends it.
 An interrupted model request consumes its retry budget and can end earlier.
@@ -142,7 +141,7 @@ codemode section, without schemas. `artifact` and `recurse_settings` are native
 model tools and remain callable from scripts; on-demand MCP tools appear only
 by server in `mcp_servers`. Discovery is unchanged. Message provenance is separate from user text
 ([../runtime/prompt_stamp.ts](../runtime/prompt_stamp.ts)).
-[models.ts](models.ts) resolves models; [choices](model_selection/)
+[models.ts](models.ts) resolves models, masks keys; [choices](model_selection/)
 never fall back;
 Settings owns credentials. The [loader](../../pi_model_config.worker.ts) shares
 Pi's built-ins/store across listing, turns and internal requests. Regular files
@@ -194,7 +193,7 @@ Promotion copies an idle fork into a child conversation, preserving model conten
 except for remapped internal server-compaction history boundaries. Promoted
 server-only markers use the lazy readable-summary fallback because encrypted
 checkpoint documents are not copied. See [side_conversations.ts](side_conversations.ts),
-[follow.ts](follow.ts) and [promotion.ts](promotion.ts).
+[follow.ts](follow.ts) and [promotion](host/promotion.ts).
 
 ## Open diagnostics
 

@@ -1,7 +1,7 @@
 /** Durable's real Harness with a built-in Pi parser and recorded provider. */
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { DurableHost } from "../../../../src/agents/durable/host.ts";
+import { DurableHost } from "../../../../src/agents/durable/host";
 import { testDeps } from "../durable_host/host.ts";
 import { recordedModels } from "./models.ts";
 

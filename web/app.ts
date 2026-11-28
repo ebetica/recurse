@@ -15,13 +15,16 @@ import {
   chordLabel,
   embedded,
   embeddedFrameHidden,
+  platformModifierPressed,
   primaryPointerIsCoarse,
 } from "./state.js";
 import { startInteractionTiming } from "./interaction-timing.js";
+import { installTouchPressFeedback } from "./touch-press.js";
 import {
   configureAgentFocus,
   focusAgentTree,
   restoreAgentFocus,
+  restoringMovedListControl,
 } from "./sidebar/focus.js";
 import { configureSidebarActions } from "./sidebar/index.js";
 import { configureArtifactRendering } from "./artifacts/artifact-state.js";
@@ -51,6 +54,7 @@ $("#panes")!.addEventListener("keydown", (event) => {
   const pane = paneForTarget(event.target);
   if (pane) handleCommentShortcut(event, pane);
 });
+installTouchPressFeedback();
 startInteractionTiming(() => state.selectedId);
 startMainThreadTiming(
   () => ({
@@ -67,7 +71,11 @@ startMainThreadTiming(
   embeddedFrameHidden,
 );
 startBackendDiscovery();
-import { dismissEffortMenu, openEffortMenu } from "./models.js";
+import {
+  dismissEffortMenu,
+  effortMenuInvoker,
+  openEffortMenu,
+} from "./models.js";
 import { openContextViewer } from "./context-viewer.js";
 import { closePowerbarOverflow } from "./panes/powerbar.js";
 import type { PaneNavigation, TreeNode } from "./types.js";
@@ -149,6 +157,7 @@ import {
 } from "./conversation/index.js";
 import {
   send,
+  sendBtw,
   hasUnsentComposerWork,
   preserveUnsentForLogin,
   startNewAgent,
@@ -892,15 +901,18 @@ document.addEventListener(
       }
     }
 
-    // A touch-opened effort menu leaves keyboard focus in the draft.
+    // Touch can keep focus in the draft; Tab can move focus outside the picker.
     if (
       event.key === "Escape" &&
-      event.target === inputEl &&
+      !higherLayerOpen &&
+      !isDialogTarget(event.target) &&
       !event.defaultPrevented &&
       !event.isComposing &&
       event.keyCode !== 229 &&
       dismissEffortMenu()
     ) {
+      if (event.target !== inputEl)
+        effortMenuInvoker().focus({ preventScroll: true });
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -997,7 +1009,9 @@ document.addEventListener(
         event.keyCode !== 229
       ) {
         event.preventDefault();
-        send();
+        if (!event.altKey && platformModifierPressed(event)) {
+          if (!event.repeat) sendBtw();
+        } else send();
       }
       return;
     }
@@ -1049,6 +1063,10 @@ document.addEventListener(
   true,
 );
 
+function globalNavigationPrefix({ mode }: KeymapState): boolean {
+  return mode === "g-prefix" || mode === "w-prefix";
+}
+
 document.addEventListener("focusin", (event: FocusEvent) => {
   const target = keyTarget(event.target);
   const focusedPane = paneForTarget(event.target);
@@ -1060,18 +1078,25 @@ document.addEventListener("focusin", (event: FocusEvent) => {
     setKeyState(initialKeymapState("pane"));
   else if (target === "dialog" || target === "editor")
     setKeyState(initialKeymapState("dialog"));
-  else if (target === "chrome") setKeyState(initialKeymapState());
+  else if (
+    target === "chrome" &&
+    !(
+      event.target === restoringMovedListControl &&
+      globalNavigationPrefix(keyState)
+    )
+  )
+    setKeyState(initialKeymapState());
 });
-document.addEventListener("focusout", () => {
-  // Invariant: Deferred blur cannot clear newer key state or a window prefix
-  // when hidden or removed content drops focus to the document body.
+document.addEventListener("focusout", (event) => {
+  // Invariant: A lost or moved element does not cancel global navigation.
   const before = keyState;
+  const previous = event.target;
   setTimeout(() => {
     const active = document.activeElement;
     if (keyState !== before || keyTarget(active) !== "chrome") return;
     if (
-      (before.mode === "g-prefix" || before.mode === "w-prefix") &&
-      (!active || active === document.body)
+      globalNavigationPrefix(before) &&
+      (!active || active === document.body || active === previous)
     )
       return;
     setKeyState(initialKeymapState());

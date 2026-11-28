@@ -9,8 +9,8 @@ import type {
   Conversation,
   Harness,
 } from "@earendil-works/pi-durable";
-import type { DurableHost } from "../host.ts";
-import { splitPiUserText } from "../../view/session_entries";
+import type { DurableHost } from "./host.ts";
+import { splitPiUserText } from "../../view";
 import { modelRef, requireModel } from "../model_selection";
 import { WARNING } from "../../../observability/runtime_logging";
 import { writeClear } from "./clear.ts";

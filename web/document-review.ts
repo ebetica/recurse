@@ -2,8 +2,10 @@
 // and Files. Reviewed versions live in page memory only: after a reload the
 // first version seen counts as reviewed. Reviewed, submitting comments on the
 // highlighted version, or picking a version under "New since" moves it.
-import { html, type TemplateResult } from "lit";
+import { html, nothing, render, type TemplateResult } from "lit";
+import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { clearDocumentChanges } from "./document-diff.js";
+import { CHECK_ICON } from "./icons.js";
 
 const reviewed = new Map<string, string>();
 const reviewers = new WeakMap<Element, () => void>();
@@ -82,10 +84,47 @@ export function changesHeader(
   </div>`;
 }
 
-export function reviewedFooter(root: Element | null): TemplateResult {
-  return html`<div class="doc-reviewed">
-    <button class="btn" type="button" @click=${() => reviewDocument(root)}>
-      Reviewed
-    </button>
-  </div>`;
+export function renderReviewButton(
+  pane: HTMLElement,
+  root: Element | null = pane.querySelector(".report-doc"),
+): void {
+  const foot = pane.querySelector<HTMLElement>(".doc-review-foot")!;
+  const active = root && reviewers.has(root);
+  if (active) foot.querySelector(".doc-review-confirmed")?.remove();
+  render(
+    active
+      ? html`<button
+          class="btn sm doc-reviewed"
+          type="button"
+          @click=${(event: Event) => {
+            const button = event.currentTarget as HTMLButtonElement;
+            if (button === document.activeElement) {
+              pane.focus({ preventScroll: true });
+              if (pane === document.activeElement) {
+                pane.classList.add("doc-review-focused");
+                // Ordinary pane navigation has its own focus cue.
+                pane.addEventListener(
+                  "focus",
+                  () => pane.classList.remove("doc-review-focused"),
+                  { once: true },
+                );
+              }
+            }
+            const confirmation = button.cloneNode(true) as HTMLElement;
+            confirmation.inert = true;
+            confirmation.classList.add("doc-review-confirmed");
+            // Keep the confirmation outside the Lit part that review clears.
+            foot.prepend(confirmation);
+            reviewDocument(root);
+            const animation = confirmation.getAnimations()[0];
+            const remove = () => confirmation.remove();
+            if (animation) void animation.finished.then(remove, remove);
+            else remove();
+          }}
+        >
+          ${unsafeHTML(CHECK_ICON)} Reviewed
+        </button>`
+      : nothing,
+    foot,
+  );
 }

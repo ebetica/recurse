@@ -147,6 +147,9 @@ const ICON_PATHS: Record<string, string> = {
   restore: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8M3 3v5h5"/>',
   tag: '<path d="M3 12V3h9l9 9-9 9zM7.5 7.5h.01"/>',
   new: '<path d="M12 5v14M5 12h14"/>',
+  read: '<path d="M3 9l9-6 9 6v12H3zM3 9l9 6 9-6"/>',
+  unread:
+    '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/>',
 };
 export const actionIcon = (name: string): string =>
   outline(ICON_PATHS[name] ?? ICON_PATHS.tag);

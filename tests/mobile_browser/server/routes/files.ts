@@ -24,6 +24,7 @@ export function routes(fx: Fixture): Routes {
     hold,
     release,
     submitDurable,
+    sayDurable,
     helperApplyClear,
     appendNative,
     publishFiles,
@@ -290,6 +291,11 @@ export function routes(fx: Fixture): Routes {
       await publishFiles(agent, { "plan.md": text });
       return {};
     },
+    "finish-document-review-turn": async ({ agent }) => {
+      await sayDurable(agent, "Check the plan.", "The plan is unchanged.");
+      await save({ ...load(agent)!, updated: nowSeconds() });
+      return {};
+    },
     "seed-published-versions": async () => {
       const cid = "files-published-versions";
       await once({ agent: cid }, async () => {
@@ -372,8 +378,7 @@ export function routes(fx: Fixture): Routes {
       files["oversized.docx"] = new Uint8Array(8 * 1024 * 1024 + 1);
       files["expanded.csv"] = files["expanded.docx"]!;
       await publishFiles(cid, files, {
-        reply:
-          "Documents published.\n\n```python\nprint('Notebook output')\n```",
+        reply: "Documents published.\n\n```\nprint('Notebook output')\n```",
       });
       return { demo: cid };
     },
@@ -552,7 +557,12 @@ export function routes(fx: Fixture): Routes {
     "seed-mermaid-reply": async () => {
       const agent = `mermaid-reply-${hex(4)}`;
       await create(agent, "Diagram walkthrough");
-      script(agent).setResponses([fauxAssistantMessage(await wideMermaid())]);
+      script(agent).setResponses([
+        fauxAssistantMessage(
+          (await wideMermaid()) +
+            "\n\n```ts\nconst answer = 42;\n```\n\n```\nconst plain = 1;\n```\n",
+        ),
+      ]);
       return { agent };
     },
     "seed-published-diff": async () => {

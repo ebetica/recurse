@@ -1,6 +1,7 @@
 // One file viewer per pane body, shared by inline Explorer and file tabs.
 // Draft text stays in memory and the save request; the agent sees only the path.
 import { html, nothing, render, type TemplateResult } from "lit";
+import { keyed } from "lit/directives/keyed.js";
 import { live } from "lit/directives/live.js";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
 import { backendFor } from "../backends/index.js";
@@ -8,13 +9,13 @@ import { openFileTab, openPane } from "../panes.js";
 import { copyText } from "../tool_details.js";
 import { highlightSource } from "../source-preview.js";
 import {
-  htmlFileModes,
+  fileViewModes,
   HTML_OFFLINE_NOTE,
   HTML_PREVIEW_FAILED,
-  HTML_TOO_LARGE,
   isHtmlFile,
-  MAX_HTML_PREVIEW_BYTES,
+  PREVIEW_TOO_LARGE,
 } from "../html-file-view.js";
+import { renderDocumentMarkdown } from "../document-markdown.js";
 import { sendOperatorMessage } from "../conversation/index.js";
 import {
   claimComments,
@@ -26,6 +27,7 @@ import {
   pendingFor,
   reanchor,
   renderComments,
+  syncSelectionDraft,
   type CommentPane,
 } from "../artifacts/index.js";
 import { commentMount } from "../comments/selection-draft/index.js";
@@ -47,9 +49,10 @@ export interface Viewer {
   notice: string;
   preview?: ExplorerPreview;
   previewText: string;
-  htmlPreview: boolean;
-  htmlLoading?: boolean;
+  formattedPreview: boolean;
+  formattedLoading?: "open" | "switch";
   htmlFrameFailed?: boolean;
+  markdownRender?: AbortController;
   tabSeed?: ExplorerPreview;
   previewError: string;
   previewLoading: boolean;
@@ -68,6 +71,12 @@ export interface Viewer {
 }
 const viewers = new WeakMap<HTMLElement, Viewer>();
 const MAX_PREVIEW = 256 * 1024;
+const previewFormat = (path: string) =>
+  isHtmlFile(path)
+    ? "HTML"
+    : /\.(?:md|markdown)$/i.test(path)
+      ? "Markdown"
+      : null;
 export const phone = matchMedia("(max-width: 700px)");
 
 const filePath = (view: Viewer, path = view.file!): string =>
@@ -155,7 +164,7 @@ async function loadFile(
     view.file = path;
     view.preview = undefined;
     view.previewText = "";
-    view.htmlPreview = false;
+    view.formattedPreview = false;
     view.htmlFrameFailed = false;
   }
   await loadPreview(view, path, more ? "source" : "initial");
@@ -164,19 +173,25 @@ async function loadFile(
 async function loadPreview(
   view: Viewer,
   path: string,
-  stage: "source" | "initial" | "remaining",
+  stage: "source" | "initial" | "remaining" | "switch",
 ): Promise<void> {
   view.previewRequest?.abort();
   const controller = new AbortController();
   view.previewRequest = controller;
   view.previewError = "";
-  view.htmlLoading = stage !== "source" && isHtmlFile(path);
+  view.formattedLoading =
+    stage === "source" || !previewFormat(path)
+      ? undefined
+      : stage === "switch"
+        ? "switch"
+        : "open";
   view.previewLoading = true;
   view.repaint();
   try {
-    if (stage !== "remaining")
+    if (stage === "source" || stage === "initial")
       await readFileChunk(view, path, controller.signal);
-    if (view.htmlLoading) await completeHtml(view, path, controller.signal);
+    if (view.formattedLoading)
+      await completeFormattedPreview(view, path, controller.signal);
   } catch (error) {
     if (!controller.signal.aborted)
       view.previewError =
@@ -184,7 +199,7 @@ async function loadPreview(
   } finally {
     if (!controller.signal.aborted) {
       view.previewLoading = false;
-      view.htmlLoading = false;
+      view.formattedLoading = undefined;
       view.repaint();
     }
   }
@@ -214,28 +229,28 @@ async function readFileChunk(view: Viewer, path: string, signal: AbortSignal) {
   view.previewText += preview.text ?? "";
 }
 
-async function completeHtml(view: Viewer, path: string, signal: AbortSignal) {
+async function completeFormattedPreview(
+  view: Viewer,
+  path: string,
+  signal: AbortSignal,
+) {
   while (!signal.aborted && !view.disposed) {
     const item = view.preview;
-    if (item?.kind !== "text" || item.size > MAX_HTML_PREVIEW_BYTES) return;
+    if (item?.kind !== "text" || item.size > MAX_PREVIEW) return;
     if (item.next === null) {
-      view.htmlPreview = true;
+      view.formattedPreview = true;
       return;
     }
     await readFileChunk(view, path, signal);
   }
 }
 
-function continueHtmlPreview(view: Viewer, path: string) {
-  view.htmlLoading = false;
+function continueFormattedPreview(view: Viewer, path: string) {
+  view.formattedLoading = undefined;
   const item = view.preview;
-  if (
-    !isHtmlFile(path) ||
-    item?.kind !== "text" ||
-    item.size > MAX_HTML_PREVIEW_BYTES
-  )
+  if (!previewFormat(path) || item?.kind !== "text" || item.size > MAX_PREVIEW)
     return;
-  if (item.next === null) view.htmlPreview = true;
+  if (item.next === null) view.formattedPreview = true;
   else void loadPreview(view, path, "remaining");
 }
 
@@ -253,7 +268,7 @@ async function startEditing(view: Viewer): Promise<void> {
     saveError: "",
     conflict: false,
     notice: "",
-    htmlPreview: false,
+    formattedPreview: false,
   });
   view.repaint();
   view.element.querySelector<HTMLElement>(".explorer-editor")?.focus();
@@ -359,6 +374,9 @@ export function backToFiles(view: Viewer): void {
 
 function preview(view: Viewer): TemplateResult {
   const item = view.preview;
+  const format = previewFormat(view.file!);
+  const switching = view.formattedLoading === "switch";
+  const showingHtml = view.formattedPreview && format === "HTML";
   const destination = visiblePath(item?.canonicalPath ?? filePath(view));
   const name = html`<bdi dir="ltr">${destination}</bdi>`;
   return html`<div
@@ -407,8 +425,8 @@ function preview(view: Viewer): TemplateResult {
       item?.kind === "text" &&
       item.canonicalPath &&
       item.size <= MAX_PREVIEW &&
-      !view.htmlLoading &&
-      !view.htmlPreview
+      !view.formattedLoading &&
+      !showingHtml
         ? html`<button class="btn sm" @click=${() => startEditing(view)}>
             Edit
           </button>`
@@ -440,31 +458,46 @@ function preview(view: Viewer): TemplateResult {
           This file’s contents are sent to the model. Don’t save secrets here.
         </p>`
       : nothing}
-    ${view.htmlLoading
-      ? html`<p class="explorer-status" role="status">Loading preview…</p>`
-      : nothing}
-    ${!view.htmlLoading &&
+    ${view.formattedLoading !== "open" &&
     !view.editing &&
     item?.kind === "text" &&
-    isHtmlFile(view.file!)
-      ? html`${htmlFileModes(
-          view.htmlPreview,
-          item.next !== null ||
-            item.size > MAX_HTML_PREVIEW_BYTES ||
+    format
+      ? html`${fileViewModes(
+          `${format} view`,
+          view.formattedPreview || switching,
+          item.size > MAX_PREVIEW ||
+            !!view.previewError ||
             !!view.htmlFrameFailed,
           (preview) => {
-            if (preview === view.htmlPreview) return;
-            view.htmlPreview = preview;
+            if (switching) {
+              if (!preview) {
+                view.previewRequest?.abort();
+                view.previewLoading = false;
+                view.formattedLoading = undefined;
+                view.repaint();
+              }
+              return;
+            }
+            if (preview === view.formattedPreview) return;
+            if (preview && item.next !== null) {
+              void loadPreview(view, view.file!, "switch");
+              return;
+            }
+            view.formattedPreview = preview;
             view.repaint();
+            if (format === "Markdown") syncSelectionDraft();
           },
         )}
-        ${item.size > MAX_HTML_PREVIEW_BYTES || view.htmlFrameFailed
+        ${item.size > MAX_PREVIEW || view.htmlFrameFailed
           ? html`<p class="html-file-note" role="status">
-              ${item.size > MAX_HTML_PREVIEW_BYTES
-                ? HTML_TOO_LARGE
+              ${item.size > MAX_PREVIEW
+                ? PREVIEW_TOO_LARGE
                 : HTML_PREVIEW_FAILED}
             </p>`
           : nothing}`
+      : nothing}
+    ${view.formattedLoading
+      ? html`<p class="explorer-status" role="status">Loading preview…</p>`
       : nothing}
     ${view.editing ? editor(view) : nothing}
     ${item && !item.canonicalPath
@@ -498,13 +531,13 @@ function preview(view: Viewer): TemplateResult {
           This file cannot be shown as text. Download it to open it.
         </p>`
       : nothing}
-    ${item?.kind === "text" && !view.editing && !view.htmlLoading
+    ${item?.kind === "text" && !view.editing && !view.formattedLoading
       ? html`<pre
           class="explorer-source report-doc explorer-source-only"
           tabindex="0"
         ><code></code></pre>`
       : nothing}
-    ${view.previewLoading && !view.htmlLoading
+    ${view.previewLoading && !view.formattedLoading
       ? html`<p class="explorer-status explorer-source-only" role="status">
           Loading file…
         </p>`
@@ -512,7 +545,7 @@ function preview(view: Viewer): TemplateResult {
     ${item?.kind === "text" &&
     item.next !== null &&
     !view.editing &&
-    !view.htmlLoading
+    !view.formattedLoading
       ? html`<p class="explorer-status explorer-source-only">
             Showing ${view.previewText.length.toLocaleString()} characters of
             ${(item.size / 1024).toFixed(0)} KB.
@@ -529,13 +562,22 @@ function preview(view: Viewer): TemplateResult {
                 Download the file to read the rest.
               </p>`}`
       : nothing}
-    ${item?.kind === "text" && !view.editing && !view.htmlLoading
+    ${item?.kind === "text" &&
+    !view.editing &&
+    !view.formattedLoading &&
+    !(view.formattedPreview && format === "Markdown")
       ? html`<div class="report-comments explorer-source-only"></div>
           <div class="report-bar explorer-source-only"></div>`
       : nothing}
-    ${view.htmlPreview
+    ${showingHtml
       ? html`<p class="html-file-note">${HTML_OFFLINE_NOTE}</p>
           <div class="explorer-html-preview"></div>`
+      : nothing}
+    ${view.formattedPreview && format === "Markdown"
+      ? keyed(
+          item?.version,
+          html`<div class="explorer-markdown artifact-doc"></div>`,
+        )
       : nothing}`;
 }
 
@@ -568,7 +610,7 @@ function syncComments(view: Viewer): void {
   if (!view.previewText.startsWith(shown)) code.textContent = view.previewText;
   else if (shown.length < view.previewText.length)
     code.append(view.previewText.slice(shown.length));
-  highlightSource(code, item!.path);
+  if (!view.formattedPreview) highlightSource(code, item!.path);
   claimComments(pane, commentRendering);
   reanchor(pane, id);
   renderComments(pane);
@@ -599,10 +641,29 @@ function syncHtmlPreview(view: Viewer): void {
     })
     .catch(() => {
       if (!ownsView()) return;
-      view.htmlPreview = false;
+      view.formattedPreview = false;
       view.htmlFrameFailed = true;
       view.repaint();
     });
+}
+
+function syncMarkdownPreview(view: Viewer): void {
+  const container =
+    view.element.querySelector<HTMLElement>(".explorer-markdown");
+  if (container?.firstChild && !view.markdownRender?.signal.aborted) return;
+  view.markdownRender?.abort();
+  if (!container || !view.preview) return;
+  const controller = new AbortController();
+  view.markdownRender = controller;
+  container.replaceChildren();
+  const { root, path } = view.preview;
+  renderDocumentMarkdown(container, view.previewText, {
+    title: path.split("/").at(-1)!,
+    agentId: view.cid,
+    signal: controller.signal,
+    documentPath: absolutePath(root, path),
+    doubleClickImages: true,
+  });
 }
 
 export function renderExplorer(
@@ -612,7 +673,7 @@ export function renderExplorer(
   if (view.disposed) return;
   render(
     html`<section
-      class="explorer ${view.file && view.htmlPreview
+      class="explorer ${view.file && view.formattedPreview
         ? "explorer-preview-mode"
         : ""}"
       aria-label=${view.tabId ? visiblePath(view.file!) : "Working folder"}
@@ -626,6 +687,7 @@ export function renderExplorer(
   );
   syncComments(view);
   syncHtmlPreview(view);
+  syncMarkdownPreview(view);
 }
 
 export function viewerAt(element: HTMLElement): Viewer | undefined {
@@ -672,6 +734,7 @@ export function navigateFile(view: Viewer, command: PaneNavigation): boolean {
 
 function stopViewer(view: Viewer): void {
   view.previewRequest?.abort();
+  view.markdownRender?.abort();
   view.previewLoading = false;
 }
 
@@ -686,11 +749,11 @@ export const viewerCache: Pick<
     if (view) {
       view.disposed = false;
       if (
-        view.htmlLoading &&
+        view.formattedLoading &&
         view.file &&
         view.previewRequest?.signal.aborted
       ) {
-        if (view.preview) continueHtmlPreview(view, view.file);
+        if (view.preview) continueFormattedPreview(view, view.file);
         else void loadFile(view, view.file);
       }
       view.repaint();
@@ -734,7 +797,7 @@ export function viewerFor(
     filePaths: [],
     notice: "",
     previewText: "",
-    htmlPreview: false,
+    formattedPreview: false,
     previewError: "",
     previewLoading: false,
     editing: false,
@@ -775,9 +838,9 @@ export function seedTab(
     view.preview = preview;
     view.previewText = preview.text ?? "";
     view.previewError = "";
-    view.htmlPreview = false;
+    view.formattedPreview = false;
     view.htmlFrameFailed = false;
-    continueHtmlPreview(view, path);
+    continueFormattedPreview(view, path);
   }
   view.repaint();
 }

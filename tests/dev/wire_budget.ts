@@ -621,6 +621,7 @@ const cachedAs = (item: Exchange) => (item.revalidated ? "304" : item.cacheHit);
 function wireOf(item: Exchange): number {
   if (item.revalidated) return Math.max(item.received, item.headers);
   if (item.cacheHit) return 0;
+  if (!item.status) return item.received;
   if (item.encoding) return item.received;
   return Math.max(item.received, item.headers + item.body);
 }
@@ -644,6 +645,14 @@ class Meter {
     const meter = new Meter();
     const cdp = await page.context().newCDPSession(page);
     const current = (id: string) => meter.hops.get(id)?.at(-1);
+    // A dedicated worker's script response arrives on the worker's own target,
+    // so worker targets are attached (unflattened) and their Network events
+    // share the page's handlers; request ids match across both targets.
+    const listeners = new Map<string, (event: Json) => void>();
+    const on = (name: string, listener: (event: Json) => void) => {
+      listeners.set(name, listener);
+      cdp.on(name as "Network.dataReceived", listener);
+    };
     // Invariant: CDP sends ExtraInfo only for hops it flags (hasExtraInfo,
     // redirectHasExtraInfo), in hop order, possibly before the hop's events.
     const pairings = new Map<string, Pairing>();
@@ -674,13 +683,13 @@ class Meter {
       handle: (event: Json, hop: Exchange) => void,
     ) => {
       handlers.set(name, handle);
-      cdp.on(name as "Network.requestWillBeSentExtraInfo", (event: Json) => {
+      on(name, (event: Json) => {
         const entry = pairing(event.requestId);
         entry.waiting.set(name, [...(entry.waiting.get(name) ?? []), event]);
         pair(event.requestId);
       });
     };
-    cdp.on("Network.requestWillBeSent", (event: Json) => {
+    on("Network.requestWillBeSent", (event: Json) => {
       const hops = meter.hops.get(event.requestId) ?? [];
       const prior = hops.at(-1);
       if (event.redirectResponse && prior) {
@@ -715,7 +724,7 @@ class Meter {
     onExtraInfo("Network.requestWillBeSentExtraInfo", (event, item) => {
       item.sent += headerBytes(event.headers);
     });
-    cdp.on("Network.requestServedFromCache", (event: Json) => {
+    on("Network.requestServedFromCache", (event: Json) => {
       const item = current(event.requestId);
       if (item) item.cacheHit = "memory";
     });
@@ -729,7 +738,7 @@ class Meter {
         item.status = 304;
       }
     });
-    cdp.on("Network.responseReceived", (event: Json) => {
+    on("Network.responseReceived", (event: Json) => {
       const item = current(event.requestId);
       if (!item) return;
       if (event.hasExtraInfo) flag(event.requestId, item);
@@ -746,25 +755,51 @@ class Meter {
       item.received = Math.max(item.received, response.encodedDataLength);
       item.headers ||= response.encodedDataLength;
     });
-    cdp.on("Network.dataReceived", (event: Json) => {
+    on("Network.dataReceived", (event: Json) => {
       const item = current(event.requestId);
       if (!item) return;
       item.body += event.dataLength;
       item.received += event.encodedDataLength;
     });
-    cdp.on("Network.loadingFinished", (event: Json) => {
+    on("Network.loadingFinished", (event: Json) => {
       const item = current(event.requestId);
       if (!item) return;
-      item.received = Math.max(item.received, event.encodedDataLength);
+      // A worker script's response event can precede its target's attach;
+      // then only the total transfer size is known, and 0 means a cache hit.
+      if (!item.status) {
+        item.received = event.encodedDataLength;
+        if (!item.received) item.cacheHit = "disk";
+      } else item.received = Math.max(item.received, event.encodedDataLength);
       item.done = true;
     });
-    cdp.on("Network.loadingFailed", (event: Json) => {
+    on("Network.loadingFailed", (event: Json) => {
       const item = current(event.requestId);
       if (item) item.done = true;
       const waiting = [...pairing(event.requestId).waiting.values()];
       if (waiting.some((events) => events.length)) flag(event.requestId, item);
     });
     await cdp.send("Network.enable");
+    cdp.on("Target.attachedToTarget", (event: Json) => {
+      const send = (id: number, method: string) =>
+        cdp
+          .send("Target.sendMessageToTarget", {
+            sessionId: event.sessionId,
+            message: JSON.stringify({ id, method }),
+          })
+          .catch(() => {});
+      void send(1, "Network.enable").then(() =>
+        send(2, "Runtime.runIfWaitingForDebugger"),
+      );
+    });
+    cdp.on("Target.receivedMessageFromTarget", (event: Json) => {
+      const message = JSON.parse(event.message);
+      if (message.method) listeners.get(message.method)?.(message.params);
+    });
+    await cdp.send("Target.setAutoAttach", {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: false,
+    });
     return meter;
   }
 

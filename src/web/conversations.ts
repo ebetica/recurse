@@ -14,7 +14,9 @@ import { AttachmentError } from "../agents/runtime/attachments/base";
 import { pyTruthy } from "../agents/runtime";
 import {
   INFO,
+  WARNING,
   logEvent,
+  logException,
   type RuntimeLogger,
 } from "../observability/runtime_logging";
 import { cleanTitle } from "../title_text";
@@ -54,7 +56,8 @@ export interface ConversationsRoutesDeps {
       options?: { withPending?: boolean; fields?: readonly string[] },
     ): Rec | null;
     metadataSnapshot(cid: string, fields?: readonly string[]): Rec | null;
-    markViewed(cid: string): Promise<void>;
+    markViewed(cid: string): Promise<() => void>;
+    setUnread(cid: string, unread: boolean): Promise<boolean>;
     effectiveWorkdir(conv: Rec): string;
   };
   readonly delivery: {
@@ -186,7 +189,7 @@ export interface ConversationsRoutesDeps {
   };
   /** node_pi.live_run_id. */
   liveRunId(cid: string): string | null;
-  /** Durable conversations (src/agents/durable/host.ts). */
+  /** Durable conversations (src/agents/durable/host). */
   readonly durable?: {
     owns(conv: Rec | null | undefined): boolean;
     subscribeView?(cid: string, listener: () => void): () => void;
@@ -777,6 +780,18 @@ export function registerConversationRoutes(
     return jsonResponse({ id: cid, taken_over: pyTruthy(conv.taken_over) });
   });
 
+  router.post("/api/conversations/{cid}/unread", async (ex) => {
+    if (!isOperator(ex, { allowBackendKey: true }) || agentMarked(ex))
+      throw new HttpError(403, "only the operator can change unread state");
+    deps.requireActionReady();
+    const { unread } = await dictBody(ex);
+    if (typeof unread !== "boolean")
+      throw new HttpError(422, "unread must be a boolean");
+    if (!(await store.setUnread(ex.params.cid!, unread)))
+      throw new HttpError(404);
+    return jsonResponse({ unread });
+  });
+
   router.post("/api/conversations/{cid}/compact", async (ex) =>
     jsonResponse(await compactConversation(deps, ex.params.cid!)),
   );
@@ -849,10 +864,12 @@ export function registerConversationRoutes(
       const conv = store.metadataSnapshot(cid, ["backend"]);
       if (conv === null) throw new HttpError(404);
       const durable = deps.durable;
+      let acknowledgeClose: (() => void) | undefined;
       return conversationEvents(
         header(ex, "last-event-id"),
         async (cursor) => {
-          if (ex.query.viewing === true) await store.markViewed(cid);
+          if (ex.query.viewing === true)
+            acknowledgeClose ??= await store.markViewed(cid);
           return deps.reads.readViewEvents(
             cid,
             cursor,
@@ -869,6 +886,16 @@ export function registerConversationRoutes(
               return () => {
                 stopViewing?.();
                 unsubscribe();
+                try {
+                  acknowledgeClose?.();
+                } catch (error) {
+                  logException(
+                    deps.log,
+                    "conversation_view_ack_failed",
+                    error,
+                    { conversation_id: cid, level: WARNING },
+                  );
+                }
               };
             }
           : null,
@@ -1003,9 +1030,7 @@ export function registerConversationRoutes(
         );
       return deps.deliverStop(cid, body);
     }
-    return jsonResponse(
-      await sendMessage(cid, body, header(ex, "x-recurse-agent"), relayed),
-    );
+    return jsonResponse(await sendMessage(cid, body, ex, relayed));
   });
 
   router.delete("/api/conversations/{cid}/messages/{mid}", async (ex) => {

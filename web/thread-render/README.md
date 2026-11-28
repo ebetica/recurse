@@ -10,11 +10,17 @@
   [tool_activity.ts](tool_activity.ts) describes tool work.
 - [reply-html.ts](reply-html.ts) sanitizes reply Markdown and applies the image
   policy; [inline image captions](../image-preview/inline.ts) use cached filenames.
+  [PR references](../pr-references.ts) use explicit repository names when present;
+  a bare number cannot select a repository from surrounding prose.
+- [code-highlight.ts](code-highlight.ts) colours reply code blocks that name a
+  language with the [shared source highlighter](../source-preview.ts), only once
+  a block nears the viewport, so opening a conversation never waits on it.
 
 Running tool counts and details belong to the transcript, not the
-[status bar](../conversation/README.md#status-bar). The opened activity card
-keeps summaries compact on desktop and preserves tap targets on phones and touch
-screens. Shell completion details stay with the adjacent
+[status bar](../conversation/README.md#status-bar). [Activity card styles](style.css)
+stack collapsed summaries like lines of text on desktop and touch screens.
+Each summary is its own tap target; extending it vertically would cover the next
+row. Open details keep their separation. Shell completion details stay with the adjacent
 [command series](turn-groups.ts), so output stays available without a duplicate row.
 A completion without an adjacent series keeps its own disclosure.
 
@@ -43,3 +49,5 @@ for gestures.
 
 Keep full history details lazy and preserve recorded usage rather than inferring
 it from visible replies. Apply the shared image policy to inline previews.
+Only apply legacy notice filtering where the server has not separated the
+user's text from delivery framing.

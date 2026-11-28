@@ -193,7 +193,7 @@ test("new conversations and spawns on a Settings custom provider use Durable", a
 });
 
 // Regression: #2993 Returning control must notify both recipients once without waking idle agents.
-test("Take over and release store inspectable notes once, without waking idle recipients", async () => {
+test("Take over and release store inspectable notes once; only a release wakes the parent", async () => {
   const w = await switchoverWorld();
   try {
     const { create, durable, delivery, conversations, nodes } = w.instance;
@@ -288,6 +288,11 @@ test("Take over and release store inspectable notes once, without waking idle re
     expect(conversations.load("held")!.muted).toBe(false);
     const releaseNote =
       "User has returned control of Held agent (held); you can message it again.";
+    await until(
+      async () =>
+        durable.metadata("boss").status === "idle" &&
+        JSON.stringify(await durable.prompt("boss")).includes(releaseNote),
+    );
     for (const cid of ["held", "boss"]) {
       const view = await durable.view(cid);
       expect(
@@ -297,15 +302,26 @@ test("Take over and release store inspectable notes once, without waking idle re
       ).toHaveLength(1);
       expect(durable.metadata(cid).status).toBe("idle");
     }
+    expect(JSON.stringify(await durable.prompt("held"))).not.toContain(
+      releaseNote,
+    );
     for (const cid of ["held", "boss"]) {
-      await delivery.deliver(cid, "Continue after release", {
-        origin: "operator",
-      });
+      if (cid === "held")
+        await delivery.deliver(cid, "Continue after release", {
+          origin: "operator",
+        });
       await until(() => durable.metadata(cid).status === "idle");
       const prompt = JSON.stringify(await durable.prompt(cid));
       expect(prompt).toContain(releaseNote);
       expect(prompt.indexOf(note)).toBeLessThan(prompt.indexOf(releaseNote));
     }
+    await until(
+      async () =>
+        durable.metadata("boss").status === "idle" &&
+        JSON.stringify(await durable.prompt("boss")).includes(
+          "[recurse-from: held]",
+        ),
+    );
     const active = w.holdNextRequest({
       name: "read",
       args: { path: join(w.root, "data/config/model-providers.json") },

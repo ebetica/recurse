@@ -4,7 +4,7 @@
 import { stat } from "node:fs/promises";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { Harness } from "@earendil-works/pi-durable";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import type { Opened } from "./open.ts";
 import { runtime } from "./load.ts";
 

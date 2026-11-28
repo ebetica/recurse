@@ -1,11 +1,11 @@
 {
   "cold-load": {
-    "bytes": 485513,
-    "requests": 37
+    "bytes": 639828,
+    "requests": 44
   },
   "warm-reload": {
-    "bytes": 13469,
-    "requests": 31
+    "bytes": 22071,
+    "requests": 42
   },
   "long-conversation": {
     "bytes": 53426,

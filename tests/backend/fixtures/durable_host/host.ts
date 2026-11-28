@@ -14,7 +14,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createProvider } from "@earendil-works/pi-ai/models";
 import { createFauxCore } from "@earendil-works/pi-ai/providers/faux";
-import { DurableHost } from "../../../../src/agents/durable/host.ts";
+import { DurableHost } from "../../../../src/agents/durable/host";
 import { ProcessLifecycle } from "../../../../src/process_lifecycle.ts";
 import type { LogSink } from "../../../../src/observability/runtime_logging.ts";
 

@@ -25,7 +25,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { createRegistry, Harness, LiveDoc } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
-import { DurableHost } from "../../src/agents/durable/host.ts";
+import { DurableHost } from "../../src/agents/durable/host";
 import {
   DurableViews,
   type ViewConversation,
@@ -939,10 +939,15 @@ describe("reports", () => {
       await (await host.open("c1")).reporter?.kick();
       await until(idle(host));
       expect(
-        reports.map(({ key, ...rest }) => [key.split("-").length, rest]),
+        reports.map(({ key, replyAt, ...rest }) => [
+          key.split("-").length,
+          typeof replyAt,
+          rest,
+        ]),
       ).toEqual([
         [
           4,
+          "number",
           {
             requestId: "op:operator::k1",
             received: ["op:agent:p1:k2"],
@@ -955,6 +960,7 @@ describe("reports", () => {
         ],
         [
           4,
+          "number",
           {
             requestId: "op:operator::k3",
             received: [],

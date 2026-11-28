@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseMessageMarkdown } from "../../web/util/message-markdown.js";
+import { parseMessageMarkdown } from "../../src/message_markdown.js";
 
 // test-check-allow: T9 Active HTML must remain escaped literal prose.
 test("HTML blocks, raw-text elements and attributes render as literal prose", () => {

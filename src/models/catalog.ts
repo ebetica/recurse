@@ -6,6 +6,7 @@ import {
   type ConfigFiles,
   type Dict,
 } from "../config_files";
+import { GEMINI_CREDENTIAL } from "../auth";
 import {
   readProvidersDocument,
   upsertCustomProvider,
@@ -50,7 +51,7 @@ type CatalogInputs = StoredPiModelList & {
 };
 
 // Built-in routes follow Pi's list; custom providers follow them.
-export const DEFAULT_CHAT_MODEL = "anthropic/claude-opus-5-5";
+const DEFAULT_CHAT_MODEL = "anthropic/claude-opus-5-5";
 
 /** Recurse's suggested conversation reasoning for model families. */
 const SUGGESTED_EFFORTS: readonly [RegExp, Thinking][] = [
@@ -168,11 +169,14 @@ export class ModelCatalog {
     const [parsedProviders, defaultRaw] = readProvidersDocument(
       providers.value,
     );
+    const listed = readPiModelList(pi.value, this.warn);
+    if (listed.pi && Object.hasOwn(parsedProviders, "google"))
+      delete listed.pi.google;
     const value = {
       providers: parsedProviders,
       default_raw: defaultRaw,
       efforts: this.readDefaultEfforts(efforts.value),
-      ...readPiModelList(pi.value, this.warn),
+      ...listed,
     };
     this.catalogCache = { revision, value };
     return value;
@@ -333,7 +337,7 @@ export class ModelCatalog {
       }),
     );
     const defaults = [this.CHAT_MODEL];
-    if (this.isFileProviderModel(this.CHAT_MODEL))
+    if (this.automaticFallbackModel() !== this.CHAT_MODEL)
       defaults.push(DEFAULT_CHAT_MODEL);
     for (const model of defaults)
       if (!Object.hasOwn(policies, model))
@@ -380,15 +384,39 @@ export class ModelCatalog {
     );
   }
 
-  defaultChatModel(catalog?: readonly ModelOption[]): string {
-    const configured = this.customDefaultModel() || this.CHAT_MODEL;
-    const want = this.isFileProviderModel(configured)
+  isGeminiModel(model: string): boolean {
+    return (
+      this.providerOf(model) === "google" &&
+      !Object.hasOwn(this.customModelProviders(), "google")
+    );
+  }
+
+  automaticFallbackModel(): string {
+    return this.isFileProviderModel(this.CHAT_MODEL) ||
+      this.isGeminiModel(this.CHAT_MODEL)
       ? DEFAULT_CHAT_MODEL
-      : configured;
-    catalog ??= this.signedInChatModels(this.authedModelProviders());
-    return catalog.some((option) => option.id === want)
+      : this.CHAT_MODEL;
+  }
+
+  automaticChatModels(catalog: readonly ModelOption[]): ModelOption[] {
+    return catalog.filter((option) => !this.isGeminiModel(option.id));
+  }
+
+  signedInDefaultChatModel(catalog: readonly ModelOption[]): string | null {
+    const want = this.customDefaultModel() || this.automaticFallbackModel();
+    const eligible = this.automaticChatModels(catalog);
+    return eligible.some((option) => option.id === want)
       ? want
-      : (catalog[0]?.id ?? want);
+      : (eligible[0]?.id ?? null);
+  }
+
+  defaultChatModel(): string {
+    return (
+      this.signedInDefaultChatModel(
+        this.signedInChatModels(this.authedModelProviders()),
+      ) ??
+      (this.customDefaultModel() || this.automaticFallbackModel())
+    );
   }
 
   private validateDefaultEfforts(value: unknown): Record<string, string> {
@@ -456,11 +484,11 @@ export class ModelCatalog {
   authedModelProviders(): Set<string> {
     try {
       const custom = this.customModelProviders();
+      const native = new Set(this.authenticatedProviderSource());
+      if (native.delete(GEMINI_CREDENTIAL) && !Object.hasOwn(custom, "google"))
+        native.add("google");
       return new Set(
-        [
-          ...this.authenticatedProviderSource(),
-          ...this.configuredCustomProviders(),
-        ].filter(
+        [...native, ...this.configuredCustomProviders()].filter(
           (provider) =>
             PI_BUILTIN_PROVIDERS.has(provider) ||
             Object.hasOwn(custom, provider),

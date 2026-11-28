@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { brandingFile, readBrand } from "../../branding";
 import { SERVICE_MESSAGE_MAX_CHARS } from "../../auth/service";
 import { pyStrip } from "../../auth/provider_store";
-import { authMethod, jsonDictBody } from "../request";
+import { jsonDictBody } from "../request";
 import type { createMessageSender } from "../deliver_message";
 import type { TreeRow } from "../../agents/tree_view";
 import type { TranscriptQuery } from "../../agents/durable/transcript";
@@ -31,6 +31,7 @@ interface Deps {
   shells(id: string): { items: Shell[] };
   queued(id: string): number;
   context(row: TreeRow): AgentStatus["context"];
+  runningHooks(id: string): AgentStatus["running_hooks"];
   requireReady(): void;
   treeReady(): boolean;
   themesFile: string;
@@ -80,7 +81,12 @@ export function registerApiV1(router: Router, deps: Deps): void {
         deps.queued(String(row.id)),
       ),
       context: deps.context(row),
+      ...runningHooks(String(row.id)),
     }));
+  };
+  const runningHooks = (id: string) => {
+    const hooks = deps.runningHooks(id);
+    return hooks?.length ? { running_hooks: hooks } : {};
   };
   const subtree = (agents: AgentStatus[], root: string): AgentStatus[] => {
     if (!agents.some((a) => a.id === root))
@@ -211,12 +217,7 @@ export function registerApiV1(router: Router, deps: Deps): void {
           interrupt: body.interrupt,
           client_message_id: body.client_message_id,
         },
-        authMethod(ex) === "backend-key"
-          ? null
-          : ex.request.headers.get("x-recurse-agent"),
-        typeof ex.state.backend_agent === "string"
-          ? { sender: ex.state.backend_agent, title: null }
-          : null,
+        ex,
       );
       return jsonResponse({
         message_id: result.message_id,

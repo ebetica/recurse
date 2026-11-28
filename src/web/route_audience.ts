@@ -22,6 +22,7 @@ export function loopbackAudience(
         path === "/api/backends" ||
         path === "/api/subagent-tool/search" ||
         path === "/api/subagent-tool/read" ||
+        path === "/api/hooks-tool/list" ||
         /^\/api\/relay\/messages\/[^/]+$/.test(path) ||
         /^\/api\/relay\/transcript\/[^/]+\/[^/]+$/.test(path))) ||
     (method === "POST" &&

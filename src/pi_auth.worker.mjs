@@ -8,7 +8,7 @@ import { chmodSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import readline from "node:readline";
-import { OPENAI_CHOICE_MARKER, validCredential, validCredentials } from "./auth/index.ts";
+import { GEMINI_CREDENTIAL, OPENAI_CHOICE_MARKER, validCredential, validCredentials } from "./auth/index.ts";
 
 const EXPECTED_PI_VERSION = "1.5.1";
 const ANTHROPIC_OAUTH_MODULE = new URL(
@@ -16,7 +16,7 @@ const ANTHROPIC_OAUTH_MODULE = new URL(
 const MAX_INPUT_CHARS = 64 * 1024;
 // Login-owned routes include Muse's minted key; unknown IDs fail closed.
 const ALLOWED_PROVIDERS = new Set([
-	"anthropic", "openai-codex", "openai", "openrouter",
+	"anthropic", "openai-codex", "openai", "openrouter", "google",
 	"muse-code",
 ]);
 
@@ -50,7 +50,7 @@ function storageBackend(root) {
 
 function provider(value, extra) {
 	if (typeof value !== "string") throw new Error("invalid_input");
-	if (ALLOWED_PROVIDERS.has(value)) return value;
+	if (ALLOWED_PROVIDERS.has(value) || value === GEMINI_CREDENTIAL) return value;
 	
 	if (extra instanceof Set && extra.has(value)) return value;
 	throw new Error("invalid_input");

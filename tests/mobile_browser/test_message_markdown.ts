@@ -16,6 +16,7 @@ import {
   turn,
   waitForLayout,
   type BrowserTest,
+  MERMAID_DIAGRAM,
 } from "./common";
 
 type TraversalObserver = Window & { diagramTraversals?: boolean[] };
@@ -78,7 +79,7 @@ async function expectTableScrolls(wrapper: Locator) {
 }
 
 export const tests: BrowserTest[] = [
-  // Regression: #3568 wrap Markdown tables before scrolling; preserve #3550 diagram zoom and pan.
+  // Regression: #3568 wrap Markdown tables before scrolling; preserve #3550 diagram zoom and pan; #3737 colour ts code blocks (5ed7717ef: data-source-syntax was unset).
   async function test_mermaid_zoom_in_reply_and_document(browser, base) {
     const directory = process.env.RECURSE_BROWSER_SCREENSHOT_DIR;
     if (directory) await mkdir(directory, { recursive: true });
@@ -126,12 +127,33 @@ export const tests: BrowserTest[] = [
       const reply = content.locator(".mermaid-host");
       await waitForLayout(page);
       const tables = await expectReadableTables(content);
+      const typed = content.locator(".code-wrap pre code.language-ts");
+      await browserExpect(typed).toHaveAttribute(
+        "data-source-syntax",
+        "highlighted",
+      );
+      const colour = (locator: Locator) =>
+        locator.evaluate((element) => getComputedStyle(element).color);
+      expect(await colour(typed.locator(".hljs-keyword"))).not.toBe(
+        await colour(typed),
+      );
+      const plain = content.locator(".code-wrap pre code").last();
+      expect(await plain.textContent()).toBe("const plain = 1;\n");
+      expect(await plain.locator(".source-token").count()).toBe(0);
+      const typedWrap = content.locator(".code-wrap", {
+        has: page.locator("code.language-ts"),
+      });
+      await typedWrap.getByRole("button", { name: "Copy code" }).click();
+      await typedWrap.getByRole("button", { name: "Code copied" }).waitFor();
+      expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(
+        "const answer = 42;\n",
+      );
       if (directory) {
         await tables.first().scrollIntoViewIfNeeded();
         await shot("chat-tables");
       }
       await expectTableScrolls(tables.last());
-      const svg = reply.locator("svg");
+      const svg = reply.locator(MERMAID_DIAGRAM);
       await svg.scrollIntoViewIfNeeded();
       expect(
         await svg.evaluate((element) => {
@@ -143,7 +165,7 @@ export const tests: BrowserTest[] = [
           return element.contains(hit);
         }),
       ).toBe(true);
-      const copy = reply.getByRole("button", { name: "Copy", exact: true });
+      const copy = reply.getByRole("button", { name: "Copy code" });
       const open = reply.getByRole("button", { name: "Open diagram" });
       if (phone) {
         await expectHitCorners(copy);
@@ -151,9 +173,7 @@ export const tests: BrowserTest[] = [
       }
       await shot("thread");
       await copy.click();
-      await reply
-        .getByRole("button", { name: "Copied", exact: true })
-        .waitFor();
+      await reply.getByRole("button", { name: "Code copied" }).waitFor();
       expect(
         await page.evaluate(() => navigator.clipboard.readText()),
       ).toContain("F[Validate request]");
@@ -564,7 +584,9 @@ export const tests: BrowserTest[] = [
     expect(await content.innerText()).toContain(
       "The final paragraph is still here.",
     );
-    expect(await content.locator("title, id, path, cid").count()).toBe(0);
+    expect(
+      await content.locator(":is(title, id, path, cid):not(svg *)").count(),
+    ).toBe(0);
     expect(await content.locator(".code-wrap pre").innerText()).toBe(
       "copy this\n",
     );

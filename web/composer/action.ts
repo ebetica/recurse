@@ -2,6 +2,8 @@
 import { sendEl, titleEl } from "../dom.js";
 import { attachHoldTip } from "../hold-tip.js";
 import { SEND_ICON, STOP_ICON } from "../icons.js";
+import { primaryPointerIsCoarse } from "../state.js";
+import { refreshSendMenu } from "./send-menu.js";
 import {
   activateComposerControlState,
   initialComposerControlState,
@@ -77,9 +79,17 @@ function paintComposerControl(): void {
   sendEl.classList.toggle("armed", armed);
   sendEl.classList.toggle("stopping", stopMode && stopStatus === "stopping");
   sendEl.classList.toggle("error", stopMode && stopStatus === "error");
-  sendEl.disabled =
+  const disabled =
     preparingStop ||
     (controlState.hasPayload ? !controlState.sendable : !stopMode);
+  const hasMenu = !stopMode && primaryPointerIsCoarse();
+  // A disabled Send action can still explain why btw is unavailable.
+  sendEl.disabled = disabled && !hasMenu;
+  if (hasMenu && disabled) sendEl.setAttribute("aria-disabled", "true");
+  else sendEl.removeAttribute("aria-disabled");
+  if (hasMenu) sendEl.setAttribute("aria-haspopup", "menu");
+  else sendEl.removeAttribute("aria-haspopup");
+  refreshSendMenu();
   sendEl.title = label;
   sendEl.setAttribute("aria-label", label);
   sendEl.innerHTML = stopMode ? STOP_ICON : SEND_ICON;

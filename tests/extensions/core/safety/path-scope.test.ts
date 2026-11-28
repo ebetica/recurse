@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   rmSync,
@@ -10,6 +11,7 @@ import { join } from "node:path";
 import {
   allowedByPathScope,
   loadTrustedPathScope,
+  protectedFileTarget,
   WORKSPACE_ROOT_ENV,
   WORKTREES_ROOT_ENV,
 } from "../../../../src/extensions/core/safety/path-scope.ts";
@@ -304,5 +306,61 @@ describe("file action path scope", () => {
       false,
     );
     expect(allowedByPathScope("write", {}, workspace, scope)).toBe(false);
+  });
+
+  // Feature: #3694 MCP configuration writes and their links reach the full reviewer
+  test("never fast-paths MCP configuration or its links", async () => {
+    const config = join(workspace, "pi-agent");
+    mkdirSync(config);
+    const scope = await loadTrustedPathScope(env, config);
+    const allowed = (path: string) =>
+      allowedByPathScope("write", { path }, workspace, scope);
+    const mcp = join(config, "mcp.json");
+    expect(allowed(join(config, "ordinary.json"))).toBe(true);
+    expect(allowed(mcp)).toBe(false);
+    expect(allowed(`@${mcp}`)).toBe(false);
+    expect(protectedFileTarget(config, workspace, "pi-agent/mcp.json")).toBe(
+      mcp,
+    );
+    const target = join(workspace, "mcp-target.json");
+    symlinkSync(target, mcp);
+    expect(allowed(target)).toBe(false);
+    expect(allowed(join(config, "unrelated.json"))).toBe(true);
+    writeFileSync(target, "{}");
+    expect(allowed(target)).toBe(false);
+    const hardLink = join(config, "mcp-hard-link.json");
+    linkSync(target, hardLink);
+    expect(allowed(hardLink)).toBe(false);
+  });
+
+  test("never fast-paths hook files: global ones, links into their directory, or agents' local ones", async () => {
+    const config = join(workspace, "hook-agent");
+    const hooks = join(config, "hooks");
+    mkdirSync(config);
+    const scope = await loadTrustedPathScope(env, config);
+    const allowed = (path: string) =>
+      allowedByPathScope("write", { path }, workspace, scope);
+    expect(allowed(join(hooks, "gate.ts"))).toBe(false);
+    expect(allowed(join(config, "hooks-notes.ts"))).toBe(true);
+    expect(
+      protectedFileTarget(config, workspace, "hook-agent/hooks/gate.ts"),
+    ).toBe(hooks);
+    mkdirSync(hooks);
+    const alias = join(workspace, "hook-alias");
+    symlinkSync(hooks, alias);
+    expect(allowed(join(alias, "gate.ts"))).toBe(false);
+    const state = join(workspace, "hook-state");
+    mkdirSync(join(state, "hooks", "agents", "other"), { recursive: true });
+    expect(
+      await scoped(
+        "write",
+        "hook-state/hooks/agents/other/gate.ts",
+        workspace,
+        {
+          ...env,
+          CHAT_DATA_DIR: state,
+        } as NodeJS.ProcessEnv,
+      ),
+    ).toBe(false);
   });
 });

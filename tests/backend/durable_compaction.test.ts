@@ -21,7 +21,7 @@ import {
 } from "@earendil-works/pi-durable";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { calculateContextTokens } from "@earendil-works/pi-ai/utils/estimate";
-import { DurableHost } from "../../src/agents/durable/host.ts";
+import { DurableHost } from "../../src/agents/durable/host";
 import { Config } from "../../src/config.ts";
 import {
   copyFork,
@@ -355,6 +355,71 @@ test("an overflow compacts and the request is retried", async () => {
     const [compaction] = await ofKind(host, "pi.compaction");
     expect((compaction!.data as Rec).reason).toBe("overflow");
     expect(textOf(compaction)).toContain("RECURSE SUMMARY");
+  } finally {
+    await host.close();
+  }
+});
+
+// Feature: #3724 hook files change one request's messages and decide a compaction, except cancelling one a too-long request needs
+test("request and compaction hooks change what one request sends and write the summary", async () => {
+  const w = world();
+  const local = join(w.dataDir, "hooks", "agents", "c1");
+  mkdirSync(local, { recursive: true });
+  writeFileSync(
+    join(local, "a-cancel.ts"),
+    `export default function (pi) {
+  pi.on("session_before_compact", () => ({ cancel: true }));
+}`,
+  );
+  writeFileSync(
+    join(local, "h.ts"),
+    `export default function (pi) {
+  pi.on("context", (event) => ({ messages: [...event.messages, { role: "user", content: "from the context hook " + event.messages.some((m) => m.role === "system"), timestamp: 0 }] }));
+  pi.on("session_before_compact", (event) => ({ compaction: { summary: "HOOK SUMMARY " + event.reason + " " + (event.preparation.messages.length > 0) } }));
+}`,
+  );
+  writeFileSync(
+    join(local, "z-late.ts"),
+    `export default function (pi) {
+  pi.on("session_before_compact", () => ({ compaction: { summary: "LATE SUMMARY" } }));
+}`,
+  );
+  const requests: Rec[] = [];
+  const { host, summaries } = hostOn(w, [
+    async (request) => {
+      requests.push(request as unknown as Rec);
+      return fauxAssistantMessage("hi");
+    },
+    fauxAssistantMessage("", {
+      stopReason: "error",
+      errorMessage: "prompt is too long: 213462 tokens > 200000 maximum",
+    }),
+    fauxAssistantMessage("recovered"),
+    fauxAssistantMessage("more"),
+  ]);
+  try {
+    await host.send("c1", "hello", "seed");
+    await answered(host, "hi");
+    const sent = requests[0]!.messages as Rec[];
+    expect(sent[0]!.role).toBe("system");
+    expect(JSON.stringify(sent.at(-1))).toContain(
+      "from the context hook false",
+    );
+    expect(
+      (await entries(host)).some((entry) =>
+        JSON.stringify(entry).includes("from the context hook"),
+      ),
+    ).toBe(false);
+    await host.send("c1", `go ${tokens(25_000)}`, "r1");
+    await answered(host, "recovered");
+    const [compaction] = await ofKind(host, "pi.compaction");
+    expect(textOf(compaction)).toContain("HOOK SUMMARY overflow true");
+    await host.send("c1", `more ${tokens(25_000)}`, "r2");
+    await answered(host, "more");
+    await host.compact("c1");
+    await until(async () => (await compactionsRunning(host)) === 0);
+    expect(await ofKind(host, "pi.compaction")).toHaveLength(1);
+    expect(summaries).toEqual([]);
   } finally {
     await host.close();
   }

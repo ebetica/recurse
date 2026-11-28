@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="">
 <!-- Fonts and fetches stay on this origin: the drawing editor's CDN font
      fallback (esm.sh) is unreachable. -->
 <meta http-equiv="Content-Security-Policy" content="font-src 'self' data:; connect-src 'self' data: blob:">
@@ -130,6 +133,10 @@
         aria-controls="pane-menu" aria-expanded="false"></button>
     </div>
   </div>
+  <div id="window-load-error" hidden>
+    <span role="status">Windows could not load. Wait for Chat to finish loading before reloading.</span>
+    <button class="btn sm" type="button" disabled>Reload page</button>
+  </div>
   <div id="shared-tree-status" class="menu-note" role="status" hidden></div>
   <div id="share-link-status" class="menu-note" role="status" hidden></div>
   <!-- Shown while opening an agent whose thread hasn't been read yet: the
@@ -183,7 +190,7 @@
               </div>
               <div id="model-row">
                 <button id="model-trigger" type="button" popovertarget="model-menu" aria-keyshortcuts="e Shift+M"
-                  aria-expanded="false" title="Choose effort level (e or Shift+M)" aria-label="Choose effort level"><span class="model-name"></span><svg data-icon="CHEVRON_UP_ICON"></svg></button>
+                  aria-expanded="false" title="Choose effort level (e or Shift+M)" aria-label="Choose effort level"><span class="model-name"></span></button>
                 <div id="model-menu" class="menu" popover="auto" tabindex="-1" role="dialog" aria-label="Effort level">
                   <div id="effort-slider"><input id="effort-range" type="range" step="1" aria-label="Effort level"></div>
                   <p id="effort-model" role="status" aria-live="polite"></p>
@@ -198,9 +205,15 @@
               </div>
             </div>
           </div>
-          <button id="send" class="btn primary composer-send" type="button" title="Send" disabled>
+          <button id="send" class="btn primary composer-send" type="button" title="Send" aria-controls="send-menu" disabled>
             <svg data-icon="SEND_ICON"></svg>
           </button>
+          <div id="send-menu" class="menu" popover="manual" role="menu" aria-label="Send options">
+            <button id="send-btw" class="menu-item" type="button" role="menuitem" aria-labelledby="send-btw-label" aria-describedby="send-btw-description">
+              <span id="send-btw-label">Ask in side chat</span>
+              <span id="send-btw-description" hidden></span>
+            </button>
+          </div>
         </div>
       </div>
     </div>

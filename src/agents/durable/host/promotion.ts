@@ -10,10 +10,10 @@ import {
   BACKGROUND_CONTEXT as context,
   withAbortSignal,
 } from "@earendil-works/chord/context";
-import { retirePath } from "../../utils/trash-sweep";
-import type { Opened } from "./host/open.ts";
+import { retirePath } from "../../../utils/trash-sweep";
+import type { Opened } from "./open.ts";
 
-const runtime = () => import("./host/runtime.ts");
+const runtime = () => import("./runtime.ts");
 
 export type PromotionRecord = Pick<PromotionDeps, "promotion" | "promoted">;
 

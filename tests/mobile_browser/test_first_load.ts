@@ -1,13 +1,21 @@
 import { expect } from "bun:test";
-import type { Browser } from "playwright";
+import { cp, mkdir, rename } from "node:fs/promises";
+import { basename, join } from "node:path";
+import type { Browser, BrowserContext } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
+  ROOT,
   assertArtifactVersionMenuEscape,
+  checkedTap,
   closeWithRoutes,
+  expectHitCorners,
   gotoRoot,
   mockConversation,
   openPage,
   routeArtifacts,
+  screenshot,
+  startServer,
+  stopServer,
   turn,
   visibleAndUncovered,
   waitForLayout,
@@ -46,6 +54,96 @@ async function assertDraftSurvivesSelection(
 }
 
 export const tests: BrowserTest[] = [
+  // Regression: #3182 A stale desktop windows import must offer recovery without losing unsent work.
+  async function test_reload_after_windows_chunk_is_removed(
+    browser,
+    _base,
+    data,
+  ) {
+    const frontendRoot = join(data, "browser-build");
+    const web = join(frontendRoot, "web");
+    await mkdir(web, { recursive: true });
+    for (const name of ["index.html", "icons.ts", "dist"])
+      await cp(join(ROOT, "web", name), join(web, name), { recursive: true });
+    const server = await startServer({ frontendRoot });
+    let context: BrowserContext | undefined;
+    try {
+      const opened = await openPage(browser, {
+        viewport: { width: 390, height: 844 },
+        hasTouch: true,
+      });
+      context = opened.context;
+      const { page } = opened;
+      await page.goto(`${server.base}#agent=${server.root}`);
+      await browserExpect(page.locator("#pane-fab")).toBeVisible();
+      const input = page.locator("#input");
+      const draft = "Keep this unsent while the browser build changes";
+      await input.fill(draft);
+      const servedVersion = await page
+        .locator("body")
+        .getAttribute("data-version");
+      const preload = await page
+        .locator('link[rel="modulepreload"]')
+        .getAttribute("href");
+      const oldChunk = basename(new URL(preload!, server.base).pathname);
+      const newChunk = `host-${Bun.hash(oldChunk).toString(36)}.js`;
+      const dist = join(web, "dist");
+      const entry = join(dist, "app.js");
+      await rename(join(dist, oldChunk), join(dist, newChunk));
+      await Bun.write(
+        `${entry}.next`,
+        (await Bun.file(entry).text()).replaceAll(
+          `./${oldChunk}`,
+          `./${newChunk}`,
+        ),
+      );
+      await rename(`${entry}.next`, entry);
+      await browserExpect
+        .poll(async () => {
+          const response = await page.request.get(`${server.base}api/version`);
+          return ((await response.json()) as { version: string }).version;
+        })
+        .not.toBe(servedVersion);
+      const response = page.waitForResponse(
+        (res) => res.url() === new URL(preload!, server.base).href,
+      );
+      await page.setViewportSize({ width: 1190, height: 844 });
+      expect((await response).status()).toBe(404);
+      const reload = page.getByRole("button", { name: "Reload page" });
+      await browserExpect(reload).toBeVisible();
+      await browserExpect(reload).toBeEnabled();
+      await expectHitCorners(reload);
+      await screenshot(page, "window-load-error");
+      await checkedTap(reload);
+      await browserExpect(
+        page
+          .getByRole("status")
+          .filter({ hasText: "Send or clear unsent work" }),
+      ).toBeVisible();
+      await browserExpect(input).toHaveValue(draft);
+      await input.clear();
+      await checkedTap(reload);
+      const open = page.getByRole("button", {
+        name: "Open fullscreen",
+        exact: true,
+      });
+      await browserExpect(open).toBeVisible();
+      await checkedTap(open);
+      await browserExpect(page.locator("#main.fullscreen")).toBeVisible();
+      const exit = page.getByRole("button", {
+        name: "Exit fullscreen",
+        exact: true,
+      });
+      await checkedTap(exit);
+      await browserExpect(open).toBeVisible();
+    } finally {
+      try {
+        await context?.close();
+      } finally {
+        await stopServer(server);
+      }
+    }
+  },
   // Regression: #2505 #3269 the sidebar, fonts and desktop Chat window are ready before the first visible Chat frame.
   async function test_fresh_mobile_and_desktop(browser, base) {
     for (const [name, viewport, touch] of [

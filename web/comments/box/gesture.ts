@@ -3,6 +3,7 @@
 // unchanged. Touch taps explain the gesture; native cancel abandons it.
 import type { CommentBox } from "../../artifacts/artifact-state.js";
 import { imageCommentHint } from "../../image-preview/index.js";
+import { HOLD_MS, SLOP_PX } from "../../touch-hold.js";
 
 const inlineSources = new WeakMap<Element, Promise<string | null>>();
 
@@ -72,9 +73,8 @@ export function placeBox(
   return mark;
 }
 
-const HOLD_MS = 450;
-const SLOP_PX = 8;
-const MIN_SIZE = 0.01;
+const MIN_IMAGE_BOX_PX = 4;
+const MIN_PDF_BOX_FRACTION = 0.01;
 
 interface Point {
   x: number;
@@ -96,8 +96,7 @@ export function touchDrewBox(): boolean {
   return touchDrew;
 }
 
-function pointIn(frame: HTMLElement, event: PointerEvent): Point {
-  const rect = frame.getBoundingClientRect();
+function pointIn(rect: DOMRectReadOnly, event: PointerEvent): Point {
   const clamp = (value: number) => Math.min(1, Math.max(0, value));
   return {
     x: clamp((event.clientX - rect.left) / rect.width),
@@ -173,7 +172,7 @@ export function installBoxComments(pane: HTMLElement): void {
     const current: Press = {
       id: event.pointerId,
       frame,
-      from: pointIn(frame, event),
+      from: pointIn(frame.getBoundingClientRect(), event),
       client: { x: event.clientX, y: event.clientY },
       time: event.timeStamp,
     };
@@ -220,7 +219,8 @@ export function installBoxComments(pane: HTMLElement): void {
           return;
         }
       }
-      placeBox(frame, boxOf(frame, press.from, pointIn(frame, event)), mark);
+      const to = pointIn(frame.getBoundingClientRect(), event);
+      placeBox(frame, boxOf(frame, press.from, to), mark);
     },
     { capture: true },
   );
@@ -252,8 +252,14 @@ export function installBoxComments(pane: HTMLElement): void {
       if (event.pointerType !== "mouse") showHint(frame, from);
       return;
     }
-    const box = boxOf(frame, from, pointIn(frame, event));
-    if (box.w < MIN_SIZE || box.h < MIN_SIZE) {
+    const rect = frame.getBoundingClientRect();
+    const box = boxOf(frame, from, pointIn(rect, event));
+    const tooSmall = box.page
+      ? box.w < MIN_PDF_BOX_FRACTION || box.h < MIN_PDF_BOX_FRACTION
+      : mark.classList.contains("files-box-start") ||
+        box.w * rect.width < MIN_IMAGE_BOX_PX ||
+        box.h * rect.height < MIN_IMAGE_BOX_PX;
+    if (tooSmall) {
       mark.remove();
       if (box.image && event.pointerType !== "mouse") {
         drawnImage = frame;

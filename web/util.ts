@@ -4,11 +4,11 @@
 // Markdown tables share a scroll wrapper; long columns wrap at a readable minimum.
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import { mathExtension } from "./math.js";
+import { mathExtension } from "../src/markdown_math.js";
 import { PERSON_ICON } from "./icons.js";
 import "./icons.js";
-import { parseMessageMarkdown } from "./util/message-markdown.js";
-import { strikethrough } from "./util/strikethrough.js";
+import { parseMessageMarkdown } from "../src/message_markdown.js";
+import { strikethrough } from "../src/markdown_strikethrough.js";
 
 marked.setOptions({ gfm: true });
 marked.use(mathExtension, strikethrough);

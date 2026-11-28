@@ -76,6 +76,37 @@ exec ${Bun.$.escape(realGit)} "$@"
       process.env.PATH = `${bin}:${process.env.PATH}`;
       return { checkout: "pr-checkout", plain: "pr-plain", started, release };
     },
+    "seed-cross-repo-references": async () => {
+      const root = await mkdtemp(
+        join(instance.config.paths.DATA_DIR, "cross-repo-references-"),
+      );
+      const checkout = join(root, "checkout");
+      await mkdir(checkout);
+      await git(checkout, "init");
+      await git(
+        checkout,
+        "remote",
+        "add",
+        "origin",
+        "https://github.com/evolutionaryscale/evolutionaryscale",
+      );
+      const answer = [
+        "Merged chanzuckerberg/agentic-cli-hooks#155 and chanzuckerberg/biohub-ai-infra#610.",
+        "hooks #155; Hooks #155; hooks PR #155; **hooks** #155; hooks **#155**; hooks **PR #155**; hooks [#155]; biohub-ai-infra #610; biohub-ai-infra: #610; biohub-ai-infra (#610).",
+        "[evolutionaryscale](https://github.com/chanzuckerberg/biohub-ai-infra) (**PR #610**) is related.",
+        "#12 is local; evolutionaryscale #13 is too. See also #14. Fixed in #15.",
+        "Fixes #16. merged #17. Closes #18.",
+        "[Full PR link](https://github.com/chanzuckerberg/agentic-cli-hooks/pull/156)",
+      ].join("\n\n");
+      for (const [cid, cwd] of [
+        ["cross-repo-checkout", checkout],
+        ["cross-repo-plain", root],
+      ] as const) {
+        await create(cid, cid, rootAgentId(), undefined, cwd);
+        await sayDurable(cid, "What pull requests did you work on?", answer);
+      }
+      return { checkout: "cross-repo-checkout", plain: "cross-repo-plain" };
+    },
     "seed-changes-base": async () => {
       const cwd = await mkdtemp(join(tmpdir(), "changes-base-"));
       await git(cwd, "init", "-q", "-b", "main");

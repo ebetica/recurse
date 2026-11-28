@@ -17,6 +17,7 @@ export interface SelectionSource {
   interactionStarted: number;
   touch: boolean;
   changed: boolean;
+  rangeAtStart: Range | null;
   blocked: boolean;
   blockedRange: Range | null;
   offerToken: number;

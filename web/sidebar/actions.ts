@@ -55,6 +55,20 @@ export async function runAction(
   await turn;
 }
 
+/** Change the row's own mark on its backend, not the mark of its parent. */
+export async function setUnread(id: string, unread: boolean): Promise<void> {
+  try {
+    const response = await backendFor(id).jpost(
+      `/api/conversations/${encodeURIComponent(id)}/unread`,
+      { unread },
+    );
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    void refreshSidebarTree();
+  } catch {
+    requestUiStatus(`Couldn't mark ${unread ? "unread" : "read"}; try again`);
+  }
+}
+
 let sending: Promise<void> = Promise.resolve();
 
 async function send(

@@ -51,8 +51,10 @@ Sections may group one level of child sections; the example's tag groups contain
 
 The sidebar script API is experimental and may change without migration; Recurse updates may require editing the script.
 
-Rows expose `unread`, true after a notification-eligible finish not yet viewed on any device. The shared renderer shows its dot automatically for built-in and custom layouts, including remotes that supply the state. Opening the conversation clears it server-side, even with notifications off.
+Rows expose `unread`, true when the agent itself sends a new reply while no device is viewing its conversation. The shared renderer shows its dot automatically for built-in and custom layouts, including remotes that supply the state. Opening the conversation clears it server-side, even with notifications off.
 
 - `sidebar_script` shows the instance's current script (built-in unless customised) and its last 10 versions.
 - `set_sidebar_script` replaces it with `script`: an ES module, at most 16 KB, whose default export `sidebar(rows, now)` returns sections. It must run on current rows before saving. The result lists each section's row count.
 - `undo_sidebar_script` restores the previous version; `reset_sidebar_script` restores the built-in script.
+
+Give a `rowActions` entry `swipe: "left"` or `swipe: "right"` to show it on a phone in script order. The first action runs on a full swipe unless it sets `fullSwipe: false`. Use `do: "toggleUnread"`, `do: "more"` or `do: "delete"` for the built-in swipe commands. Subagents that are not explicitly listed inherit their section's `do` commands, not its tag actions. Delete always asks for confirmation and needs `fullSwipe: true` even to ask on a full swipe. See [phone swipe actions](../../web/sidebar/README.md#phone-swipe-actions).

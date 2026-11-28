@@ -119,8 +119,11 @@ export interface FilesRoutesDeps {
   mutateExternalStorage<T>(work: () => Promise<T>): Promise<T>;
   /** mutation_guard._to_thread_fenced. */
   fenced<T>(work: () => Promise<T>): Promise<T>;
-  /** supervisor.deliver(owner, text, start=False, source/origin=platform). */
-  deliverPlatformNote(owner: string, text: string): Promise<unknown>;
+  removeArtifact(
+    owner: string,
+    id: string,
+    expected: string,
+  ): Promise<{ result: Rec; complete: boolean }>;
 }
 
 const errorName = (error: unknown) =>
@@ -187,37 +190,6 @@ function artifactFilename(name: string): string {
     .replace(/^[.-]+|[.-]+$/g, "")
     .slice(0, 180);
   return safe || "artifact";
-}
-
-function artifactDeletionMessage(result: Rec): string {
-  return (
-    `[Artifact deleted] “${String(result.title)}” ` +
-    `(id: ${String(result.id)}, version: ${String(result.version)}) was deleted. ` +
-    "Do not recreate it unless the operator explicitly asks."
-  );
-}
-
-/** Durably notify, then retire the tombstone for background sweeping. */
-export async function finishArtifactDeletion(
-  deps: Pick<
-    FilesRoutesDeps,
-    "artifacts" | "mutateExternalStorage" | "deliverPlatformNote"
-  >,
-  result: Rec,
-): Promise<boolean> {
-  const owner = String(result.owner_agent_id);
-  if (result.notification_pending)
-    await deps.mutateExternalStorage(() =>
-      deps.deliverPlatformNote(owner, artifactDeletionMessage(result)),
-    );
-  return deps.mutateExternalStorage(() =>
-    artifacts.finalizeDelete(
-      deps.artifacts,
-      owner,
-      String(result.id),
-      String(result.deletion_id),
-    ),
-  );
 }
 
 /** Starlette Response: text/* media types gain `; charset=utf-8`. */
@@ -853,15 +825,18 @@ export function registerFileRoutes(
     "/api/artifacts",
     async (ex) => {
       try {
+        const owner = artifactOwner(ex.query.agent);
+        const selected = str(ex, "selected");
+        const listed = await artifacts.listArtifacts(deps.artifacts, owner, {
+          status: str(ex, "status"),
+          limit: ex.query.limit as number,
+        });
+        const deleted =
+          selected &&
+          !listed.artifacts.some((item) => item.id === selected) &&
+          (await artifacts.hasDeletionReceipt(deps.artifacts, owner, selected));
         return jsonResponse(
-          await artifacts.listArtifacts(
-            deps.artifacts,
-            artifactOwner(ex.query.agent),
-            {
-              status: str(ex, "status"),
-              limit: ex.query.limit as number,
-            },
-          ),
+          deleted ? { ...listed, deleted_selected: selected } : listed,
         );
       } catch (error) {
         if (error instanceof artifacts.ArtifactError) artifactFailure(error);
@@ -872,6 +847,7 @@ export function registerFileRoutes(
       query: {
         agent: { type: "str", required: true },
         status: { type: "str" },
+        selected: { type: "str" },
         limit: { type: "int", default: 100 },
       },
     },
@@ -1118,27 +1094,9 @@ export function registerFileRoutes(
       if (typeof agent !== "string" || typeof expected !== "string")
         throw new HttpError(422, "agent and expected_version are required");
       const owner = artifactOwner(agent);
-      let result: Rec;
-      try {
-        result = await deps.mutateExternalStorage(() =>
-          artifacts.deleteArtifact(
-            deps.artifacts,
-            owner,
-            ex.params.artifact_id!,
-            expected,
-          ),
-        );
-      } catch (error) {
-        if (error instanceof artifacts.ArtifactError) artifactFailure(error);
-        throw error;
-      }
-      let complete: boolean;
-      try {
-        complete = await finishArtifactDeletion(deps, result);
-      } catch (error) {
-        if (!(error instanceof artifacts.ArtifactError)) throw error;
-        complete = false;
-      }
+      const { result, complete } = await deps
+        .removeArtifact(owner, ex.params.artifact_id!, expected)
+        .catch(artifactFailure);
       if (!complete)
         throw new HttpError(
           503,

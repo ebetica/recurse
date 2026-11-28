@@ -47,6 +47,8 @@ export function checkNewAgent(value: unknown): NewAgent | undefined {
 }
 
 type Names = string | string[];
+type SwipeDirection = "left" | "right";
+type SwipeCommand = "toggleUnread" | "delete" | "more";
 export interface ScriptAction {
   label: string;
   icon?: string;
@@ -60,6 +62,14 @@ export interface ScriptAction {
   if?: string;
   unless?: string;
   rows?: (SidebarRow | string)[];
+  /** Show on a touch swipe in this direction, in rowActions order. */
+  swipe?: SwipeDirection;
+  /** Keep a tag action out of the hover buttons and hold menu. */
+  swipeOnly?: boolean;
+  /** Built-in command, available on swipe only and instead of tag changes. */
+  do?: SwipeCommand;
+  /** Let a full swipe on Delete open its confirmation. */
+  fullSwipe?: boolean;
 }
 export interface ScriptSection {
   title: string;
@@ -85,6 +95,10 @@ export interface Action {
   until?: number | "ask";
   if?: string;
   unless?: string;
+  swipe?: SwipeDirection;
+  swipeOnly?: boolean;
+  do?: SwipeCommand;
+  fullSwipe?: boolean;
   /** A section action's targets, picked when the arrangement ran. */
   ids: string[];
 }
@@ -109,6 +123,7 @@ const LIMITS = {
   children: 12,
   actions: 2,
   rowActions: 4,
+  totalRowActions: 12,
   text: 40,
 };
 /** An arrangement whose output fails the checks; shown to the operator. */
@@ -190,8 +205,45 @@ function action(
       );
     checked.start = true;
   }
+  if (a.swipe !== undefined) {
+    if (
+      sectionRows !== undefined ||
+      (a.swipe !== "left" && a.swipe !== "right")
+    )
+      throw new ArrangementError(
+        `${label}: swipe must be left or right on a row action`,
+      );
+    checked.swipe = a.swipe;
+  }
+  if (a.swipeOnly !== undefined || a.fullSwipe !== undefined) {
+    if (
+      !checked.swipe ||
+      (a.swipeOnly !== undefined && typeof a.swipeOnly !== "boolean") ||
+      (a.fullSwipe !== undefined && typeof a.fullSwipe !== "boolean")
+    )
+      throw new ArrangementError(
+        `${label}: swipeOnly and fullSwipe need a swipe direction and a boolean value`,
+      );
+    checked.swipeOnly = a.swipeOnly;
+    checked.fullSwipe = a.fullSwipe;
+  }
+  if (a.do !== undefined) {
+    if (
+      !checked.swipe ||
+      !["toggleUnread", "delete", "more"].includes(a.do) ||
+      checked.set.length ||
+      checked.clear.length ||
+      checked.ask ||
+      a.until !== undefined
+    )
+      throw new ArrangementError(
+        `${label}: do needs a swipe direction and no tag changes`,
+      );
+    checked.do = a.do;
+  }
   if (
     !checked.start &&
+    !checked.do &&
     !checked.set.length &&
     !checked.clear.length &&
     !checked.ask
@@ -242,10 +294,21 @@ export function checkSections(output: unknown, rows: SidebarRow[]): Section[] {
       actions: list(s.actions, LIMITS.actions, `${title} actions`).map((a) =>
         action(a, known, sectionIds),
       ),
-      rowActions: list(s.rowActions, LIMITS.rowActions, `${title} row actions`)
+      rowActions: list(
+        s.rowActions,
+        LIMITS.totalRowActions,
+        `${title} row actions`,
+      )
         .map((a) => action(a, known))
         .map((a) => ({ ...a, ids: [] })),
     };
+    if (
+      section.rowActions.filter((a) => !a.do && !a.swipeOnly).length >
+      LIMITS.rowActions
+    )
+      throw new ArrangementError(
+        `${title} has more than ${LIMITS.rowActions} non-swipe-only row actions`,
+      );
     if (s.hideWhenEmpty !== undefined) {
       if (typeof s.hideWhenEmpty !== "boolean")
         throw new ArrangementError(`${title}: hideWhenEmpty must be a boolean`);

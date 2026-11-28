@@ -1,5 +1,6 @@
-// Quote selected agent text into the main composer. Touch
-// Reserve 28px for native handles below, or 64px for the toolbar above.
+// Quote selected agent text into the main composer.
+// Invariant: a cancelled touch can finish a new selection, but must not reoffer an old one.
+// On touch, reserve 28px for handles below, or 64px for the toolbar above.
 import { autosize } from "./composer/index.js";
 import { inputEl } from "./dom.js";
 import {
@@ -23,6 +24,7 @@ document.body.appendChild(offer);
 
 let pending: PendingSelection | null = null;
 let pointerSelecting = false;
+let selectionAtTouchStart: Range | null = null;
 
 function inAgentContent(node: Node): Element | null {
   const element =
@@ -78,7 +80,7 @@ function place(element: HTMLElement, range: Range): void {
   element.style.top = `${Math.max(8, top)}px`;
 }
 
-function showOffer(): void {
+function showOffer(previousRange: Range | null = null): void {
   if (pointerSelecting) return;
   const selection = window.getSelection();
   if (!selection || selection.isCollapsed || !selection.rangeCount) {
@@ -86,6 +88,12 @@ function showOffer(): void {
     return;
   }
   const original = selection.getRangeAt(0);
+  if (
+    previousRange &&
+    original.compareBoundaryPoints(Range.START_TO_START, previousRange) === 0 &&
+    original.compareBoundaryPoints(Range.END_TO_END, previousRange) === 0
+  )
+    return;
   const text = selection.toString().trimEnd();
   const content = inAgentContent(original.startContainer);
   const range = content ? selectionCommentRange(selection, content) : original;
@@ -117,27 +125,28 @@ document.addEventListener(
     const target = event.target as Node | null;
     if (target && offer.contains(target)) return;
     pointerSelecting = !!target && !!inAgentContent(target);
+    const selection =
+      pointerSelecting && event.pointerType === "touch"
+        ? window.getSelection()
+        : null;
+    selectionAtTouchStart = selection?.rangeCount
+      ? selection.getRangeAt(0).cloneRange()
+      : null;
     if (pending) hide();
   },
   true,
 );
-document.addEventListener(
-  "pointerup",
-  () => {
-    if (!pointerSelecting) return;
-    pointerSelecting = false;
-    showOffer();
-  },
-  true,
-);
-document.addEventListener(
-  "pointercancel",
-  () => {
-    pointerSelecting = false;
-  },
-  true,
-);
-document.addEventListener("selectionchange", showOffer);
+function finishPointerSelection(event: PointerEvent): void {
+  if (!pointerSelecting) return;
+  pointerSelecting = false;
+  const previousRange = selectionAtTouchStart;
+  selectionAtTouchStart = null;
+  if (event.type === "pointerup") showOffer();
+  else if (event.pointerType === "touch") showOffer(previousRange);
+}
+document.addEventListener("pointerup", finishPointerSelection, true);
+document.addEventListener("pointercancel", finishPointerSelection, true);
+document.addEventListener("selectionchange", () => showOffer());
 function reposition(): void {
   if (!pending) return;
   place(offer, pending.range);

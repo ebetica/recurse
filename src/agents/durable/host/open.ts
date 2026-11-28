@@ -12,11 +12,12 @@ import type {
   Harness,
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import type { LiveRow, ShellInput } from "../follow.ts";
 import type { Reporter } from "../report.ts";
 import type { RequestCaptures } from "../request_capture.ts";
 import { modelRef, requireModel } from "../model_selection";
+import { stampMessage } from "../../runtime";
 import { INFO, WARNING } from "../../../observability/runtime_logging";
 import {
   awaitedSpan,
@@ -25,6 +26,7 @@ import {
 } from "../../../observability/slow-span";
 import { resumeClear, submitHeld, type ClearState } from "./clear.ts";
 import { syncAgent } from "./send.ts";
+import { draft } from "./submission.ts";
 import {
   CONTEXT_RETENTION_MS,
   failureLog,
@@ -60,6 +62,8 @@ export interface Opened {
   parent?: string;
   /** The extension a side fork adds to its parent's selection. */
   side: Extension;
+  /** The agent's run hooks: on new input (send.ts) and when a run ends. */
+  runHooks: ReturnType<typeof installHooks>["runHooks"];
   /** Provider session id → conversation id, for request capture. */
   sessions: Map<string, string>;
   /** Side session id → its parent's session id, sent to providers instead. */
@@ -622,6 +626,7 @@ function handle(
     owners: target.owners,
     attached: target.attached,
     side: hooks.side,
+    runHooks: hooks.runHooks,
   };
 }
 
@@ -747,7 +752,34 @@ async function follow(
     rowChanged: () => host.deps.rowChanged?.(cid),
     viewChanged: () => host.viewChanged(cid),
     safetyChanged: () => host.deps.safetyChanged?.(cid),
+    runEnded: (end) => opened.runHooks.settled(end),
     prsCreated: (urls, since) => host.deps.prsCreated?.(cid, urls, since),
+    replyFinished:
+      host.deps.replyFinished &&
+      ((reply, text, current) => {
+        const allowed = () => current() && !host.clears.has(cid);
+        const { conversation } = opened;
+        host.deps.replyFinished!(cid, text, allowed, (content) =>
+          conversation.commit(async (tx) => {
+            // Invariant: A write in an idle conversation with a nonempty inbox
+            // can promote queued input. Never let a notice start or join a run.
+            if (
+              (await tx.doc(rt.LiveDoc, conversation.id)).run !== undefined ||
+              (await tx.doc(rt.InboxDoc, conversation.id)).items.length ||
+              !allowed()
+            )
+              return;
+            await conversation.submit(
+              tx,
+              draft({
+                content: stampMessage({ content, origin: "platform" }, cid),
+                requestId: `reply-image-notice:${reply}`,
+                note: true,
+              }),
+            );
+          }, context),
+        );
+      }),
   });
 }
 

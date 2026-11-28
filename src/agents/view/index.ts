@@ -7,4 +7,6 @@ export {
   CompletedReplyCursorError,
   CompletedReplyCursorExpired,
   CompletedReplyStorageUnavailable,
+  unavailable,
 } from "./reader";
+export { pendingUserFields, splitPiUserText } from "./session_entries";

@@ -76,9 +76,35 @@ export function routes(fx: Fixture): Routes {
       ]);
       return { agent: "durable-demo" };
     },
-    "seed-activity-card": async ({ isolated }) => {
+    "seed-activity-card": async ({ isolated, agentWake }) => {
       const agent = `activity-card-${hex(4)}`;
-      await create(agent, "Review command results");
+      await create(
+        agent,
+        agentWake ? "Review sample results" : "Review command results",
+      );
+      if (agentWake) {
+        const child = `${agent}-child`;
+        const recipient = `${agent}-recipient`;
+        await create(child, "Sample reviewer", agent);
+        await create(recipient, "Results reader");
+        script(agent).setResponses([
+          fauxAssistantMessage(
+            [
+              fauxThinking("**Checking samples**\nThe comparison is ready."),
+              fauxToolCall("bash", {
+                command: `bun "$RECURSE_SRC/tools/subagent.ts" send ${recipient} 'The comparison is ready.'`,
+              }),
+            ],
+            { stopReason: "toolUse" },
+          ),
+          fauxAssistantMessage("The sample results agree."),
+        ]);
+        await submitDurable(
+          agent,
+          `[recurse-origin: agent]\n[recurse-from: ${child}]\nI compared both samples.`,
+        );
+        return { agent };
+      }
       const directory = await agentTemp.agentTempPath(
         conversations.load(agent)!,
       );

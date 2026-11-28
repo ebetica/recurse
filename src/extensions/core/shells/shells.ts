@@ -45,6 +45,7 @@ import {
   TOOL_CALL_ID_ENV,
 } from "./registry.ts";
 import { RegistryStore } from "./persist.ts";
+export { RegistryStore };
 import { middleElide } from "./status.ts";
 
 export const SHELL_TASK = "recurse.shell";

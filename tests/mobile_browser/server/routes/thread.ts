@@ -205,6 +205,64 @@ export function routes(fx: Fixture): Routes {
         await unlink(file);
       }
     },
+    "hook-rewritten-call": async () => {
+      const file = join(tmpdir(), `import-pi-hook-${hex()}.jsonl`);
+      const at = Date.parse("2026-10-07T05:45:46.110Z");
+      const message = (id: string, parentId: string | null, value: object) => ({
+        type: "message",
+        id,
+        parentId,
+        timestamp: new Date(at).toISOString(),
+        message: { ...value, timestamp: at },
+      });
+      await writeFile(
+        file,
+        [
+          { type: "session", version: 3, id: "hook-pi", cwd: tmpdir() },
+          message("h1", null, {
+            role: "user",
+            content:
+              "## Message\n[recurse-origin: operator]\nShow the last two commits.",
+          }),
+          message("h2", "h1", {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "hook-call",
+                name: "bash",
+                arguments: { command: "git log -2" },
+              },
+            ],
+            stopReason: "toolUse",
+          }),
+          message("h3", "h2", {
+            role: "toolResult",
+            toolCallId: "hook-call",
+            toolName: "bash",
+            content: [{ type: "text", text: "abc123 First\ndef456 Second\n" }],
+            details: {
+              recurseHookArguments: { command: "git --no-pager log -2" },
+            },
+            isError: false,
+          }),
+          message("h4", "h3", {
+            role: "assistant",
+            content: [
+              { type: "text", text: "The last two commits are listed." },
+            ],
+            stopReason: "stop",
+          }),
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n") + "\n",
+      );
+      try {
+        return await importRecordedPi(file);
+      } finally {
+        await unlink(file);
+      }
+    },
     "seed-side-history": async () => {
       const cid = "side-history";
       await create(cid, "Side history");

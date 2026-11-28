@@ -1,5 +1,5 @@
 import { expect } from "bun:test";
-import { mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, writeFile } from "node:fs/promises";
 import { retire } from "../../src/utils/trash";
 import type { BrowserContext, Route } from "playwright";
 import { expect as browserExpect } from "playwright/test";
@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   dispatchArtifactSelection,
+  expectHitCorners,
   openPage,
   postFixture,
   runBrowserTests,
@@ -1029,6 +1030,197 @@ export const tests: BrowserTest[] = [
       }
     } finally {
       retire(temporary, join(tmpdir(), ".trash"));
+    }
+  },
+  // Regression: #3713 use focusable figures and stable touch targets; #3705 preview and edit Markdown.
+  async function test_explorer_markdown_previews_and_edits(browser, base) {
+    const root = await mkdtemp(join(tmpdir(), "browser-explorer-markdown-"));
+    try {
+      const path = "docs/guide.md";
+      const title = "Workspace guide";
+      const text = `# ${title}\n\n**Results** from the sample run. [Run notes](summary.md)\n\n<!--\n${"Sample run notes.\n".repeat(950)}-->\n\n![Sample chart](chart.svg)\n`;
+      await mkdir(join(root, "docs"));
+      await writeFile(join(root, "docs/summary.md"), "# Run summary\n");
+      await writeFile(
+        join(root, "docs/chart.svg"),
+        `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="120" viewBox="0 0 320 120"><rect width="320" height="120" rx="8" fill="#1b435a"/><path d="M20 94h280" stroke="#b5d5e7"/><path d="M36 94V72h44v22m24 0V58h44v36m24 0V45h44v49m24 0V26h44v68" fill="#77c9b6"/></svg>`,
+      );
+      for (const width of [1280, 390]) {
+        const phone = width === 390;
+        await writeFile(join(root, path), text);
+        const { agent } = await postFixture(base, "seed-file-edit", {
+          agent: `explorer-markdown-${width}`,
+          workdir: root,
+        });
+        const { context, page } = await openPage(browser, {
+          viewport: { width, height: 915 },
+          touch: phone,
+        });
+        try {
+          await page.goto(`${base}#agent=${agent}`);
+          await openExplorer(page, width);
+          const activate = (control: ReturnType<typeof page.locator>) =>
+            phone ? control.tap() : control.click();
+          const tree = page.locator('.pane-col[data-pane="explorer"]');
+          const row = (name: string) =>
+            tree.locator(`.explorer-row[data-path="${name}"]`);
+          const file = (name: string) =>
+            phone
+              ? tree
+              : page.locator(".pane-col.file-tab", {
+                  has: page.locator(".explorer-filename", { hasText: name }),
+                });
+          await activate(row("docs"));
+          await activate(row(path));
+          const guide = file(path);
+          const heading = guide.getByRole("heading", {
+            name: title,
+            exact: true,
+          });
+          await browserExpect(heading).toBeVisible();
+          const image = guide.getByRole("button", {
+            name: "Open image: Sample chart",
+            exact: true,
+          });
+          await browserExpect(image).toBeVisible();
+          await browserExpect(image).toHaveAttribute("src", /\/path-image\?/);
+          const viewer = page.getByRole("dialog", { name: "Image viewer" });
+          if (phone) await image.tap();
+          else {
+            await image.click();
+            expect(await viewer.count()).toBe(0);
+            await image.dblclick();
+          }
+          const original = viewer.locator("img.files-image");
+          await browserExpect(original).toHaveAttribute("alt", "chart.svg");
+          await original.evaluate((node) =>
+            (node as HTMLImageElement).decode(),
+          );
+          await screenshot(page, `explorer/${width}-markdown-figure`);
+          await page.keyboard.press("Escape");
+          await viewer.waitFor({ state: "detached" });
+          await page.waitForFunction(
+            () => !(globalThis as any).history.state?.imagePopout,
+          );
+          await browserExpect(
+            guide.getByText("Run notes", { exact: true }),
+          ).toBeVisible();
+          await browserExpect(
+            guide.getByRole("link", { name: "Run notes" }),
+          ).toHaveCount(0);
+          const modes = guide.getByRole("group", { name: "Markdown view" });
+          const source = modes.getByRole("button", { name: "Source" });
+          const preview = modes.getByRole("button", { name: "Preview" });
+          await browserExpect(preview).toHaveAttribute("aria-pressed", "true");
+          if (phone) {
+            await expectHitCorners(source);
+            await expectHitCorners(preview);
+          }
+          await screenshot(page, `${width}-markdown-preview`);
+          const code = guide.locator(".explorer-source code");
+          await activate(source);
+          await browserExpect(source).toHaveAttribute("aria-pressed", "true");
+          await browserExpect(heading).toBeHidden();
+          expect(await code.textContent()).toBe(text);
+          if (!phone) {
+            const comment = "Explain the sample run";
+            await dispatchArtifactSelection(
+              page,
+              "mouse",
+              title,
+              guide.locator(".explorer-source"),
+            );
+            const draft = page.locator(".report-comment-popover:not([hidden])");
+            await draft.locator("textarea").fill(comment);
+            await draft
+              .getByRole("button", { name: "Comment", exact: true })
+              .click();
+            await guide.locator(".report-comment").waitFor();
+            await activate(preview);
+            await image.focus();
+            await browserExpect(image).toBeFocused();
+            await page.keyboard.press("Control+Enter");
+            expect(await viewer.count()).toBe(0);
+            await page.keyboard.press("Enter");
+            await viewer.waitFor();
+            await page.keyboard.press("Escape");
+            await viewer.waitFor({ state: "detached" });
+            await browserExpect(image).toBeFocused();
+            await page.waitForFunction(
+              () => !(globalThis as any).history.state?.imagePopout,
+            );
+            await activate(source);
+            await browserExpect(
+              guide.locator(".report-comment-input"),
+            ).toHaveValue(comment);
+            await guide.locator(".report-comment-del").click();
+          }
+
+          const files = tree.getByRole("button", {
+            name: "Files",
+            exact: true,
+          });
+          if (phone) await activate(files);
+          else await openExplorer(page, width);
+          await activate(row("docs/summary.md"));
+          await browserExpect(
+            file("docs/summary.md").getByRole("heading", {
+              name: "Run summary",
+            }),
+          ).toBeVisible();
+          if (phone) {
+            await activate(files);
+            await activate(row(path));
+            await browserExpect(heading).toBeVisible();
+            await browserExpect(preview).toHaveAttribute(
+              "aria-pressed",
+              "true",
+            );
+          } else {
+            await page
+              .getByRole("tab", { name: "guide.md", exact: true })
+              .click();
+            await browserExpect(source).toHaveAttribute("aria-pressed", "true");
+            await activate(preview);
+            await browserExpect(heading).toBeVisible();
+          }
+          await activate(
+            guide.getByRole("button", { name: "Edit", exact: true }),
+          );
+          const editor = guide.getByRole("textbox", { name: "File text" });
+          await browserExpect(editor).toHaveValue(text);
+          const edited = text.replace(title, "Updated workspace guide");
+          await editor.fill(edited);
+          await activate(
+            guide.getByRole("button", { name: "Save", exact: true }),
+          );
+          await browserExpect(
+            guide.getByText("Saved.", { exact: true }),
+          ).toBeVisible();
+          expect(await readFile(join(root, path), "utf8")).toBe(edited);
+          if (phone) await activate(preview);
+          else await preview.press("Enter");
+          await browserExpect(
+            guide.getByRole("heading", { name: "Updated workspace guide" }),
+          ).toBeVisible();
+          if (!phone) await browserExpect(preview).toBeFocused();
+          if (phone)
+            await activate(
+              tree.getByRole("button", { name: "Close Explorer", exact: true }),
+            );
+          else
+            await page.getByRole("tab", { name: "Chat", exact: true }).click();
+          await browserExpect(
+            page
+              .locator("#messages .msg.assistant")
+              .filter({ hasText: "Acknowledged." }),
+          ).toBeVisible();
+        } finally {
+          await context.close();
+        }
+      }
+    } finally {
+      retire(root, join(tmpdir(), ".trash"));
     }
   },
   // Feature: #3251 opening Explorer focuses search, whose results update lazily.

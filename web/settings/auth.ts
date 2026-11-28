@@ -532,14 +532,18 @@ export function buildMuseSubscriptionSection(body: HTMLElement): void {
     }
   });
 }
-export function buildOpenRouterSection(body: HTMLElement): void {
+export function buildProviderApiKeySection(
+  body: HTMLElement,
+  provider: "Gemini" | "OpenRouter",
+): void {
   const { api, jpost } = settingsClient();
+  const path = `/api/pi/${provider.toLowerCase()}-auth`;
   body.innerHTML = `
     <div class="row auth-actions"><button type="button" class="settings-row apikey">API key</button>
       <button type="button" class="settings-row danger signout" hidden>Log out</button></div>
-    <div class="keypanel" hidden><label class="field">OpenRouter API key
-      <input type="password" class="key" aria-label="OpenRouter API key"
-        placeholder="sk-or-…" autocomplete="off"></label>
+    <div class="keypanel" hidden><label class="field">${provider} API key
+      <input type="password" class="key" ${provider === "OpenRouter" ? 'placeholder="sk-or-…"' : ""} autocomplete="off"></label>
+      ${provider === "Gemini" ? '<a class="btn quiet" href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Get an API key in Google AI Studio</a>' : ""}
       <div class="actions"><button type="button" class="primary savekey">Save key</button></div></div>
     <p class="msg"></p>`;
   const q = <T extends HTMLElement = HTMLElement>(s: string): T =>
@@ -552,7 +556,7 @@ export function buildOpenRouterSection(body: HTMLElement): void {
     msg.className = "msg " + cls;
     msg.textContent = text;
   };
-  providerDetail(body, "OpenRouter");
+  providerDetail(body, provider);
   q(".apikey").onclick = () => {
     q(".keypanel").hidden = false;
     key.focus();
@@ -563,8 +567,11 @@ export function buildOpenRouterSection(body: HTMLElement): void {
     signout.hidden = !on;
     window.dispatchEvent(new Event("recurse-auth-changed"));
   };
-  api("/api/pi/openrouter-auth")
-    .then((r) => r.json())
+  api(path)
+    .then((r) => {
+      if (!r.ok) throw new Error("Couldn't load sign-in status.");
+      return r.json();
+    })
     .then(applyStatus)
     .catch(() => markAuthError(body));
   save.addEventListener("click", async () => {
@@ -575,7 +582,7 @@ export function buildOpenRouterSection(body: HTMLElement): void {
     }
     save.disabled = true;
     try {
-      const r = await jpost("/api/pi/openrouter-auth/api-key", { key: value });
+      const r = await jpost(`${path}/api-key`, { key: value });
       if (!r.ok) {
         show("err", await errDetail(r, "Couldn't save the API key."));
         return;
@@ -583,7 +590,7 @@ export function buildOpenRouterSection(body: HTMLElement): void {
       applyStatus(await r.json());
       key.value = "";
       q(".keypanel").hidden = true;
-      show("ok", "OpenRouter API key saved.");
+      show("ok", `${provider} API key saved.`);
     } catch {
       show("err", "Network error. Try again.");
     } finally {
@@ -593,7 +600,7 @@ export function buildOpenRouterSection(body: HTMLElement): void {
   signout.addEventListener("click", async () => {
     signout.disabled = true;
     try {
-      const r = await jpost("/api/pi/openrouter-auth/logout");
+      const r = await jpost(`${path}/logout`);
       if (r.ok) {
         applyStatus(await r.json());
         show("", "Logged out.");

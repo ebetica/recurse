@@ -9,6 +9,7 @@ import {
   postFixture,
   runBrowserTests,
   type BrowserTest,
+  MERMAID_DIAGRAM,
 } from "./common";
 import {
   filePage,
@@ -154,9 +155,15 @@ export const tests: BrowserTest[] = [
   },
   // Regression: #3397 a Markdown picture click must open the shared viewer without consuming a text-selection drag.
   async function test_markdown_picture_clicks(browser, base, data) {
+    const headings =
+      "# Picture navigation\n\n## The chart\n\n### Details\n\n#### Labels\n\n##### Source\n\n###### About this example";
     const { agent, id } = await postFixture(base, "seed-artifact-sections", {
       markdown:
-        "# Picture navigation\n\nBefore image: select this sentence.\n\n![Artifact picture](diagram.svg)\n\nAfter image: keep the comment offer.\n\n[Notes](notes.md)\n\n![Blocked picture](https://example.com/blocked.svg)\n",
+        `${headings}\n\nBefore image: select this sentence.\n\n` +
+        '<img src="diagram.svg" alt="Artifact picture" width="50%">\n\n' +
+        '<img src="diagram.svg" alt="Small picture" height="25%">\n\n' +
+        "After image: keep the comment offer.\n\n[Notes](notes.md)\n\n![Blocked picture](https://example.com/blocked.svg)\n",
+      replyMarkdown: `${headings}\n\nHere is the document.`,
     });
     const store = {
       artifactsDir: join(data, "data", "artifact_repos"),
@@ -165,13 +172,24 @@ export const tests: BrowserTest[] = [
     const item = await artifacts.get(store, agent, id);
     await writeFile(
       join(String(item.repo_path), "diagram.svg"),
-      '<svg xmlns="http://www.w3.org/2000/svg" width="640" height="240"><rect width="640" height="240" fill="#8bc4ed"/><circle cx="140" cy="120" r="64" fill="#336b9a"/><text x="240" y="125" font-size="28">Artifact picture</text></svg>',
+      '<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="450" viewBox="0 0 640 240"><rect width="640" height="240" fill="#8bc4ed"/><circle cx="140" cy="120" r="64" fill="#336b9a"/><text x="240" y="125" font-size="28">Artifact picture</text></svg>',
     );
     await writeFile(
       join(String(item.repo_path), "notes.md"),
       "# Picture notes\n\n![File picture](diagram.svg)\n",
     );
     await artifacts.publish(store, agent, id);
+    const headingScale = (content: Element) => {
+      const body = parseFloat(
+        getComputedStyle(content.querySelector("p")!).fontSize,
+      );
+      return [...content.querySelectorAll("h1,h2,h3,h4,h5,h6")].map((heading) =>
+        Number(
+          (parseFloat(getComputedStyle(heading).fontSize) / body).toFixed(3),
+        ),
+      );
+    };
+    const layouts = [];
     for (const width of [1280, 412]) {
       const { context, page, errors } = await filePage(
         browser,
@@ -185,13 +203,39 @@ export const tests: BrowserTest[] = [
           external.push(request.url());
       });
       await page.goto(`${base}#agent=${agent}`);
-      await page.getByRole("link", { name: "Section", exact: true }).click();
+      const section = page.getByRole("link", { name: "Section", exact: true });
+      await section.waitFor();
+      const replyHeadings = await page
+        .locator(".msg.assistant .content")
+        .evaluate(headingScale);
+      await section.click();
       const report = page.locator('.pane-col[data-pane="report"]');
+      const markdown = report.locator(".artifact-markdown");
       const picture = report.locator(
         'img[alt="Artifact picture"]:not([hidden])',
       );
+      const small = report.locator('img[alt="Small picture"]:not([hidden])');
       await picture.waitFor();
-      await picture.evaluate((image: any) => image.decode());
+      await small.waitFor();
+      layouts.push({
+        width,
+        replyHeadings,
+        documentHeadings: await markdown.evaluate(headingScale),
+        imageWidthPercent: await picture.evaluate((image) => {
+          const body = image.closest(".artifact-markdown")!.querySelector("p")!;
+          return Math.round(
+            (100 * image.getBoundingClientRect().width) /
+              body.getBoundingClientRect().width,
+          );
+        }),
+        imageHeightPercent: await small.evaluate((image) =>
+          Math.round(
+            (100 * image.getBoundingClientRect().height) /
+              (image as HTMLImageElement).naturalHeight,
+          ),
+        ),
+      });
+      await fileShot(page, `artifact-markdown-layout-${width}.png`);
       if (width === 1280) {
         const text = (await report
           .getByText("Before image: select this sentence.", { exact: true })
@@ -261,6 +305,15 @@ export const tests: BrowserTest[] = [
       expect(errors).toEqual([]);
       await context.close();
     }
+    expect(layouts).toEqual(
+      [1280, 412].map((width) => ({
+        width,
+        replyHeadings: [1.25, 1.1, 1.02, 1, 0.83, 0.67],
+        documentHeadings: [2, 1.5, 1.25, 1, 0.875, 0.85],
+        imageWidthPercent: 50,
+        imageHeightPercent: 25,
+      })),
+    );
   },
   // Feature: #3362 #3307 #3369 #3397 Markdown retains shared images, sanitized links and visible heading jumps.
   async function test_published_file_opens_its_detail_view(
@@ -324,7 +377,7 @@ export const tests: BrowserTest[] = [
         expect(await detail.locator(".files-markdown strong").innerText()).toBe(
           "previews",
         );
-        await detail.locator(".files-markdown .mermaid-host svg").waitFor();
+        await detail.locator(`.files-markdown ${MERMAID_DIAGRAM}`).waitFor();
         await detail.locator(".files-markdown .katex-display .katex").waitFor();
         expect(await detail.locator(".files-markdown .katex").count()).toBe(2);
         await detail
@@ -459,11 +512,16 @@ export const tests: BrowserTest[] = [
             target: typeof image,
             shot: string,
             local = false,
+            artifact = false,
           ) => {
             await target.scrollIntoViewIfNeeded();
             await fileShot(page, shot.replace("image-", "document-"));
-            await target.click();
             const viewer = page.getByRole("dialog", { name: "Image viewer" });
+            await target.click();
+            if (!artifact) {
+              expect(await viewer.count()).toBe(0);
+              await target.dblclick();
+            }
             const shown = viewer.locator("img.files-image");
             await shown.waitFor();
             await shown.evaluate((node: any) => node.decode());
@@ -488,7 +546,7 @@ export const tests: BrowserTest[] = [
               .getByRole("button", { name: "Download", exact: true })
               .click();
             expect(await (await downloading).failure()).toBeNull();
-            await viewer.getByRole("button", { name: "Close image" }).click();
+            await page.keyboard.press("Escape");
             await viewer.waitFor({ state: "detached" });
             await page.waitForFunction(
               () => !(globalThis as any).history.state?.imagePopout,
@@ -528,7 +586,12 @@ export const tests: BrowserTest[] = [
             'img[alt="Artifact diagram"]:not([hidden])',
           );
           await artifactImage.waitFor();
-          await enlarge(artifactImage, "markdown-image-artifact-desktop.png");
+          await enlarge(
+            artifactImage,
+            "markdown-image-artifact-desktop.png",
+            false,
+            true,
+          );
           await context.route("https://example.com/image-link", (route) =>
             route.fulfill({ body: "Linked image destination" }),
           );
@@ -552,9 +615,12 @@ export const tests: BrowserTest[] = [
           ).toBe(0);
           expect(remote).toEqual([]);
         } else {
-          await image.click();
+          await image.tap();
           const viewer = page.getByRole("dialog", { name: "Image viewer" });
-          await viewer.waitFor();
+          await viewer
+            .locator("img.files-image")
+            .evaluate((image: any) => image.decode());
+          await fileShot(page, "markdown-image-files-phone.png");
           await viewer
             .getByRole("button", { name: "Close image", exact: true })
             .click();

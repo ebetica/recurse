@@ -79,11 +79,14 @@ const IS_MAC = /Mac|iP(hone|ad|od)/.test(
 // Coarse primary pointer selects touch UI/native Enter behavior.
 export const primaryPointerIsCoarse = (): boolean =>
   matchMedia("(pointer: coarse)").matches;
+export const platformModifierPressed = (event: KeyboardEvent): boolean =>
+  IS_MAC ? event.metaKey && !event.ctrlKey : event.ctrlKey && !event.metaKey;
 // Formats platform chords; mac uppercase implies Shift, Ctrl spells it out.
 export const chordLabel = (k: string, shift = false, upper = false): string => {
+  const key = k.length === 1 ? k.toLowerCase() : k;
   if (IS_MAC) {
-    if (shift && upper) return "⌘" + k.toUpperCase();
-    return "⌘" + (shift ? "⇧" : "") + k.toLowerCase();
+    if (shift && upper) return "⌘" + key.toUpperCase();
+    return "⌘" + (shift ? "⇧" : "") + key;
   }
-  return "Ctrl+" + (shift ? "Shift+" : "") + k.toLowerCase();
+  return "Ctrl+" + (shift ? "Shift+" : "") + key;
 };

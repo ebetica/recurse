@@ -16,6 +16,8 @@ import { AsyncMutex, TaskSet } from "./utils/tasks";
 export const STOP_GRACE_MS = 2000;
 export const MAX_REPORTED_PROCESSES = 12;
 const UNVERIFIED_IDENTITY = "unverified";
+const REAP_BACKOFF_MIN_MS = 100;
+const REAP_BACKOFF_MAX_MS = 5_000;
 
 class ProcessRegistryUnreadable extends Error {
   override name = "ProcessRegistryUnreadable";
@@ -183,6 +185,10 @@ export class ProcessLifecycle {
   /** The subset with a live local child object. */
   readonly owned = new Map<string, [ProcessHandle, OwnedProcess]>();
   readonly reaps = new TaskSet();
+  private readonly scheduledReaps = new Map<
+    OwnedProcess,
+    ReturnType<typeof setTimeout> | undefined
+  >();
   private startupAllowsSweep = false;
   private spawnsOpen = true;
   private readonly spawnLock = new AsyncMutex();
@@ -863,10 +869,33 @@ export class ProcessLifecycle {
     await this.reaps.drain();
   }
 
-  /** TERM→KILL and forget a registered child outside the cancelled caller. */
+  /** Recheck and stop an owned child outside the cancelled caller. */
   scheduleReap(proc: OwnedProcess): boolean {
-    if (!this.isOwned(proc)) return false;
-    this.detach("process_reap", () => this.terminate(proc));
+    const handle = this.ownedHandle(proc);
+    if (!handle) return false;
+    if (this.scheduledReaps.has(proc)) return true;
+    const attempt = (delay: number) => {
+      this.scheduledReaps.set(proc, undefined);
+      void this.reaps
+        .spawn("process_reap", async () => {
+          await this.terminate(proc);
+          if (!this.isOwned(proc)) {
+            this.scheduledReaps.delete(proc);
+          } else if (this.spawnsOpen) {
+            // Idle retry timers do not hold unrelated reaps or shutdown drains.
+            const next = setTimeout(
+              () => attempt(Math.min(delay * 2, REAP_BACKOFF_MAX_MS)),
+              delay,
+            );
+            next.unref();
+            this.scheduledReaps.set(proc, next);
+          } else {
+            this.scheduledReaps.delete(proc);
+          }
+        })
+        .catch(() => undefined);
+    };
+    attempt(REAP_BACKOFF_MIN_MS);
     return true;
   }
 
@@ -960,6 +989,11 @@ export class ProcessLifecycle {
   /** Stop this generation's foreground groups; detached shells stay. */
   async shutdownCleanup(graceMs = this.termGraceMs): Promise<boolean> {
     this.spawnsOpen = false;
+    for (const [proc, pending] of this.scheduledReaps) {
+      if (pending === undefined) continue;
+      clearTimeout(pending);
+      this.scheduledReaps.delete(proc);
+    }
     const processes = await this.spawnLock.run(async () =>
       [...this.owned.values()].map(([, proc]) => proc),
     );

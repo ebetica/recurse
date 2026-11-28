@@ -1,4 +1,41 @@
-/* Document page navigation in the shared Artifact pane. */
+/* Shared Markdown document headings and Artifact page navigation. */
+.content.artifact-markdown {
+  & :is(h1, h2, h3, h4, h5, h6) {
+    margin: var(--space-6) 0 var(--space-5);
+    font-weight: 600;
+    line-height: 1.25;
+  }
+  & :is(h1, h2) {
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--border);
+  }
+  & h1 {
+    font-size: 2em;
+  }
+  & h2 {
+    font-size: 1.5em;
+  }
+  & h3 {
+    font-size: 1.25em;
+  }
+  & h4 {
+    font-size: 1em;
+  }
+  & h5 {
+    font-size: 0.875em;
+  }
+  & h6 {
+    font-size: 0.85em;
+    color: var(--muted);
+  }
+  & > :first-child {
+    margin-top: 0;
+  }
+  & > :last-child {
+    margin-bottom: 0;
+  }
+}
+
 .artifact-page-nav {
   display: flex;
   align-items: center;

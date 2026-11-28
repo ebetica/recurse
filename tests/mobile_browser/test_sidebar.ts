@@ -4,11 +4,15 @@ import type { BrowserContext, Locator, Request } from "playwright";
 import { expect as browserExpect } from "playwright/test";
 import {
   captureErrors,
+  expectHitCorners,
   gotoRoot,
   openPage,
   postFixture,
   rootAgentId,
   screenshot,
+  showAgentList,
+  startServer,
+  stopServer,
   type BrowserTest,
 } from "./common";
 import {
@@ -21,6 +25,279 @@ import {
 } from "./sidebar_support";
 
 export const tests: BrowserTest[] = [
+  // Feature: #3707 phone swipes use script order and keep deletion deliberate.
+  async function test_sidebar_swipe_actions(browser) {
+    for (const width of [390, 412]) {
+      const server = await startServer();
+      const { base } = server;
+      const context = await browser.newContext({
+        viewport: { width, height: 840 },
+        isMobile: true,
+        hasTouch: true,
+        colorScheme: width === 390 ? "light" : "dark",
+        reducedMotion: width === 390 ? "reduce" : "no-preference",
+      });
+      const page = await context.newPage();
+      const errors = captureErrors(page);
+      try {
+        const ids = await seedSections(context, base);
+        const fresh = page.locator(
+          `#agent-list .agent[data-id="${ids.fresh}"]`,
+        );
+        const tray = fresh.getByRole("group", { name: "Swipe actions" });
+        const button = (name: string) =>
+          tray.getByRole("button", { name, exact: true });
+        const unread = fresh.locator(".agent-unread");
+        await gotoRoot(page, base);
+        await showAgentList(page);
+        const touch = await context.newCDPSession(page);
+        const drag = async (
+          side: "left" | "right",
+          full = false,
+          checkBadge = false,
+        ) => {
+          await fresh.scrollIntoViewIfNeeded();
+          const box = (await fresh.boundingBox())!;
+          const x = side === "left" ? box.x + box.width - 16 : box.x + 16;
+          const y = box.y + box.height / 2;
+          const distance = checkBadge
+            ? box.width - 32
+            : full
+              ? box.width * 0.7
+              : side === "left"
+                ? 115
+                : 78;
+          const dx = side === "left" ? -distance : distance;
+          await touch.send("Input.dispatchTouchEvent", {
+            type: "touchStart",
+            touchPoints: [{ x, y }],
+          });
+          for (const part of [0.3, 0.6, 1])
+            await touch.send("Input.dispatchTouchEvent", {
+              type: "touchMove",
+              touchPoints: [{ x: x + part * dx, y }],
+            });
+          if (checkBadge) {
+            expect(
+              await fresh.evaluate((row) => {
+                const tray = row.querySelector(".swipe-full")!;
+                const badge = row.querySelector(".kids")!;
+                const { left, right, x, y, width, height } =
+                  badge.getBoundingClientRect();
+                const hit = row.ownerDocument.elementFromPoint(
+                  x + width / 2,
+                  y + height / 2,
+                );
+                const strip = tray.getBoundingClientRect();
+                return (
+                  tray.querySelectorAll(".swipe-labelled").length === 3 &&
+                  badge.contains(hit) &&
+                  (strip.right <= left || strip.left >= right)
+                );
+              }),
+            ).toBeTrue();
+          }
+          await touch.send("Input.dispatchTouchEvent", {
+            type: "touchEnd",
+            touchPoints: [],
+          });
+        };
+        const expectActions = async (names: string[]) => {
+          await browserExpect(tray.getByRole("button")).toHaveCount(
+            names.length,
+          );
+          await browserExpect(tray).not.toHaveAttribute("inert", "");
+          for (const [i, name] of names.entries()) {
+            await browserExpect(
+              tray.getByRole("button").nth(i),
+            ).toHaveAccessibleName(name);
+            await expectHitCorners(button(name), 44, { scroll: false });
+          }
+        };
+        const readTree = async () => {
+          const response = await context.request.get(`${base}api/tree`);
+          expect(response.ok()).toBeTrue();
+          return (await response.json()) as { id: string; unread: boolean }[];
+        };
+        const readMarks = async () => {
+          const tree = await readTree();
+          return [ids.fresh, ids.child].map(
+            (id) => tree.find((row) => row.id === id)?.unread,
+          );
+        };
+
+        await drag("left");
+        if (width === 412) {
+          expect(
+            await fresh.evaluate(async (el) => {
+              const row = el.querySelector(".row1")!;
+              const tray = el.querySelector(".swipe-tray")!;
+              for (;;) {
+                if (
+                  row.getBoundingClientRect().right >
+                  tray.getBoundingClientRect().left
+                )
+                  return false;
+                if (!el.getAnimations().length) return true;
+                await new Promise<void>((resolve) =>
+                  el.ownerDocument.defaultView!.requestAnimationFrame(() =>
+                    resolve(),
+                  ),
+                );
+              }
+            }),
+          ).toBeTrue();
+        }
+        await expectActions(["Archive", "Delete", "More"]);
+        await browserExpect
+          .poll(() =>
+            fresh.locator(".title, .kids").evaluateAll((elements) =>
+              elements.map((el) => {
+                const box = el.getBoundingClientRect();
+                return el.contains(
+                  el.ownerDocument.elementFromPoint(
+                    box.x + box.width / 2,
+                    box.y + box.height / 2,
+                  ),
+                );
+              }),
+            ),
+          )
+          .toEqual([true, true]);
+        await screenshot(page, `sidebar-left-${width}`);
+        await button("More").tap();
+        await browserExpect(
+          page.getByRole("menuitem", { name: "Rename" }),
+        ).toBeVisible();
+        await page.keyboard.press("Escape");
+        await drag("left");
+        await button("Delete").tap();
+        const confirm = page.getByRole("dialog", {
+          name: "Delete Fresh idle and all its subagents?",
+        });
+        await browserExpect(
+          confirm.getByRole("button", { name: "Cancel" }),
+        ).toBeFocused();
+        expect(
+          (await readTree()).some((row) => row.id === ids.fresh),
+        ).toBeTrue();
+        await confirm.getByRole("button", { name: "Cancel" }).tap();
+        await drag("left", true);
+        await browserExpect
+          .poll(() => serverTags(context, base, ids.fresh))
+          .toHaveProperty("archived");
+        await browserExpect(fresh).toHaveCount(0);
+        await header(page, "Archive").getByRole("button").tap();
+        await drag("left");
+        await button("Restore").tap();
+        await browserExpect
+          .poll(() => sectionOf(page, ids.fresh))
+          .toBe("Inbox");
+
+        await drag("right");
+        await expectActions(["Unread", "Pin"]);
+        await screenshot(page, `sidebar-right-${width}`);
+        await button("Unread").tap();
+        await browserExpect(unread).toBeVisible();
+        await browserExpect.poll(readMarks).toEqual([true, false]);
+        await page.reload();
+        await showAgentList(page);
+        await browserExpect(unread).toBeVisible();
+        await drag("right");
+        await button("Read").tap();
+        await browserExpect(unread).toHaveCount(0);
+        await browserExpect.poll(readMarks).toEqual([false, false]);
+
+        const customize = async (fullSwipe: boolean) => {
+          const title = fullSwipe
+            ? `Confirm-delete swipes on ${width}`
+            : `Swipe actions on ${width}`;
+          const script = `export default rows => [{ title: ${JSON.stringify(title)},
+            rows: rows.filter(row => row.id === ${JSON.stringify(ids.fresh)}),
+            rowActions: [
+              { label: "Delete", do: "delete", swipe: "left"${fullSwipe ? ", fullSwipe: true" : ""} },
+              { label: "Flag", set: "flagged", swipe: "left" },
+              { label: "Review this later", set: "review-later", swipe: "left" },
+              { label: "Pin to top", icon: "pin", set: "pinned", swipe: "right", swipeOnly: true },
+              { label: "Check replies", set: "check-replies", swipe: "right", swipeOnly: true },
+              { label: "Ask me later", set: "ask-later", swipe: "right", swipeOnly: true },
+            ],
+          }];`;
+          await postFixture(base, "save-sidebar-script", {
+            script,
+            by: "operator",
+          });
+          await page.reload();
+          await showAgentList(page);
+          await header(page, title).waitFor();
+        };
+        await customize(false);
+        await drag("left", true);
+        await expectActions(["Delete", "Flag", "Review this later"]);
+        await browserExpect(button("Flag")).toHaveText("Flag");
+        await browserExpect(button("Review this later")).toHaveText(
+          "Review this later",
+        );
+        await screenshot(page, `sidebar-custom-${width}`);
+        await browserExpect(confirm).toHaveCount(0);
+        await button("Flag").tap();
+        await browserExpect
+          .poll(() => serverTags(context, base, ids.fresh))
+          .toHaveProperty("flagged");
+        await page.emulateMedia({ reducedMotion: "no-preference" });
+        await drag("right", true, true);
+        await browserExpect
+          .poll(() => serverTags(context, base, ids.fresh))
+          .toHaveProperty("pinned");
+        await fresh
+          .getByRole("button", { name: "Actions for Fresh idle" })
+          .press("Enter");
+        await browserExpect(
+          page.getByRole("menuitem", { name: "Flag" }),
+        ).toHaveText("Flag");
+        await page.keyboard.press("Escape");
+        await customize(true);
+        await drag("left", true);
+        await browserExpect(confirm).toBeVisible();
+        await browserExpect(fresh).toBeVisible();
+        const deleteAgent = confirm.getByRole("button", {
+          name: "Delete agent",
+        });
+        await deleteAgent.press("Enter");
+        await browserExpect(confirm).toBeVisible();
+        const box = (await deleteAgent.boundingBox())!;
+        await touch.send("Input.dispatchTouchEvent", {
+          type: "touchStart",
+          touchPoints: [
+            { x: box.x + box.width / 2, y: box.y + box.height / 2 },
+          ],
+        });
+        await page
+          .locator(".hold-tip.on", { hasText: "Tap to confirm deletion" })
+          .waitFor();
+        await touch.send("Input.dispatchTouchEvent", {
+          type: "touchEnd",
+          touchPoints: [],
+        });
+        await browserExpect(confirm).toBeHidden();
+        await browserExpect(fresh).toBeVisible();
+        await drag("left", true);
+        await deleteAgent.tap();
+        await browserExpect(fresh).toHaveCount(0);
+        await browserExpect
+          .poll(async () =>
+            (await readTree()).some((row) =>
+              [ids.fresh, ids.child].includes(row.id),
+            ),
+          )
+          .toBe(false);
+        expect(errors).toEqual([]);
+      } finally {
+        await context.close();
+        await stopServer(server);
+      }
+    }
+  },
   // Feature: #3371 edge drops choose a sibling parent without promising sibling order.
   async function test_sidebar_drag_parent(browser, base) {
     const { context, page, errors } = await openPage(browser, {
@@ -1000,7 +1277,7 @@ async function phoneHold(
   const buttons = menu.getByRole("menuitem");
   expect(
     await buttons.evaluateAll((els) => els.map((el) => el.ariaLabel)),
-  ).toEqual(["Archive", "Snooze", "Pin", "Rename"]);
+  ).toEqual(["Archive", "Snooze", "Pin", "Swipe actions", "Rename"]);
   for (const box of await buttons.evaluateAll((els) =>
     els.map((el) => el.getBoundingClientRect().toJSON()),
   )) {

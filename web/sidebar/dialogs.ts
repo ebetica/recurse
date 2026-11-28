@@ -1,6 +1,8 @@
 // Drafts and sidebar actions share one tag, snooze or confirmation popover.
 // Input dialogs neither send mutations nor load the sidebar renderer.
 import { html, nothing, render, type TemplateResult } from "lit";
+import { ref } from "lit/directives/ref.js";
+import { attachHoldTip } from "../hold-tip.js";
 import { OPERATOR_TAGS } from "../../src/agent_metadata/index.js";
 import { normalizeSearchText, textRank, titleTokens } from "../fuzzy-match.js";
 import { state } from "../state.js";
@@ -60,8 +62,13 @@ function popover<T>(
     closeOpen = () => done(undefined);
     const position = () => {
       const viewport = window.visualViewport;
-      const top = (viewport?.offsetTop ?? 0) + 8;
-      const bottom = top + (viewport?.height ?? innerHeight) - 16;
+      const viewportTop = viewport?.offsetTop ?? 0;
+      const topInset =
+        parseFloat(
+          getComputedStyle(host!).getPropertyValue("--standalone-top-inset"),
+        ) || 0;
+      const top = Math.max(viewportTop, topInset) + 8;
+      const bottom = viewportTop + (viewport?.height ?? innerHeight) - 8;
       host!.style.maxHeight = `${bottom - top}px`;
       const box = host!.getBoundingClientRect();
       const left = Math.min(
@@ -238,6 +245,50 @@ export function askSnooze(anchor: DOMRect): Promise<number | undefined> {
             </button>`,
         )}`,
   );
+}
+
+export async function askDeleteAgent(
+  title: string,
+  anchor: DOMRect,
+): Promise<boolean> {
+  const question = `Delete ${title} and all its subagents?`;
+  let hold: ReturnType<typeof attachHoldTip> | undefined;
+  return !!(await popover<boolean>(
+    anchor,
+    question,
+    (done) => html`
+      <p class="popover-title">${question}</p>
+      <div class="dialog-buttons">
+        <button
+          type="button"
+          class="btn"
+          data-focus
+          @click=${() => done(false)}
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          class="btn danger"
+          ${ref((button) => {
+            if (button instanceof HTMLButtonElement)
+              hold = attachHoldTip(button, document, {
+                text: () => "Tap to confirm deletion",
+                onHoldEnd: () => done(false),
+              });
+          })}
+          @keydown=${(e: KeyboardEvent) => {
+            if (e.key === "Enter") e.preventDefault();
+          }}
+          @click=${() => {
+            if (!hold?.takeHoldConsumed()) done(true);
+          }}
+        >
+          Delete agent
+        </button>
+      </div>
+    `,
+  ));
 }
 
 export async function askConfirm(

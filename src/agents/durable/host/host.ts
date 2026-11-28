@@ -1,70 +1,71 @@
 // @tla specs/tla/send/OperatorSend.tla: Stop preserves the committed inbox.
 // One Harness per conversation; runs outlive HTTP. Keep handles, live rows and
-// per-conversation order; host/ holds lifecycles. Settings owns auth.
+// per-conversation order. Settings owns auth.
 // Reap, clear and recovery verify group cleanup before retiring.
-import { runStateClock } from "./run_state_clock";
-import { ServerStoppingError } from "./stopping_error";
-import { IdleHarnesses } from "./idle_harnesses";
-import { needsRecovery } from "./host/recovery";
-import { ReportHolds } from "./report_holds";
+import {
+  AgentArchive,
+  IdleHarnesses,
+  ReportHolds,
+  RequestCaptureWorker,
+  runStateClock,
+  type ArchivedAgent,
+  type ArchiveReason,
+} from "../index.ts";
+import { escapeOriginMarkers } from "../../runtime";
+import { ServerStoppingError } from "../stopping_error";
+import { needsRecovery } from "./recovery";
 import { Promotions, type PromotionRecord } from "./promotion";
-import type { AbortScope } from "../../utils/tasks";
+import type { AbortScope } from "../../../utils/tasks";
 import { join } from "node:path";
-import { splitPiUserText } from "../view/session_entries";
-import { unavailable } from "../view/reader";
+import { pendingUserFields, unavailable } from "../../view";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import type { ImageContent, MutableModels } from "@earendil-works/pi-ai";
-import type { ProviderSpec } from "../../models";
-import type { Config } from "../../config";
-import type { SidebarScript } from "../../sidebar_script";
+import type { ProviderSpec } from "../../../models";
+import type { Config } from "../../../config";
+import { Hooks, type RunningHook } from "../../../extensions/extra/hooks";
+import { hookProcesses } from "./hook_process";
+import type { SidebarScript } from "../../../sidebar_script";
 import type { LiveState } from "@earendil-works/pi-durable";
 import type { ImageProcessor } from "@earendil-works/pi-durable/tools";
 import type {
   DurableViews,
   PageOptions,
   PublishedFiles,
-} from "./durable_rows.ts";
-import type { PromptSnapshot } from "./prompt_sections.ts";
-import type { SqliteWorker } from "./sqlite_worker.ts";
-import {
-  AgentArchive,
-  type ArchivedAgent,
-  type ArchiveReason,
-} from "./archive.ts";
-import type { ReviveState } from "./revive_doc.ts";
-import type { FffWorker } from "../../extensions/extra/fff/fff_worker.ts";
-import type { TranscriptQuery } from "./transcript.ts";
-import { RequestCaptureWorker } from "./request_capture_worker.ts";
+} from "../durable_rows.ts";
+import type { PromptSnapshot } from "../prompt_sections.ts";
+import type { SqliteWorker } from "../sqlite_worker.ts";
+import type { ReviveState } from "../revive_doc.ts";
+import type { FffWorker } from "../../../extensions/extra/fff/fff_worker.ts";
+import type { TranscriptQuery } from "../transcript.ts";
 import type {
   PromptResources,
   PromptResourcesWorker,
-} from "./prompt_resources.ts";
-import type { DurableReport, ReportOutcome } from "./report.ts";
-import type { ConnectedBackends } from "../../backends/connected";
-import type { ShellGroup } from "../../extensions/core/shells/shells.ts";
-import type { OwnedProcess } from "../../process_lifecycle.ts";
-import type { EnvironmentChange } from "../../extensions/core/environment/managed_tools.ts";
-import type { UsageLimits } from "../../extensions/extra/usage-limits/usage-limits.ts";
-import type { LiveRow } from "./follow.ts";
-import { WARNING } from "../../observability/runtime_logging";
-import { MessageSearch, type SearchTarget } from "../../search/index";
-import { timed, timingDetail } from "../../observability/request_timing";
-import type { PiImportOptions, PiImportResult } from "./import_pi_session";
-import { runtime, type Runtime } from "./host/load.ts";
-import { openHarness, openSide, type Opened } from "./host/open.ts";
-import { CONTEXT_RETENTION_MS } from "./host/registry.ts";
-import { cancel, send, type SendOptions } from "./host/send.ts";
-import { requestClear, retireCleared, type ClearState } from "./host/clear.ts";
-import { forgetFork, retire } from "./host/delete.ts";
-import { closeAll, closeHarness } from "./host/close.ts";
-import { importArchive, importPi, supportsImport } from "./host/import.ts";
+} from "../prompt_resources.ts";
+import type { DurableReport, ReportOutcome } from "../report.ts";
+import type { ConnectedBackends } from "../../../backends/connected";
+import type { ShellGroup } from "../../../extensions/core/shells/shells.ts";
+import type { OwnedProcess } from "../../../process_lifecycle.ts";
+import type { EnvironmentChange } from "../../../extensions/core/environment/managed_tools.ts";
+import type { UsageLimits } from "../../../extensions/extra/usage-limits/usage-limits.ts";
+import type { LiveRow } from "../follow.ts";
+import { timed, timingDetail, WARNING } from "../../../observability";
+import { MessageSearch, type SearchTarget } from "../../../search/index";
+import type { PiImportOptions, PiImportResult } from "../import_pi_session";
+import { runtime, type Runtime } from "./load.ts";
+import { openHarness, openSide, type Opened } from "./open.ts";
+import { CONTEXT_RETENTION_MS } from "./registry.ts";
+import { cancel, send, type SendOptions } from "./send.ts";
+import { requestClear, retireCleared, type ClearState } from "./clear.ts";
+import { forgetFork, retire } from "./delete.ts";
+import { closeAll, closeHarness } from "./close.ts";
+import { importArchive, importPi, supportsImport } from "./import.ts";
 import {
   contextUsage,
   prompt,
   thinking,
   toolDetails,
   turnPrompt,
-} from "./host/reads.ts";
+} from "./reads.ts";
 
 /** Overall bound for a background phase waiting on focused opens. */
 const FOCUS_WAIT_MS = 60_000;
@@ -115,7 +116,7 @@ export interface DurableHostDeps extends PromotionRecord {
   ownProcess(
     proc: OwnedProcess,
     cid: string | null,
-    kind?: "mcp" | "file-search",
+    kind?: "mcp" | "file-search" | "hook",
   ): Promise<void>;
   /** Verified stop of a recorded group; true once it is proven gone. */
   releaseProcess(proc: OwnedProcess): Promise<boolean>;
@@ -131,6 +132,13 @@ export interface DurableHostDeps extends PromotionRecord {
   rowChanged?(cid: string): void;
   /** A tool call printed the URLs of pull requests it created. */
   prsCreated?(cid: string, urls: string[], since: number): void;
+  /** One final assistant reply was committed in this conversation. */
+  replyFinished?(
+    cid: string,
+    text: string,
+    current: () => boolean,
+    writeNote: (text: string) => Promise<void>,
+  ): void;
   /** Effort-1 settings for best-effort top-level conversation naming. */
   titleSettings?(): [string, string];
   /** Apply only while the original default title has not been renamed. */
@@ -141,6 +149,12 @@ export interface DurableHostDeps extends PromotionRecord {
   returnToMain?(from: string, message: string): Promise<string | null>;
   /** Deliver one settled run's report to the parent (report.ts). */
   report?(cid: string, report: DurableReport): Promise<ReportOutcome>;
+  /** Delete a published Artifact and notify an owner other than the actor. */
+  removeArtifact?(
+    id: string,
+    actor: string,
+    signal?: AbortSignal,
+  ): Promise<{ complete: boolean }>;
   /** Delete side conversations before clearing their parent's storage. */
   clearingSides?(cid: string): void;
   /** The Settings cap on a model's context window. */
@@ -157,14 +171,14 @@ export interface DurableHostDeps extends PromotionRecord {
   /** How long a latest request stays in memory before it moves to its file. */
   captureIdleMs?: number;
   /** Inject the warming scheduler; other Durable clocks stay real. */
-  warmingClock?: import("../../extensions/extra/cache-warm/cache-warm").WarmingClock;
+  warmingClock?: import("../../../extensions/extra/cache-warm/cache-warm").WarmingClock;
   /** How long an unused Harness stays open after its last activity. */
   harnessIdleMs?: number;
 }
 
 /** Launcher data-dir lock plus old-server exit before new-server start
  * exclude two processes opening the same conversation storage. Members
- * without `private` are shared with the lifecycles in ./host/. */
+ * without `private` are shared with the host lifecycle operations. */
 export class DurableHost {
   /** Shared connection operations, installed by the app before runs start. */
   remoteSettings?: Pick<ConnectedBackends, "request" | "listForAgents">;
@@ -177,7 +191,7 @@ export class DurableHost {
   readonly captureWorker = new RequestCaptureWorker();
   /** Focused opens in flight, with their conversation ids. */
   private readonly onDemand = new Map<Promise<Opened>, string>();
-  /** Background conversation naming (host/title.ts), by conversation. */
+  /** Background conversation naming (title.ts), by conversation. */
   readonly titleTasks = new Map<
     string,
     { scope: AbortScope; done: Promise<void> }
@@ -248,6 +262,8 @@ export class DurableHost {
   /** Stores kept at reap and clear, for revive. */
   readonly archive: AgentArchive;
   readonly messageSearch: MessageSearch;
+  /** Global hook files and the hooks running now. */
+  readonly hooks: Hooks;
   readonly storageReads = new Map<
     string,
     Set<{
@@ -262,6 +278,15 @@ export class DurableHost {
     readonly deps: DurableHostDeps,
     readonly focusWaitMs = FOCUS_WAIT_MS,
   ) {
+    this.hooks = new Hooks({
+      dir: join(deps.piAgentDir, "hooks"),
+      agentsDir: join(deps.dataDir, "hooks", "agents"),
+      enabled: () => deps.config?.runHooks() ?? true,
+      ...hookProcesses(deps, (cid) => this.shellState(cid).stateDir),
+      log: (event, fields) => deps.log(event, fields),
+      changed: (cid) => this.viewChanged(cid),
+      quote: escapeOriginMarkers,
+    });
     this.messageSearch = new MessageSearch(deps.log, async (target) =>
       this.worker?.hasDatabase(target.path)
         ? this.worker.syncSearch(target)
@@ -759,19 +784,11 @@ export class DurableHost {
 
   /** Queued rows, then the rows a clear holds. */
   pendingRows(cid: string): Rec[] {
-    const held = (this.clears.get(cid)?.held ?? []).map((item) => {
-      const [origin, sender, senderName, content] = splitPiUserText(
-        item.content,
-      );
-      return {
-        id: item.requestId,
-        role: "user",
-        content,
-        ...(origin ? { origin } : {}),
-        ...(sender ? { from: sender } : {}),
-        ...(senderName ? { from_name: senderName } : {}),
-      };
-    });
+    const held = (this.clears.get(cid)?.held ?? []).map((item) => ({
+      id: item.requestId,
+      role: "user",
+      ...pendingUserFields(item.content),
+    }));
     const row = this.liveRows.get(cid);
     const rows = [...(row?.pending ?? []), ...held];
     const error = row?.modelError;
@@ -1064,7 +1081,7 @@ export class DurableHost {
     callIds: readonly string[],
   ): ReturnType<PublishedFiles> {
     const { publishedCallFiles } =
-      await import("../runtime/attachments/published.ts");
+      await import("../../runtime/attachments/published.ts");
     const conv = this.deps.load(cid)!;
     const path = this.deps.collectionPath
       ? this.deps.collectionPath(conv)
@@ -1093,7 +1110,7 @@ export class DurableHost {
     home?: string,
   ): Promise<PromptResources> {
     const { PromptResourcesWorker, loadPromptResources } =
-      await import("./prompt_resources.ts");
+      await import("../prompt_resources.ts");
 
     if (this.closing)
       return loadPromptResources(cwd, agentDir, skillPaths, home);
@@ -1122,7 +1139,7 @@ export class DurableHost {
     if (opened) this.idle.retain(cid);
     const files = (callIds: readonly string[]) =>
       this.publishedFiles(cid, callIds);
-    const { storageView } = await import("./host/view");
+    const { storageView } = await import("./view");
     let page = opened ? null : await storageView(this, cid, options, files);
     if (page === null) {
       opened ??= await this.open(cid);
@@ -1148,6 +1165,7 @@ export class DurableHost {
       active_run: state.active_run,
       active_run_start: state.active_run_start,
       run_state_clock: state.run_state_clock,
+      running_hooks: state.running_hooks,
     };
   }
 
@@ -1157,6 +1175,7 @@ export class DurableHost {
     active_run: string | null;
     active_run_start: number | null;
     run_state_clock: [string, number];
+    running_hooks?: RunningHook[];
     pending: Rec[];
     pending_actions: string[];
     safety_off_active: boolean;
@@ -1165,7 +1184,9 @@ export class DurableHost {
     const row = this.liveRows.get(cid);
     const run = this.liveStatus(cid)[1];
     const off = this.safetyOffActive(cid);
+    const hooks = this.hooks.running(cid);
     return {
+      ...(hooks.length && { running_hooks: hooks }),
       status: run === null ? "idle" : "running",
       active_run: run,
       active_run_start: row?.runFirstEntry ?? null,
@@ -1205,7 +1226,7 @@ export class DurableHost {
   /** The subagent CLI's transcript window (transcript.ts). */
   async transcript(cid: string, options: TranscriptQuery): Promise<Rec> {
     const { conversation } = await this.open(cid);
-    const { transcriptWindow } = await import("./transcript.ts");
+    const { transcriptWindow } = await import("../transcript.ts");
     return transcriptWindow(conversation, options, context);
   }
 

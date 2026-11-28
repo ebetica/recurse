@@ -4,6 +4,12 @@
 /** Reserved auth.json marker, not a provider ID. */
 export const OPENAI_CHOICE_MARKER = "$recurse.openai-choice";
 
+/** Keep the direct Gemini key separate from any custom endpoint named google. */
+export const GEMINI_CREDENTIAL = "$recurse.gemini";
+
+/** Real Gemini keys have 39 characters; redacting a short key garbles replies. */
+export const GEMINI_MIN_KEY_LENGTH = 20;
+
 export function validCredential(value: unknown): boolean {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const { type, access, refresh, expires, key, env } = value as Record<

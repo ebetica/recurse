@@ -11,6 +11,10 @@ import {
   referenceImageUrl,
 } from "./references.js";
 import { type Backend, resolveUrl } from "../backends/backend.js";
+import {
+  isFlatAttachmentUrl,
+  isScopedAttachmentUrl,
+} from "../../src/image_reference.js";
 
 // Block-sized, capped, lazy images bound layout and network work.
 export const INLINE_IMAGE_STYLE =
@@ -101,18 +105,10 @@ export function threadImageLoaded(event: Event): void {
   });
 }
 
-// Single-leading-slash upload path; no protocol-relative or absolute URLs.
-const ATTACHMENT_URL = /^\/api\/attachments\/[A-Za-z0-9._-]+$/;
-
-// Shape-pinned scoped raw downloads; only derived previews render inline.
-const SCOPED_ATTACHMENT_URL =
-  /^\/api\/conversations\/[A-Za-z0-9][A-Za-z0-9_-]{0,63}\/attachments\/[0-9a-f]{32}(?:\.[a-z0-9]{1,16})?$/;
-
 export function isAllowedInlineImageSrc(
   src: string | null | undefined,
 ): boolean {
-  if (!src || src.includes("..")) return false;
-  return ATTACHMENT_URL.test(src);
+  return !!src && isFlatAttachmentUrl(src);
 }
 
 // Download anchors for operator uploads in flat or conversation-scoped form.
@@ -121,8 +117,7 @@ export function isAllowedInlineImageSrc(
 export function isAllowedAttachmentHref(
   href: string | null | undefined,
 ): boolean {
-  if (!href || href.includes("..")) return false;
-  return ATTACHMENT_URL.test(href) || SCOPED_ATTACHMENT_URL.test(href);
+  return !!href && (isFlatAttachmentUrl(href) || isScopedAttachmentUrl(href));
 }
 
 // Retries a failed thumbnail once as its original preview: a connected
@@ -147,7 +142,5 @@ export function thumbnailFallback(event: Event): void {
 export function scopedAttachmentPreviewHref(
   href: string | null | undefined,
 ): string | null {
-  if (!href || href.includes("..")) return null;
-  if (!SCOPED_ATTACHMENT_URL.test(href)) return null;
-  return `${href}/thumbnail`;
+  return href && isScopedAttachmentUrl(href) ? `${href}/thumbnail` : null;
 }

@@ -1,4 +1,4 @@
-import type { DurableHost } from "../../../../src/agents/durable/host.ts";
+import type { DurableHost } from "../../../../src/agents/durable/host";
 import { DurableViews } from "../../../../src/agents/durable/durable_rows.ts";
 
 export function holdStoragePage(host: DurableHost) {

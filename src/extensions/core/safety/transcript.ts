@@ -532,6 +532,7 @@ const MAX_REVIEW_PATH_CHARS = 1_000;
 export function formatPathOnlyProposedAction(
   toolName: "write" | "edit",
   input: unknown,
+  protectedConfig?: string,
 ): string {
   const record =
     input && typeof input === "object" && !Array.isArray(input)
@@ -556,6 +557,7 @@ export function formatPathOnlyProposedAction(
       operation: toolName,
       path: bounded,
       path_status: "untrusted-display-only",
+      ...(protectedConfig ? { protected_config: protectedConfig } : {}),
     },
     null,
     2,

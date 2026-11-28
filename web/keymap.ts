@@ -351,6 +351,11 @@ export const SHORTCUT_GROUPS: readonly ShortcutGroup[] = [
     title: "While typing",
     items: [
       { keys: ["Enter"], description: "send (desktop)" },
+      {
+        keys: ["Enter"],
+        platform: "modifier",
+        description: "ask in side chat (btw, desktop)",
+      },
       { keys: ["Shift+Enter"], description: "new line" },
       {
         keys: ["Escape"],

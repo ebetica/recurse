@@ -41,6 +41,8 @@ export interface PromptSnapshot extends PromptResources {
   recurse_runtime: string;
   recurse_tree: string;
   recurse_tools: string;
+  /** The agent's hook files (hooks.ts section), when any run. */
+  recurse_hooks?: string;
   /** Pi's MCP extension section (mcp.ts mcpServersSection), when set. */
   mcp_servers?: string;
 }
@@ -97,6 +99,9 @@ export function renderPromptSections(
     recurse_runtime: state.recurse_runtime,
     recurse_tree: state.recurse_tree,
     recurse_tools: state.recurse_tools,
+    ...(state.recurse_hooks
+      ? { recurse_hooks: escapeReminderMarkers(state.recurse_hooks) }
+      : {}),
     ...(state.mcp_servers ? { mcp_servers: state.mcp_servers } : {}),
   };
 }
@@ -120,6 +125,7 @@ export function createPromptExtension(
     "recurse_runtime",
     "recurse_tree",
     "recurse_tools",
+    "recurse_hooks",
     "mcp_servers",
   ];
   return defineExtension({

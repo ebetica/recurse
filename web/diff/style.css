@@ -16,7 +16,7 @@
   padding: var(--space-3); margin-bottom: var(--space-3); border: 1px solid var(--warn);
   border-radius: 8px; }
 .diff-retry { margin-left: var(--space-3); border-color: var(--warn); color: var(--warn); }
-.btn.diff-retry:hover:not(:disabled) { background: var(--warn); color: var(--text-on-accent); }
+@media (hover: hover) { .btn.diff-retry:hover:not(:disabled) { background: var(--warn); color: var(--text-on-accent); } }
 .diff-loading { color: var(--muted); font-size: 0.78125rem; padding: var(--space-3) var(--space-4); }
 
 .diff-head { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3);
@@ -40,8 +40,8 @@ button.diff-base-btn { display: inline-flex; align-items: center; gap: var(--spa
 button.diff-base-btn::after { content: ""; flex: none; width: 5px; height: 5px;
   border-right: 1px solid currentColor; border-bottom: 1px solid currentColor;
   transform: rotate(45deg) translateY(-1px); }
-button.diff-base-btn:hover,
 button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--text); }
+@media (hover: hover) { button.diff-base-btn:hover { color: var(--text); border-color: var(--text); } }
 @media (pointer: coarse) {
   button.diff-base-btn { min-height: 32px; }
 }
@@ -73,7 +73,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-pr-title { margin: 0 0 var(--space-2); font-size: 0.9375rem; line-height: 1.35; }
 .diff-pr-title a { display: flex; align-items: flex-start; gap: var(--space-3);
   min-height: 44px; color: var(--text); overflow-wrap: anywhere; }
-.diff-pr-title a:hover { color: var(--accent); }
+@media (hover: hover) { .diff-pr-title a:hover { color: var(--accent); } }
 .diff-pr-title svg { flex: none; width: 16px; height: 16px; margin-top: var(--space-1); }
 .diff-pr-meta { margin: calc(-1 * var(--space-3)) 0 var(--space-2); color: var(--muted);
   font-size: 0.84375rem; }
@@ -102,7 +102,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-expand-all { background: none; border: 1px solid var(--border);
   border-radius: 8px; cursor: pointer; font: inherit; font-size: 0.78125rem;
   color: var(--muted); padding: var(--space-2) var(--space-4); }
-.diff-expand-all:hover { color: var(--text); }
+@media (hover: hover) { .diff-expand-all:hover { color: var(--text); } }
 .diff-expand-all[aria-pressed="true"] { background: var(--panel-2);
   color: var(--text); font-weight: 600; }
 
@@ -125,7 +125,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
 .diff-file-toggle { display: flex; align-items: center; gap: var(--space-3); flex: 1;
   min-width: 0; text-align: left; background: none; border: 0; cursor: pointer;
   color: var(--text); font: inherit; font-size: 0.84375rem; padding: var(--space-2) var(--space-1); }
-.diff-file-toggle:hover { color: var(--accent); }
+@media (hover: hover) { .diff-file-toggle:hover { color: var(--accent); } }
 .diff-mark { flex: none; width: 14px; text-align: center; font-weight: 700; }
 .diff-mark.add { color: var(--running); }
 .diff-mark.del { color: var(--danger); }
@@ -163,19 +163,20 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
   background: none; border: 0; cursor: pointer;
   color: var(--accent); font-weight: 700; text-align: center; border-radius: 6px;
   opacity: 0; }
-.diff-row:hover .diff-add-comment, .diff-row.commenting .diff-add-comment,
-.diff-cell:hover .diff-add-comment, .diff-cell.commenting .diff-add-comment,
+.diff-row.commenting .diff-add-comment,
+.diff-cell.commenting .diff-add-comment,
 .diff-row:focus-within .diff-add-comment,
 .diff-cell:focus-within .diff-add-comment,
 .diff-add-comment:focus-visible { opacity: 1; }
+@media (hover: hover) { .diff-row:hover .diff-add-comment, .diff-cell:hover .diff-add-comment { opacity: 1; } }
 /* Commentable lines invite clicks on their number (single) and
    shift-click/drag (range) on desktop; touch taps instead. */
 .commentable > .diff-num { cursor: pointer; }
-.commentable > .diff-num:hover { text-decoration: underline; }
+@media (hover: hover) { .commentable > .diff-num:hover { text-decoration: underline; } }
 .diff-row.in-range, .diff-cell.in-range { background: color-mix(in srgb, var(--info) 18%, transparent); }
 .diff-row.in-range > .diff-num, .diff-cell.in-range > .diff-num {
   color: var(--accent); opacity: 1; }
-.diff-add-comment:hover { background: var(--accent); color: var(--text-on-accent); }
+@media (hover: hover) { .diff-add-comment:hover { background: var(--accent); color: var(--text-on-accent); } }
 /* Touch screens have no hover: the per-line "+" stays hidden (the
    line-number cell taps instead, wired in commentable()), so context
    lines never carry a visible sign at any width. */
@@ -195,7 +196,7 @@ button.diff-base-btn:focus-visible { color: var(--text); border-color: var(--tex
   border-radius: 6px; white-space: nowrap; display: inline-flex;
   align-items: center; gap: var(--space-2); }
 .diff-gap-btn svg { width: 12px; height: 12px; }
-.diff-gap-btn:hover { background: var(--panel-2); color: var(--text); }
+@media (hover: hover) { .diff-gap-btn:hover { background: var(--panel-2); color: var(--text); } }
 /* Honest notes: over-cap contents, failed loads. */
 .diff-expand-note { color: var(--muted); font-size: 0.78125rem; font-style: italic;
   padding: var(--space-2) var(--space-4) var(--space-1); }

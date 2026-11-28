@@ -5,7 +5,7 @@
 - [IdleCompaction.tla](../IdleCompaction.tla) and [configuration](../IdleCompaction.cfg).
 - [cache-warm.ts](../../../src/extensions/extra/cache-warm/cache-warm.ts): captured
   request, reconciliation, shared timer, replay and admission callback.
-- [host.ts](../../../src/agents/durable/host.ts): `cacheWarmBusy` distinguishes own
+- [Durable host](../../../src/agents/durable/host/host.ts): `cacheWarmBusy` distinguishes own
   turn/input from shells and descendants. [registry.ts](../../../src/agents/durable/host/registry.ts)
   supplies independent settings and repeats `allowed()` before compaction.
 

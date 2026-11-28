@@ -150,7 +150,7 @@ interface ReadNode extends HistoryNode {
 
 export interface ReadsDeps {
   readonly claims: HistoryClaimDeps;
-  /** Durable conversations' view (src/agents/durable/host.ts). */
+  /** Durable conversations' view (src/agents/durable/host). */
   readonly durable?: {
     owns(conv: JsonObject | null | undefined): boolean;
     view(

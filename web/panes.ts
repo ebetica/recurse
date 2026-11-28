@@ -159,8 +159,13 @@ const desktopDock = new DesktopDock(panesEl, {
     }
   },
   error: () => {
+    const notice = $("#window-load-error");
+    notice?.removeAttribute("hidden");
     if (announcerEl)
-      announcerEl.textContent = "Windows could not load. Reload to try again.";
+      announcerEl.textContent =
+        notice?.querySelector('[role="status"]')?.textContent ||
+        "Windows could not load.";
+    window.dispatchEvent(new Event("recurse:check-for-update"));
   },
 });
 

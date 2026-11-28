@@ -2,6 +2,8 @@
 
 `zoom.ts` transforms the image frame and its comment marks together. Comment
 boxes use normalized image coordinates, independent of zoom or translation.
+The shared [box gesture](../comments/box/gesture.ts) measures the drag in screen
+pixels, so tall or zoomed images do not require larger gestures.
 When zoomed, dragging with one finger, a pen or a mouse pans. At fit, touch
 swipes navigate the gallery; a mouse or pen drag does nothing. Touch and pen
 hold, then drag to comment. Mouse comments use Command-drag on macOS and
@@ -54,15 +56,15 @@ Opening an operator image directly still works, as a standalone preview with no
 image navigation. The separate Files list continues to show operator uploads.
 There is no setting or toggle for this default.
 
-Markdown in replies, Files and Artifacts also displays absolute, `~/` and
-relative image paths through an operator-authenticated, byte-validated route.
-Relative paths use the conversation's working directory, or the document's
-source directory when recorded; published sibling images take precedence.
-Clicking or tapping a loaded Markdown picture opens the existing viewer with
-its original. Links around pictures keep their authored destination; selecting
-text across a picture does not open the viewer or discard comments. Files and
-Artifacts register through `../document-markdown.ts` and share the handler in
-`references.ts`. In Artifact Markdown, Command/Ctrl-drag or hold then drag
+Markdown in replies, Files, Explorer and Artifacts uses a shared viewer rather
+than a separate enlargement surface. [Image references](references.ts) choose
+an original after a loaded figure is activated; linked figures keep their
+link, and selections take precedence. Files and Explorer use double-click
+for mouse input and retain tap and keyboard activation. Replies and Artifacts
+keep their existing click or tap. Local image routes are operator-authenticated
+and byte-validated. Published siblings take precedence; other relative paths use
+the document’s source directory when known, and the working folder otherwise.
+In Artifact Markdown, Command/Ctrl-drag or hold then drag
 on a loaded local or inline image to comment on an area without opening the
 viewer. The pending card keeps the original crop. On remount, the box returns
 for images pinned to the same revision, but not for mutable local paths.

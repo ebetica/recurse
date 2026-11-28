@@ -5,7 +5,6 @@ import { html, type TemplateResult } from "lit";
 import { renderDocumentMarkdown } from "../document-markdown.js";
 import {
   changesHeader,
-  reviewedFooter,
   reviewedVersion,
   watchReview,
 } from "../document-review.js";
@@ -104,6 +103,7 @@ export function filesMarkdown(
     signal,
     agentId: cid,
     documentPath: file.source_path,
+    doubleClickImages: true,
     resolveRelative: (path, image) => {
       const item = sibling(path);
       return item ? source.href(item, image) : null;
@@ -125,5 +125,5 @@ export function filesMarkdown(
     value: item.key,
     label: versionLabel(item, rest.length - index, false),
   }));
-  return html`${changesHeader(changes, versions)}${body}${reviewedFooter(body)}`;
+  return html`${changesHeader(changes, versions)}${body}`;
 }

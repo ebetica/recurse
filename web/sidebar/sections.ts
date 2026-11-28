@@ -4,7 +4,7 @@
 // hover devices, buttons overlay the right edge on hover or keyboard focus.
 import { html, nothing, type TemplateResult } from "lit";
 import { unsafeHTML } from "lit/directives/unsafe-html.js";
-import { PEN_ICON, actionIcon } from "../icons.js";
+import { MORE_ICON, PEN_ICON, actionIcon } from "../icons.js";
 import type { TreeNode } from "../types.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 import { runAction } from "./actions.js";
@@ -85,16 +85,25 @@ export function sectionForBackend(
   };
 }
 
-/** Row actions that apply to `id` now. */
-export function rowActions(section: Section, id: string): Action[] {
+/** Applicable row actions; implicit subagents only inherit built-in commands. */
+export function rowActions(
+  section: Section,
+  id: string,
+  commandsOnly = false,
+): Action[] {
   const tags = shownTags(id, Date.now() / 1000);
-  return section.rowActions.filter((a) => actionApplies(a, tags));
+  return section.rowActions.filter(
+    (a) => (!commandsOnly || a.do) && actionApplies(a, tags),
+  );
 }
 
 const runSectionAction = (action: Action, section: Section, anchor: DOMRect) =>
   action.start
     ? startDraft(section.backend, action.set)
     : runAction(action, action.ids, anchor, true);
+
+const sharedRowActions = (actions: Action[]) =>
+  actions.filter((a) => !a.do && !a.swipeOnly);
 
 const anchorOf = (e: Event) =>
   (e.currentTarget as HTMLElement).getBoundingClientRect();
@@ -106,26 +115,39 @@ export function rowButtons(
   title: string,
   focusable: boolean,
 ): TemplateResult | typeof nothing {
-  if (!actions.length) return nothing;
-  return html`<span class="row-actions">
-    ${actions.map(
-      (a) =>
-        html`<button
-          type="button"
-          class="icon-btn"
-          tabindex=${focusable ? 0 : -1}
-          aria-label=${`${a.label} ${title}`}
-          title=${`${a.label} ${title}`}
-          @click=${(e: Event) => {
-            e.stopPropagation();
-            void runAction(a, [id], anchorOf(e));
-          }}
-          @dblclick=${(e: Event) => e.stopPropagation()}
-        >
-          ${unsafeHTML(actionIcon(a.icon))}
-        </button>`,
-    )}
-  </span>`;
+  const shared = sharedRowActions(actions);
+  const phoneMenu = actions.some((a) => a.swipe)
+    ? html`<button
+        type="button"
+        class="icon-btn lg phone-row-menu"
+        aria-haspopup="menu"
+        aria-label=${`Actions for ${title}`}
+        title=${`Actions for ${title}`}
+      >
+        ${unsafeHTML(MORE_ICON)}
+      </button>`
+    : nothing;
+  return html`${phoneMenu}${shared.length
+    ? html`<span class="row-actions">
+        ${shared.map(
+          (a) =>
+            html`<button
+              type="button"
+              class="icon-btn"
+              tabindex=${focusable ? 0 : -1}
+              aria-label=${`${a.label} ${title}`}
+              title=${`${a.label} ${title}`}
+              @click=${(e: Event) => {
+                e.stopPropagation();
+                void runAction(a, [id], anchorOf(e));
+              }}
+              @dblclick=${(e: Event) => e.stopPropagation()}
+            >
+              ${unsafeHTML(actionIcon(a.icon))}
+            </button>`,
+        )}
+      </span>`
+    : nothing}`;
 }
 
 /** A section header: its title and count fold it; actions show on hover. */
@@ -201,7 +223,7 @@ export function rowHoldItems(
   rename: () => void,
 ): HoldItem[] {
   return [
-    ...actions.map((a) => ({
+    ...sharedRowActions(actions).map((a) => ({
       label: a.label,
       icon: actionIcon(a.icon),
       run: (anchor: DOMRect) => void runAction(a, [id], anchor),

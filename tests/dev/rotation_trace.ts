@@ -12,7 +12,7 @@ const sites: [string, number][] = [
   ["src/agents/durable/sqlite_worker.ts", 6],
   ["src/agents/durable/sqlite_thread.worker.ts", 2],
   ["src/agents/durable/host/view.ts", 2],
-  ["src/agents/durable/host.ts", 2],
+  ["src/agents/durable/host/host.ts", 2],
   ["src/agents/durable/host/delete.ts", 2],
   ["src/agents/durable/host/clear.ts", 1],
   ["src/agents/durable/archive.ts", 2],

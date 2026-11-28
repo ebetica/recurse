@@ -82,8 +82,13 @@ body #panes.docked.on {
   inset: 50% 0 auto;
   height: 1px;
 }
-#dock .dv-sash:not(.dv-disabled):is(:hover, :active)::after {
+#dock .dv-sash:not(.dv-disabled):active::after {
   background: var(--accent);
+}
+@media (hover: hover) {
+  #dock .dv-sash:not(.dv-disabled):hover::after {
+    background: var(--accent);
+  }
 }
 #dock .dockview-theme-abyss-spaced {
   background-color: transparent;
@@ -264,8 +269,10 @@ body #panes.docked.on {
   color: var(--accent);
   font-weight: 600;
 }
-#dock .dv-tab.dv-inactive-tab:hover {
-  background: color-mix(in srgb, var(--dock-strip) 70%, var(--bg));
+@media (hover: hover) {
+  #dock .dv-tab.dv-inactive-tab:hover {
+    background: color-mix(in srgb, var(--dock-strip) 70%, var(--bg));
+  }
 }
 #dock .dock-tab-icon {
   display: inline-flex;
@@ -310,9 +317,11 @@ body #panes.docked.on {
 #dock .dv-default-tab-action::after {
   transform: translate(-50%, -50%) rotate(-45deg);
 }
-#dock .dv-default-tab-action:hover {
-  color: var(--text);
-  background: var(--dv-icon-hover-background-color);
+@media (hover: hover) {
+  #dock .dv-default-tab-action:hover {
+    color: var(--text);
+    background: var(--dv-icon-hover-background-color);
+  }
 }
 @media (hover: hover) {
   #dock .dv-inactive-tab:not(:hover):not(:focus-within) .dv-default-tab-action {
@@ -404,6 +413,10 @@ body:has(#dock .pane-col.fullscreen, #dock #main.fullscreen) #panes.docked {
   transform: none;
   will-change: auto;
   z-index: calc(var(--z-drawer) + 4);
+}
+#dock .dv-render-overlay:has(#main.fullscreen) {
+  padding: var(--standalone-top-inset) var(--standalone-right-inset) 0
+    var(--standalone-left-inset);
 }
 #dock .pane-powerbar {
   border-radius: 0;

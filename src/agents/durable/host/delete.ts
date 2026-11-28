@@ -4,7 +4,7 @@
 // A side conversation's fork is withdrawn from its parent's Harness.
 import { join } from "node:path";
 import { retirePath } from "../../../utils/trash-sweep";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import { closeHarness } from "./close.ts";
 import type { Opened } from "./open.ts";
 import { runtime } from "./load.ts";

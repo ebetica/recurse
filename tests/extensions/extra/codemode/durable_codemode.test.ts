@@ -13,7 +13,7 @@ import {
   withAbortSignal,
 } from "@earendil-works/chord/context";
 import { LiveDoc } from "@earendil-works/pi-durable";
-import type { DurableHost } from "../../../../src/agents/durable/host.ts";
+import type { DurableHost } from "../../../../src/agents/durable/host";
 import { McpServers } from "../../../../src/extensions/extra/mcp/mcp.ts";
 import { mcpStatuses } from "../../../../src/extensions/extra/mcp/status.ts";
 import piTools from "../../../backend/fixtures/durable_host/pi-tools.json";

@@ -328,16 +328,23 @@ test("connected backend proxy streams and enforces the operator boundary", async
     expect(await (await fetch(`${home}/api/${contextWindow}`)).json()).toEqual(
       homeWindow,
     );
-    expect(
-      (await send("pi/openrouter-auth/api-key", { key: "sk-or-remote" }))
-        .status,
-    ).toBe(200);
-    expect(await (await proxy("pi/openrouter-auth")).json()).toMatchObject({
-      configured: true,
-    });
-    expect(
-      await (await fetch(`${home}/api/pi/openrouter-auth`)).json(),
-    ).toMatchObject({ configured: false });
+    for (const provider of ["openrouter", "gemini"]) {
+      const route = `pi/${provider}-auth`;
+      const key = `remote-${provider}-test-key`;
+      const added = await send(`${route}/api-key`, { key });
+      expect(added.status).toBe(200);
+      expect(await added.text()).not.toContain(key);
+      expect(await (await proxy(route)).json()).toMatchObject({
+        configured: true,
+      });
+      expect(await (await fetch(`${home}/api/${route}`)).json()).toMatchObject({
+        configured: false,
+      });
+      expect((await send(`${route}/logout`, {})).status).toBe(200);
+      expect(await (await proxy(route)).json()).toMatchObject({
+        configured: false,
+      });
+    }
     const mcp = { mcpServers: { docs: { url: "https://mcp.invalid/" } } };
     expect(
       (await send("settings/mcp-servers", { text: JSON.stringify(mcp) }, "PUT"))

@@ -193,9 +193,13 @@ function query(
   return `?${params.toString()}`;
 }
 
-export const artifactListUrl = (agentId: string): string =>
+export const artifactListUrl = (
+  agentId: string,
+  selected?: string | null,
+): string =>
   backendFor(agentId).url(
-    `/api/artifacts?agent=${encodeURIComponent(parseConversationId(agentId).cid)}`,
+    `/api/artifacts?agent=${encodeURIComponent(parseConversationId(agentId).cid)}` +
+      (selected ? `&selected=${encodeURIComponent(selected)}` : ""),
   );
 export const artifactFileUrl = (
   agentId: string,

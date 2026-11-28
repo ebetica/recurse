@@ -24,6 +24,7 @@ import {
 } from "playwright";
 
 export const ROOT = join(import.meta.dir, "../..");
+export const MERMAID_DIAGRAM = ".mermaid-render > svg";
 export const LOGIN = "browser-test-password";
 export const ARTIFACT_VERSION = "a".repeat(40);
 export const OLDER_ARTIFACT_VERSION = "b".repeat(40);
@@ -318,16 +319,20 @@ type BrowserServer = {
   cookie: string | undefined;
 };
 
-export function startServer(options: {
-  auth: true;
-  sourceRoot?: string;
-}): Promise<BrowserServer & { cookie: string }>;
-export function startServer(options?: {
+type BrowserServerOptions = {
   auth?: boolean;
   sourceRoot?: string;
-}): Promise<BrowserServer>;
+  frontendRoot?: string;
+};
+
+export function startServer(
+  options: BrowserServerOptions & { auth: true },
+): Promise<BrowserServer & { cookie: string }>;
+export function startServer(
+  options?: BrowserServerOptions,
+): Promise<BrowserServer>;
 export async function startServer(
-  options: { auth?: boolean; sourceRoot?: string } = {},
+  options: BrowserServerOptions = {},
 ): Promise<BrowserServer> {
   browserProgress("server-prepare");
   if (!options.auth) rootId = undefined;
@@ -361,7 +366,10 @@ export async function startServer(
     RECURSE_TEMP_ROOT: join(data, "scratch"),
     PI_BG_SHELL_STATE_DIR: join(data, "pi-bg"),
     RECURSE_BROWSER_VERSION: "browser-e2e-current",
-    RECURSE_FRONTEND_LIVE: "0",
+    RECURSE_FRONTEND_LIVE: options.frontendRoot ? "1" : "0",
+    ...(options.frontendRoot && {
+      RECURSE_BROWSER_TEST_FRONTEND_ROOT: options.frontendRoot,
+    }),
     RECURSE_ISOLATED_ROOT: data,
     PORT: String(requestedPort),
   };

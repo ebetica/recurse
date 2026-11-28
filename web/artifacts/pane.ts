@@ -33,7 +33,7 @@ import { artifactGeneration } from "../panes/autoopen.js";
 import { DRAFT, state } from "../state.js";
 import { registerCommentSource } from "../comments.js";
 import { installBoxComments } from "../comments/box/index.js";
-import { changesHeader, reviewedFooter } from "../document-review.js";
+import { changesHeader, renderReviewButton } from "../document-review.js";
 import { artifactFileUrl, isFullVersion, versionLabel } from "./model.js";
 import type { PaneContext, PaneNavigation } from "../types.js";
 import {
@@ -677,9 +677,11 @@ function renderShell(pane: ArtifactEl): void {
     item.title.toLowerCase().includes(rs.filter.trim().toLowerCase()),
   );
   const selectionReady = applyRestoredArtifactSelection(pane);
+  const holding = pendingFor(currentCommentKey(pane)) > 0;
   if (
     selectionReady &&
     !rs.linkedArtifactId &&
+    !holding &&
     !list.some((item) => item.id === rs.selId)
   ) {
     rs.contentAbort?.abort();
@@ -697,7 +699,6 @@ function renderShell(pane: ArtifactEl): void {
     rs.versions = [];
     rs.versionsError = false;
   }
-  const holding = pendingFor(currentCommentKey(pane)) > 0;
   if (
     currentInfo &&
     rs.followCurrent &&
@@ -786,12 +787,15 @@ function renderShell(pane: ArtifactEl): void {
     ? `Download original ${rs.selectedPage || info.filename}${rs.selectedVersion ? `, version ${rs.selectedVersion.slice(0, 8)}` : ""}`
     : "Download original";
   const coldList = !!cache?.fetching && !cache.loaded;
-  const missingLink = rs.linkedArtifactId && selectionReady && !currentInfo;
+  const missingSelection =
+    (rs.linkedArtifactId || holding) && selectionReady && !currentInfo;
   const noticeText = coldList
     ? "Loading artifacts…"
     : cache?.error ||
-      (missingLink
-        ? "Artifact not found. Check the link or ask for a new one."
+      (missingSelection
+        ? holding
+          ? "Artifact not found. Your unsent comments are still here."
+          : "Artifact not found. Check the link or ask for a new one."
         : holding &&
             rs.followCurrent &&
             rs.selectedVersion !== currentInfo?.version
@@ -980,7 +984,7 @@ function renderShell(pane: ArtifactEl): void {
           </nav>`
         : nothing}
       <div
-        class=${`artifact-notice ${noticeText ? "on" : ""} ${cache?.error || missingLink || rs.noticeError ? "error" : ""}`}
+        class=${`artifact-notice ${noticeText ? "on" : ""} ${cache?.error || missingSelection || rs.noticeError ? "error" : ""}`}
         role="status"
         aria-live="polite"
       >
@@ -1039,10 +1043,7 @@ function renderShell(pane: ArtifactEl): void {
         : nothing}`,
     pane.querySelector<HTMLElement>(".artifact-shell")!,
   );
-  render(
-    changes ? reviewedFooter(pane.querySelector(".report-doc")) : nothing,
-    pane.querySelector<HTMLElement>(".doc-review-foot")!,
-  );
+  renderReviewButton(pane, changes ? pane.querySelector(".report-doc") : null);
 }
 
 function retarget(pane: ArtifactEl, agentId: string): boolean {
@@ -1262,7 +1263,7 @@ registerPane({
     const pane = element as ArtifactEl;
     pane.renderShell = () => renderShell(pane);
     pane.showArtifact = () => showArtifact(pane);
-    pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div><div class="doc-review-foot"></div></article><div class="report-comments"></div><div class="report-bar"></div>`;
+    pane.innerHTML = `<article class="artifact-view" aria-labelledby="artifact-heading"><div class="artifact-shell"></div><div class="report-doc artifact-doc" tabindex="-1"></div></article><div class="report-comments"></div><div class="doc-review-actions"><div class="report-bar"></div><div class="doc-review-foot"></div></div>`;
     installBoxComments(pane.querySelector<HTMLElement>(".report-doc")!);
     pane._rs = {
       agentId: null,

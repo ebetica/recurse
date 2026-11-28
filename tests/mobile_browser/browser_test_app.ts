@@ -18,7 +18,7 @@ if (!Number.isInteger(port))
 let operatorTime: number | undefined;
 const app = await buildApp({
   env: process.env,
-  sourceRoot: CHECKOUT_ROOT,
+  sourceRoot: process.env.RECURSE_BROWSER_TEST_FRONTEND_ROOT ?? CHECKOUT_ROOT,
   operatorNow: () => operatorTime ?? Date.now() / 1000,
 });
 const { instance, router } = app;

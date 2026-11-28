@@ -17,7 +17,9 @@ migration. Recurse updates may require editing a custom script.
   helpers without importing the tree renderer.
 - `tag-state.ts` owns optimistic tags until a tree read begun after the answer
   confirms them. `dialogs.ts` shares one tag, snooze or confirmation popover
-  between sidebar actions and the optional draft control.
+  between sidebar actions and the optional draft control. Dialogs and hold
+  menus are fixed outside the list, so they also clear the installed app's
+  top inset when opened near the first row.
 - `sections.ts` draws sections; `script.ts` manages the worker and saved script.
 - [style.css](style.css) keeps the agent list, shared agent rows, section
   actions, and tag and hold menus together. It ships in `app.css` so the
@@ -27,12 +29,14 @@ migration. Recurse updates may require editing a custom script.
   and sidebar mutations, the draft action for sections and remote headers, and
   the row and selection actions used by the active-agent dialog.
 - `drag.ts` owns desktop agent drop targets and feedback. `row-touch.ts` owns
-  phone row and section holds and left-swipe deletion. The renderer supplies
-  actions and pauses repaint during an active swipe.
+  phone holds and hands the row's swipe actions to `swipe-tray.ts`. The tray
+  lives inside its row so its buttons scroll and clip with the list.
 - Sidebar history completes boot links by correcting the URL before opening the
   linked artifact or reporting an unavailable agent.
 - `focus.ts` refreshes the list before focusing its cursor, with the phone menu
   fallback. App startup supplies rendering; pane exits import only this helper.
+  The [tree renderer](../sidebar.ts) keeps focus on a surviving control when
+  a refresh reorders its row.
 - `agent-folds.ts` remembers, on this device, which agents list their
   subagents (opened with l/Right, folded with h/Left), so the agent list keeps
   its shape across reloads and server restarts. A one-time reset discards saved
@@ -51,12 +55,13 @@ Side conversations are excluded from both script inputs and stay in the Side
 pane. Rows require no extra record, transcript or GitHub reads. Usage is not in the
 tree snapshot and is omitted. Branch and current directory are optional and only
 included if recorded. Remote rows use qualified ids and set `remote` to true.
-Rows expose `unread: true` after a notification-eligible finish, independently of
-notification subscriptions. The shared row renderer centers an accent dot in place
+Rows expose `unread: true` when the agent itself sends a new reply while no device
+is viewing its conversation, independently of push notifications. A manual mark
+changes the same state on that agent's own backend. The shared row renderer centers an accent dot in place
 of the activity time, preserving its space and tooltip on desktop, phones and the
 active-agent dialog. Row action overlays cover the dot. Section headers have no
 unread indicator. Opening the main conversation clears it on the owning server and all
-devices over tree events; watching it finish keeps it cleared. This applies to
+devices over tree events; viewing the conversation when the reply arrives keeps it cleared. This applies to
 custom layouts and remote rows whose backend supplies `unread`, without extra
 polling. Older remotes default to false.
 The same arrangement is shown under each backend label, with independent folds.
@@ -109,6 +114,41 @@ checked rows on that backend. Group actions target all child rows by default;
 New agent actions also work on a group. Fold preferences use the full title path
 and backend, so children with the same title in different groups are independent.
 As with flat sections, the selected conversation stays visible when folded.
+
+## Phone swipe actions
+
+The [row action contract](../../src/sidebar_script/arrangement.ts) adds a
+swipe direction to actions for the rows a section lists. Each side shows its
+first applicable actions in script order, up to three that fit beside the row.
+Custom actions show their names in the tray. `swipeOnly: true` hides a tag
+action from desktop buttons and the quick phone hold strip. Rows with no swipe
+actions do not slide. A subagent shown under another row inherits its section's
+built-in `do` commands, not its tag actions. These commands act on the subagent
+itself. To give a subagent different swipes, list it explicitly in a section.
+
+```js
+rowActions: [
+  { label: "Archive", icon: "archive", set: "archived", swipe: "left" },
+  { label: "Delete", do: "delete", swipe: "left" },
+  { label: "More", do: "more", swipe: "left" },
+  { label: "Read or unread", do: "toggleUnread", swipe: "right" },
+  {
+    label: "Pin",
+    icon: "pin",
+    set: "pinned",
+    unless: "pinned",
+    swipe: "right",
+  },
+];
+```
+
+Built-in commands do not take tag changes. More opens a list with action
+names. You can also hold the row and choose Swipe actions, or focus the row's
+Actions button with the keyboard. Read or Unread uses this row's server state,
+and Delete asks to confirm deletion of the agent and its subagents. A full swipe uses the first action unless it has `fullSwipe: false`.
+For Delete, `fullSwipe: true` explicitly allows the swipe to open confirmation;
+it never confirms deletion. In the built-in Inbox, a full left swipe archives
+and Archive → Restore reverses it.
 
 ## Actions that ask for a tag
 

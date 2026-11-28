@@ -220,7 +220,7 @@ export function backendAgentAllowed(method: string, path: string): boolean {
  */
 export function remoteSettingsRoute(path: string): boolean {
   return (
-    /^\/api\/pi\/(auth|codex-auth|muse-auth|openrouter-auth|custom-provider-auth)(\/|$)/.test(
+    /^\/api\/pi\/(auth|codex-auth|muse-auth|openrouter-auth|gemini-auth|custom-provider-auth)(\/|$)/.test(
       path,
     ) ||
     /^\/api\/settings\/(model-list|model-list-update|maximum-context-window|default-efforts|effort-levels|mcp-servers(\/(status|check|sign-out))?)$/.test(

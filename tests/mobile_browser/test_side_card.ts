@@ -1,5 +1,35 @@
 import { expect } from "bun:test";
-import { runBrowserTests, type BrowserTest } from "./common";
+import type { Page } from "playwright";
+import { expect as browserExpect } from "playwright/test";
+import {
+  checkedHitPoint,
+  checkedTap,
+  expectHitCorners,
+  openPage,
+  runBrowserTests,
+  screenshot,
+  type BrowserTest,
+} from "./common";
+
+async function holdSend(page: Page) {
+  const { x, y } = await checkedHitPoint(
+    page.getByRole("button", { name: "Send message" }),
+  );
+  const session = await page.context().newCDPSession(page);
+  await session.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y }],
+  });
+  try {
+    await page.getByRole("menu", { name: "Send options" }).waitFor();
+  } finally {
+    await session.send("Input.dispatchTouchEvent", {
+      type: "touchEnd",
+      touchPoints: [],
+    });
+    await session.detach();
+  }
+}
 
 export const tests: BrowserTest[] = [
   // Feature: #3608 phone side conversations pop out as a card over their parent
@@ -21,8 +51,22 @@ export const tests: BrowserTest[] = [
     await page
       .locator(".msg.assistant .content", { hasText: "Card parent ready" })
       .waitFor();
-    await page.locator("#input").fill("/btw Reply only Side card answer");
-    await page.locator("#input").press("Enter");
+    const input = page.locator("#input");
+    await input.press("ControlOrMeta+Enter");
+    await browserExpect(page.locator("#send-status")).toHaveText(
+      "/btw needs a question",
+    );
+    await page.getByText("Keyboard shortcuts", { exact: true }).click();
+    const shortcut = page.locator("#shortcut-groups .k", {
+      hasText: "ask in side chat",
+    });
+    await browserExpect(shortcut.locator("kbd")).toHaveText(
+      /^(⌘|Ctrl\+)Enter$/,
+    );
+    await shortcut.scrollIntoViewIfNeeded();
+    await screenshot(page, "send-btw-shortcut-1280");
+    await input.fill("Reply only Side card answer");
+    await input.press("ControlOrMeta+Enter");
     await page
       .frameLocator("iframe.side-frame")
       .locator(".msg.assistant .content", { hasText: "Side card answer" })
@@ -107,6 +151,118 @@ export const tests: BrowserTest[] = [
         false,
       );
       await phone.close();
+    }
+
+    const { context, page: phone } = await openPage(browser, {
+      viewport: { width: 412, height: 915 },
+      touch: true,
+    });
+    try {
+      await phone.goto(`${base}#agent=${agent}`);
+      await phone
+        .locator(".msg.assistant .content", { hasText: "Card parent ready" })
+        .waitFor();
+      const parent = await phone.locator("#topbar").evaluate((titlebar) => ({
+        x: innerWidth / 2,
+        y: titlebar.getBoundingClientRect().bottom + 8,
+      }));
+      const draft = phone.locator("#input");
+      const menu = phone.getByRole("menu", { name: "Send options" });
+      const btw = menu.getByRole("menuitem", {
+        name: "Ask in side chat",
+        exact: true,
+      });
+      await checkedTap(draft);
+      await holdSend(phone);
+      await browserExpect(btw).toBeDisabled();
+      await browserExpect(btw).toHaveAccessibleDescription(
+        "/btw needs a question",
+      );
+      await phone.keyboard.press("Escape");
+      await browserExpect(menu).toBeHidden();
+      await browserExpect(draft).toBeFocused();
+
+      const question = "Reply only Phone side answer";
+      await draft.fill(question);
+      await phone.locator("#file-input").setInputFiles({
+        name: "notes.txt",
+        mimeType: "text/plain",
+        buffer: Buffer.from("Side questions cannot include attachments."),
+      });
+      const remove = phone.getByRole("button", { name: "Remove notes.txt" });
+      await remove.waitFor();
+      await holdSend(phone);
+      await browserExpect(btw).toBeDisabled();
+      await browserExpect(btw).toHaveAccessibleDescription(
+        "Remove attachments to ask in side chat",
+      );
+      await phone.keyboard.press("Escape");
+      await checkedTap(remove);
+      await browserExpect(remove).toBeHidden();
+      await draft.evaluate((input) => {
+        const page = globalThis as any;
+        page.blurs = 0;
+        page.toggles = 0;
+        input.addEventListener("focusout", () => page.blurs++);
+        document
+          .querySelector("#send-menu")!
+          .addEventListener("toggle", () => page.toggles++);
+        document
+          .querySelector("#send-btw")!
+          .addEventListener(
+            "click",
+            () => (page.chosen = `${document.activeElement?.id}:${page.blurs}`),
+          );
+      });
+      const blurs = () => phone.evaluate(() => (globalThis as any).blurs);
+
+      await holdSend(phone);
+      await browserExpect(menu).toBeVisible();
+      await browserExpect(btw).toHaveAccessibleDescription("");
+      await browserExpect(draft).toBeFocused();
+      expect(await blurs()).toBe(0);
+      await browserExpect(draft).toHaveValue(question);
+      await expectHitCorners(btw);
+      await screenshot(phone, "send-btw-menu-412");
+      await phone.touchscreen.tap(parent.x, parent.y);
+      await browserExpect(menu).toBeHidden();
+      await browserExpect(draft).toBeFocused();
+      expect(await blurs()).toBe(0);
+      if (process.env.RECURSE_BROWSER_SCREENSHOT_DIR) {
+        await phone.setViewportSize({ width: 390, height: 844 });
+        await holdSend(phone);
+        await screenshot(phone, "send-btw-menu-390");
+        await phone.touchscreen.tap(parent.x, parent.y);
+        await browserExpect(menu).toBeHidden();
+        await phone.setViewportSize({ width: 412, height: 915 });
+      }
+
+      await holdSend(phone);
+      await checkedTap(btw);
+      expect(await phone.evaluate(() => (globalThis as any).chosen)).toBe(
+        "input:0",
+      );
+      await phone
+        .frameLocator("iframe.side-frame")
+        .locator(".msg.assistant .content", { hasText: "Phone side answer" })
+        .last()
+        .waitFor();
+      await browserExpect(
+        phone.locator(".msg.user", { hasText: question }),
+      ).toHaveCount(0);
+      await phone.touchscreen.tap(parent.x, parent.y);
+      await phone.locator("#panes.overlay").waitFor({ state: "detached" });
+      await draft.fill("Reply only Plain phone send");
+      const opened = await phone.evaluate(() => (globalThis as any).toggles);
+      await checkedTap(phone.getByRole("button", { name: "Send message" }));
+      await phone
+        .locator(".msg.assistant .content", { hasText: "Plain phone send" })
+        .waitFor();
+      expect(await phone.evaluate(() => (globalThis as any).toggles)).toBe(
+        opened,
+      );
+    } finally {
+      await context.close();
     }
   },
 ];

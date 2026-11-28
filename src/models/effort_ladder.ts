@@ -14,7 +14,7 @@ import {
   isEffortLevel,
 } from "../effort_levels";
 import { pyCompactJson } from "../utils/python-json";
-import { DEFAULT_CHAT_MODEL, type ModelCatalog } from "./catalog";
+import type { ModelCatalog } from "./catalog";
 import { validModelScopeKey } from "./model_id";
 import { parseThinking, type Thinking } from "./thinking";
 
@@ -70,10 +70,9 @@ export class EffortLadder {
     else if (authed.has("openai-codex")) entries = codex;
     else {
       const best =
-        this.models.signedInChatModels(authed)[0]?.id ??
-        (this.models.isFileProviderModel(this.models.CHAT_MODEL)
-          ? DEFAULT_CHAT_MODEL
-          : this.models.CHAT_MODEL);
+        this.models.automaticChatModels(
+          this.models.signedInChatModels(authed),
+        )[0]?.id ?? this.models.automaticFallbackModel();
       const offered = this.models.modelReasoningLevels(best) ?? [
         "low",
         "medium",
@@ -103,10 +102,11 @@ export class EffortLadder {
   levelOneModel(): { model: string } | { authed: Set<string> } {
     const document = this.readEffortLevelsDoc();
     const pin = isObject(document.levels) ? document.levels["1"] : undefined;
-    if (pin !== undefined)
-      return {
-        model: isObject(pin) && typeof pin.model === "string" ? pin.model : "",
-      };
+    if (pin !== undefined) {
+      const model =
+        isObject(pin) && typeof pin.model === "string" ? pin.model : "";
+      if (this.models.providerOf(model) !== "google") return { model };
+    }
     const authed = this.models.authedModelProviders();
     if (authed.has("anthropic") || authed.has("openai-codex"))
       return { model: this.defaultLadder(authed)[EFFORT_MIN_LEVEL]!.model };

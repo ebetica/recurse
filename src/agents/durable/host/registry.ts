@@ -1,6 +1,8 @@
 // Harness extension order is hook order: guard, tools, hooks, side fork.
-// Safety review is always installed; RTK rewrites only after approval.
+// Safety review is always installed; operator hooks run just before it, so it
+// reviews the call as they changed it. RTK rewrites only after approval.
 // Prompts snapshot per request; wrappers shorten help, not Pi tool behavior.
+import type { RunEnd } from "../follow.ts";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,10 +11,14 @@ import {
 } from "@earendil-works/chord/context";
 import type { Conversation, Registry } from "@earendil-works/pi-durable";
 import type { CodemodeNamespace } from "@earendil-works/pi-durable/codemode";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import type { RequestCaptures } from "../request_capture.ts";
 import { BUILD_DIR } from "../../../build_dir.ts";
 import { MCP_FILE_NAME } from "../../../mcp_config.ts";
+import {
+  hooksCompactionExtension,
+  hooksExtension,
+} from "../../../extensions/extra/hooks";
 import { WARNING } from "../../../observability/runtime_logging";
 import { startSlowSpan } from "../../../observability/slow-span";
 import { modelRef } from "../model_selection";
@@ -51,6 +57,8 @@ export interface Tools {
   transforms: ReturnType<Runtime["createModelClock"]>;
   /** The cwd and tool environment of the conversation's next tool call. */
   scope(): Promise<{ cwd: string; env: Record<string, string> }>;
+  /** The same cwd, with the environment hook files run in. */
+  hookScope(): Promise<{ cwd: string; env: Record<string, string> }>;
   /** Close the shells, search, codemode workers and MCP servers. */
   release(shellStop?: Promise<void>): Promise<void>;
 }
@@ -170,6 +178,12 @@ export async function installTools(
         target.followed.get(String(api.conversationId)) ?? target.conversation!,
       ),
   });
+  // Hooks never get the agent's env overrides, so it can't change what they load.
+  const hookScope = async () => ({
+    cwd: (await scope()).cwd,
+    env: { ...baseEnv, RECURSE_AGENT_ID: cid },
+  });
+  registry.install(hooksCompactionExtension(rt, host.hooks, cid, hookScope));
   for (const extension of contextExtension.extensions)
     registry.install(extension);
   const shellState = host.shellState(cid);
@@ -191,6 +205,7 @@ export async function installTools(
     ),
   );
   registry.install(rt.createPublish(host.collection(cid, baseEnv), cid));
+  const { removeArtifact } = host.deps;
   registry.install(
     rt.createArtifact(
       {
@@ -200,6 +215,7 @@ export async function installTools(
         trashDir: host.deps.trashDir,
       },
       cid,
+      removeArtifact && ((id, signal) => removeArtifact(id, cid, signal)),
     ),
   );
   const remotes = host.remoteSettings;
@@ -339,6 +355,7 @@ export async function installTools(
     warmer,
     transforms,
     scope,
+    hookScope,
     release: async (shellStop) => {
       warmer.close();
       host.cacheWarmers.delete(warmer);
@@ -363,7 +380,7 @@ export function installHooks(
   tools: Tools,
 ) {
   const { cid, conv, cwd, env: baseEnv } = target;
-  const { registry, mcp, sandbox, scope } = tools;
+  const { registry, mcp, sandbox, scope, hookScope } = tools;
   const trusted = Object.freeze({
     modelPolicy: baseEnv.RECURSE_MODEL_POLICY,
     workspaceRoot: baseEnv.RECURSE_WORKSPACE_ROOT,
@@ -504,12 +521,15 @@ export function installHooks(
   };
   const codex = rt.createCodex({ models: tools.context.models });
   const { transforms } = tools;
+  let hooksSection: Promise<string> | undefined;
   const prompt = rt.createPromptExtension(
     async (input) => ({
       ...(await host.deps.promptSnapshot(
         host.deps.load(owner(target, input.conversationId)) ?? conv,
         input.env?.cwd ?? input.agent.cwd ?? cwd,
       )),
+      // Once per session, so the list doesn't change the prompt mid-session.
+      recurse_hooks: await (hooksSection ??= host.hooks.section(cid)),
       mcp_servers: await mcp.section(),
     }),
     cid,
@@ -521,10 +541,15 @@ export function installHooks(
   registry.install(rt.refusalsExtension(byId));
   for (const extra of [
     tools.search,
-    { extensions: [review] },
+    {
+      extensions: [
+        hooksExtension(rt, host.hooks, cid, hookScope),
+        prompt,
+        review,
+      ],
+    },
     codemode,
     rt.createRtk({ scope, buildDir: BUILD_DIR }),
-    { extensions: [prompt] },
     transforms,
   ])
     for (const extension of extra.extensions) registry.install(extension);
@@ -546,5 +571,8 @@ export function installHooks(
     (id) => owner(target, id) !== cid,
   );
   registry.install(side);
-  return { side, transforms, models: codex.models, readyMcp };
+  const runHooks = {
+    settled: (end: RunEnd) => void host.hooks.settled(cid, hookScope, end),
+  };
+  return { side, transforms, models: codex.models, readyMcp, runHooks };
 }

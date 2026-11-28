@@ -23,7 +23,7 @@ import {
   fauxAssistantMessage,
   fauxProvider,
 } from "@earendil-works/pi-ai";
-import { DurableHost } from "../../src/agents/durable/host.ts";
+import { DurableHost } from "../../src/agents/durable/host";
 import { WARNING } from "../../src/observability/runtime_logging.ts";
 import { testDeps, until } from "./fixtures/durable_host/host.ts";
 import { openDescriptors as descriptors } from "./fixtures/durable_sqlite/descriptors.ts";

@@ -290,6 +290,13 @@ export async function buildConversationsApp(
       async markViewed(cid) {
         const conv = world.load(cid);
         if (conv?.unread) await world.save({ ...conv, unread: false });
+        return () => {};
+      },
+      async setUnread(cid, unread) {
+        const conv = world.load(cid);
+        if (!conv) return false;
+        await world.save({ ...conv, unread });
+        return true;
       },
       subtree: () => [],
       save: (conv) => world.save(conv),

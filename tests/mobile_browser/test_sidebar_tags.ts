@@ -51,20 +51,27 @@ export const tests: BrowserTest[] = [
     const settings = await (
       await context.request.get(`${base}api/sidebar/script`)
     ).json();
-    const script = settings.default
-      .replaceAll("collapsed: true", "collapsed: false")
-      .replace(
-        "actions: stale.length ? [archiveStale] : [],",
-        'actions: [ARCHIVE, PIN].map(a => ({...a, label: a.label + " all", rows: inbox})),',
-      )
-      .replace(
-        "rowActions: [RESTORE],",
-        'rowActions: [RESTORE], actions: [{...RESTORE, label: "Restore all", rows: archive}],',
-      )
-      .replace(
-        "rowActions: [PIN],",
-        'rowActions: [PIN], actions: [{...SNOOZE, label: "Snooze all", rows: inbox}],',
-      );
+    const script =
+      settings.default.replace(
+        "export default function sidebar",
+        "function builtIn",
+      ) +
+      `
+      export default rows => {
+        const sections = builtIn(rows);
+        const inbox = sections.find(section => section.title === "Inbox").rows;
+        return sections.map(section => ({
+          ...section,
+          collapsed: false,
+          actions: section.title === "Inbox"
+            ? [ARCHIVE, PIN].map(a => ({ ...a, label: a.label + " all", rows: inbox }))
+            : section.title === "Archive"
+              ? [{ ...RESTORE, label: "Restore all", rows: section.rows }]
+              : section.title === "Active"
+                ? [{ ...SNOOZE, label: "Snooze all", rows: inbox }]
+                : section.actions,
+        }));
+      };`;
     await postFixture(base, "save-sidebar-script", { script, by: "operator" });
     await page.clock.install();
     await gotoRoot(page, base);
@@ -220,7 +227,7 @@ async function typedTags(
   expect(await page.getByRole("button", { name: /^Tag… / }).count()).toBe(0);
   await newButton.click();
   await browserExpect(page.locator("#input")).toBeFocused();
-  await page.locator("#draft-model-host").waitFor();
+  await page.getByRole("heading", { name: "New agent" }).waitFor();
   expect(await page.locator("#draft-tag").count()).toBe(0);
   await screenshot(page, `sidebar/draft-built-in-${width}`);
   const tagScript = await enableTagSidebar(context, base, [
@@ -364,7 +371,7 @@ async function typedTags(
   }
   await newButton.click();
   await browserExpect(page.locator("#input")).toBeFocused();
-  await page.locator("#draft-model-host").waitFor();
+  await page.getByRole("heading", { name: "New agent" }).waitFor();
   expect(await dialog.count()).toBe(0);
   const tagControl = page.locator("#draft-tag");
   await browserExpect(tagControl).toHaveAccessibleName("No tag");

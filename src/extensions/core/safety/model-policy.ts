@@ -1,3 +1,4 @@
+// Resolve the Settings-owned reviewer route against Pi's trusted catalog.
 import type {
   ClassifierApi,
   ClassifierModel,
@@ -206,13 +207,17 @@ function sameModel(
 
 export type ReviewModel = Model<any> | ClassifierModel<ClassifierApi>;
 
+type ReviewContext = Pick<ExtensionContext, "model" | "signal"> & {
+  modelRegistry: Pick<ExtensionContext["modelRegistry"], "find" | "findOfType">;
+};
+
 type ReviewSelection = {
   model: ReviewModel;
   effort: ReviewEffort;
 };
 
 function findReviewModel(
-  ctx: ExtensionContext,
+  ctx: ReviewContext,
   target: PolicyModel,
   explicit: boolean,
 ): ReviewModel | undefined {
@@ -255,7 +260,7 @@ export function reviewerConfigurationCategory(
 // identity or reviewer pin is stale. Never infer candidates from file models.
 // Only an absent policy uses the trusted active model at low effort.
 export function pickReviewerCandidates(
-  ctx: ExtensionContext,
+  ctx: ReviewContext,
   state: TrustedModelPolicyState,
   purpose: "reviewer" | "summary",
 ): ReviewSelection[] | undefined {
@@ -300,7 +305,7 @@ export function pickReviewerCandidates(
  * in; undefined means no trusted model resolves. Auth check errors stay on the
  * selected provider. */
 export async function pickReviewer(
-  ctx: ExtensionContext,
+  ctx: ReviewContext,
   state: TrustedModelPolicyState,
   purpose: "reviewer" | "summary",
   models: Pick<Models, "checkAuth">,

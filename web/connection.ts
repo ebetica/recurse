@@ -47,6 +47,10 @@ export function startConnectionMonitoring(
   let previousPhase: ConnectionPhase | null = null;
   let indicatorWasVisible = false;
   const updateStatus = document.querySelector<HTMLElement>("#update-status");
+  const windowsError =
+    document.querySelector<HTMLElement>("#window-load-error");
+  const windowsStatus = windowsError?.querySelector('[role="status"]');
+  const reloadWindows = windowsError?.querySelector("button");
   let recoveryPending = false;
   let manualRetry = false;
   let updateTarget: string | null = null;
@@ -80,10 +84,14 @@ export function startConnectionMonitoring(
   function attemptUpdate(target: string, automatic: boolean): void {
     const ready = new Event("recurse:update-ready", { cancelable: true });
     if (!window.dispatchEvent(ready)) {
-      showUpdateStatus(
-        "Update ready — send or clear unsent work first.",
-        target,
-      );
+      if (windowsStatus && !windowsError?.hidden)
+        windowsStatus.textContent =
+          "Windows could not load. Send or clear unsent work before reloading.";
+      if (target !== loadedVersion)
+        showUpdateStatus(
+          "Update ready — send or clear unsent work first.",
+          target,
+        );
       return;
     }
     if (
@@ -204,7 +212,13 @@ export function startConnectionMonitoring(
     embeddedFrameHidden() ? null : probe.request({ force, suppressStale });
   void generationReady.then(() => {
     generationEnabled = true;
+    if (reloadWindows) reloadWindows.disabled = false;
+    if (windowsStatus) windowsStatus.textContent = "Windows could not load.";
     requestProbe(true);
+  });
+  window.addEventListener("recurse:check-for-update", () => requestProbe(true));
+  reloadWindows?.addEventListener("click", () => {
+    attemptUpdate(updateTarget || loadedVersion, false);
   });
   retry.addEventListener("click", () => {
     if (connectionHealth.snapshot().phase === "auth-expired") {

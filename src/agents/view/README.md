@@ -46,6 +46,10 @@ rows and keep their history positions, so scrolling back past a compaction works
 sits after its summary marker, keeping it out of the compacted activity group;
 tool-only assistant cuts still seat the marker before their tool rows.
 
+The [user-text display parser](session_entries.ts) keeps a leading skill command
+next to its arguments. Pending and settled views share this parser without
+changing what Pi receives.
+
 Legacy message-detail scans reuse the asynchronous JSONL reader and pin the
 session's descriptor identity between bounded pages. Parsed view batches and
 page inputs stay as objects inside the server; the view projects display rows

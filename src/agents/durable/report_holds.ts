@@ -52,6 +52,11 @@ export class ReportHolds {
     return row?.runId === undefined && !row?.queued;
   }
 
+  /** A cold conversation may have a report the resident state cannot see. */
+  mayHaveUnreportedReply(cid: string): boolean {
+    return !this.settled(cid) || this.reporters.get(cid)?.caughtUp !== true;
+  }
+
   // After `cid`'s Harness closed: it holds nothing now. A deletion releases at
   // its end instead (reap.ts), and a server shutdown never releases.
   closed(cid: string, stopping: boolean): void {

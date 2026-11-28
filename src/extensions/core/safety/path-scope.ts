@@ -1,5 +1,7 @@
 // Trusted roots resolve asynchronously per run; action targets are rechecked.
 import fs from "node:fs";
+import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { realpath, stat } from "node:fs/promises";
 import {
   basename,
@@ -11,6 +13,7 @@ import {
   resolve,
   sep,
 } from "node:path";
+import { protectedConfigDirs, protectedConfigPaths } from "./policy.ts";
 
 export const WORKSPACE_ROOT_ENV = "RECURSE_WORKSPACE_ROOT";
 export const WORKTREES_ROOT_ENV = "RECURSE_WORKTREES_ROOT";
@@ -21,6 +24,7 @@ export type TrustedPathScope = {
   tmp: string;
   agentTmp?: string;
   dataDir?: string;
+  configDir?: string;
 };
 
 const FILE_SCOPED_TOOLS = new Set(["write", "edit"]);
@@ -144,6 +148,112 @@ function resolveTarget(
   }
 }
 
+// Match Pi Durable's tool-path spelling without rewriting the submitted path.
+function piToolPath(path: string): string | undefined {
+  let value = path
+    .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, " ")
+    .replace(/^@/, "");
+  if (value === "~" || value.startsWith("~/"))
+    value = homedir() + value.slice(1);
+  if (value.startsWith("file://")) {
+    try {
+      value = fileURLToPath(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return value;
+}
+
+function fileIdentity(path: string) {
+  // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+  const { dev, ino } = fs.statSync(path, { bigint: true });
+  return `${dev}:${ino}`;
+}
+
+// realpath cannot return a dangling link's destination. Follow its existing
+// prefixes without losing the kernel's symlink-before-`..` ordering.
+function missingDestination(path: string): string | undefined {
+  let prefix = parse(path).root;
+  let parts = path.slice(prefix.length).split(sep);
+  let links = 0;
+  while (parts.length) {
+    const part = parts.shift()!;
+    const candidate = resolve(prefix, part);
+    try {
+      // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+      if (fs.lstatSync(candidate).isSymbolicLink()) {
+        if (++links > 40) return undefined;
+        // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+        let link = fs.readlinkSync(candidate);
+        if (isAbsolute(link)) {
+          prefix = parse(link).root;
+          link = link.slice(prefix.length);
+        }
+        parts = [...link.split(sep), ...parts];
+      } else prefix = candidate;
+    } catch (error) {
+      return isMissing(error) && !parts.includes("..")
+        ? resolve(candidate, ...parts)
+        : undefined;
+    }
+  }
+  return prefix;
+}
+
+function realDestination(path: string): string | undefined {
+  try {
+    // oxlint-disable-next-line no-restricted-properties -- known: main-thread safety path-scope validation
+    return fs.realpathSync(path);
+  } catch (error) {
+    return isMissing(error) ? missingDestination(path) : undefined;
+  }
+}
+
+function configTarget(configDir: string, target: string) {
+  let identity: string | undefined;
+  let destination: string | undefined;
+  let unknown = false;
+  try {
+    identity = fileIdentity(target);
+  } catch (error) {
+    if (isMissing(error)) destination = missingDestination(target);
+    if (!destination) unknown = true;
+  }
+  for (const dir of protectedConfigDirs(configDir)) {
+    // Inside the directory itself, or reached through a link.
+    const real = realDestination(target) ?? destination;
+    if (
+      contained(dir, target) ||
+      (real && contained(realDestination(dir) ?? dir, real))
+    )
+      return { path: dir, unknown: false };
+    if (!real) unknown = true;
+  }
+  for (const path of protectedConfigPaths(configDir)) {
+    if (target === path) return { path, unknown: false };
+    try {
+      // Both symlinks and hard links can grant access to the same live file.
+      if (fileIdentity(path) === identity) return { path, unknown: false };
+    } catch (error) {
+      const missing = isMissing(error) ? missingDestination(path) : undefined;
+      if (!missing) unknown = true;
+      else if (missing === destination) return { path, unknown: false };
+    }
+  }
+  return { path: undefined, unknown };
+}
+
+/** Trusted evidence when a file tool resolves to an operator configuration. */
+export function protectedFileTarget(
+  configDir: string,
+  cwd: string,
+  path: unknown,
+): string | undefined {
+  const value = typeof path === "string" ? piToolPath(path) : undefined;
+  return value ? configTarget(configDir, resolve(cwd, value)).path : undefined;
+}
+
 function contained(root: string, target: string): boolean {
   const child = relative(root, target);
   return (
@@ -189,6 +299,7 @@ function isCarvedOut(parts: readonly string[]): boolean {
 /** Resolve the runner-provided roots once, before any model action runs. */
 export async function loadTrustedPathScope(
   env: NodeJS.ProcessEnv,
+  configDir?: string,
 ): Promise<TrustedPathScope | undefined> {
   const [workspace, worktrees, tmp, agentTmp, dataDir] = await Promise.all([
     realDirectory(env[WORKSPACE_ROOT_ENV]),
@@ -208,6 +319,7 @@ export async function loadTrustedPathScope(
     tmp,
     ...(agentTmp ? { agentTmp } : {}),
     ...(dataDir ? { dataDir } : {}),
+    ...(configDir ? { configDir } : {}),
   };
 }
 
@@ -226,7 +338,8 @@ export function allowedByPathScope(
   if (typeof path !== "string") return false;
 
   if (!scope) return false;
-  const target = resolveTarget(cwd, path);
+  const value = piToolPath(path);
+  const target = value ? resolveTarget(cwd, value) : undefined;
   if (!target) return false;
 
   // Invariant: Protect the exact state root even below /tmp or with a custom
@@ -243,6 +356,12 @@ export function allowedByPathScope(
     target.real,
     ...target.symlinkDestinations,
   ];
+  // Recheck configuration links as well as the action, including links made
+  // after the first call in the run. An unresolved link can't prove safety.
+  if (scope.configDir) {
+    const config = configTarget(scope.configDir, target.lexical);
+    if (config.path || config.unknown) return false;
+  }
   const worktreesRoot = scope.worktrees;
   if (
     worktreesRoot &&

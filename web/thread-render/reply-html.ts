@@ -12,6 +12,7 @@ import { renderMathPlaceholders } from "../math.js";
 import { renderReferenceImages } from "../image-preview/inline.js";
 import { linkPrReferences } from "../pr-references.js";
 import { linkFilePaths } from "../file-path-links.js";
+import { COPY_ICON, PANE_EXPAND_ICON as EXPAND_ICON } from "../icons.js";
 
 const renderedHtml = new Map<string, string>();
 const MAX_RENDERED_HTML = 1024;
@@ -20,14 +21,58 @@ const MAX_RENDERED_HTML_ENTRY_CHARACTERS = MAX_RENDERED_HTML_CHARACTERS / 4;
 let renderedHtmlCharacters = 0;
 const renderingBackend = () =>
   state.currentConv ? backendFor(state.currentConv.id) : homeBackend;
-const COPY_BTN = `<button class="btn sm copy-btn" type="button">Copy</button>`;
+// Display names for common fence languages; other fences show as written.
+const LANGUAGE_NAMES: Record<string, string> = {
+  bash: "Bash",
+  c: "C",
+  cpp: "C++",
+  css: "CSS",
+  diff: "Diff",
+  go: "Go",
+  html: "HTML",
+  java: "Java",
+  javascript: "JavaScript",
+  js: "JavaScript",
+  json: "JSON",
+  jsx: "JSX",
+  markdown: "Markdown",
+  md: "Markdown",
+  py: "Python",
+  python: "Python",
+  rs: "Rust",
+  rust: "Rust",
+  sh: "Shell",
+  shell: "Shell",
+  sql: "SQL",
+  text: "Text",
+  toml: "TOML",
+  ts: "TypeScript",
+  tsx: "TSX",
+  txt: "Text",
+  typescript: "TypeScript",
+  yaml: "YAML",
+  yml: "YAML",
+  zsh: "Zsh",
+};
+// Code header bar; the language comes from a serialized attribute, so escape <>.
+const codeHead = (lang: string | undefined) =>
+  `<div class="code-head"><span class="code-lang">${
+    (lang && Object.hasOwn(LANGUAGE_NAMES, lang.toLowerCase())
+      ? LANGUAGE_NAMES[lang.toLowerCase()]
+      : lang
+    )
+      ?.replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;") ?? "Text"
+  }</span>` +
+  `<button class="icon-btn copy-btn" type="button" aria-label="Copy code" title="Copy code">${COPY_ICON}</button>` +
+  `<button class="icon-btn code-expand-btn" type="button" aria-label="Expand code" title="Expand code">${EXPAND_ICON}</button></div>`;
 
 // Classifies sanitized images in an inert template before any can fetch.
 // Local paths use authenticated previews; web images need an explicit click.
 function applyImagePolicy(
   fragment: DocumentFragment,
-  base: string | null = null,
-  footer = false,
+  base: string | null | undefined,
+  footer: boolean,
 ): string {
   const backend = renderingBackend();
   const tpl = document.createElement("template");
@@ -73,7 +118,7 @@ function applyImagePolicy(
       }
     }
   }
-  if (base) linkPrReferences(tpl.content, base);
+  if (base !== undefined) linkPrReferences(tpl.content, base);
   renderMathPlaceholders(tpl.content);
   if (footer) footerTail(tpl.content);
   return tpl.innerHTML;
@@ -81,13 +126,13 @@ function applyImagePolicy(
 /** Agent Markdown as inert HTML under the reply image policy. */
 export function safeMarkdown(
   markdown: string,
-  base: string | null = null,
+  base?: string | null,
   footer = false,
 ): string {
   const key = JSON.stringify([
     state.currentConv?.id ?? null,
     renderingBackend().label,
-    base,
+    base === undefined ? false : base,
     footer,
     markdown,
   ]);
@@ -118,12 +163,16 @@ export function safeMarkdown(
 }
 export function enrich(
   text: string,
-  base: string | null = null,
+  base?: string | null,
   footer = false,
 ): string {
   return safeMarkdown(text, base, footer)
-    .replace(/<pre>/g, `<div class="code-wrap"><pre>`)
-    .replace(/<\/pre>/g, `</pre>${COPY_BTN}</div>`);
+    .replace(
+      /<pre>(?=(?:<code class="(?:[^"]*\s)?language-([^"\s]+))?)/g,
+      (_, lang: string | undefined) =>
+        `<div class="code-wrap">${codeHead(lang)}<pre>`,
+    )
+    .replace(/<\/pre>/g, `</pre></div>`);
 }
 /** Keep the final word with a width-only footer at normal leading. */
 function footerTail(fragment: DocumentFragment): void {

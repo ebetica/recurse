@@ -8,8 +8,14 @@ import {
   type BrowserTest,
 } from "./common";
 
-async function useStateTool(base: string, id: string, replacement?: unknown) {
-  const { result } = (await postFixture(base, "run-artifact-state-tool", {
+async function useArtifactTool(
+  base: string,
+  action: "state" | "list" | "delete",
+  id?: string,
+  replacement?: unknown,
+) {
+  const { result } = (await postFixture(base, "run-artifact-tool", {
+    action,
     id,
     replacement,
   })) as { result: ToolResultMessage };
@@ -93,7 +99,7 @@ export const tests: BrowserTest[] = [
     await browserExpect(count).toHaveText("0");
     await move.click();
     await browserExpect(feedback).toHaveText("Saved");
-    expect(await useStateTool(base, app.id)).toEqual({
+    expect(await useArtifactTool(base, "state", app.id)).toEqual({
       isError: false,
       output: { type: "text", text: '{"attendees":1}' },
     });
@@ -137,7 +143,7 @@ export const tests: BrowserTest[] = [
       '{"attendees":2}',
       '{"attendees":3}',
     ]);
-    expect(await useStateTool(base, other.id)).toEqual({
+    expect(await useArtifactTool(base, "state", other.id)).toEqual({
       isError: false,
       output: { type: "text", text: "null" },
     });
@@ -155,7 +161,9 @@ export const tests: BrowserTest[] = [
     try {
       await move.click();
       await browserExpect(count).toHaveText("4");
-      expect(await useStateTool(base, app.id, { attendees: 3 })).toEqual({
+      expect(
+        await useArtifactTool(base, "state", app.id, { attendees: 3 }),
+      ).toEqual({
         isError: false,
         output: { type: "text", text: '{"attendees":3}' },
       });
@@ -246,23 +254,70 @@ export const tests: BrowserTest[] = [
     await browserExpect(picker).toHaveValue(destination.id);
     await picker.selectOption(app.id);
     await browserExpect(count).toHaveText("3");
+    const selectedFrame = page
+      .getByTitle(`${app.title} live preview`, { exact: true })
+      .and(page.locator(`iframe[src*="/api/artifacts/${app.id}/page?"]`));
+    await browserExpect(selectedFrame).toBeVisible();
+    const removed = await useArtifactTool(base, "delete", app.id);
+    expect(removed).toEqual({
+      isError: false,
+      output: { type: "text", text: `Deleted Artifact ${app.id}.` },
+    });
+    await browserExpect(
+      picker.locator(`option[value="${app.id}"]`),
+    ).toHaveCount(0);
+    await browserExpect(selectedFrame).toHaveCount(0);
+    const listed = await useArtifactTool(base, "list");
+    expect(listed.isError).toBe(false);
+    expect(listed.output).toMatchObject({
+      text: expect.stringContaining(other.id),
+    });
+    expect(listed.output).not.toMatchObject({
+      text: expect.stringContaining(app.id),
+    });
+    for (const action of ["delete", "state"] as const) {
+      expect(await useArtifactTool(base, action, app.id)).toEqual({
+        isError: true,
+        output: {
+          type: "text",
+          text: expect.stringContaining("artifact not found"),
+        },
+      });
+    }
+    expect(
+      await Bun.file(`${app.repo_path}/.git/recurse-app-state.json`).exists(),
+    ).toBe(false);
+    const draft = await postFixture(base, "seed-saved-app-state", {
+      draft: true,
+    });
+    expect(await useArtifactTool(base, "delete", draft.id)).toEqual({
+      isError: true,
+      output: {
+        type: "text",
+        text: expect.stringContaining("artifact has not been published"),
+      },
+    });
+    expect(await Bun.file(`${draft.repo_path}/.git/HEAD`).exists()).toBe(true);
+    await picker.selectOption(other.id);
+    await browserExpect(count).toHaveText("0");
+    await move.click();
+    await browserExpect(feedback).toHaveText("Saved");
+    const otherState = Bun.file(
+      `${other.repo_path}/.git/recurse-app-state.json`,
+    );
+    expect(await otherState.json()).toEqual({ attendees: 1 });
     page.once("dialog", (dialog) => void dialog.accept());
     const deletion = page.waitForResponse(
       (response) =>
         response.request().method() === "DELETE" &&
-        response.url().endsWith(`/api/artifacts/${app.id}`),
+        response.url().endsWith(`/api/artifacts/${other.id}`),
     );
     await page.locator(".artifact-delete-btn").click();
     expect((await deletion).status()).toBe(200);
-    const deleted = await useStateTool(base, app.id);
-    expect(deleted.isError).toBe(true);
-    expect(deleted.output).toMatchObject({
-      type: "text",
-      text: expect.stringContaining("artifact not found"),
-    });
-    expect(
-      await Bun.file(`${app.repo_path}/.git/recurse-app-state.json`).exists(),
-    ).toBe(false);
+    await browserExpect(
+      picker.locator(`option[value="${other.id}"]`),
+    ).toHaveCount(0);
+    expect(await otherState.exists()).toBe(false);
     await page.close();
   },
 ];

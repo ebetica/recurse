@@ -179,6 +179,11 @@ export class AgentTools {
       item("$RECURSE_SRC/tools/worktree.ts", this.help.get("worktree")!);
     out.push("");
     out.push(
+      "bun $RECURSE_SRC/tools/hooks.ts list|run — local TypeScript hooks: $CHAT_DATA_DIR/hooks/agents/<id>/*.ts.",
+      "  Hooks run on events like tool calls (which they can block or change), model requests and run ends; see --help.",
+      "",
+    );
+    out.push(
       "If Git reports no author identity, ask the operator; never make one up.",
     );
     out.push("");

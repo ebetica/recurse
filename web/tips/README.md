@@ -7,7 +7,8 @@ The Tips pane shows short tips about Recurse, one at a time.
 - [list.ts](list.ts) is the fixed list of tips, in display order. Each tip says
   first what to ask an agent, then where the same thing is in the app. A tip
   may carry a request (typed into a new agent's or this agent's message box,
-  never sent) and one app control its second button opens.
+  never sent) and one app control its second button opens. The pane and its
+  browser tests share the device filter from this file.
 - [pane.ts](pane.ts) registers the pane and keeps its state in this browser's
   storage: the switch, the tips seen, the tip showing, and time used.
 
@@ -36,6 +37,8 @@ the shown tip in detail. Phone controls and the unfiltered All tips remain nativ
 
 ## Rules for changes
 
+- When a PR adds or changes a user-facing feature, add or update its tip in
+  [list.ts](list.ts), or say in the PR body why no tip fits.
 - Check each tip against the code it describes, and keep its text in plain
   language without internal names.
 - Keep tip ids stable; a new id counts as unseen.

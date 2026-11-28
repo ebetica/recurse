@@ -15,6 +15,8 @@ ebetica/recurse; see [How Recurse is developed](../develop.md#how-recurse-is-dev
    checks core links and paths; optional deployment checks are documented with the deployment.
    Core code, tests, checks and configuration must not refer to the optional
    playground directory. `tests/check.sh` runs a boundary check in every stage.
+   A PR that adds or changes a user-facing feature adds or updates its tip in
+   [web/tips/list.ts](../../web/tips/list.ts), or says in the PR body why no tip fits.
 4. Run the tests the change can reach first ([tests/README.md](../../tests/README.md));
    `bun tests/dev/affected_tests.ts` lists them. `tests/check.sh` runs the full suite;
    never run two stages at once.

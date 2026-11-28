@@ -18,7 +18,7 @@
     "tests/mobile_browser/test_artifact_visit.ts": 2,
     "tests/mobile_browser/test_changes_expand.ts": 1,
     "tests/mobile_browser/test_compact_rows.ts": 1,
-    "tests/mobile_browser/test_composer.ts": 3,
+    "tests/mobile_browser/test_composer.ts": 2,
     "tests/mobile_browser/test_explorer.ts": 2,
     "tests/mobile_browser/test_files.ts": 9,
     "tests/mobile_browser/test_first_load.ts": 1,

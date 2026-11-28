@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { BACKGROUND_CONTEXT as context } from "@earendil-works/chord/context";
 import { InboxDoc, LiveDoc } from "@earendil-works/pi-durable";
-import { DurableHost } from "../../src/agents/durable/host.ts";
+import { DurableHost } from "../../src/agents/durable/host";
 import { DurableViews } from "../../src/agents/durable/durable_rows.ts";
 import { ReportDoc } from "../../src/agents/durable/report.ts";
 import { deliverStop, withDurableStop } from "../../src/web/tree.ts";

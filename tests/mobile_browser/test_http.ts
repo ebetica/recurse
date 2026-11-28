@@ -104,8 +104,8 @@ export const tests: BrowserTest[] = [
       await page.locator(".agent").first().waitFor();
 
       fileRoot = await mkdtemp(join(tmpdir(), "browser-http-file-"));
-      const fileText = "# File preview over HTTP\n";
-      await writeFile(join(fileRoot, "http-file.md"), fileText);
+      const fileText = "File preview over HTTP\n";
+      await writeFile(join(fileRoot, "http-file.txt"), fileText);
       const fileFixture = await page.evaluate(async (workdir) => {
         const response = await fetch(
           "/__browser-test/seed-model-selection-error",
@@ -130,14 +130,14 @@ export const tests: BrowserTest[] = [
         .locator("#conv-freshness:not(.on)")
         .waitFor({ state: "attached" });
       await page.locator('.rail-btn[data-pane="explorer"]').click();
-      await page.locator('.explorer-row[data-path="http-file.md"]').click();
+      await page.locator('.explorer-row[data-path="http-file.txt"]').click();
       const file = page.locator(".pane-col.file-tab .explorer-source", {
         hasText: fileText.trim(),
       });
       await file.waitFor();
       expect(await file.textContent()).toBe(fileText);
       expect(
-        await page.locator(".dv-tab", { hasText: "http-file.md" }).count(),
+        await page.locator(".dv-tab", { hasText: "http-file.txt" }).count(),
       ).toBe(1);
 
       const composer = await seedImage(page);

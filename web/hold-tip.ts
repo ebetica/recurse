@@ -215,13 +215,10 @@ export function attachHoldTip(
   anchor.addEventListener("mouseleave", hoverHide);
   // Invariant: Capture Escape because handled keymap events stop propagation.
   // It drops hover/peek only; pinned tips clear with their confirmation arm.
-  doc.addEventListener(
-    "keydown",
-    (event: Event) => {
-      if ((event as KeyboardEvent).key === "Escape") hoverHide();
-    },
-    true,
-  );
+  const escape = (event: KeyboardEvent) => {
+    if (event.key === "Escape") hoverHide();
+  };
+  doc.addEventListener("keydown", escape, true);
 
   // Invariant: A repaint can replace the anchor (a re-rendered sidebar button):
   // the parked div in body would then float forever, so removal hides the tip
@@ -230,6 +227,9 @@ export function attachHoldTip(
     const observer = new MutationObserver(() => {
       if (anchor.isConnected) return;
       observer.disconnect();
+      doc.defaultView?.removeEventListener("scroll", repark, true);
+      doc.defaultView?.removeEventListener("resize", repark);
+      doc.removeEventListener("keydown", escape, true);
       pressing = false;
       held = false;
       cancelHold?.();

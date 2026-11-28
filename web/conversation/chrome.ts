@@ -626,9 +626,6 @@ export function renderDraft(): void {
   applyFreshness();
   titleEl.textContent = "New agent";
   setTitleCopyable(false);
-  // Invariant: Move the shared model row out of any prior draft host before lit
-  // replaces the thread. Empty drafts put that same control back into their
-  // pane below.
   hideModel();
   hideSafety();
   $("#conv-status")!.classList.remove("running");
@@ -661,7 +658,6 @@ export function renderDraft(): void {
           </div>`
       : html`<div class="draft-hello">
           <h2>New agent</h2>
-          <div id="draft-model-host" class="draft-model-host"></div>
           <div id="draft-tag-host"></div>
         </div>`,
     msgsEl,

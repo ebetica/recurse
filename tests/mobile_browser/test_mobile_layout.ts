@@ -19,7 +19,9 @@ import {
   showAgentList,
   turn,
   waitForLayout,
+  MERMAID_DIAGRAM,
 } from "./common";
+import { standalonePhone } from "./standalone";
 
 export const tests: BrowserTest[] = [
   // Regression: #3246 rendering a diagram during navigation must not squeeze the phone conversation.
@@ -94,7 +96,9 @@ export const tests: BrowserTest[] = [
           );
           await screenshot(page, `mobile-layout/phone-diagram-${width}`);
           release();
-          await page.locator("#messages .mermaid-done svg").waitFor();
+          await page
+            .locator(`#messages .mermaid-done ${MERMAID_DIAGRAM}`)
+            .waitFor();
           await page.locator("#menu-btn").click();
           await page.locator("html.phone-list").waitFor();
           await page.locator(`.agent[data-id="${rootAgentId()}"]`).click();
@@ -223,6 +227,81 @@ export const tests: BrowserTest[] = [
       (await page.locator("dialog.settings-sheet[open] h2").boundingBox())!.x,
     ).toBeGreaterThanOrEqual(60);
     await context.close();
+  },
+  // Feature: #3704 Home Screen controls stay outside the status bar and cutouts.
+  async function test_standalone_status_bar_clears_controls(_browser, base) {
+    const { page, session, close } = await standalonePhone(base);
+    const top = 60;
+    try {
+      await session.send("Emulation.setSafeAreaInsetsOverride", {
+        insets: { top },
+      });
+      await gotoRoot(page, base);
+      expect(
+        await page.evaluate<boolean>(
+          "matchMedia('(display-mode: standalone)').matches",
+        ),
+      ).toBe(true);
+      await browserExpect(
+        page.locator('meta[name="apple-mobile-web-app-status-bar-style"]'),
+      ).toHaveAttribute("content", "black-translucent");
+      const menu = page.getByRole("button", { name: "Back to agents" });
+      await browserExpect(menu).toBeVisible();
+      expect((await menu.boundingBox())!.y).toBeGreaterThanOrEqual(top);
+      await expectHitCorners(menu);
+      await screenshot(page, "standalone-phone");
+
+      await menu.click();
+      const firstRow = page.locator("#agent-list .agent").first();
+      const snooze = page.getByRole("menuitem", { name: "Snooze" });
+      await firstRow.scrollIntoViewIfNeeded();
+      const row = (await firstRow.boundingBox())!;
+      await session.send("Input.dispatchTouchEvent", {
+        type: "touchStart",
+        touchPoints: [{ x: row.x + 50, y: row.y + row.height / 2 }],
+      });
+      await snooze.waitFor();
+      await session.send("Input.dispatchTouchEvent", {
+        type: "touchEnd",
+        touchPoints: [],
+      });
+      expect(
+        (await page.locator("#hold-menu").boundingBox())!.y,
+      ).toBeGreaterThanOrEqual(top);
+      await snooze.click();
+      const dialog = page.getByRole("dialog", { name: "Snooze until" });
+      await dialog.waitFor();
+      expect((await dialog.boundingBox())!.y).toBeGreaterThanOrEqual(top);
+      await page.keyboard.press("Escape");
+      await dialog.waitFor({ state: "hidden" });
+      await gotoRoot(page, base);
+
+      const width = 1280;
+      const right = 60;
+      await session.send("Emulation.setDeviceMetricsOverride", {
+        width,
+        height: 800,
+        deviceScaleFactor: 1,
+        mobile: true,
+      });
+      await session.send("Emulation.setSafeAreaInsetsOverride", {
+        insets: { top, right, left: right },
+      });
+      for (const id of ["chat", "explorer"]) {
+        if (id === "explorer")
+          await page.locator('.rail-btn[data-pane="explorer"]').click();
+        const fullscreen = page.locator(`#dock button.fs[data-pane="${id}"]`);
+        await fullscreen.click();
+        await browserExpect(fullscreen).toHaveAccessibleName("Exit fullscreen");
+        const box = (await fullscreen.boundingBox())!;
+        expect(box.y).toBeGreaterThanOrEqual(top);
+        expect(box.x + box.width).toBeLessThanOrEqual(width - right);
+        await screenshot(page, `standalone-wide-${id}`);
+        await fullscreen.click();
+      }
+    } finally {
+      await close();
+    }
   },
   // Feature: #2354 touch attachment controls keep image previews accessible.
   async function test_mobile_shell_stays_visible_across_scroll_resize_and_list(

@@ -16,6 +16,7 @@ import {
   groupPiTurns,
   joinText,
   splitPiUserText,
+  splitStampedSkillText,
   viewEntry,
   type ExpectedIdentity,
   type JsonObject,
@@ -882,11 +883,6 @@ export async function thinkingText(
   }
 }
 
-function blockSender(text: string): [string | null, string | null] {
-  const [, sender, senderName] = splitPiUserText(text);
-  return [sender, senderName];
-}
-
 function servedBlock(
   block: Block,
   files: readonly JsonObject[] = [],
@@ -902,10 +898,10 @@ function servedBlock(
   const withheldCommand =
     (name === "bash" || name === "shell") &&
     (containsSecret(block.args) || containsSecret(block.input ?? ""));
-  let sender: string | null = null;
-  let senderName: string | null = null;
-  if (block.kind === "text" && block.role === "user")
-    [sender, senderName] = blockSender(block.text);
+  const user = block.kind === "text" && block.role === "user";
+  const skill = user ? splitStampedSkillText(block.text) : null;
+  const [, sender, senderName] =
+    skill?.parts ?? (user ? splitPiUserText(block.text) : []);
   let prLinks: unknown[] = [];
   const stat = block.stat ?? {};
   if (stat.action === "pr_create" || stat.action === "pr_merge") {
@@ -921,7 +917,8 @@ function servedBlock(
     offset: block.offset,
     kind: block.kind,
     role: block.role,
-    text: block.text,
+    text: skill?.parts[3] ?? block.text,
+    ...(skill?.text_is_authored ? { text_is_authored: true } : {}),
     ...(block.text_from
       ? { text_from: block.text_from, text_hash: block.text_hash }
       : {}),
@@ -937,9 +934,17 @@ function servedBlock(
         }
       : {}),
     ...(block.live_thinking ? { live_thinking: true } : {}),
-    origin: block.origin,
+    origin: skill?.parts[0] ?? block.origin,
     name: block.name,
     args: withheldCommand ? "Command withheld" : block.args,
+    ...(block.ran_args
+      ? {
+          ran_args:
+            withheldCommand || containsSecret(block.ran_args)
+              ? "Command withheld"
+              : block.ran_args,
+        }
+      : {}),
     result,
     ...(block.running && block.result !== null
       ? {
@@ -963,8 +968,8 @@ function servedBlock(
     stop_reason: block.stop_reason,
     running: block.running,
     input: withheldCommand ? "Command withheld" : block.input,
-    sender,
-    sender_name: senderName,
+    sender: sender ?? null,
+    sender_name: senderName ?? null,
     stat: block.stat,
     // Invariant: Legacy calls publish one file; scripts may publish many.
     attachment:

@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/chord/context";
 import { readEnvironmentOverrides } from "../../../extensions/core/safety/environment-state";
 import type { ArchivedAgent } from "../archive.ts";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import type { PiImportOptions, PiImportResult } from "../import_pi_session";
 import { modelRef } from "../model_selection";
 import { runtime } from "./load.ts";

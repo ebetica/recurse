@@ -240,6 +240,7 @@ export async function writeFileAtomic(
   ctx: ResolvedContext,
   path: string,
   data: FileBytes,
+  signal?: AbortSignal,
 ): Promise<void> {
   await ensureParent(path);
   try {
@@ -256,6 +257,7 @@ export async function writeFileAtomic(
     await handle.sync();
     await handle.close();
     handle = undefined;
+    signal?.throwIfAborted();
     await renamePath(temp, path);
     // Invariant: A best-effort parent-directory fsync follows the rename.
     try {
@@ -271,7 +273,11 @@ export async function writeFileAtomic(
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await unlink(temp).catch(() => undefined);
-    if (error instanceof ArtifactError) throw error;
+    if (
+      error instanceof ArtifactError ||
+      (signal?.aborted && error === signal.reason)
+    )
+      throw error;
     throw new ArtifactCorrupt("artifact file cannot be written");
   }
 }

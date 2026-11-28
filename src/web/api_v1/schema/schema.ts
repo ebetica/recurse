@@ -2,7 +2,7 @@
 import { Type, type Static } from "typebox";
 
 export const API_MAJOR = 1;
-export const API_REVISION = 8;
+export const API_REVISION = 9;
 
 const TagSchema = Type.Object({
   at: Type.Number(),
@@ -59,6 +59,17 @@ const AgentStatusSchema = Type.Object({
       description:
         "Last measured prompt usage committed while live; null when cold or unknown. No store is opened by status reads.",
     },
+  ),
+  running_hooks: Type.Optional(
+    Type.Array(
+      Type.Object({
+        label: Type.String({ description: "File name and scope." }),
+        at: Type.Number({ description: "Start time, epoch milliseconds." }),
+      }),
+      {
+        description: "Hook files running now, oldest first; absent when none.",
+      },
+    ),
   ),
 });
 export type AgentStatus = Static<typeof AgentStatusSchema>;

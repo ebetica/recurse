@@ -324,18 +324,19 @@ export const tests: BrowserTest[] = [
           .waitFor();
         expect(page.url()).toContain(neighbour);
       }
-      await page.waitForFunction(
-        async (ids) => {
+      const expectGoneFromTree = (ids: string[]) =>
+        page.waitForFunction(async (removed) => {
           const response = await (globalThis as any).fetch("/api/tree");
           return (
             response.ok &&
-            (await response.json()).every((node: any) => !ids.includes(node.id))
+            (await response.json()).every(
+              (node: any) => !removed.includes(node.id),
+            )
           );
-        },
-        [dying, previous, next],
-      );
+        }, ids);
+      await expectGoneFromTree([dying, previous, next]);
       if (width === 412) {
-        const swiped = await create("Swipe to delete", parent);
+        const swiped = await create("Nested agent", parent);
         await page.locator("#menu-btn").tap();
         const row = page.locator(`.agent[data-id="${swiped}"]`);
         await row.scrollIntoViewIfNeeded();
@@ -355,16 +356,19 @@ export const tests: BrowserTest[] = [
           type: "touchEnd",
           touchPoints: [],
         });
+        const tray = row.getByRole("group", { name: "Swipe actions" });
+        const buttons = tray.getByRole("button");
+        await browserExpect(buttons).toHaveCount(2);
+        await browserExpect(buttons.nth(0)).toHaveAccessibleName("Delete");
+        await browserExpect(buttons.nth(1)).toHaveAccessibleName("More");
+        await tray.getByRole("button", { name: "Delete" }).tap();
+        const confirm = page.getByRole("dialog", {
+          name: "Delete Nested agent and all its subagents?",
+        });
+        await browserExpect(row).toBeVisible();
+        await confirm.getByRole("button", { name: "Delete agent" }).tap();
         await browserExpect(row).toHaveCount(0);
-        await browserExpect
-          .poll(async () => {
-            const response = await page.request.get(`${base}api/tree`);
-            expect(response.ok()).toBe(true);
-            return (await response.json()).some(
-              (node: { id: string }) => node.id === swiped,
-            );
-          })
-          .toBe(false);
+        await expectGoneFromTree([swiped]);
         await browserExpect(
           page.locator(`.agent[data-id="${parent}"]`),
         ).toHaveAttribute("aria-current", "page");

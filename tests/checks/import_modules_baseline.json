@@ -1,10 +1,5 @@
 {
-  "cycles": [
-    [
-      "src/agents/durable",
-      "src/agents/durable/host"
-    ]
-  ],
+  "cycles": [],
   "bypasses": [
     "src/agents/agent_tree.ts → src/observability/runtime_logging.ts",
     "src/agents/agent_tree.ts → src/utils/tasks.ts",
@@ -19,20 +14,6 @@
     "src/agents/durable/follow.ts → src/extensions/core/safety/durable.ts",
     "src/agents/durable/follow.ts → src/extensions/core/shells/shells.ts",
     "src/agents/durable/follow.ts → src/observability/runtime_logging.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/clear.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/close.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/delete.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/import.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/load.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/open.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/reads.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/recovery.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/registry.ts",
-    "src/agents/durable/host.ts → src/agents/durable/host/send.ts",
-    "src/agents/durable/host.ts → src/agents/view/reader.ts",
-    "src/agents/durable/host.ts → src/agents/view/session_entries.ts",
-    "src/agents/durable/host.ts → src/observability/request_timing.ts",
-    "src/agents/durable/host.ts → src/observability/runtime_logging.ts",
     "src/agents/durable/host/clear.ts → src/agents/durable/archive.ts",
     "src/agents/durable/host/import.ts → src/extensions/core/safety/environment-state.ts",
     "src/agents/durable/host/open.ts → src/agents/durable/activity.ts",
@@ -71,7 +52,6 @@
     "src/agents/durable/host/runtime.ts → src/extensions/extra/model-clock/model-clock.ts",
     "src/agents/durable/host/runtime.ts → src/extensions/extra/rtk/rtk.ts",
     "src/agents/durable/host/runtime.ts → src/extensions/extra/usage-limits/usage-limits.ts",
-    "src/agents/durable/host/send.ts → src/agents/view/session_entries.ts",
     "src/agents/durable/host/send.ts → src/observability/runtime_logging.ts",
     "src/agents/durable/host/submission.ts → src/agents/view/session_entries.ts",
     "src/agents/durable/host/title.ts → src/observability/runtime_logging.ts",
@@ -91,7 +71,6 @@
     "src/agents/durable/revive_doc.ts → src/extensions/core/environment/managed_tools.ts",
     "src/agents/durable/side_conversations.ts → src/extensions/core/context/server-compaction.ts",
     "src/agents/durable/sqlite_thread.worker.ts → src/search/sync.worker.ts",
-    "src/agents/instance.ts → src/agents/durable/host.ts",
     "src/agents/instance.ts → src/agents/runtime/agent_node.ts",
     "src/agents/instance.ts → src/agents/runtime/agent_nodes.ts",
     "src/agents/instance.ts → src/agents/runtime/agent_temp.ts",
@@ -457,7 +436,6 @@
     "web/settings.ts → web/settings/layout.ts",
     "web/settings.ts → web/settings/mcp.ts",
     "web/settings.ts → web/settings/models.ts",
-    "web/settings.ts → web/settings/notifications.ts",
     "web/settings.ts → web/settings/sidebar.ts",
     "web/settings.ts → web/settings/target.ts",
     "web/settings.ts → web/settings/theme.ts",
@@ -502,13 +480,9 @@
     "web/thread-render/user-bubble.ts → web/image-preview/inline.ts",
     "web/tips/pane.ts → web/agent-finder/ui.ts",
     "web/tips/pane.ts → web/panes/navigation.ts",
-    "web/tool_details.ts → web/backends/backend.ts",
-    "web/util.ts → web/util/message-markdown.ts",
-    "web/util.ts → web/util/strikethrough.ts"
+    "web/tool_details.ts → web/backends/backend.ts"
   ],
   "entries": {
-    "src/agents/durable": -1,
-    "src/agents/durable/host": -1,
     "src/agents/runtime/attachments": -1,
     "src/agents/runtime/pi": -1,
     "src/backends": -1,
@@ -535,10 +509,8 @@
     "web/conversation/chrome": -1,
     "web/dock": -1,
     "web/prompt": -1,
-    "web/settings": -1,
     "web/skills": -1,
     "web/stop-control": -1,
-    "web/tips": -1,
-    "web/util": -1
+    "web/tips": -1
   }
 }

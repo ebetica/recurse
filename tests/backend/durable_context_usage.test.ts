@@ -9,7 +9,7 @@ import {
   openWorkerSqliteStorage,
   type SqliteWorker,
 } from "../../src/agents/durable/sqlite_worker";
-import { runtime } from "../../src/agents/durable/host/load";
+import { runtime } from "../../src/agents/durable/host";
 import {
   ContextUsage,
   promptTokens,

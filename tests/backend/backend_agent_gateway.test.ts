@@ -38,13 +38,16 @@ test("local agents cannot change operator settings or authentication", async () 
     });
   const snapshot = async () =>
     Promise.all(
-      ["/api/settings/theme", "/api/settings/mcp-servers", "/api/pi/auth"].map(
-        async (path) => {
-          const response = await operator(path);
-          expect(response.status).toBe(200);
-          return response.text();
-        },
-      ),
+      [
+        "/api/settings/theme",
+        "/api/settings/mcp-servers",
+        "/api/pi/auth",
+        "/api/pi/gemini-auth",
+      ].map(async (path) => {
+        const response = await operator(path);
+        expect(response.status).toBe(200);
+        return response.text();
+      }),
     );
   try {
     await until(() => app.instance.lifecycle.readinessSnapshot().ready);
@@ -97,6 +100,12 @@ test("local agents cannot change operator settings or authentication", async () 
           JSON.stringify({ key: "sk-test-blocked" }),
         ],
         ["/api/pi/auth/logout", "POST", undefined],
+        ["/api/pi/gemini-auth/logout", "POST", undefined],
+        [
+          "/api/pi/gemini-auth/api-key",
+          "POST",
+          JSON.stringify({ key: "gemini-test-blocked" }),
+        ],
         ["/logout", "POST", undefined],
         [
           "/api/password",
@@ -123,8 +132,8 @@ test("local agents cannot change operator settings or authentication", async () 
           status: 403,
         });
         expect(response.headers.has("set-cookie")).toBe(false);
-        expect(await snapshot()).toEqual(before);
       }
+      expect(await snapshot()).toEqual(before);
     }
     expect(
       (
@@ -318,6 +327,8 @@ test("agent CLI creates and manages a connected remote agent", async () => {
       ["pi/auth/login-url", "POST"],
       ["pi/auth/api-key", "POST"],
       ["pi/openrouter-auth/api-key", "POST"],
+      ["pi/gemini-auth/api-key", "POST"],
+      ["pi/gemini-auth/logout", "POST"],
       ["password", "POST"],
       ["backend-keys", "GET"],
       ["backends", "GET"],
@@ -459,6 +470,13 @@ test("agent CLI creates and manages a connected remote agent", async () => {
         pinned: value,
       });
     }
+    await until(
+      async () =>
+        home.durable.metadata(caller).status === "idle" &&
+        JSON.stringify(await home.durable.prompt(caller)).includes(
+          "User has returned control",
+        ),
+    );
     fixture.faux.setResponses([
       fauxAssistantMessage("Top-level operator reply"),
     ]);
@@ -529,6 +547,19 @@ test("agent CLI creates and manages a connected remote agent", async () => {
         })
       ).status,
     ).toBe(403);
+    const spoofedLocal = await fetch(`${servers[1]!.url}/api/${v1}/messages`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${remoteKey.key}`,
+        "content-type": "application/json",
+        "x-recurse-agent": cid,
+      },
+      body: JSON.stringify({ text: "backend key with a local agent marker" }),
+    });
+    expect(spoofedLocal.status).toBe(403);
+    expect(await spoofedLocal.json()).toMatchObject({
+      detail: "sender agent is unavailable",
+    });
     for (const [text, headers, expected] of [
       ["proxied v1", null, `${caller}@`],
       [
@@ -540,11 +571,7 @@ test("agent CLI creates and manages a connected remote agent", async () => {
         },
         `${caller}@home-agent`,
       ],
-      [
-        "unmarked v1",
-        { authorization: `Bearer ${remoteKey.key}`, "x-recurse-agent": cid },
-        null,
-      ],
+      ["unmarked v1", { authorization: `Bearer ${remoteKey.key}` }, null],
     ] as const) {
       await until(() => remote.durable.metadata(cid).status === "idle");
       fixture.faux.setResponses([fauxAssistantMessage(`reply to ${text}`)]);

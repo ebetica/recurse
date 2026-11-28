@@ -1,5 +1,5 @@
+// One composer effort picker serves drafts and existing conversations.
 // Draft effort applies on creation; existing choices wait for the next turn.
-// The composer's chip shows the recorded or pending choice; the popup previews it.
 // Unreachable choices explain why, without duplicate controls.
 // Context reuses tree usage for loaded history; pending Clear stays blank.
 import { backendFor } from "./backends/backend.js";
@@ -60,13 +60,9 @@ interface Ladder {
   models: LadderModel[];
 }
 
-// Progressive picker host preserves controls across mixed shell generations.
-const controls = $("#model-controls");
 const row = $("#model-row")!;
-const compactHome = controls || row.parentElement!;
 const trigger = $<HTMLButtonElement>("#model-trigger")!;
 const triggerName = $<HTMLElement>("#model-trigger .model-name")!;
-const triggerCaret = trigger.querySelector("svg");
 const triggerReasoning = el("span", "effort-reasoning-text");
 triggerName.after(triggerReasoning);
 const menu = $("#model-menu")!;
@@ -309,18 +305,22 @@ function choiceLabel(name: string, reasoning: string): string {
 function paintTrigger(): void {
   const pending = mode === "conv" && conv && pendingChoice(conv);
   const level = committedLevel();
+  const entry = entryFor(level ?? defaultLevel());
   const model =
     mode === "draft" || !conv
-      ? entryFor(level ?? defaultLevel())?.model
+      ? entry?.model
       : pending
-        ? pending.model || (level && entryFor(level)?.model)
+        ? pending.model || (level && entry?.model)
         : conv.model;
   const label = model ? modelLabel(model) : null;
   const name = label || (!model && level === null ? "Unknown model" : "Effort");
-  const reasoning =
-    label && mode === "conv"
-      ? reasoningText(pending ? pending.effort : conv?.effort)
-      : "";
+  const effort =
+    mode === "draft"
+      ? entry?.reasoning
+      : pending
+        ? pending.effort
+        : conv?.effort;
+  const reasoning = label ? reasoningText(effort) : "";
   const choice = choiceLabel(name, reasoning);
   const accessibleName = level === null ? choice : `Level ${level}: ${choice}`;
   trigger.classList.toggle("pending", !!pending);
@@ -344,10 +344,9 @@ function syncPreview(at: number, legacyUnpicked: boolean): void {
   const model = recorded?.model || entry?.model;
   const label = model ? modelLabel(model) : null;
   const name = label ?? (!model && legacyUnpicked ? "Unknown model" : null);
-  const reasoning =
-    label && mode === "conv"
-      ? reasoningText(recorded ? recorded.effort : entry?.reasoning)
-      : "";
+  const reasoning = label
+    ? reasoningText(recorded ? recorded.effort : entry?.reasoning)
+    : "";
   const choice = name && choiceLabel(name, reasoning);
   const valueText = legacyUnpicked
     ? (choice ?? "Model loading")
@@ -356,7 +355,6 @@ function syncPreview(at: number, legacyUnpicked: boolean): void {
   const progress = legacyUnpicked
     ? 0
     : (at - EFFORT_MIN_LEVEL) / (Number(range.max) - EFFORT_MIN_LEVEL);
-  range.style.setProperty("--fill", `${progress * 100}%`);
   stops.style.setProperty("--effort-progress", String(progress));
   for (const [i, stop] of Array.from(stops.children).entries())
     stop.classList.toggle(
@@ -386,16 +384,6 @@ function paintSlider(disabled: boolean): void {
     range.max = String(maximum);
     const levels = EFFORT_LEVELS.filter((level) => level <= maximum);
     stops.replaceChildren(...levels.map(() => el("span")));
-    range.style.setProperty(
-      "--effort-ticks",
-      levels
-        .map((level) => {
-          const percent =
-            ((level - EFFORT_MIN_LEVEL) / (maximum - EFFORT_MIN_LEVEL)) * 100;
-          return `radial-gradient(circle 2.5px at clamp(1%, ${percent}%, 99%), var(--effort-tick-color) 90%, transparent)`;
-        })
-        .join(", "),
-    );
   }
   range.value = String(current ?? defaultLevel());
   if (disabled && document.activeElement === range)
@@ -533,31 +521,7 @@ export function showDraftModel(initial?: number | null): void {
     hideModel();
     return;
   }
-  const alreadyInline = draftInline();
-  menu.hidePopover();
-  if (!alreadyInline) {
-    previewLevel = null;
-    menu.classList.remove("draft-open");
-    trigger.setAttribute("aria-expanded", "false");
-  }
-  menu.style.left = "";
-  menu.style.top = "";
-  menu.style.bottom = "";
-  menu.style.maxHeight = "";
-  const host = document.querySelector<HTMLElement>("#draft-model-host");
-  if (host) {
-    controls?.classList.remove("on");
-    host.appendChild(row);
-  } else {
-    // Invariant: Mixed-generation shells retain one usable legacy-host control
-    // when the central host is absent, never hide it.
-    compactHome.appendChild(row);
-    controls?.classList.add("on");
-  }
   row.classList.add("on");
-  row.classList.remove("conversation-effort");
-  if (triggerCaret) trigger.append(triggerCaret);
-  showContextTokens(null);
   mode = "draft";
   conv = null;
   useLadderOf(draft.backendLabel ?? "");
@@ -566,18 +530,14 @@ export function showDraftModel(initial?: number | null): void {
   void fetchLadder();
 }
 
-// No conversation is loaded (a draft, or an agent still being read): show no
-// effort or context metadata rather than the last agent's values.
+// Hide effort and context while no draft or conversation can be edited.
 export function hideModel(): void {
   previewLevel = null;
   menu.hidePopover();
-  menu.classList.remove("draft-open");
   trigger.setAttribute("aria-expanded", "false");
   mode = "conv";
   conv = null;
   showContextTokens(null);
-  compactHome.appendChild(row);
-  controls?.classList.remove("on");
   row.classList.remove("on");
 }
 
@@ -587,62 +547,29 @@ export function showConversationModel(c: Conversation | null): void {
     touchStart = null;
     menu.hidePopover();
   }
-  menu.classList.remove("draft-open");
-  trigger.setAttribute("aria-expanded", String(menu.matches(":popover-open")));
-  const show = !!c;
-  if (row.parentElement !== compactHome) compactHome.appendChild(row);
-  controls?.classList.toggle("on", show);
-  row.classList.toggle("on", show);
-  row.classList.add("conversation-effort");
-  triggerCaret?.remove();
-  showContextTokens(show ? c : null);
+  trigger.setAttribute("aria-expanded", String(pickerOpen()));
+  row.classList.toggle("on", !!c);
+  showContextTokens(c);
   mode = "conv";
   conv = c || null;
   if (c) useLadderOf(parseConversationId(c.id).label);
   render();
-  if (show && !ladder) void fetchLadder();
-}
-
-// The new-agent page reveals the slider box inline under its trigger. True only
-// while the shared row sits in the draft host; the mixed-generation fallback
-// (no host) keeps popover behaviour in the composer footer.
-function draftInline(): boolean {
-  return mode === "draft" && row.parentElement?.id === "draft-model-host";
+  if (c && !ladder) void fetchLadder();
 }
 
 function pickerOpen(): boolean {
-  return draftInline()
-    ? menu.classList.contains("draft-open")
-    : menu.matches(":popover-open");
-}
-
-function closeDraftMenu(): void {
-  previewLevel = null;
-  menu.classList.remove("draft-open");
-  trigger.setAttribute("aria-expanded", "false");
-  render();
+  return menu.matches(":popover-open");
 }
 
 export function dismissEffortMenu(): boolean {
   if (!pickerOpen()) return false;
-  if (draftInline()) closeDraftMenu();
-  else menu.hidePopover();
+  menu.hidePopover();
   return true;
 }
 
 export function openEffortMenu(): void {
   if (!row.classList.contains("on")) return;
-  // Invariant: The ladder file may have changed out-of-band (a direct file edit
-  // dispatches no event): revalidate on every open and repaint when the load
-  // lands, so the box and the trigger text track the file.
-  void fetchLadder();
-  if (draftInline()) {
-    menu.classList.add("draft-open");
-    trigger.setAttribute("aria-expanded", "true");
-    menu.focus();
-    return;
-  }
-  if (!menu.matches(":popover-open")) {
+  if (!pickerOpen()) {
     render();
     menu.showPopover();
   }
@@ -664,26 +591,18 @@ for (const invoker of [trigger, $<HTMLButtonElement>("#safety-warning")]) {
   });
 }
 
-trigger.addEventListener("click", (event) => {
-  if (!draftInline()) return;
-  event.preventDefault();
-  if (pickerOpen()) {
-    closeDraftMenu();
-    trigger.focus();
-  } else {
-    openEffortMenu();
-  }
-});
-
 menu.addEventListener("beforetoggle", (event) => {
   previewLevel = null;
   touchStart = null;
-  if (event instanceof ToggleEvent && event.newState === "open")
+  if (event instanceof ToggleEvent && event.newState === "open") {
     paintSlider(!!conv && saving.has(conv.id));
+    // Direct edits to the ladder file do not dispatch a change event.
+    void fetchLadder();
+  }
 });
 
 menu.addEventListener("toggle", () => {
-  const open = menu.matches(":popover-open");
+  const open = pickerOpen();
   trigger.setAttribute("aria-expanded", String(open));
   if (!open) {
     keepComposerFocus = false;
@@ -692,16 +611,11 @@ menu.addEventListener("toggle", () => {
     return;
   }
   const rect = trigger.getBoundingClientRect();
-  const above = mode === "conv" || rect.top > innerHeight / 2;
-  const composerTop = $("#composer")?.getBoundingClientRect().top ?? rect.top;
-  const top =
-    mode === "conv" && composerTop >= menu.scrollHeight + 24
-      ? composerTop
-      : rect.top;
-  menu.style.maxHeight = `${Math.max(0, (above ? top : innerHeight - rect.bottom) - 20)}px`;
+  const composerTop = $("#composer")!.getBoundingClientRect().top;
+  const top = composerTop >= menu.scrollHeight + 24 ? composerTop : rect.top;
+  menu.style.maxHeight = `${Math.max(0, top - 20)}px`;
   menu.style.left = `${Math.max(12, Math.min(rect.left + rect.width / 2 - menu.offsetWidth / 2, innerWidth - menu.offsetWidth - 12))}px`;
-  menu.style.top = above ? "auto" : `${rect.bottom + 8}px`;
-  menu.style.bottom = above ? `${innerHeight - top + 8}px` : "auto";
+  menu.style.bottom = `${innerHeight - top + 8}px`;
   if (!keepComposerFocus) menu.focus({ preventScroll: true });
 });
 
@@ -850,7 +764,7 @@ const LADDER_REFRESH_MS = 10_000;
 setInterval(() => {
   if (document.hidden || embeddedFrameHidden()) return;
   if (document.activeElement === range) return;
-  if (menu.matches(":popover-open")) return;
+  if (pickerOpen()) return;
   void fetchLadder();
 }, LADDER_REFRESH_MS);
 fetchLadder();

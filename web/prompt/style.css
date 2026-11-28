@@ -53,14 +53,14 @@
 .prompt-copy { margin-left: auto; background: none; border: 1px solid var(--border);
   border-radius: 8px; padding: var(--space-1) var(--space-4); color: var(--muted); cursor: pointer;
   font: 600 0.71875rem/1.4 var(--font-sans); }
-.prompt-copy:hover { color: var(--text); border-color: var(--text); }
+@media (hover: hover) { .prompt-copy:hover { color: var(--text); border-color: var(--text); } }
 .prompt-copy.copied { color: var(--accent); border-color: var(--accent-dim); }
 /* collapsed "System prompt" section inside the full-prompt (per-turn) modal */
 .prompt-details { border-top: 1px solid var(--border); margin-top: var(--space-4); }
 .prompt-details > summary { cursor: pointer; font-size: 0.78125rem; font-weight: 600;
   color: var(--muted); padding: var(--space-4) 0 var(--space-1); list-style: none; }
 .prompt-details > summary::-webkit-details-marker { display: none; }
-.prompt-details > summary:hover { color: var(--text); }
+@media (hover: hover) { .prompt-details > summary:hover { color: var(--text); } }
 .prompt-details[open] > summary { margin-bottom: var(--space-1); }
 .prompt-section > summary { display: flex; align-items: center; gap: var(--space-2); }
 .prompt-details .prompt-block { border-top: 0; margin-top: var(--space-2); padding-top: 0; }
@@ -71,7 +71,7 @@
   background: var(--panel-2); border: 1px dashed var(--border); border-radius: 10px;
   padding: var(--space-3) var(--space-4); color: var(--muted); cursor: pointer; text-align: left;
   font: inherit; transition: border-color var(--motion-fast), color var(--motion-fast); }
-.prompt-banner-row:hover { border-color: var(--accent-dim); color: var(--text); }
+@media (hover: hover) { .prompt-banner-row:hover { border-color: var(--accent-dim); color: var(--text); } }
 .prompt-banner-row .lead { flex: none; font-size: 0.71875rem; font-weight: 600; }
 .prompt-banner-row .sub { flex: 1; min-width: 0; font-size: 0.78125rem;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

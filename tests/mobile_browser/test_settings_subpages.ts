@@ -194,6 +194,64 @@ export const tests: BrowserTest[] = [
       await context.close();
     }
   },
+  async function test_hooks_settings_manage_hook_files(browser, base) {
+    const context = await browser.newContext({
+      viewport: { width: 412, height: 860 },
+      hasTouch: true,
+      isMobile: true,
+    });
+    const page = await context.newPage();
+    try {
+      await gotoRoot(page, base);
+      await page.locator(".agent").first().waitFor();
+      await openSettingsPanel(page);
+      await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page.getByRole("button", { name: /^Hooks / }).click();
+      const section = page.getByRole("region", { name: "Hooks", exact: true });
+      const enabled = section.getByRole("switch", { name: "Run hooks" });
+      await browserExpect(enabled).toBeChecked();
+      await browserExpect(section.getByText("No hooks yet.")).toBeVisible();
+      await section.getByRole("button", { name: "Add hook" }).click();
+      await section
+        .getByRole("textbox", { name: "File name" })
+        .fill("no-force-push.ts");
+      await section
+        .getByRole("textbox", { name: "Code" })
+        .fill(
+          'export default function (pi) {\n  pi.on("tool_call", () => {});\n  pi.on("session_start", () => {});\n}\n',
+        );
+      await section.getByRole("button", { name: "Save", exact: true }).click();
+      const row = section
+        .locator(".mcp-server")
+        .filter({ hasText: "no-force-push.ts" });
+      await browserExpect(row).toContainText("Events show after its first run");
+      await browserExpect(
+        section.getByRole("textbox", { name: "Code" }),
+      ).toBeHidden();
+      const show = row.getByRole("button", { name: "Show code" });
+      await expectHitCorners(show);
+      await show.click();
+      await browserExpect(row.locator("pre")).toContainText("session_start");
+      await expectHitCorners(section.locator("label.check"));
+      await enabled.click();
+      await browserExpect(enabled).not.toBeChecked();
+      await browserExpect(enabled).toBeEnabled();
+      await page.reload();
+      await openSettingsPanel(page);
+      await page.locator('#settings-nav button[data-cat="agents"]').click();
+      await page.getByRole("button", { name: /^Hooks / }).click();
+      await browserExpect(enabled).not.toBeChecked();
+      await browserExpect(row).toContainText("Events show after its first run");
+      page.once("dialog", (dialog) => void dialog.accept());
+      await row
+        .getByRole("button", { name: "Delete no-force-push.ts" })
+        .click();
+      await browserExpect(row).toHaveCount(0);
+      await browserExpect(section.getByText("No hooks yet.")).toBeVisible();
+    } finally {
+      await context.close();
+    }
+  },
 ];
 
 if (import.meta.main) await runBrowserTests([["settings-subpages", tests]]);

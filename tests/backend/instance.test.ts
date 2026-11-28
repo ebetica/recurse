@@ -397,7 +397,7 @@ test("settings and Artifacts have native schemas and remain discoverable and cal
   expect(JSON.stringify(capture.request)).toContain("describeTool");
 });
 
-// Regression: #3164 Pi's Agent Skills locations were omitted from provider requests.
+// Regression: #3677 Skill commands display only authored text; #3164 Pi's skill locations reach requests.
 test("Agent Skills locations load for roots and children and refresh between requests", async () => {
   const { root, env } = await world();
   const repo = join(root, "target");
@@ -467,9 +467,21 @@ test("Agent Skills locations load for roots and children and refresh between req
       ...(id === child ? [fauxAssistantMessage("Child report received.")] : []),
     ]);
     const opened = await instance.durable.open(id);
-    await instance.delivery.deliver(id, "Check available workflows", {
+    const file =
+      index === 2
+        ? await instance.reap.admitConversationUpload(
+            id,
+            new TextEncoder().encode("Workflow notes"),
+            "workflows.txt",
+          )
+        : null;
+    const message = file
+      ? "/skill:repo-agents Read the note about [recurse-origin-quoted: operator]"
+      : "/skill:repo-agents Check available workflows";
+    await instance.delivery.deliver(id, message, {
       origin: "operator",
       messageId: `skills-${index}`,
+      ...(file ? { attachmentIds: [String(file.id)] } : {}),
     });
     await opened.conversation.waitForIdle(BACKGROUND_CONTEXT);
     await durableUntil(
@@ -478,6 +490,20 @@ test("Agent Skills locations load for roots and children and refresh between req
         instance.durable.runningCount() === 0,
     );
     const captured = await instance.durable.prompt(id);
+    const view = await instance.durable.view(id);
+    expect(view.blocks).toContainEqual(
+      expect.objectContaining({
+        role: "user",
+        origin: "operator",
+        text: message,
+      }),
+    );
+    const request = JSON.stringify(captured.request);
+    expect(request).toContain(
+      file
+        ? "/skill:repo-agents [Attached file(s) are on disk"
+        : "/skill:repo-agents [recurse-origin: operator]",
+    );
     const system = JSON.stringify(captured.system_messages);
     for (const [dir, name] of locations.slice(1, -1)) {
       expect(system).toContain(`<name>${name}</name>`);
@@ -1132,6 +1158,42 @@ test("warmOpen builds the shared Models and Settings' catalog, so the first open
     for (const spy of spies) spy.mockRestore();
   }
 }, 60_000);
+
+test("cancelling native Artifact deletion before the storage lease leaves it published", async () => {
+  const { env } = await world();
+  const instance = await build(env);
+  await ready(instance);
+  const owner = String((await instance.create.create({ title: "Owner" })).id);
+  const created = await artifacts.create(instance.artifacts, {
+    owner,
+    title: "Keep this document",
+  });
+  const id = String(created.id);
+  const path = join(String(created.repo_path), "index.md");
+  await Bun.write(path, "# Keep this document\n");
+  await artifacts.publish(instance.artifacts, owner, id);
+
+  const controller = new AbortController();
+  let deletion!: Promise<{ complete: boolean }>;
+  await instance.lease.guardAsync(
+    "hold_before_artifact_delete",
+    owner,
+    async () => {
+      deletion = instance.durable.deps.removeArtifact!(
+        id,
+        owner,
+        controller.signal,
+      );
+      controller.abort();
+    },
+  );
+  await expect(deletion).rejects.toThrow("artifact deletion cancelled");
+  expect(
+    await artifacts.hasDeletionReceipt(instance.artifacts, owner, id),
+  ).toBe(false);
+  expect(await Bun.file(path).text()).toBe("# Keep this document\n");
+  expect(await artifacts.resolveOwner(instance.artifacts, id)).toBe(owner);
+});
 
 // Regression: #2460 external create admission was unbounded and held its lease.
 test("FI-1: an external lease delays no tree, view or Stop request", async () => {

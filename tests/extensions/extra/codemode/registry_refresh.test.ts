@@ -135,7 +135,7 @@ for (const wrapped of [false, true]) {
       } else {
         expect(
           executed,
-          "Pi now refreshes the agent within the call handler: delete the codemode agent() wrapper in src/agents/durable/host.ts and this test",
+          "Pi now refreshes the agent within the call handler: delete the codemode agent() wrapper in src/agents/durable/host/host.ts and this test",
         ).toBe(false);
         expect(result).toContain("tools.mcp__late__echo does not exist");
       }

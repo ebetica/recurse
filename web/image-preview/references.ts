@@ -4,31 +4,54 @@
 import { backendFor } from "../backends/backend.js";
 import { parseConversationId } from "../backends/conversation-id/index.js";
 import type { SessionFile } from "../files/model.js";
+import { localImagePath } from "../../src/image_reference.js";
 
 const PATH_IMAGE_ROUTE =
   /^\/api(?:\/backends\/[A-Za-z0-9._-]{1,32})?\/conversations\/[^/]+\/path-image$/;
 const DATA_IMAGE = /^data:image\/(?:png|jpeg|gif|webp);base64,[a-z0-9+/=\s]+$/i;
-const documentImages = new WeakMap<
-  HTMLElement,
-  {
-    agentId: string;
-    signal: AbortSignal;
-  }
->();
+interface DocumentImages {
+  agentId: string;
+  signal: AbortSignal;
+  doubleClickImages?: boolean;
+}
+
+const documentImages = new WeakMap<HTMLElement, DocumentImages>();
 
 /** Register only shared-renderer Markdown, never sealed preview frames. */
 export function registerDocumentImages(
   section: HTMLElement,
-  agentId: string,
-  signal: AbortSignal,
+  options: DocumentImages,
 ): void {
-  documentImages.set(section, { agentId, signal });
+  const { agentId, signal, doubleClickImages } = options;
+  documentImages.set(section, { agentId, signal, doubleClickImages });
 }
 
-function documentImageOwner(image: HTMLImageElement): string | null {
+function imageDocument(image: HTMLImageElement): DocumentImages | undefined {
   const section = image.closest<HTMLElement>(".artifact-markdown");
   const owner = section && documentImages.get(section);
-  return owner && !owner.signal.aborted ? owner.agentId : null;
+  return owner && !owner.signal.aborted ? owner : undefined;
+}
+
+export function makeDocumentImageOpenable(image: HTMLImageElement): void {
+  if (!imageDocument(image)?.doubleClickImages || image.closest("a, button"))
+    return;
+  image.tabIndex = 0;
+  image.setAttribute("role", "button");
+  image.setAttribute("aria-label", `Open image: ${image.alt}`);
+  image.addEventListener("keydown", (event) => {
+    if (
+      (event.key !== "Enter" && event.key !== " ") ||
+      event.defaultPrevented ||
+      event.isComposing ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey
+    )
+      return;
+    event.preventDefault();
+    if (!event.repeat) image.click();
+  });
 }
 
 export function imageHost(source: string | null): string | null {
@@ -47,18 +70,9 @@ export function referenceImageUrl(
 ): string | null {
   if (!source) return null;
   if (source.length <= 256 * 1024 && DATA_IMAGE.test(source)) return source;
-  if (
-    !cid ||
-    /^(?:[a-z][a-z0-9+.-]*:|\/\/|#)/i.test(source) ||
-    source.length > 4096
-  )
-    return null;
-  let path: string;
-  try {
-    path = decodeURIComponent(source);
-  } catch {
-    return null;
-  }
+  if (!cid) return null;
+  const path = localImagePath(source);
+  if (path === null) return null;
   const query = new URLSearchParams({ path, thumbnail: "1" });
   if (documentPath) query.set("document", documentPath);
   return backendFor(cid).url(
@@ -106,11 +120,20 @@ export function installReferenceImageViewer(
   open: (cid: string, file: SessionFile) => void,
   attachment: (cid: string, id: string) => unknown,
 ): void {
-  document.addEventListener("click", (event) => {
+  const activate = (event: MouseEvent) => {
     const image = (event.target as Element).closest?.("img");
     if (!image || image.closest("button, a")) return;
-    const owner = documentImageOwner(image);
-    const cid = owner || selected();
+    const owner = imageDocument(image);
+    if (event.type === "dblclick") {
+      if (!owner?.doubleClickImages) return;
+    } else if (owner?.doubleClickImages && event.detail !== 0) {
+      const pointer = "pointerType" in event ? event.pointerType : "";
+      if (
+        pointer ? pointer === "mouse" : !matchMedia("(pointer: coarse)").matches
+      )
+        return;
+    }
+    const cid = owner?.agentId || selected();
     if (!cid) return;
     const selection = image.ownerDocument.getSelection();
     if (
@@ -177,7 +200,9 @@ export function installReferenceImageViewer(
       match && (match[1] ? `${match[1]}/${match[2]}` : match[2]);
     if (image.closest("#messages") && attachmentOwner === cid)
       attachment(cid, match![3]!);
-  });
+  };
+  document.addEventListener("click", activate);
+  document.addEventListener("dblclick", activate);
 }
 
 /** Only an explicit click grants a single authored web image a network load. */
@@ -201,6 +226,9 @@ export function showExternalImage(event: Event): void {
       once: true,
     },
   );
+  image.addEventListener("load", () => makeDocumentImageOpenable(image), {
+    once: true,
+  });
   button.replaceWith(image);
   image.src = source;
 }

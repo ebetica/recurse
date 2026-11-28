@@ -16,8 +16,12 @@ export const PI_MODEL_ROUTES: readonly (readonly [string, string])[] = [
   ["anthropic", "Claude"],
   ["openai-codex", "ChatGPT subscription"],
   ["openai", "OpenAI API key"],
+  ["google", "Gemini"],
   ["openrouter", "OpenRouter"],
 ];
+export const AUTOMATIC_REVIEW_ROUTES = PI_MODEL_ROUTES.filter(
+  ([provider]) => provider !== "google",
+);
 // Schema version; unknown stored lists permit all until relisted.
 export const PI_MODEL_LIST_VERSION = 1;
 // Bound agent-writable catalogs before validating or grouping their rows.

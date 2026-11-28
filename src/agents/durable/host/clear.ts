@@ -10,7 +10,7 @@ import type { Conversation } from "@earendil-works/pi-durable";
 import { retirePath } from "../../../utils/trash-sweep";
 import { slowSpan } from "../../../observability/slow-span";
 import { isDirectory } from "../archive.ts";
-import type { DurableHost } from "../host.ts";
+import type { DurableHost } from "./host.ts";
 import { draft, type Held, reviewedOnly } from "./submission.ts";
 import { runtime } from "./load.ts";
 

@@ -366,7 +366,7 @@ export const tests: BrowserTest[] = [
       ).toBeVisible();
       await browserExpect(page.locator("dialog[open]")).toHaveCount(0);
       const time = String.raw`(?:\w{3} )?\d\d:\d\d`;
-      for (const title of ["Claude", "OpenAI", "OpenRouter"]) {
+      for (const title of ["Claude", "OpenAI", "OpenRouter", "Gemini"]) {
         await closeDetails(page);
         await openDetail(page, new RegExp(`^${title} `));
         const section = page.getByRole("region", { name: title, exact: true });
@@ -389,7 +389,43 @@ export const tests: BrowserTest[] = [
         await browserExpect(
           section.getByRole("button", { name: "API key", exact: true }),
         ).toBeVisible();
-        if (title !== "OpenRouter") {
+        if (title === "Gemini") {
+          await section
+            .getByRole("button", { name: "API key", exact: true })
+            .click();
+          const input = section.getByLabel("Gemini API key");
+          await browserExpect(input).toBeFocused();
+          await browserExpect(input).toHaveAttribute("type", "password");
+          await input.fill("browser-test-gemini-key");
+          const logout = section.getByRole("button", {
+            name: "Log out",
+            exact: true,
+          });
+          const reopen = async (status: RegExp) => {
+            await closeDetails(page);
+            await page.locator("#settings-close").click();
+            await browserExpect(page.locator("#settings-overlay")).toBeHidden();
+            await page.locator("#settings-btn").click();
+            await page
+              .locator('#settings-nav button[data-cat="providers"]')
+              .click();
+            await openDetail(page, status);
+          };
+          await section
+            .getByRole("button", { name: "Save key", exact: true })
+            .click();
+          await browserExpect(logout).toBeVisible();
+          await reopen(/^Gemini API key · signed in$/);
+          await browserExpect(logout).toBeVisible();
+          await logout.click();
+          await browserExpect(logout).toHaveCount(0);
+          await reopen(/^Gemini Not signed in$/);
+          await browserExpect(
+            section.getByRole("button", { name: "API key", exact: true }),
+          ).toBeVisible();
+          await browserExpect(logout).toHaveCount(0);
+        }
+        if (title === "Claude") {
           await browserExpect(
             section.getByRole("button", { name: /^Subscription/ }),
           ).toBeVisible();

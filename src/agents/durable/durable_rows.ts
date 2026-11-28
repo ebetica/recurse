@@ -21,7 +21,7 @@ import { ReportDoc } from "./report";
 import { ReplyTimesDoc } from "./reply_times";
 import { LOST_STOP_REASON, thinkingInfo } from "../view";
 import { ConversationView } from "../view/conversation";
-import { splitPiUserText } from "../view/session_entries";
+import { pendingUserFields } from "../view/session_entries";
 import { slowSpan } from "../../observability/slow-span";
 import { displayToolContent } from "./display_content";
 import {
@@ -453,20 +453,15 @@ export function pendingRows(
     if (item.mode === "write") continue;
     const content = item.content as unknown;
     if (shellNotice(content) !== null) continue;
-    const [origin, sender, senderName, text] = splitPiUserText(
-      Array.isArray(content)
-        ? content
-            .map((part: Rec) => (part.type === "text" ? part.text : ""))
-            .join("")
-        : String(content),
-    );
+    const text = Array.isArray(content)
+      ? content
+          .map((part: Rec) => (part.type === "text" ? part.text : ""))
+          .join("")
+      : String(content);
     rows.push({
       id: requestIds.get(String(item.id)) ?? `durable-${String(item.id)}`,
       role: "user",
-      content: text,
-      ...(origin ? { origin } : {}),
-      ...(sender ? { from: sender } : {}),
-      ...(senderName ? { from_name: senderName } : {}),
+      ...pendingUserFields(text),
       ...(item.mode === "steer" ? { steer: true } : {}),
     });
   }

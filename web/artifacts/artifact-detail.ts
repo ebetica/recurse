@@ -183,17 +183,20 @@ export async function showArtifact(pane: ArtifactEl): Promise<void> {
   )
     return;
   const info = selectedInfo(pane);
-  if (rs.contentInfo && pendingFor(currentCommentKey(pane))) return;
   if (!info || !rs.agentId) {
     cancelSelectionComment(pane);
     rs.contentAbort?.abort();
     rs.contentAbort = null;
+    rs.requestSeq++;
+    rs.contentInfo = null;
+    rs.shownKey = rs.loadingKey = rs.failedKey = null;
     const documentBody = pane.querySelector<HTMLElement>(".report-doc")!;
     documentBody.innerHTML = "";
     setPaneLoading(pane, false);
     renderComments(pane);
     return;
   }
+  if (rs.contentInfo && pendingFor(currentCommentKey(pane))) return;
   rs.selectedVersion =
     pendingCommentVersion(pane) ?? rs.selectedVersion ?? info.version;
   void loadVersions(pane, info);

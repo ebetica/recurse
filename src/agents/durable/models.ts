@@ -4,6 +4,7 @@
 // catalogs/usage remain private. Custom providers retain their key/env_key.
 import {
   type ApiKeyAuth,
+  type AssistantMessageEvent,
   type AuthContext,
   createProvider,
   type MutableModels,
@@ -23,9 +24,25 @@ import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completio
 import { openAIResponsesApi } from "@earendil-works/pi-ai/api/openai-responses.lazy";
 
 import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
-import { CODEX_PROVIDER, withCodexCliAccess } from "../../auth";
+import {
+  CODEX_PROVIDER,
+  GEMINI_CREDENTIAL,
+  GEMINI_MIN_KEY_LENGTH,
+  withCodexCliAccess,
+} from "../../auth";
 import { ReadOnlySignIns } from "../../auth/read_only_sign_ins.ts";
-import { providerOutageKind, PICK_EFFORT_LEVEL_AGAIN } from "../view";
+import { PICK_EFFORT_LEVEL_AGAIN, providerOutageKind } from "../view";
+import {
+  credentialFields,
+  credentialMask,
+  mapStreamMessages,
+  maskProviderFailure,
+  rememberTurnError,
+  TURN_ERROR_TEXT,
+  withProviderErrors,
+  type ChatStream,
+  type TurnErrorText,
+} from "./provider_responses";
 import { FileModelsStore } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/models-store.js";
 import {
   withPersonalizedCatalog,
@@ -50,6 +67,7 @@ export const STORED_CREDENTIALS_ONLY: AuthContext = {
 const TRUSTED_CATALOG = Symbol("trusted model catalog");
 const ADD_FILE_MODELS = Symbol("add file models to Settings provider");
 const STORED_CODEX_AUTH = Symbol("stored Codex auth for MCP");
+const CHAT_ONLY_AUTH = Symbol("chat-only provider auth");
 
 /** Shipped models and Settings providers, never file-backed catalogs. */
 export function trustedModelCatalog<T extends Models>(models: T): T {
@@ -135,54 +153,188 @@ function withRecurseAnthropicRefresh(provider: Provider): Provider {
   });
 }
 
+type ChatReply = Awaited<ReturnType<ChatStream["result"]>>;
+
+/** One stream's redaction. Open text and thinking blocks hold back a trailing
+ * key prefix, so no concatenation of deltas or snapshots spells the key. The
+ * mask's ends never occur in the key. Field names stay intact for keys shorter
+ * than Settings accepts, which would otherwise rename message fields. */
+function geminiRedaction(
+  apiKey: string,
+  options: Parameters<Provider["streamSimple"]>[2],
+) {
+  const { patterns, mask, redact } = credentialMask([apiKey]);
+  const fields = credentialFields(
+    redact,
+    apiKey.length >= GEMINI_MIN_KEY_LENGTH,
+  );
+  type Streaming = { field: "text" | "thinking"; shown: string; read: number };
+  const streaming = new Map<number, Streaming>();
+  const ended = new Set<number>();
+  const advance = (block: Streaming, raw: string) => {
+    for (;;) {
+      const found = patterns
+        .map((pattern) => ({ pattern, at: raw.indexOf(pattern, block.read) }))
+        .filter(({ at }) => at >= 0)
+        .sort((a, b) => a.at - b.at || b.pattern.length - a.pattern.length)[0];
+      if (!found) break;
+      block.shown += raw.slice(block.read, found.at) + mask;
+      block.read = found.at + found.pattern.length;
+    }
+    const unread = raw.length - block.read;
+    const held = Math.max(
+      ...patterns.map((key) => {
+        let size = Math.min(key.length - 1, unread);
+        while (size > 0 && !raw.endsWith(key.slice(0, size))) size--;
+        return size;
+      }),
+    );
+    const safe = raw.length - held;
+    block.shown += raw.slice(block.read, safe);
+    block.read = safe;
+  };
+  const keep = ["role", "api", "provider", "model", "stopReason"];
+  const message = (reply: ChatReply) => {
+    const safe = fields(reply, keep);
+    rememberTurnError(options, reply, safe);
+    return safe;
+  };
+  const partial = (reply: ChatReply): ChatReply => ({
+    ...fields(reply, [...keep, "content"]),
+    content: reply.content.map((block, index) => {
+      if (
+        ended.has(index) ||
+        (block.type !== "text" && block.type !== "thinking")
+      )
+        return fields(block);
+      const shown = streaming.get(index);
+      return {
+        ...fields(block, [block.type]),
+        [block.type]: shown?.field === block.type ? shown.shown : "",
+      };
+    }),
+  });
+  return {
+    // The adapter can emit text and tool deltas before it knows the turn failed.
+    message,
+    event: (event: AssistantMessageEvent): AssistantMessageEvent => {
+      if (event.type === "done" || event.type === "error") {
+        streaming.clear();
+        return event.type === "done"
+          ? { ...event, message: message(event.message) }
+          : { ...event, error: message(event.error) };
+      }
+      let delta: string | undefined;
+      if (event.type === "text_delta" || event.type === "thinking_delta") {
+        const field = event.type === "text_delta" ? "text" : "thinking";
+        let block = streaming.get(event.contentIndex);
+        if (block?.field !== field)
+          streaming.set(
+            event.contentIndex,
+            (block = { field, shown: "", read: 0 }),
+          );
+        const current = event.partial.content[event.contentIndex];
+        const before = block.shown.length;
+        if (current?.type === "text") advance(block, current.text);
+        if (current?.type === "thinking") advance(block, current.thinking);
+        delta = block.shown.slice(before);
+      }
+      if (event.type === "text_end" || event.type === "thinking_end") {
+        streaming.delete(event.contentIndex);
+        ended.add(event.contentIndex);
+      }
+      return {
+        ...fields(event, ["type", "partial"]),
+        partial: partial(event.partial),
+        ...(delta === undefined ? {} : { delta }),
+      };
+    },
+    failure: (error: unknown) =>
+      maskProviderFailure(
+        options,
+        error instanceof Error
+          ? error.message
+          : typeof error === "string"
+            ? error
+            : "Gemini request failed.",
+        redact,
+      ),
+  };
+}
+
+/** Pi hands us the resolved key here, before any errors leave the provider. */
+function withProviderTransport(provider: Provider): Provider {
+  if (provider.id !== "google") return withProviderErrors(provider);
+  return new Proxy(provider, {
+    get(target, key) {
+      if (key === CHAT_ONLY_AUTH) return true;
+      if (key === "stream" || key === "streamSimple")
+        return (
+          ...[model, context, options]: Parameters<Provider["streamSimple"]>
+        ) => {
+          const apiKey = options?.apiKey;
+          if (!apiKey) return target[key](model, context, options);
+          // Pi's Google provider sends every model through the Gemini API, even
+          // a model kept from an earlier custom `google` route.
+          if (model.api !== "google-generative-ai")
+            throw new Error(
+              `The Gemini API key works only with Gemini API models, not ${model.provider}/${model.id}. Choose the model again.`,
+            );
+          const redaction = geminiRedaction(apiKey, options);
+          // Raw chunks would carry a key split across them, so Pi extensions
+          // see only the redacted Pi events for Gemini.
+          const { onProviderStreamEvent: _raw, ...sent } = options;
+          let stream: ChatStream;
+          try {
+            stream = target[key](model, context, sent);
+          } catch (error) {
+            throw redaction.failure(error);
+          }
+          return mapStreamMessages(stream, redaction.message, redaction);
+        };
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+}
+
 /** Stamp responses with the requested effort. */
 export function withRequestedEffort(models: Models): Models {
   return new Proxy(models, {
     get(target, key) {
       if (key === "streamSimple")
-        return (...args: Parameters<Models["streamSimple"]>) => {
-          const thinkingLevel = args[2]?.reasoning ?? "off";
-          const stream = target.streamSimple(...args);
-          const stamp = (
-            message: Awaited<ReturnType<typeof stream.result>>,
-          ) => {
+        return (
+          ...[model, context, options]: Parameters<Models["streamSimple"]>
+        ) => {
+          const thinkingLevel = options?.reasoning ?? "off";
+          const errors: TurnErrorText = { replies: new WeakMap() };
+          const request = { ...options, [TURN_ERROR_TEXT]: errors };
+          const stream = target.streamSimple(model, context, request);
+          let offerPicker: boolean | undefined;
+          return mapStreamMessages(stream, (message, terminal) => {
             message.thinkingLevel = thinkingLevel;
             const action = PICK_EFFORT_LEVEL_AGAIN;
-            if (
-              message.stopReason === "error" &&
-              !message.errorMessage?.endsWith(action)
-            ) {
-              const kind = providerOutageKind(message.errorMessage, {
-                model: `${args[0].provider}/${args[0].id}`,
+            if (!terminal || message.stopReason !== "error") return message;
+            const rejected = errors.rejected;
+            const raw =
+              errors.replies.get(message) ??
+              (rejected && rejected.masked === message.errorMessage
+                ? rejected.raw
+                : undefined);
+            errors.replies.delete(message);
+            errors.rejected = undefined;
+            if (message.errorMessage?.endsWith(action)) return message;
+            if (offerPicker === undefined) {
+              const kind = providerOutageKind(raw ?? message.errorMessage, {
+                model: `${model.provider}/${model.id}`,
               });
-              if (
+              offerPicker =
                 kind === "provider authentication failed" ||
-                kind === "model was not available"
-              )
-                message.errorMessage = `${message.errorMessage || "Model request failed."} ${action}`;
+                kind === "model was not available";
             }
+            if (offerPicker)
+              message.errorMessage = `${message.errorMessage || "Model request failed."} ${action}`;
             return message;
-          };
-          return new Proxy(stream, {
-            get(response, property) {
-              if (property === "result")
-                return async () => stamp(await response.result());
-              if (property === Symbol.asyncIterator)
-                return async function* () {
-                  for await (const event of response) {
-                    const message =
-                      event.type === "done"
-                        ? event.message
-                        : event.type === "error"
-                          ? event.error
-                          : event.partial;
-                    stamp(message);
-                    yield event;
-                  }
-                };
-              const value = Reflect.get(response, property, response);
-              return typeof value === "function" ? value.bind(response) : value;
-            },
           });
         };
       const value = Reflect.get(target, key, target);
@@ -191,7 +343,7 @@ export function withRequestedEffort(models: Models): Models {
   });
 }
 
-/** Literal headers enter at fetch; file routes discard ambient SDK headers. */
+/** File routes discard ambient SDK headers; Gemini uses Pi's native headers. */
 function withConfiguredHeaders(
   provider: Provider,
   headers: Map<string, Record<string, string>> | undefined,
@@ -238,6 +390,12 @@ function withConfiguredHeaders(
               Object.entries(values).filter(
                 ([name]) => !names.has(name.toLowerCase()),
               ),
+            );
+          if (model.api === "google-generative-ai" && fileKey === undefined)
+            return target[key](
+              { ...model, headers: omit(model.headers) },
+              context,
+              { ...options, headers: { ...omit(options?.headers), ...extra } },
             );
           const fetch = options?.fetch ?? globalThis.fetch;
           // Pi sets this literal header using only the completed payload.
@@ -324,7 +482,28 @@ export function durableModels(
   const builtinIds = new Map<string, string[]>();
   let openRouterCatalogIds: string[] = [];
   for (const builtin of builtinProviders()) {
-    const provider = withPlatformKeyOnly(builtin);
+    const provider: Provider =
+      builtin.id === "google"
+        ? {
+            ...builtin,
+            auth: {
+              apiKey: {
+                name: "Gemini API key",
+                resolve: async ({ signal }) => {
+                  const saved = await options.credentials.read(
+                    GEMINI_CREDENTIAL,
+                    { signal },
+                  );
+                  if (saved?.type !== "api_key" || !saved.key) return undefined;
+                  return {
+                    auth: { apiKey: saved.key },
+                    source: "stored credential",
+                  };
+                },
+              },
+            },
+          }
+        : withPlatformKeyOnly(builtin);
     if (provider.id === CODEX_PROVIDER) storedCodex.setProvider(provider);
     builtinIds.set(
       provider.id,
@@ -348,9 +527,15 @@ export function durableModels(
           : withRemoteCatalog(provider, undefined, generatedAt);
     const base = withRecurseAnthropicRefresh(catalog);
     builtins.set(provider.id, base);
-    trusted.setProvider(withRecurseAnthropicRefresh(provider));
+    trusted.setProvider(
+      withProviderErrors(
+        withRecurseAnthropicRefresh(
+          provider.id === "google" ? builtin : provider,
+        ),
+      ),
+    );
     baseCatalog.setProvider(base);
-    models.setProvider(base);
+    models.setProvider(withProviderTransport(base));
   }
   const catalogIds = (id: string) => {
     const base = builtins.get(id)!;
@@ -577,8 +762,9 @@ export function durableModels(
     }
     fileProviders.clear();
     for (const provider of providers.values()) {
-      models.setProvider(provider);
-      if (!builtins.has(provider.id)) fileProviders.set(provider.id, provider);
+      const installed = withProviderTransport(provider);
+      models.setProvider(installed);
+      if (!builtins.has(provider.id)) fileProviders.set(provider.id, installed);
     }
   };
   return new Proxy(models, {
@@ -601,8 +787,7 @@ export function durableModels(
   });
 }
 
-/** `provider`'s Settings login token, as Pi's model registry gives MCP
- * servers with `"auth": { "provider" }`; undefined when signed out. */
+/** MCP provider tokens exclude the chat-only Gemini Settings credential. */
 export async function providerToken(
   models: Models,
   provider: string,
@@ -613,6 +798,8 @@ export async function providerToken(
         models)
       : models;
   try {
+    const installed = source.getProvider(provider);
+    if (!installed || Reflect.get(installed, CHAT_ONLY_AUTH)) return undefined;
     return (await source.getAuth(provider))?.auth.apiKey;
   } catch {
     return undefined;
@@ -718,7 +905,7 @@ export function customProviderSync(
         | ((provider: Provider) => Provider)
         | undefined;
       const base = customProvider(id, spec, envValue);
-      const provider = add ? add(base) : base;
+      const provider = withProviderErrors(add ? add(base) : base);
       models.setProvider(provider);
       installed.set(id, provider);
     }

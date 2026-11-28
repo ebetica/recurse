@@ -11,6 +11,7 @@ import {
   type EntryId,
   type Harness,
   type SubmissionRecord,
+  type TaskId,
 } from "@earendil-works/pi-durable";
 import type { SqliteStorage } from "@earendil-works/pi-durable/storage/sqlite";
 import type { ReportHolds } from "./report_holds.ts";
@@ -51,6 +52,8 @@ export interface DurableReport {
   /** An input after these runs is still unsettled (it will start a run). */
   queued: boolean;
   finalText: string | null;
+  /** Pi's wall-clock milliseconds for the final answer task's completion. */
+  replyAt?: number;
   aborted: boolean;
   error: string | null;
 }
@@ -187,7 +190,7 @@ export class Reporter {
 
   private async entry(
     id: number,
-  ): Promise<{ byTask: boolean; text: string | null }> {
+  ): Promise<{ taskId: TaskId | undefined; text: string | null }> {
     const at = id as EntryId;
     const page = await this.deps.conversation.entries(
       { minEntryId: at, maxEntryId: at },
@@ -197,7 +200,7 @@ export class Reporter {
     );
     const entry = page.items[0];
     return {
-      byTask: entry?.byTaskId !== undefined,
+      taskId: entry?.byTaskId,
       text: assistantText(entry?.model?.[0]),
     };
   }
@@ -236,7 +239,7 @@ export class Reporter {
     this.caughtUp = false;
     const placedByTask = async (record: SubmissionRecord | undefined) =>
       record?.entry !== undefined &&
-      (await this.entry(Number(record.entry))).byTask;
+      (await this.entry(Number(record.entry))).taskId !== undefined;
     const runs: Settled[][] = [];
     let complete = true;
     for (let i = 0; i < inputs.length; ) {
@@ -261,6 +264,14 @@ export class Reporter {
       const key = `r-${this.deps.child}-${generation}-${Number(first.id)}`;
       let outcome: ReportOutcome;
       try {
+        const reply =
+          last.status === "done"
+            ? await this.entry(Number(last.answer))
+            : undefined;
+        const replyAt =
+          reply?.text != null && reply.taskId !== undefined
+            ? (await storage.task(reply.taskId, context))?.endedAt
+            : undefined;
         outcome = await this.deps.deliver({
           key,
           requestId: first.requestId,
@@ -270,10 +281,8 @@ export class Reporter {
             .map((input) => input.requestId),
           earlier: reported.length - 1,
           queued: blocked,
-          finalText:
-            last.status === "done"
-              ? (await this.entry(Number(last.answer))).text
-              : null,
+          finalText: reply?.text ?? null,
+          replyAt,
           aborted: last.status === "unanswered" && last.reason === "aborted",
           error: runError(last),
         });

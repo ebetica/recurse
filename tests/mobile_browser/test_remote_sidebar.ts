@@ -238,7 +238,7 @@ export const tests: BrowserTest[] = [
         remoteReasoning.charAt(0).toUpperCase() + remoteReasoning.slice(1);
       const pickRemoteLevel4 = async (owner: "draft" | "conversation") => {
         const saved = owner === "conversation";
-        const description = saved ? `${remoteLabel} · ${reason}` : remoteLabel;
+        const description = `${remoteLabel} · ${reason}`;
         await browserExpect(page.locator("#model-row")).toHaveClass(/\bon\b/);
         await browserExpect(page.locator("#model-row")).not.toHaveAttribute(
           "aria-disabled",
@@ -258,7 +258,7 @@ export const tests: BrowserTest[] = [
           `Level 4: ${description}`,
         );
         await browserExpect(page.locator("#effort-model")).toHaveText(
-          saved ? `${remoteLabel} ${reason}` : remoteLabel,
+          `${remoteLabel} ${reason}`,
         );
         await browserExpect(trigger.locator(".model-name")).toHaveText(
           remoteLabel.replace(/^Claude /, ""),
@@ -364,7 +364,7 @@ export const tests: BrowserTest[] = [
           }),
         ).toBe(true);
         await create.click();
-        await page.locator("#draft-model-host").waitFor();
+        await page.getByRole("heading", { name: "New agent" }).waitFor();
         await page.getByRole("button", { name: "No tag", exact: true }).click();
         await page
           .getByRole("textbox", { name: "Tag name", exact: true })

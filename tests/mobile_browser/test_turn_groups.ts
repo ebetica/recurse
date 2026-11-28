@@ -4,12 +4,14 @@ declare const getComputedStyle: any;
 import { row, tree } from "./fixtures";
 import steeredOperatorRows from "../web/fixtures/steered-operator-rows.json";
 import {
+  expectHitCorners,
   gotoRoot,
   mockConversation,
   reloadConversation,
   waitForLayout,
   type BrowserTest,
 } from "./common";
+import { expectActivityRowCorners } from "./test_activity_lines";
 
 const tool = (id: string) =>
   row(id, "tool", "", {
@@ -201,16 +203,19 @@ export const turnGroupTests: BrowserTest[] = [
   async function test_hide_chevron_straddles_cutout_border(browser, base) {
     const measurements: {
       centreError: number;
-      overlaps: boolean;
       hit: boolean;
       footerGap: number;
-      headerInset: number;
     }[] = [];
-    for (const [name, viewport] of [
-      ["phone", { width: 412, height: 915 }],
-      ["desktop", { width: 1280, height: 900 }],
+    for (const [name, viewport, count] of [
+      ["phone", { width: 390, height: 844 }, 1],
+      ["phone-multiple", { width: 390, height: 844 }, 3],
+      ["desktop", { width: 1280, height: 900 }, 1],
     ] as const) {
-      const page = await browser.newPage({ viewport });
+      const page = await browser.newPage({
+        viewport,
+        isMobile: viewport.width === 390,
+        hasTouch: viewport.width === 390,
+      });
       try {
         await page.route(base + "api/tree", (route) =>
           route.fulfill({ json: tree() }),
@@ -218,7 +223,7 @@ export const turnGroupTests: BrowserTest[] = [
         await mockConversation(page, base, "main", () => ({
           id: "main",
           status: "idle",
-          rows: [...normalGroupRows(), ...wakeGroupRows(1)],
+          rows: [...normalGroupRows(), ...wakeGroupRows(count)],
         }));
         await gotoRoot(page, base);
         const group = page.locator(".activity-group").last();
@@ -227,14 +232,12 @@ export const turnGroupTests: BrowserTest[] = [
           name: "Hide activity",
           exact: true,
         });
-        await hide.scrollIntoViewIfNeeded();
+        const header = group.locator(".agent-message-row").first();
+        await expectActivityRowCorners(header);
+        await expectHitCorners(hide);
         const button = (await hide.boundingBox())!;
         const surface = (await group
           .locator(".activity-group-body")
-          .boundingBox())!;
-        const header = (await group
-          .locator(".agent-message-row")
-          .first()
           .boundingBox())!;
         const footer = (await page
           .locator(".turn-foot-actions")
@@ -247,14 +250,8 @@ export const turnGroupTests: BrowserTest[] = [
         });
         measurements.push({
           footerGap: hitTop - footer.y - footer.height,
-          headerInset: surface.x + surface.width - header.x - header.width,
           centreError: Math.abs(button.y + button.height / 2 - surface.y),
           hit: false,
-          overlaps:
-            button.x < header.x + header.width &&
-            button.x + button.width > header.x &&
-            button.y < header.y + header.height &&
-            button.y + button.height > header.y,
         });
         if (process.env.HIDE_BORDER_SHOTS) {
           await mkdir(process.env.HIDE_BORDER_SHOTS, { recursive: true });
@@ -273,10 +270,8 @@ export const turnGroupTests: BrowserTest[] = [
     }
     for (const measurement of measurements) {
       expect(measurement.centreError).toBeLessThanOrEqual(2);
-      expect(measurement.overlaps).toBe(false);
       expect(measurement.hit).toBe(true);
       expect(measurement.footerGap).toBeGreaterThanOrEqual(0);
-      expect(measurement.headerInset).toBeLessThanOrEqual(14);
     }
   },
   async function test_v_opens_activity_and_preserves_manual_rows(

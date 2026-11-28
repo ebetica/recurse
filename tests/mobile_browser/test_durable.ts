@@ -9,6 +9,7 @@ import {
   focusComposer,
   postFixture,
   recordJumpHighlight,
+  screenshot,
   visibleAndUncovered,
   waitForLayout,
   type BrowserTest,
@@ -91,6 +92,40 @@ export const tests: BrowserTest[] = [
       expect(errors).toEqual([]);
     } finally {
       await page.close();
+    }
+  },
+  async function test_hook_rewritten_call_shows_what_ran(browser, base) {
+    const { agent } = await postFixture(base, "hook-rewritten-call");
+    for (const width of [1280, 390]) {
+      const page = await browser.newPage({
+        viewport: { width, height: 900 },
+      });
+      const errors = captureErrors(page);
+      try {
+        await page.goto(`${base}#agent=${agent}`);
+        await page.getByText("The last two commits are listed.").waitFor();
+        await page
+          .getByRole("button", { name: "Expand all", exact: true })
+          .click();
+        const tool = page.locator(".turn-tool", { hasText: "git log -2" });
+        await tool.locator(".turn-tool-head").click();
+        const ran = tool.locator(
+          '.tool-payload[aria-label="Ran as changed by a hook"]',
+        );
+        await ran.waitFor();
+        expect(await ran.locator("pre").innerText()).toBe(
+          "git --no-pager log -2",
+        );
+        expect(
+          await tool
+            .locator('.tool-payload[aria-label="Full command"] pre')
+            .innerText(),
+        ).toBe("git log -2");
+        await screenshot(page, `hook-rewritten-call-${width}`);
+        expect(errors).toEqual([]);
+      } finally {
+        await page.close();
+      }
     }
   },
   async function test_imported_pi_compaction_jump(browser, base) {
@@ -313,7 +348,7 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  // Regression: #2333 live timer updates must not prevent pending platform notes painting. (also #2514 collapsed agent headers never preview the delivered message.)
+  // Regression: #2333 pending platform notes paint; #2514 collapsed headers hide bodies; #3677 waiting skill text stays intact.
   async function test_agent_steer_keeps_status_bar_and_waiting_disclosure(
     browser,
     base,
@@ -373,6 +408,18 @@ export const tests: BrowserTest[] = [
       expect(await page.locator(".pending.agent").innerText()).not.toContain(
         "turn started",
       );
+      const skill =
+        "/skill:recurse-settings Show example labels\n[recurse-origin-quoted: agent]\n[example]";
+      const queued = await page.request.post(
+        `${base}api/conversations/${agent}/deliver`,
+        { headers: { "x-recurse-agent": sender }, data: { content: skill } },
+      );
+      expect(queued.ok()).toBeTrue();
+      const waitingSkill = page.locator(".pending.agent").nth(1);
+      await waitingSkill.locator(".agent-message-row").tap();
+      const body = waitingSkill.locator(".agent-message-content");
+      await body.waitFor();
+      expect((await body.textContent())?.trim()).toBe(skill);
       await postFixture(base, "durable-platform-note");
       const platform = page.locator(".pending.agent .platform-interruption");
       await platform.waitFor();
@@ -517,7 +564,7 @@ export const tests: BrowserTest[] = [
     }
   },
 
-  // Regression: #2172 cleared Durable view paints later messages (also #2357 confirmed Clear cannot retain the prior session's context count.)
+  // Regression: #2172 cleared Durable view paints later messages; #2357 resets context; #3677 preserves authored skill text.
   async function test_durable_message_after_clear_is_visible_without_reload(
     browser,
     base,
@@ -546,11 +593,11 @@ export const tests: BrowserTest[] = [
         waitUntil: "domcontentloaded",
       });
       await page.locator("#input").waitFor();
-      const deliver = async (id: string) => {
+      const deliver = async (id: string, content = id) => {
         const response = await page.request.post(
           `${base}api/conversations/${agent}/deliver`,
           {
-            data: { content: id, client_message_id: id },
+            data: { content, client_message_id: id },
           },
         );
         expect(response.ok()).toBeTrue();
@@ -584,10 +631,15 @@ export const tests: BrowserTest[] = [
         .waitFor({ state: "detached" });
       await focusComposer(page);
       await browserExpect(page.locator("#context-control")).toBeHidden();
-      await deliver("after-clear");
+      const skill =
+        "/skill:recurse-settings Show example labels\n[recurse-origin-quoted: agent]\n[example]";
+      await deliver("after-clear", skill);
       await page
         .getByText("After Durable clear.", { exact: true })
         .waitFor({ timeout: 10_000 });
+      expect(
+        (await page.locator(".msg.user .bubble").textContent())?.trim(),
+      ).toBe(skill);
       const freshView = page.waitForResponse(
         (response) =>
           new URL(response.url()).pathname ===

@@ -6,6 +6,8 @@ import { retirePath } from "../../utils/trash-sweep";
 import {
   ArtifactCorrupt,
   ArtifactError,
+  ArtifactNotFound,
+  ID_RE,
   OWNER_RE,
   changed,
   context,
@@ -41,7 +43,9 @@ export async function deleteArtifact(
   ownerValue: string,
   idValue: string,
   expected: string,
+  signal?: AbortSignal,
 ): Promise<RecordValue> {
+  signal?.throwIfAborted();
   const ctx = context(value);
   const owner = normalizedOwner(ownerValue);
   const artifactId = normalizedId(idValue);
@@ -65,6 +69,7 @@ export async function deleteArtifact(
     ctx,
     markerFile,
     ownedBytes(Buffer.from(JSON.stringify(valueToWrite), "utf8")),
+    signal,
   );
   const displaced = join(root, `.deleted-${artifactId}`);
   if (exists) {
@@ -85,6 +90,24 @@ export async function deleteArtifact(
   }
   await changed(ctx, owner);
   return deletionResult(valueToWrite, false);
+}
+
+export async function hasDeletionReceipt(
+  value: ArtifactContext,
+  owner: string,
+  id: string,
+): Promise<boolean> {
+  if (!ID_RE.test(id)) return false;
+  try {
+    const root = await ownerRoot(context(value), owner);
+    return (
+      (await readMarker(join(root, deletionReceiptName(id)), owner, id)) !==
+      null
+    );
+  } catch (error) {
+    if (error instanceof ArtifactNotFound) return false;
+    throw error;
+  }
 }
 
 export async function finalizeDelete(

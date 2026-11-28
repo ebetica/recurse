@@ -12,7 +12,14 @@ import {
   SET_MODEL_MARKER,
   ServiceBindings,
 } from "./storage";
-import { pruneEmptyOwner } from "../artifacts";
+import {
+  ArtifactCorrupt,
+  ArtifactError,
+  pruneEmptyOwner,
+  removeArtifact as removeStoredArtifact,
+  removePublishedArtifact,
+  type ArtifactContext,
+} from "../artifacts";
 import { AgentTree } from "./agent_tree";
 import { WorktreeHolders } from "./worktree_holders";
 import { DurableHost } from "./durable/host";
@@ -31,6 +38,7 @@ import {
 import { AgentNodes } from "./runtime/agent_nodes";
 import { AgentTemp } from "./runtime/agent_temp";
 import { AttachmentDrafts } from "./runtime/attachment_drafts";
+import { ReplyImageNotices } from "./reply_image_notice";
 import { ConfigActions } from "./runtime/config_actions";
 import { ContextUsage } from "./runtime/context_usage";
 import {
@@ -269,6 +277,8 @@ export async function buildInstance(options: InstanceOptions) {
     {
       inbox: (cid) => nodes.existing(cid)?.inboxMessages() ?? [],
       defaultSpawnWorkdir: () => spawnWorkdir.current(),
+      mayHaveUnreportedReply: (cid) =>
+        durableHost?.reportHolds.mayHaveUnreportedReply(cid) ?? true,
       onRowsChanged: (cid) => {
         if (cid === null) void treeView.rebuildAll();
         else treeView.refresh(cid);
@@ -531,7 +541,63 @@ export async function buildInstance(options: InstanceOptions) {
     })) as unknown as TreeSource[];
   };
   const sidebarScript = new SidebarScript(paths.CONFIG_DIR, sidebarRows);
+  const imageCwd = async (cid: string): Promise<string | null> => {
+    const conv = conversations.load(cid, { withPending: false });
+    if (!conv || nodes.existing(cid)?.reaping) return null;
+    return (
+      (durable.owns(conv) ? await durable.effectiveCwd(cid) : null) ??
+      conversations.effectiveWorkdir(conv)
+    );
+  };
+  const replyImageNotices = new ReplyImageNotices(imageCwd, (work) =>
+    tasks.spawn("reply_image_notice", work, shutdownController.signal),
+  );
+  const artifacts: ArtifactContext = {
+    artifactsDir: paths.ARTIFACTS_DIR,
+    trashDir: paths.TRASH_DIR,
+  };
+  const platformNote = {
+    start: false,
+    source: "platform",
+    origin: "platform",
+  } as const;
+  const deliverPlatformNote = (owner: string, text: string) =>
+    delivery.deliver(owner, text, platformNote);
+  const artifactRemoval = {
+    artifacts,
+    deliverPlatformNote,
+    mutateExternalStorage: <T>(work: () => Promise<T>) =>
+      lease.mutateExternalStorage(work, []),
+  };
+  const removeArtifact = (owner: string, id: string, expected: string) =>
+    removeStoredArtifact(artifactRemoval, owner, id, expected);
   const durable: DurableHost = new DurableHost({
+    removeArtifact: async (id, actor, signal) => {
+      try {
+        return await removePublishedArtifact(
+          {
+            ...artifactRemoval,
+            deliverPlatformNote: async (owner, text) => {
+              if (owner !== actor)
+                await delivery.deliver(owner, text, {
+                  ...platformNote,
+                  nextTurnOnly: true,
+                });
+            },
+          },
+          id,
+          signal,
+        );
+      } catch (error) {
+        if (signal?.aborted && error === signal.reason)
+          throw new ArtifactError("artifact deletion cancelled");
+        if (error instanceof ArtifactError) throw error;
+        logException(log.agents, "artifact_tool_delete_failed", error, {
+          fields: { cid: actor },
+        });
+        throw new ArtifactCorrupt("artifact deletion could not be completed");
+      }
+    },
     config,
     sidebarScript,
     dataDir: paths.DATA_DIR,
@@ -645,6 +711,8 @@ export async function buildInstance(options: InstanceOptions) {
     rowChanged: refreshTreeRow,
     prsCreated: (cid, urls, since) =>
       conversationPrs.recordCreated(cid, urls, since),
+    replyFinished: (cid, text, current, writeNote) =>
+      replyImageNotices.check(cid, { text, current, writeNote }),
     titleSettings: () => config.levels.resolveEffortLevel(1),
     applyTitle: (cid, title) => {
       const current = conversations.metadataSnapshot(cid);
@@ -670,7 +738,7 @@ export async function buildInstance(options: InstanceOptions) {
       await conversations.stampReply(cid, report.key, now());
       const outcome = await delivery.reportDurableRun(cid, report);
       const row = conversations.metadataSnapshot(cid);
-      if (
+      const notify =
         outcome === "done" &&
         !report.queued &&
         notifiedRuns.get(cid) !== report.key &&
@@ -687,13 +755,23 @@ export async function buildInstance(options: InstanceOptions) {
               durable.reportHolds.settled(child) &&
               nodes.pendingCount(child) === 0 &&
               durable.shells(child).active_count === 0,
-          )
+          );
+      if (
+        outcome === "done" &&
+        row &&
+        typeof row.side_of !== "string" &&
+        report.finalText
       ) {
+        const viewedAt = conversations.viewedAt(cid);
         await conversations.finishUnread(
           cid,
           report.key,
-          !notifications.hasViewer(cid),
+          !notifications.hasViewer(cid) &&
+            (viewedAt === undefined ||
+              (report.replyAt !== undefined && report.replyAt > viewedAt)),
         );
+      }
+      if (notify) {
         notifiedRuns.delete(cid);
         notifiedRuns.set(cid, report.key);
         if (notifiedRuns.size > 1000)
@@ -825,10 +903,10 @@ export async function buildInstance(options: InstanceOptions) {
     now,
     sleep: sleepFor,
     tasks: createTasks,
-    deliverPlatformNote: (cid, content) =>
+    deliverPlatformNote: (cid, content, options) =>
       delivery.deliver(cid, content, {
         origin: "platform",
-        nextTurnOnly: true,
+        nextTurnOnly: options?.startTurn !== true,
       }),
   });
   delivery = new SupervisorDelivery({
@@ -1096,6 +1174,9 @@ export async function buildInstance(options: InstanceOptions) {
     spawnWorkdir,
     create,
     delivery,
+    deliverPlatformNote,
+    artifacts,
+    removeArtifact,
     reads,
     deferredReaps,
     tree,
@@ -1105,6 +1186,7 @@ export async function buildInstance(options: InstanceOptions) {
     reconciler,
     lifecycle,
     durable,
+    imageCwd,
     switchover,
     // Invariant: Return once the watcher launches; its sequence runs detached.
     start: async (

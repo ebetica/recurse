@@ -16,7 +16,7 @@
   padding: 0; border: 0; border-radius: 8px; background: none;
   color: var(--text); align-items: center; justify-content: center; cursor: pointer; }
 #up-top.on { display: inline-flex; }
-#up-top:hover { background: var(--panel); }
+@media (hover: hover) { #up-top:hover { background: var(--panel); } }
 #up-top:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 /* The title takes the remaining width without moving actions onto a new row. */
 #conv-titlebar { position: relative; display: flex; flex: 1; align-items: center; gap: var(--space-3); min-width: 0; }
@@ -47,7 +47,7 @@
      stolen by the browser as a scroll when you slide down onto the menu */
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   touch-action: none; }
-.top-act:hover { color: var(--accent); background: var(--panel); }
+@media (hover: hover) { .top-act:hover { color: var(--accent); background: var(--panel); } }
 .top-act:disabled { color: var(--text-disabled); cursor: default; background: none; }
 #new-top { min-width: 44px; min-height: 44px; justify-content: center;
   color: var(--text); }
@@ -72,7 +72,7 @@
   -webkit-box-orient: vertical; overflow: hidden; }
 /* the title doubles as a "copy this agent's id" control for a real agent */
 #conv-title.copyable { cursor: pointer; }
-#conv-title.copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; }
+@media (hover: hover) { #conv-title.copyable:hover { text-decoration: underline dotted; text-underline-offset: 3px; } }
 #conv-title.copied { color: var(--accent); }
 /* transient "Copied ID" pill; announced politely for screen readers */
 #title-copied { display: none; flex: none; font-size: 0.6875rem; font-weight: 600;
@@ -107,7 +107,7 @@
 
 /* Global connection status floats below the topbar, so appearing after a
    minute never shifts the cached thread, composer, or mobile title controls. */
-#connection-status { position: fixed; z-index: var(--z-dialog); top: 56px; right: 14px;
+#connection-status { position: fixed; z-index: var(--z-dialog); top: calc(56px + var(--standalone-top-inset)); right: 14px;
   display: none; align-items: center; gap: var(--space-3); max-width: calc(100vw - 28px);
   padding: var(--space-2) var(--space-3); border: 1px solid var(--danger);
   border-left-width: 3px; border-radius: 10px; background: var(--panel-2);
@@ -124,11 +124,19 @@
 #connection-status button { white-space: nowrap; }
 #connection-status button:disabled { cursor: wait; }
 
-#shell-overlay { position: fixed; z-index: var(--z-dialog); inset: 48px 0 0; display: flex;
+#window-load-error { display: none; }
+@media (width > 700px) {
+  #window-load-error:not([hidden]) { display: flex; flex: none; flex-wrap: wrap;
+    align-items: center; gap: var(--space-2) var(--space-3);
+    padding: var(--space-2) var(--space-5); background: var(--panel-2);
+    border-bottom: 1px solid var(--border); }
+}
+
+#shell-overlay { position: fixed; z-index: var(--z-dialog); inset: calc(48px + var(--standalone-top-inset)) 0 0; display: flex;
   align-items: flex-start; justify-content: center; padding: var(--space-5);
   pointer-events: none; }
 .shell-surface { pointer-events: auto; width: min(540px, calc(100vw - 2 * var(--space-5)));
-  max-height: min(72dvh, calc(100dvh - 48px - 124px));
+  max-height: min(72dvh, calc(100dvh - var(--standalone-top-inset) - 48px - 124px));
   overflow: hidden; padding: var(--space-5);
   display: flex; flex-direction: column; }
 .shell-surface-head { display: flex; align-items: flex-start; gap: var(--space-4);
@@ -169,13 +177,12 @@ button.agent { display: block; width: 100%; background: transparent;
   max-width: 440px; }
 .draft-hello h2 { color: var(--text); font-size: 1.0625rem; margin: 0; }
 .draft-hello .draft-sub { margin: var(--space-3) 0 0; font-size: 0.78125rem; color: var(--muted); }
-.draft-model-host { width: min(360px, 100%); margin: var(--space-5) auto 0;
-  text-align: left; }
 #draft-tag { display: inline-flex; align-items: center; gap: var(--space-3);
   max-width: 100%; min-height: 44px; padding: var(--space-2) var(--space-3);
   border: 0; border-radius: 8px; background: transparent; color: var(--muted);
   font: inherit; font-size: 0.78125rem; cursor: pointer; }
-#draft-tag:hover, #draft-tag:focus-visible { background: var(--panel-2); color: var(--text); }
+#draft-tag:focus-visible { background: var(--panel-2); color: var(--text); }
+@media (hover: hover) { #draft-tag:hover { background: var(--panel-2); color: var(--text); } }
 #draft-tag:focus-visible { outline: 2px solid var(--accent-dim); }
 
 /* The title-bar fade shows only while content continues under the bar. */
@@ -214,8 +221,7 @@ button.agent { display: block; width: 100%; background: transparent;
   color: var(--muted); font-size: 0.78125rem; font-family: inherit;
   border: 0; padding: 0; background: none; text-align: left; cursor: default; }
 .status-bar-box button.status-bar-label { align-self: stretch; gap: var(--space-3); cursor: pointer; }
-.status-bar-box button.status-bar-thinking-copy { padding-inline: var(--space-2);
-  -webkit-tap-highlight-color: transparent; }
+.status-bar-box button.status-bar-thinking-copy { padding-inline: var(--space-2); }
 .status-bar-box button.status-bar-label:focus-visible {
   outline: 2px solid var(--accent); outline-offset: -2px; }
 .status-bar-box .status-bar-thinking-head { display: flex; align-items: center;

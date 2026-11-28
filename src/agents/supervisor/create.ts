@@ -124,7 +124,12 @@ export interface CreateDeps {
   bumpTreeTopology(): void;
   log: RuntimeLogger;
   rollbackLog?: RuntimeLogger;
-  deliverPlatformNote(cid: string, content: string): Promise<string | null>;
+  /** Notes wait for the next turn unless startTurn asks to wake the agent. */
+  deliverPlatformNote(
+    cid: string,
+    content: string,
+    options?: { startTurn?: boolean },
+  ): Promise<string | null>;
   /** time.time(), seconds. */
   now(): number;
   /** Abortable sleep in seconds. */
@@ -771,10 +776,17 @@ export class SupervisorCreate {
     const recipients = new Set([heldId]);
     if (typeof conv.parent === "string" && conv.parent)
       recipients.add(conv.parent);
+    // Invariant: a return of control starts a parent turn so it can direct the
+    // child; every other control note waits for the recipient's next turn.
     for (const cid of recipients) {
+      const startTurn = !conv.taken_over && cid !== heldId;
       this.deps.tasks.spawn("control_note", async () => {
         try {
-          if ((await this.deps.deliverPlatformNote(cid, content)) === null)
+          if (
+            (await this.deps.deliverPlatformNote(cid, content, {
+              startTurn,
+            })) === null
+          )
             throw new Error("recipient refused control-change note");
         } catch (error) {
           logEvent(this.deps.log, WARNING, "control_note_failed", {

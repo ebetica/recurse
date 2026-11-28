@@ -8,7 +8,9 @@ recovery. It keeps the phone caret on composer control taps.
 [`view-state.ts`](view-state.ts) keeps selection and draft text.
 Sending and the rest of recovery stay in [`../composer.ts`](../composer.ts).
 
-[`action.ts`](action.ts) owns the Send/Stop button. The conversation's
+[`action.ts`](action.ts) owns the Send/Stop button. Its [touch menu](send-menu.ts)
+keeps the caret in the draft; it and the desktop shortcut use the same command
+path as `/btw`. The conversation's
 [Stop view](../conversation/stop-view.ts) supplies its availability and target;
 that view doesn't dispatch requests.
 
@@ -37,8 +39,10 @@ focus, so opening the phone keyboard doesn't add a row or cover the thread.
 Desktop controls wrap in narrow Chat windows. On wide touch screens the hit
 areas extend farther below the buttons than above, away from the field's
 bottom corners. Wrapped rows keep extra separation on touch screens.
-Safety review and errors are in the effort popup. Active turns show a green
-border; with reduced motion it stays still.
+New agent and existing conversations use the same [effort picker](../models.ts)
+in the control row; only the way the selected level applies differs. Safety review
+and errors are in the effort popup. Active turns show a green border; with
+reduced motion it stays still.
 
 ## Rules for changes
 

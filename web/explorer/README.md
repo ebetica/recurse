@@ -10,7 +10,9 @@ the same viewer.
   `Browser` keeps the working root, loaded pages, search results and active row.
 - [viewer.ts](viewer.ts) owns file previews, the editor, comments, and the close
   guard. Its `Viewer` keeps the selected path, preview and save state. The inline
-  viewer reads the browser’s root; a tab uses the root from its key.
+  viewer reads the browser’s root; a tab uses the root from its key. Markdown
+  uses the [document renderer](../document-markdown.ts) so relative images use
+  the same checked path route as Files.
 - [tab.ts](tab.ts) owns the Explorer file-tab source, saved keys, and availability
   probes. Tabs have a `Viewer` but no `Browser`.
 - [pane.ts](pane.ts) registers the pane and handles reply links. [index.ts](index.ts)

@@ -67,7 +67,7 @@ implementation sites.
 [worker]: ../../src/agents/durable/sqlite_worker.ts
 [native]: ../../src/agents/durable/sqlite_thread.worker.ts
 [view]: ../../src/agents/durable/host/view.ts
-[host]: ../../src/agents/durable/host.ts
+[host]: ../../src/agents/durable/host/host.ts
 [search]: ../../src/search/index.ts
 [sync]: ../../src/search/sync.worker.ts
 [delete]: ../../src/agents/durable/host/delete.ts

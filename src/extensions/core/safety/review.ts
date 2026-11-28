@@ -28,6 +28,7 @@ import {
 import type { ReviewHistory } from "./review-history.ts";
 type ReviewInputs = {
   dataDir?: string;
+  configDir?: string;
   statsRoot?: string;
   history?: ReviewHistory;
   historyVersion?: number;
@@ -651,7 +652,11 @@ export async function reviewAction(
     inputs.history?.clear();
     inputs = { ...inputs, history: undefined };
   }
-  const policy = buildReviewerSystemPrompt(additionalRules, inputs.dataDir);
+  const policy = buildReviewerSystemPrompt(
+    additionalRules,
+    inputs.dataDir,
+    inputs.configDir,
+  );
   const systemPrompt =
     buildReviewSystemPrompt(policy, model.provider, inputs.actingAgent) +
     (inputs.history

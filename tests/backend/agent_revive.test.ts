@@ -43,7 +43,7 @@ import {
 import { MAX_REVIVE_BYTES } from "../../src/agents/durable/import_archive";
 import { createModels } from "@earendil-works/pi-ai";
 import { ReviveDoc } from "../../src/agents/durable/revive_doc";
-import { runtime } from "../../src/agents/durable/host/load";
+import { runtime } from "../../src/agents/durable/host";
 import { openShellHarness } from "../extensions/core/shells/fixtures/durable_harness";
 import { RegistryStore } from "../../src/extensions/core/shells/persist";
 import { KeyError, ValueError } from "../../src/agents/runtime/agent_node";

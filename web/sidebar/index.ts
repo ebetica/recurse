@@ -16,7 +16,11 @@ export {
 } from "./agent-folds.js";
 export { initAgentDrag, isDraggingAgent } from "./drag.js";
 export { SIDEBAR_CHANGE } from "./events.js";
-export { focusAgentTree, renderAgentList } from "./focus.js";
+export {
+  focusAgentTree,
+  renderAgentList,
+  restoreMovedListControl,
+} from "./focus.js";
 export { initRowTouch } from "./row-touch.js";
 export {
   arrange,

@@ -11,7 +11,6 @@
   "src/backends/label/index.ts",
   "src/backends/settings_sync/index.ts",
   "src/extensions/core/safety/circuit-breaker.ts",
-  "src/extensions/core/safety/model-policy.ts",
   "src/extensions/core/safety/path-expansion.ts",
   "src/extensions/core/safety/session-safety.ts",
   "src/extensions/core/safety/transcript.ts",

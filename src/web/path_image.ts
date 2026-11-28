@@ -4,18 +4,10 @@
 
 import { constants } from "node:fs";
 import { open } from "node:fs/promises";
-import { homedir } from "node:os";
-import { basename, dirname, extname, resolve } from "node:path";
+import { basename, extname } from "node:path";
 import { inlineRasterMediaType } from "../agents/runtime/attachments/base";
+import { resolveImagePath } from "../image_path";
 import { HttpError } from "./router";
-
-/** Expand only the current user's home shorthand; other paths use the cwd. */
-function imagePath(cwd: string, path: string): string {
-  if (!path || path.includes("\0")) throw new HttpError(404, "image not found");
-  return path === "~" || path.startsWith("~/")
-    ? resolve(homedir(), path.slice(2))
-    : resolve(cwd, path);
-}
 
 /** Recognize an SVG root, refusing document types and entity declarations. */
 function svgSnapshot(data: Uint8Array, location: string): boolean {
@@ -47,10 +39,8 @@ export async function readPathImage(
   maxBytes: number,
   signal: AbortSignal,
 ): Promise<{ data: Uint8Array; media: string; name: string }> {
-  const location = imagePath(
-    document ? dirname(imagePath(cwd, document)) : cwd,
-    path,
-  );
+  const location = resolveImagePath(cwd, path, document);
+  if (location === null) throw new HttpError(404, "image not found");
   let handle;
   try {
     handle = await open(location, constants.O_RDONLY | constants.O_NONBLOCK);

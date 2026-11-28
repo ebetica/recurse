@@ -426,7 +426,7 @@ export function agentMarked(ex: Exchange): boolean {
 }
 
 function operatorConversationPath(path: string): boolean {
-  return /^\/api\/conversations\/[^/]+\/(safety|take-over|pin|promote|path-image)$/.test(
+  return /^\/api\/conversations\/[^/]+\/(safety|take-over|pin|promote|path-image|unread)$/.test(
     path.replace(/\/+$/, ""),
   );
 }
@@ -631,7 +631,7 @@ export function requestAuth(deps: RequestAuthDeps): Middleware {
       return next(ex);
     if (loopbackAuthenticated(ex, deps.loopbackToken)) {
       const audience = loopbackAudience(ex.request.method, ex.path);
-      const bundled = ["subagent", "worktree", "supervisor"].includes(
+      const bundled = ["subagent", "worktree", "hooks", "supervisor"].includes(
         headers.get("x-recurse-bundled-tool") ?? "",
       );
       if (

@@ -14,13 +14,27 @@ const SNOOZE = {
   set: "snoozed",
   until: "ask",
 };
-const PIN = { label: "Pin", icon: "pin", set: "pinned", unless: "pinned" };
-const UNPIN = { label: "Unpin", icon: "unpin", clear: "pinned", if: "pinned" };
+const PIN = {
+  label: "Pin",
+  icon: "pin",
+  set: "pinned",
+  unless: "pinned",
+};
+const UNPIN = {
+  label: "Unpin",
+  icon: "unpin",
+  clear: "pinned",
+  if: "pinned",
+};
 const RESTORE = {
   label: "Restore",
   icon: "restore",
   clear: ["archived", "snoozed"],
 };
+const swipe = (action, direction) => ({ ...action, swipe: direction });
+const DELETE = { label: "Delete", do: "delete", swipe: "left" };
+const MORE = { label: "More", do: "more", swipe: "left" };
+const READ = { label: "Read or unread", do: "toggleUnread", swipe: "right" };
 
 const archived = (r) =>
   r.tags.snoozed ||
@@ -47,27 +61,40 @@ export default function sidebar(rows) {
       title: "Pinned",
       hideWhenEmpty: true,
       rows: pinned.sort(byRank),
-      rowActions: [UNPIN],
+      rowActions: [
+        { ...swipe(ARCHIVE, "left"), clear: [], swipeOnly: true },
+        DELETE,
+        MORE,
+        READ,
+        swipe(UNPIN, "right"),
+      ],
     },
     {
       title: "Inbox",
       hideWhenEmpty: true,
       rows: inbox.sort(byRank),
-      rowActions: [ARCHIVE, SNOOZE, PIN],
+      rowActions: [
+        swipe(ARCHIVE, "left"),
+        SNOOZE,
+        DELETE,
+        MORE,
+        READ,
+        swipe(PIN, "right"),
+      ],
       actions: stale.length ? [archiveStale] : [],
     },
     {
       title: "Active",
       hideWhenEmpty: true,
       rows: active.sort(byRank),
-      rowActions: [PIN],
+      rowActions: [DELETE, MORE, READ, swipe(PIN, "right")],
     },
     {
       title: "Archive",
       hideWhenEmpty: true,
       collapsed: true,
       rows: archive.sort((a, b) => b.updated - a.updated),
-      rowActions: [RESTORE],
+      rowActions: [swipe(RESTORE, "left"), DELETE, MORE, READ],
     },
   ];
 }

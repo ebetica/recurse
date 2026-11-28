@@ -40,7 +40,8 @@ metadata arrives in a subsequent frame. Phones retain
 in-place details, image dialogs and Back navigation. Markdown sibling links open
 file views with a Back step on phones; fragments scroll the opened document.
 Markdown siblings opened from Artifacts use the same reading padding as published
-Markdown files. [Markdown tables](../util.ts) share layout with Artifacts and
+Markdown files. Figures use the [shared image viewer](../image-preview/README.md),
+independent of tab navigation. [Markdown tables](../util.ts) share layout with Artifacts and
 chat: long cells wrap, and tables scroll only when their columns cannot fit.
 
 Uploaded and published HTML and Explorer HTML use the Artifact app isolation.
@@ -97,7 +98,7 @@ the version last reviewed, through the same viewer as Artifacts
 and new blocks; removed text never appears, so comment anchors are unchanged.
 Reviewed versions live in page memory, so after a reload every document counts
 as reviewed and the first version seen is the starting point. "New since" above
-the document picks another earlier version; Reviewed below it, or submitting
+the document picks another earlier version; Reviewed at the bottom right, or submitting
 comments on that version, clears the highlights. The comparison text is the
 earlier version's text preview, loaded (or reloaded after eviction) on demand.
 Older versions picked in the version menu show without highlights.
@@ -123,7 +124,9 @@ share the eight-open/32-definition bounds with Explorer and the existing
 
 The list remains newest-first and groups published versions by name. Metadata
 refresh remains bounded and throttled during a running turn. An open collection
-stays available until its pending metadata read settles. Failed deletions remain
+stays available until its pending metadata read settles. List loading state
+does not repaint the open document, so an active selection and draft stay
+anchored during an unchanged refresh. Failed deletions remain
 visible and Retry retries the deletion. Media keep their admitted preview routes,
 byte limits, sanitization and worker-only document/PDF conversion. Plain source
 previews and Artifact sibling source files share

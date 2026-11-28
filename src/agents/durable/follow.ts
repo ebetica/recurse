@@ -36,6 +36,15 @@ import { WARNING } from "../../observability/runtime_logging";
 
 type Rec = Record<string, unknown>;
 
+export type RunEnd = {
+  /** It was stopped. */
+  aborted: boolean;
+  /** Its Durable conversation. */
+  conversation: string;
+  /** The input that started it. */
+  run?: string;
+};
+
 export interface ShellInput {
   pid: number;
   identity: string;
@@ -86,6 +95,43 @@ interface FollowInput {
   safetyChanged(): void;
   /** PRs a tool call that started at `since` (epoch seconds) created. */
   prsCreated?(urls: string[], since: number): void;
+  replyFinished?(reply: string, text: string, current: () => boolean): void;
+  /** A run ended, however. */
+  runEnded?(end: RunEnd): void;
+}
+
+const REPLY_IMAGE_MAX_CHARS = 64 * 1024;
+
+/** One committed answer can settle several steered inputs. */
+function finalAnswer(publication: CommitPublication): EntryId | undefined {
+  let answer: EntryId | undefined;
+  for (const change of publication.changes) {
+    if (change.type !== "submission") continue;
+    const { value } = change;
+    if (
+      value.status === "done" &&
+      "answer" in value &&
+      value.answer !== undefined &&
+      (answer === undefined || value.answer > answer)
+    )
+      answer = value.answer;
+  }
+  return answer;
+}
+
+function imageReplyText(content: unknown): string | undefined {
+  if (typeof content === "string")
+    return content.length <= REPLY_IMAGE_MAX_CHARS ? content : undefined;
+  if (!Array.isArray(content) || content.length > 256) return undefined;
+  const parts: string[] = [];
+  let size = 0;
+  for (const part of content) {
+    if (part?.type !== "text" || typeof part.text !== "string") continue;
+    size += part.text.length;
+    if (size > REPLY_IMAGE_MAX_CHARS) return undefined;
+    parts.push(part.text);
+  }
+  return parts.join("");
 }
 
 // Successful model bash calls this commit settled whose output names a pull
@@ -264,6 +310,7 @@ export async function followConversation(input: FollowInput): Promise<{
   };
   const run = (await harness.snapshot(LiveDoc, conversation.id, context))?.run;
   row.runId = run && String(run.taskId);
+  let runStart = run && String(run.inputs[0] ?? `entry ${run.first}`);
   row.runFirstEntry = run?.first === undefined ? undefined : Number(run.first);
   row.queued = (
     await harness.snapshot(InboxDoc, conversation.id, context)
@@ -272,6 +319,7 @@ export async function followConversation(input: FollowInput): Promise<{
   live.start(async (call) => {
     if (call.kind === "value" && input.current()) input.viewChanged?.();
   });
+  let latestAnswer: EntryId | undefined;
   const committed = (all: CommitPublication) => {
     input.committed?.(all);
     const publication = forConversation(all, conversation.id, input.root);
@@ -308,6 +356,27 @@ export async function followConversation(input: FollowInput): Promise<{
         row.runFirstEntry =
           run?.first === undefined ? undefined : Number(run.first);
         moved ||= row.runId !== before;
+        const startedBy = runStart;
+        runStart = run && String(run.inputs[0] ?? `entry ${run.first}`);
+        // A run ends when it goes, or when input queued behind it starts the
+        // next run in the same commit; a run keeps its first input while its
+        // generations hand over.
+        if (before !== undefined && runStart !== startedBy) {
+          const failure =
+            change.kind === "change"
+              ? (change.value as LiveState).runFailure
+              : undefined;
+          const aborted =
+            failure?.reason === "aborted" && String(failure.taskId) === before;
+          queueMicrotask(() => {
+            if (input.current())
+              input.runEnded?.({
+                aborted,
+                conversation: String(conversation.id),
+                run: startedBy,
+              });
+          });
+        }
       } else if (
         change.type === "document" &&
         change.record.kind === InboxDoc.definition.kind &&
@@ -400,6 +469,32 @@ export async function followConversation(input: FollowInput): Promise<{
           if (urls.length) input.prsCreated?.(urls, since);
         })
         .catch(report("created_pr_read_failed"));
+    if (input.replyFinished) {
+      const answer = finalAnswer(publication);
+      if (
+        answer !== undefined &&
+        (latestAnswer === undefined || answer > latestAnswer)
+      ) {
+        latestAnswer = answer;
+        const entry = publication.changes.find(
+          (change) =>
+            change.type === "entry" &&
+            change.value.id === answer &&
+            change.value.kind === "pi.assistant",
+        );
+        const message =
+          entry?.type === "entry"
+            ? (entry.value.model?.[0] as Rec | undefined)
+            : undefined;
+        const text = imageReplyText(message?.content);
+        if (text?.includes("![") && !blocked())
+          input.replyFinished(
+            `${generation}-${answer}`,
+            text,
+            () => latestAnswer === answer && input.current() && !blocked(),
+          );
+      }
+    }
     if (reporter?.noteCommit(publication))
       queueMicrotask(() => void reporter.kick());
     queueMicrotask(() => void retrack());

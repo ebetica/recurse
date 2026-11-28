@@ -62,11 +62,7 @@ import {
   CreateSlots,
   registerServiceConversationRoutes,
 } from "./service_conversations";
-import {
-  finishArtifactDeletion,
-  registerFileRoutes,
-  type FilesRoutesDeps,
-} from "./files";
+import { registerFileRoutes, type FilesRoutesDeps } from "./files";
 import { registerLoginRoutes } from "./login";
 import { registerTwoFactorRoutes } from "./two_factor";
 import { registerUiTiming } from "./ui_timing";
@@ -81,6 +77,7 @@ import {
 import { HttpError, Router, type Handler } from "./router";
 import { registerSettingsRoutes } from "./settings";
 import { registerNotificationRoutes } from "./notifications";
+import { registerHooksRoutes } from "./hooks_settings";
 import { registerSettingsSyncRoutes } from "./settings_sync";
 import { ConnectedBackends } from "../backends/connected";
 import { API_MAJOR, API_REVISION } from "./api_v1/schema";
@@ -209,6 +206,9 @@ export async function buildApp(options: AppOptions): Promise<App> {
     nodes,
     reads,
     delivery,
+    deliverPlatformNote,
+    artifacts: artifactCtx,
+    removeArtifact,
     serviceBindings,
   } = instance;
   const mutate = <T>(work: () => Promise<T>): Promise<T> =>
@@ -258,17 +258,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
   const loopback = (ex: Parameters<typeof loopbackAuthenticated>[0]) =>
     loopbackAuthenticated(ex, loopbackToken);
 
-  const artifactCtx: artifacts.ArtifactContext = {
-    artifactsDir: paths.ARTIFACTS_DIR,
-    trashDir: paths.TRASH_DIR,
-  };
   const artifactRevisions = new ArtifactRevisions(artifactCtx);
-  const deliverPlatformNote = (owner: string, text: string) =>
-    delivery.deliver(owner, text, {
-      start: false,
-      source: "platform",
-      origin: "platform",
-    });
   const durable = instance.durable;
   const transcript = async (cid: string, options: TranscriptQuery) =>
     durable.owns(conversations.load(cid, { withPending: false }))
@@ -307,14 +297,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
   );
   const filesDeps: FilesRoutesDeps = {
     themesFile: config.paths.THEMES_FILE,
-    imageCwd: async (cid) => {
-      const conv = conversations.load(cid, { withPending: false });
-      if (!conv || nodes.existing(cid)?.reaping) return null;
-      return (
-        (durable.owns(conv) ? await durable.effectiveCwd(cid) : null) ??
-        conversations.effectiveWorkdir(conv)
-      );
-    },
+    imageCwd: instance.imageCwd,
     requireActionReady,
     drafts: instance.drafts,
     files: {
@@ -331,7 +314,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     artifacts: artifactCtx,
     mutateExternalStorage: (work) => mutate(work),
     fenced: (work) => fenced(work),
-    deliverPlatformNote,
+    removeArtifact,
   };
 
   const router = new Router();
@@ -523,6 +506,12 @@ export async function buildApp(options: AppOptions): Promise<App> {
     piAgentDir: () => piAgentDir(credentialRoots, preparePiAgentDir),
     mutateExternalStorage: (work) => mutate(work),
   });
+  registerHooksRoutes(router, {
+    hooks: instance.durable.hooks,
+    config,
+    liveIds: () => instance.durable.deps.liveIds(),
+    mutate,
+  });
   registerNotificationRoutes(router, instance.notifications, {
     frontend,
     workerSource: join(sourceRoot, "web", "push-worker.ts"),
@@ -653,6 +642,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
     tree: () => instance.treeView.serveBase(),
     shells: shellView,
     queued: (cid) => durable.metadata(cid).pending.length,
+    runningHooks: (cid) => durable.hooks.running(cid),
     context: (row) =>
       agentContext(row, durable.cachedContextUsage(String(row.id)), config),
     requireReady: requireActionReady,
@@ -747,15 +737,7 @@ export async function buildApp(options: AppOptions): Promise<App> {
       const owner = String(receipt.owner_agent_id);
       const id = String(receipt.id);
       try {
-        const result = await mutate(() =>
-          artifacts.deleteArtifact(
-            artifactCtx,
-            owner,
-            id,
-            String(receipt.version),
-          ),
-        );
-        await finishArtifactDeletion(filesDeps, result);
+        await removeArtifact(owner, id, String(receipt.version));
       } catch (error) {
         if (error instanceof artifacts.ArtifactConflict) {
           try {

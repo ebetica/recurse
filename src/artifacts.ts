@@ -30,10 +30,12 @@ import {
   createRef,
   createRepositoryDirectory,
   decode,
+  deleteArtifact,
   detectEntry,
   errorCode,
   excludeInstalls,
   expectVersion,
+  finalizeDelete,
   git,
   head,
   initRepo,
@@ -41,12 +43,14 @@ import {
   normalizedId,
   normalizedOwner,
   normalizedTitle,
+  openRepository,
   openRepositoryWithHook,
   ownedBytes,
   publishRef,
   published,
   pythonInt,
   readFileBounded,
+  resolveOwner,
   resolveVersion,
   safeRel,
   sourceEntry,
@@ -81,6 +85,7 @@ export {
   cancelStaleDeletion,
   deleteArtifact,
   finalizeDelete,
+  hasDeletionReceipt,
   listArtifacts,
   migrateArtifactDirectories,
   migrateCommitHooks,
@@ -90,6 +95,56 @@ export {
   resolveOwner,
   revision,
 } from "./artifacts/store";
+
+interface ArtifactRemovalDeps {
+  artifacts: ArtifactContext;
+  mutateExternalStorage<T>(work: () => Promise<T>): Promise<T>;
+  deliverPlatformNote(owner: string, text: string): Promise<unknown>;
+}
+
+/** Displace the repository, durably notify its owner, then retire it. */
+export async function removeArtifact(
+  deps: ArtifactRemovalDeps,
+  owner: string,
+  id: string,
+  expected: string,
+  signal?: AbortSignal,
+): Promise<{ result: RecordValue; complete: boolean }> {
+  const result = await deps.mutateExternalStorage(() =>
+    deleteArtifact(deps.artifacts, owner, id, expected, signal),
+  );
+  try {
+    if (result.notification_pending) {
+      await deps.mutateExternalStorage(() =>
+        deps.deliverPlatformNote(
+          owner,
+          `[Artifact deleted] “${result.title}” (id: ${result.id}, version: ${result.version}) was deleted. ` +
+            "Do not recreate it unless the operator explicitly asks.",
+        ),
+      );
+    }
+    const complete = await deps.mutateExternalStorage(() =>
+      finalizeDelete(deps.artifacts, owner, id, String(result.deletion_id)),
+    );
+    return { result, complete };
+  } catch (error) {
+    if (!(error instanceof ArtifactError)) throw error;
+    return { result, complete: false };
+  }
+}
+
+export async function removePublishedArtifact(
+  deps: ArtifactRemovalDeps,
+  id: string,
+  signal?: AbortSignal,
+): Promise<{ result: RecordValue; complete: boolean }> {
+  const owner = await resolveOwner(deps.artifacts, id);
+  const ctx = context(deps.artifacts);
+  const repo = await openRepository(ctx, owner, id);
+  const version = await published(ctx, repo, false);
+  if (!version) throw new ArtifactNotFound("artifact has not been published");
+  return removeArtifact(deps, owner, id, version, signal);
+}
 
 function newId(ctx: ResolvedContext, title: string): string {
   const slug =

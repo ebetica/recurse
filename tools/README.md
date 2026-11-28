@@ -7,7 +7,7 @@ Help lists commands and essential workflow. Validation errors and this guide
 hold detailed restrictions; those details are not injected on every turn.
 
 **Agent tools:** [subagent.ts](subagent.ts) (create, message, wait, remove and
-revive agents, and read live or archived transcripts) · [worktree.ts](worktree.ts) (managed worktrees).
+revive agents, and read live or archived transcripts) · [worktree.ts](worktree.ts) (managed worktrees) · [hooks.ts](hooks.ts) (list an agent's hooks and run one once).
 
 Native Pi tools replace the publishing, environment, settings and Artifact CLIs:
 [publish](../src/extensions/core/environment/publish.ts) attaches files to the
@@ -25,7 +25,7 @@ reads and writes Config and theme files directly; it does not call Settings HTTP
 Settings (including MCP), provider sign-in and operator login/password HTTP
 routes are operator-only and reject even empty or malformed agent markers.
 
-The subagent and worktree CLIs send `x-recurse-bundled-tool` with their name on
+The subagent, worktree and hooks CLIs send `x-recurse-bundled-tool` with their name on
 loopback requests; the launcher supervisor sends `supervisor`. This opts into
 internal tool routes that may change in any release. Scripts should use the
 [API v1 contract](../src/web/api_v1/README.md) instead. The marker does not

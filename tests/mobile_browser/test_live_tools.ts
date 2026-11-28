@@ -10,6 +10,7 @@ import {
   waitForLayout,
   type BrowserTest,
 } from "./common";
+import { expectActivityRowCorners } from "./test_activity_lines";
 
 export const tests: BrowserTest[] = [
   // Regression: #3617 streamed thinking stays visible with running tools and clears when the turn ends.
@@ -44,9 +45,11 @@ export const tests: BrowserTest[] = [
         const group = page.locator(".activity-group-toggle");
         const thought = page.locator(".turn-thinking");
         const thoughtToggle = thought.getByRole("button");
-        const tap = async (control: Locator) => {
+        const tap = async (control: Locator, row = false) => {
           if (!phone) return control.click();
-          await expectHitCorners(control);
+          await (row
+            ? expectActivityRowCorners(control)
+            : expectHitCorners(control));
           await checkedTap(control);
         };
         const expectToolsInTranscript = async () => {
@@ -97,7 +100,7 @@ export const tests: BrowserTest[] = [
           await expectToolsInTranscript();
         }
         await group.click();
-        await tap(thoughtToggle);
+        await tap(thoughtToggle, true);
         await browserExpect(thoughtToggle).toHaveAttribute(
           "aria-expanded",
           "false",
@@ -157,7 +160,7 @@ export const tests: BrowserTest[] = [
         }
         await page.reload();
         await group.click();
-        await tap(thoughtToggle);
+        await tap(thoughtToggle, true);
         await browserExpect(thought.locator(".turn-thinking-body")).toHaveText(
           `${title} ${detail}`,
           { useInnerText: true },

@@ -5,6 +5,9 @@
 :root {
   --mobile-shell-height: 97px;
   --visible-height: 100dvh;
+  --standalone-top-inset: 0px;
+  --standalone-left-inset: 0px;
+  --standalone-right-inset: 0px;
   /* Spec: operator 2026-10-15 requests 90% desktop text; phones stay unchanged. */
   font-size: 90%;
 }
@@ -12,19 +15,40 @@
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0;
   margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0);
   white-space: nowrap; border: 0; }
+html { -webkit-tap-highlight-color: transparent; }
 html, body { width: 100%; height: 100%; min-height: 0; margin: 0; overflow: hidden; }
 @supports (height: 100dvh) {
   html, body { height: 100dvh; }
 }
 body {
   background: var(--bg); color: var(--text);
-  font: 0.9375rem/1.6 var(--font-sans);
+  /* Reply text size and spacing; collapsed activity rows reuse the pitch. */
+  --text-size: 0.9375rem; --text-line-height: 1.6;
+  --text-line-pitch: calc(var(--text-size) * var(--text-line-height));
+  font: var(--text-size)/var(--text-line-height) var(--font-sans);
   display: flex; overscroll-behavior: none;
   padding-left: env(safe-area-inset-left); padding-right: env(safe-area-inset-right);
 }
 @media (min-width: 701px) { body { padding-top: env(safe-area-inset-top); padding-bottom: env(safe-area-inset-bottom); } }
+/* Some iPhone Home Screen apps report fullscreen despite a standalone manifest. */
+@media (display-mode: standalone), (display-mode: fullscreen) {
+  :root {
+    --standalone-top-inset: env(safe-area-inset-top);
+    --standalone-left-inset: env(safe-area-inset-left);
+    --standalone-right-inset: env(safe-area-inset-right);
+  }
+}
 
 @media (max-width: 700px) { :root { font-size: 100%; } }
+
+@media (pointer: coarse) {
+  /* Keep focus from zooming the page. The floor must beat field-specific typography. */
+  :is(textarea, select, input:not([type="button"], [type="submit"], [type="reset"],
+    [type="image"], [type="checkbox"], [type="radio"], [type="range"], [type="color"],
+    [type="file"], [type="hidden"])) { font-size: max(16px, 1rem) !important; }
+  /* Replace the browser tap flash without leaving paint behind after release. */
+  :where([data-touch-pressed]) { filter: opacity(.72); }
+}
 
 @keyframes pulse { 50% { opacity: .6; } }
 /* the person glyph marking a subagent count ("3 👤") */
@@ -61,11 +85,13 @@ body {
 .btn.primary, .settings-section button.primary { border-color: var(--accent);
   background: var(--accent); color: var(--text-on-accent); }
 .btn.quiet { border-color: transparent; color: var(--muted); }
-.btn:hover:not(:disabled),
-.settings-section button:is(.ghost, .secondary):hover:not(:disabled) { background: var(--panel-2); }
-.btn.quiet:hover:not(:disabled) { color: var(--text); }
-.btn.primary:hover:not(:disabled), .settings-section button.primary:hover:not(:disabled) {
-  border-color: var(--accent-hover); background: var(--accent-hover); }
+@media (hover: hover) {
+  .btn:hover:not(:disabled),
+  .settings-section button:is(.ghost, .secondary):hover:not(:disabled) { background: var(--panel-2); }
+  .btn.quiet:hover:not(:disabled) { color: var(--text); }
+  .btn.primary:hover:not(:disabled), .settings-section button.primary:hover:not(:disabled) {
+    border-color: var(--accent-hover); background: var(--accent-hover); }
+}
 .btn:disabled, .settings-section button:is(.primary, .ghost, .secondary):disabled {
   opacity: .5; cursor: default; }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -96,8 +122,12 @@ body {
   border-color: color-mix(in srgb, var(--tone) 30%, transparent);
   background: color-mix(in srgb, var(--tone) 10%, transparent); }
 button.badge { cursor: pointer; }
-button.badge:is(:hover, :focus-visible) { color: var(--text);
+button.badge:focus-visible { color: var(--text);
   border-color: var(--text); background: var(--panel); }
+@media (hover: hover) {
+  button.badge:hover { color: var(--text);
+    border-color: var(--text); background: var(--panel); }
+}
 
 /* ---------- menus ----------
    One menu: a raised surface of 44px rows with an optional leading 16px icon,
@@ -111,8 +141,12 @@ button.badge:is(:hover, :focus-visible) { color: var(--text);
   width: 100%; min-height: 44px; margin: 0; padding: var(--space-3) var(--space-4); border: 0;
   border-radius: 8px; background: none; color: var(--text); font: inherit;
   font-size: 0.84375rem; line-height: 1.35; text-align: start; cursor: pointer; }
-.menu-item:is(:hover, :focus-visible, .hot, [aria-selected="true"]) {
+.menu-item:is(:focus-visible, .hot, [aria-selected="true"]) {
   background: var(--panel-2); outline: none; }
+@media (hover: hover) {
+  .menu-item:hover {
+    background: var(--panel-2); outline: none; }
+}
 .menu-item svg { flex: none; width: 16px; height: 16px; }
 .menu-label { padding: var(--space-3) var(--space-4) var(--space-2); color: var(--muted); font-size: 0.6875rem;
   font-weight: 600; line-height: 1.3; }
@@ -141,11 +175,8 @@ dialog.dialog { color: var(--text); }
 /* ---------- text fields ----------
    One look for text inputs, selects and textareas: a panel-2 fill, a 1px
    border, 8px corners and 13px text, with an accent border and a soft ring
-   while focused. .sm is the compact single-line size. On touch screens the
-   text is 16px (so iOS does not zoom on focus) and the field is 44px tall.
-   Settings fields share it through the :where() list without raising the
-   specificity of their layout rules; they keep 13.5px text at the button
-   height everywhere except iOS, where 16px stops the zoom on focus. */
+   while focused. .sm is the compact single-line size. Coarse pointers
+   get a 44px field; Settings shares the appearance without raising specificity. */
 .text-field, .settings-section :where(input:not([type="checkbox"], [type="radio"], [type="range"]),
   select, textarea) {
   box-sizing: border-box; padding: var(--space-3) var(--space-4); border: 1px solid var(--border);
@@ -158,10 +189,7 @@ dialog.dialog { color: var(--text); }
 :is(.text-field, .settings-section :where(input, textarea))::placeholder {
   color: var(--text-placeholder); }
 @media (pointer: coarse) {
-  .text-field, .text-field.sm { min-height: 44px; font-size: 1rem; } }
-@supports (-webkit-touch-callout: none) {
-  .settings-section :where(input:not([type="checkbox"], [type="radio"], [type="range"]),
-    select, textarea) { font-size: 1rem; } }
+  .text-field, .text-field.sm { min-height: 44px; } }
 .settings-section .brand-settings :is(input, button) { min-height: 44px; min-width: 44px; }
 .theme-cards { --theme-selection-accent: var(--accent); display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-3); margin-top: var(--space-5); }
 /* Appearance is a segmented control: the pressed segment is raised. */
@@ -174,7 +202,7 @@ dialog.dialog { color: var(--text); }
 .theme-card-bubble { display: block; width: fit-content; margin-left: auto; padding: var(--space-1) var(--space-3); background: var(--user-bubble); border-radius: 6px; }
 .theme-cards button { overflow-wrap: anywhere; position: relative; min-width: 0; min-height: 64px; padding: var(--space-4) var(--space-6) var(--space-4) var(--space-4); text-align: left; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; }
 .theme-cards button[aria-pressed="true"] { outline: 2px solid var(--theme-selection-accent); outline-offset: 1px; }
-.theme-cards button:hover { box-shadow: inset 0 0 0 1px var(--text); }
+@media (hover: hover) { .theme-cards button:hover { box-shadow: inset 0 0 0 1px var(--text); } }
 .theme-card-check { display: none; position: absolute; top: 8px; right: 8px; width: 16px; height: 16px; }
 .theme-cards button[aria-pressed="true"] .theme-card-check { display: block; }
 .theme-card-swatches { display: flex; gap: var(--space-1); margin-top: var(--space-3); }
@@ -188,7 +216,8 @@ dialog.dialog { color: var(--text); }
 .disclosure-caret svg { display: block; width: 12px; height: 12px; }
 :is([aria-expanded="true"], details[open] > summary) > .disclosure-caret {
   transform: rotate(90deg); color: var(--text); }
-:is(:hover, :focus-visible) > .disclosure-caret { color: var(--text); }
+:focus-visible > .disclosure-caret { color: var(--text); }
+@media (hover: hover) { :hover > .disclosure-caret { color: var(--text); } }
 
 /* ---------- open panels (desktop columns) ----------
    #panes sits in the body flex row just right of the chat. It takes as many flex
@@ -214,7 +243,8 @@ dialog.dialog { color: var(--text); }
   left: 4px; width: 1px;
   background: transparent; transition: background var(--motion-fast); }
 .resize-grip.sb::after { left: 6px; }
-.resize-grip:hover::after, body.resizing .resize-grip::after { background: var(--accent); }
+body.resizing .resize-grip::after { background: var(--accent); }
+@media (hover: hover) { .resize-grip:hover::after { background: var(--accent); } }
 body.resizing { cursor: col-resize; user-select: none; }
 @media (max-width: 700px) { .resize-grip { display: none; } }
 .pane-col { flex: 1; min-width: 0; display: flex; flex-direction: column;
@@ -238,8 +268,10 @@ body.resizing { cursor: col-resize; user-select: none; }
   text-decoration: none; }
 :is(.icon-btn, .pane-head .fs, .pane-head .x, .artifact-icon-btn, .pane-powerbar-overflow > summary) svg {
   width: 16px; height: 16px; }
-:is(.icon-btn, .pane-head .fs, .pane-head .x, .artifact-icon-btn:not([disabled]),
-  .pane-powerbar-overflow > summary):hover { background: var(--panel-2); color: var(--text); }
+@media (hover: hover) {
+  :is(.icon-btn, .pane-head .fs, .pane-head .x, .artifact-icon-btn:not([disabled]),
+    .pane-powerbar-overflow > summary):hover { background: var(--panel-2); color: var(--text); }
+}
 .icon-btn { flex: none; }
 .icon-btn.lg { width: 44px; height: 44px; }
 .pane-head .fs { margin-left: auto; }
@@ -260,7 +292,9 @@ body.resizing { cursor: col-resize; user-select: none; }
 .pane-body:focus { outline: none; }
 
 /* A panel temporarily expanded to cover the whole viewport. */
-.pane-col.fullscreen { position: fixed; inset: 0; z-index: calc(var(--z-drawer) + 4); border-left: 0; }
+.pane-col.fullscreen { position: fixed;
+  inset: var(--standalone-top-inset) var(--standalone-right-inset) 0 var(--standalone-left-inset);
+  z-index: calc(var(--z-drawer) + 4); border-left: 0; }
 
 /* ---------- the rail (desktop, right edge) ---------- */
 @media (min-width: 701px) {
@@ -283,9 +317,14 @@ body.resizing { cursor: col-resize; user-select: none; }
 #pane-rail:has(> #trash-btn.on) > #pane-rail-panels { margin-bottom: var(--space-5); }
 #pane-rail > #trash-btn::before { content: ""; position: absolute; top: calc(-1 * var(--space-3));
   inset-inline: 0; border-top: 1px solid var(--border); pointer-events: none; }
-#pane-rail > #trash-btn:is(:hover, :focus-visible, :active, .armed) { color: var(--danger);
+#pane-rail > #trash-btn:is(:focus-visible, :active, .armed) { color: var(--danger);
   background: color-mix(in srgb, var(--danger) 14%, transparent); }
-:where(#pane-rail) > #trash-btn:is(:hover, .armed) { border-color: var(--danger); }
+@media (hover: hover) {
+  #pane-rail > #trash-btn:hover { color: var(--danger);
+    background: color-mix(in srgb, var(--danger) 14%, transparent); }
+}
+:where(#pane-rail) > #trash-btn.armed { border-color: var(--danger); }
+@media (hover: hover) { :where(#pane-rail) > #trash-btn:hover { border-color: var(--danger); } }
 #pane-rail button svg { width: 16px; height: 16px; }
 #pane-rail > button > span { position: absolute; width: 1px; height: 1px;
   overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -298,16 +337,20 @@ body.resizing { cursor: col-resize; user-select: none; }
   margin: 0; padding: 0; border: 1px solid transparent; border-radius: 50%;
   background: none; color: var(--muted); position: relative; cursor: pointer;
   align-items: center; justify-content: center; }
-#pane-rail :where(.rail-btn, #new-top, #takeover-btn, #share-link-btn):is(:hover, :focus-visible, :active):not(:disabled) {
+#pane-rail :where(.rail-btn, #new-top, #takeover-btn, #share-link-btn):is(:focus-visible, :active):not(:disabled) {
   background: var(--panel-2); color: var(--text); }
+@media (hover: hover) {
+  #pane-rail :where(.rail-btn, #new-top, #takeover-btn, #share-link-btn):hover:not(:disabled) {
+    background: var(--panel-2); color: var(--text); }
+}
 #pane-rail .rail-btn.active, #pane-rail #takeover-btn.on.active { color: var(--accent);
   border-color: var(--accent-dim); background: color-mix(in srgb, var(--accent) 9%, transparent); }
 .rail-btn { display: flex; font: 600 0.84375rem/1 var(--font-sans); }
 .rail-btn .rail-count { position: absolute; inset-inline-end: -4px; bottom: -4px;
   min-width: 15px; height: 14px; padding: 0 var(--space-2); border-color: var(--count-border);
   background: var(--count-bg); color: var(--count-text); box-shadow: 0 0 0 2px var(--panel); }
-.rail-btn:hover .rail-count, .rail-btn:focus-visible .rail-count,
-.rail-btn.active .rail-count { background: var(--count-bg-active); border-color: var(--count-border-active); color: var(--count-text-active); }
+.rail-btn:focus-visible .rail-count, .rail-btn.active .rail-count { background: var(--count-bg-active); border-color: var(--count-border-active); color: var(--count-text-active); }
+@media (hover: hover) { .rail-btn:hover .rail-count { background: var(--count-bg-active); border-color: var(--count-border-active); color: var(--count-text-active); } }
 #pane-rail .rail-btn.attention { border-color: var(--accent); }
 #pane-rail.prefix-on #new-top::after { position: absolute; inset-inline-end: -4px; bottom: -4px; white-space: nowrap; }
 .rail-btn.attention::after, #pane-fab.attention::after, .pane-menu-item.attention::after {
@@ -330,7 +373,7 @@ body.resizing { cursor: col-resize; user-select: none; }
 .tips-all-area { margin: var(--space-4) 0 var(--space-2); color: var(--muted); }
 .tips-all-item { display: block; width: 100%; padding: var(--space-2) var(--space-3); border: 0;
   border-radius: 6px; background: none; color: var(--text); font: inherit; text-align: start; cursor: pointer; }
-.tips-all-item:hover { background: var(--panel-2); }
+@media (hover: hover) { .tips-all-item:hover { background: var(--panel-2); } }
 .tips-all-item[aria-current="true"] { color: var(--accent); }
 .tips-all-item:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .tips-filter { box-sizing: border-box; width: 100%; margin-top: var(--space-4); }
@@ -356,12 +399,12 @@ body.resizing { cursor: col-resize; user-select: none; }
      the slide from selecting text or popping the native touch callout. */
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   touch-action: none; }
-#pane-fab:hover, #new-top:hover { background: transparent; color: var(--text); }
+@media (hover: hover) { #pane-fab:hover, #new-top:hover { background: transparent; color: var(--text); } }
 #pane-fab:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 #pane-fab svg { position: relative; z-index: var(--z-raised); pointer-events: none; }
 #pane-fab.on { display: inline-flex; }
 #pane-menu { display: none; position: fixed; z-index: var(--z-menu);
-  inset-inline-end: max(12px, env(safe-area-inset-right)); top: 48px;
+  inset-inline-end: max(12px, env(safe-area-inset-right)); top: calc(48px + var(--standalone-top-inset));
   min-width: 180px; max-width: calc(100vw - 24px); }
 #pane-menu.on { display: block; }
 html:dir(rtl) #pane-menu { inset-inline-end: max(12px, env(safe-area-inset-left)); }
@@ -374,9 +417,14 @@ html:dir(rtl) #pane-menu { inset-inline-end: max(12px, env(safe-area-inset-left)
   padding: var(--space-3) var(--space-4); margin: 0; border: 0; background: none; line-height: 1.35;
 }
 #pane-menu :is(#trash-btn, #takeover-btn).on { display: flex; }
-#pane-menu :is(#trash-btn, #takeover-btn):not(.armed):is(:hover, :focus-visible, .hot) {
+#pane-menu :is(#trash-btn, #takeover-btn):not(.armed):is(:focus-visible, .hot) {
   background: var(--panel-2); }
-#pane-menu #takeover-btn:is(:hover, :focus-visible, .hot) { color: var(--text); }
+@media (hover: hover) {
+  #pane-menu :is(#trash-btn, #takeover-btn):not(.armed):hover {
+    background: var(--panel-2); }
+}
+#pane-menu #takeover-btn:is(:focus-visible, .hot) { color: var(--text); }
+@media (hover: hover) { #pane-menu #takeover-btn:hover { color: var(--text); } }
 #pane-menu #trash-btn { color: var(--danger); }
 #pane-menu-panels { border-top: 1px solid var(--border); margin-top: var(--space-2);
   padding-top: var(--space-3); }
@@ -420,7 +468,7 @@ html[data-embed] :is(#sidebar, #topbar, #panes, #pane-rail, #pane-menu, #pane-ba
   background: none; border: 1px solid transparent; border-radius: 8px;
   padding: var(--space-2) var(--space-3); color: var(--text); font: inherit; font-size: 1.0625rem; font-weight: 600;
   line-height: 1.3; outline: none; cursor: pointer; }
-:is(.artifact-title-select, .side-picker):hover:not(:disabled) { background: var(--panel-2); }
+@media (hover: hover) { :is(.artifact-title-select, .side-picker):hover:not(:disabled) { background: var(--panel-2); } }
 :is(.artifact-title-select, .side-picker):focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 :is(.artifact-title-select, .side-picker):disabled { cursor: default; }
 .artifact-flag { flex: none; padding: 1px var(--space-3); border: 1px solid var(--border);
@@ -428,7 +476,7 @@ html[data-embed] :is(#sidebar, #topbar, #panes, #pane-rail, #pane-menu, #pane-ba
 .artifact-flag.draft { color: var(--draft); border-color: color-mix(in srgb, var(--draft) 40%, transparent); }
 .artifact-flag.error { color: var(--danger); border-color: var(--danger); }
 .artifact-actions { flex: none; display: flex; align-items: center; gap: var(--space-1); }
-.artifact-delete-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); }
+@media (hover: hover) { .artifact-delete-btn:hover:not(:disabled) { background: color-mix(in srgb, var(--danger) 12%, transparent); color: var(--danger); } }
 .artifact-icon-btn { position: relative; }
 .artifact-icon-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .artifact-icon-btn[disabled] { opacity: .5; cursor: default; }
@@ -445,7 +493,7 @@ html[data-embed] :is(#sidebar, #topbar, #panes, #pane-rail, #pane-menu, #pane-ba
   color: var(--accent); font-weight: 600; }
 .artifact-version-restore[disabled] { opacity: .55; cursor: default; }
 .artifact-version-note.error { color: var(--danger); }
-.pane-body.artifact-browsing :is(.report-doc, .doc-review-foot, .report-comments, .report-bar) { display: none; }
+.pane-body.artifact-browsing :is(.report-doc, .doc-review-actions, .report-comments) { display: none; }
 .artifact-list { display: flex; flex-direction: column; gap: var(--space-3); }
 .artifact-filter { box-sizing: border-box; width: 100%; min-height: 32px; padding: var(--space-2) var(--space-3); border: 1px solid var(--border); border-radius: 6px; background: var(--panel-2); color: var(--text); font: inherit; font-size: 0.84375rem; }
 .artifact-list-item { width: 100%; min-height: 44px; padding: var(--space-3); border: 0; border-bottom: 1px solid var(--border); background: none; color: var(--text); font: inherit; text-align: start; cursor: pointer; }
@@ -480,10 +528,37 @@ ins.doc-diff-added { color: inherit; text-decoration: none;
 .doc-changes label { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }
 .doc-changes select { min-width: 0; max-width: 100%; min-height: 32px; padding: 0 var(--space-1);
   border: 1px solid var(--border); border-radius: 6px; background: var(--panel); color: var(--text); font: inherit; }
-.doc-reviewed { display: flex; justify-content: flex-end; margin: var(--space-5) 0 var(--space-3); }
+/* The sticky group shares space with the comment bar and reserves its own
+   height in the scroll content so the last line can clear both controls. */
+.doc-review-actions { display: contents; }
+.pane-body.doc-review-focused:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+.pane-body:has(> .doc-review-actions .doc-reviewed) { display: flex; flex-direction: column; }
+.pane-body:has(> .doc-review-actions .doc-reviewed) > .artifact-view { flex: none; min-height: 0; }
+.doc-review-actions:has(.doc-reviewed) {
+  display: flex; flex: none; flex-direction: column; position: sticky;
+  bottom: 0; z-index: var(--z-raised); margin-block-start: auto; pointer-events: none;
+}
+.doc-review-actions:has(.doc-reviewed) .report-sendbar { position: static; margin-block-end: 0; pointer-events: auto; }
+.doc-review-foot { display: flex; justify-content: flex-end; }
+.doc-review-foot:has(.doc-reviewed) { padding-block-start: var(--space-3); }
+.doc-review-foot .doc-reviewed { background: var(--panel); pointer-events: auto; }
+.doc-reviewed svg { width: 1em; height: 1em; }
+.doc-review-foot .doc-review-confirmed { border-color: var(--running); pointer-events: none;
+  background: color-mix(in srgb, var(--running) 24%, var(--panel)); }
+.files-detail ~ .doc-review-actions .doc-review-foot:has(.doc-reviewed) {
+  padding: var(--space-3) max(var(--space-4), env(safe-area-inset-right), env(safe-area-inset-left)) var(--space-5);
+}
 @media (max-width: 700px) {
   .doc-changes select { min-height: 44px; }
-  .doc-reviewed .btn { flex: 1; min-height: 44px; }
+  .doc-review-actions:has(.doc-reviewed) { bottom: max(var(--space-5), env(safe-area-inset-bottom)); }
+  .files-detail ~ .doc-review-actions:has(.doc-reviewed) { bottom: env(safe-area-inset-bottom); }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .doc-review-confirmed { animation: doc-review-confirmed var(--motion-enter) ease-in forwards; }
+}
+@keyframes doc-review-confirmed {
+  0%, 40% { opacity: 1; }
+  100% { opacity: 0; transform: translateY(var(--space-2)); }
 }
 .artifact-image-placeholder { display: block; box-sizing: border-box;
   width: 100%; min-height: 150px; border: 1px solid var(--border); border-radius: 10px;
@@ -497,6 +572,9 @@ ins.doc-diff-added { color: inherit; text-decoration: none;
 .artifact-image-frame:not(.standalone) { max-width: 100%; margin: .5em 0; }
 .artifact-image-frame.standalone { display: grid; width: min(100%, 760px); }
 .artifact-image-frame .artifact-image { display: block; align-self: start; width: 100%; height: auto; }
+.artifact-markdown img[role="button"] { cursor: zoom-in; }
+.artifact-markdown img[role="button"]:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: -2px; }
 @keyframes artifact-placeholder { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) {
   .artifact-image-placeholder { animation: none; }
@@ -569,7 +647,7 @@ ins.doc-diff-added { color: inherit; text-decoration: none;
    sent together via the submit bar. Staged notes are discarded on leaving. */
 mark.report-cmark { background: color-mix(in srgb, var(--highlight) 28%, transparent); color: inherit;
   border-radius: 2px; box-shadow: 0 0 0 1px color-mix(in srgb, var(--highlight) 35%, transparent); } /* radius-check: allow a highlight mark */
-mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, transparent); }
+@media (hover: hover) { mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, transparent); } }
 .artifact-image-frame[data-box-image] { cursor: zoom-in; }
 .report-comment-crop { display: block; max-width: 100%; max-height: 96px; }
 .pane-body[data-pane="report"] mark.report-cmark[data-cid]:not(.report-cbox, :is(a[href], button, summary, [role="button"]:not(.report-cmark)) *) {
@@ -617,7 +695,7 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
 .report-comment-foot { display: flex; justify-content: flex-end; margin-top: var(--space-2); }
 .report-comment-del { background: none; border: 0; cursor: pointer;
   color: var(--muted); font: inherit; font-size: 0.78125rem; }
-.report-comment-del:hover { color: var(--danger); }
+@media (hover: hover) { .report-comment-del:hover { color: var(--danger); } }
 
 /* lit's render target for the bar generates no box (display:contents) so the
    sticky sendbar's containing block stays the pane root — otherwise the wrapper,
@@ -757,7 +835,6 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
 .mermaid-actions { display: flex; justify-content: flex-end; gap: var(--space-3); margin-bottom: var(--space-2); }
 .mermaid-host:not(.mermaid-done) .mermaid-open,
 .mermaid-host:not(.mermaid-done) .mermaid-actions:not(:has(.copy-btn)) { display: none; }
-.code-wrap .mermaid-actions .copy-btn { position: static; opacity: 1; }
 @media (pointer: coarse) {
   .mermaid-actions button { min-width: 76px; }
 }
@@ -786,8 +863,16 @@ mark.report-cmark:hover { background: color-mix(in srgb, var(--highlight) 42%, t
   cursor: pointer;
   font: 600 0.78125rem/1.3 var(--font-sans);
 }
-.selection-comment-offer:hover, .selection-comment-offer:focus-visible {
+@media (pointer: coarse) {
+  .selection-comment-offer { min-width: 44px; min-height: 44px; }
+}
+.selection-comment-offer:focus-visible {
   filter: brightness(1.08);
+}
+@media (hover: hover) {
+  .selection-comment-offer:hover {
+    filter: brightness(1.08);
+  }
 }
 .selection-comment-offer:focus-visible {
   outline: 2px solid var(--accent);
@@ -840,7 +925,7 @@ body:has(#update-status.on) #settings-btn .settings-icon::after { content: ""; p
 #settings-nav button { display: flex; align-items: center; gap: var(--space-4); min-height: 48px;
   padding: 0 var(--space-3); border: 0; border-radius: 8px; background: none; color: var(--text);
   font: inherit; font-size: 0.84375rem; text-align: left; cursor: pointer; }
-#settings-nav button:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+@media (hover: hover) { #settings-nav button:hover { background: color-mix(in srgb, var(--text) 6%, transparent); } }
 #settings-nav button.on { background: color-mix(in srgb, var(--accent) 22%, transparent); font-weight: 600; }
 .settings-nav-label { flex: 1; min-width: 0; }
 .settings-chevron { display: none; }
@@ -881,9 +966,9 @@ body:has(#update-status.on) #settings-btn .settings-icon::after { content: ""; p
 .settings-section .msg:not(.actions > .msg):empty { min-height: 0; margin: 0; }
 .settings-section .msg.ok { color: var(--running); }
 .settings-section .msg.err { color: var(--danger); }
-.settings-section button.ghost:hover { border-color: var(--danger); color: var(--danger); }
+@media (hover: hover) { .settings-section button.ghost:hover { border-color: var(--danger); color: var(--danger); } }
 .settings-section a.link { color: var(--accent); font-size: 0.78125rem; text-decoration: none; }
-.settings-section a.link:hover { text-decoration: underline; }
+@media (hover: hover) { .settings-section a.link:hover { text-decoration: underline; } }
 .settings-section textarea { width: 100%; resize: vertical; font: 0.78125rem/1.5 var(--font-mono); }
 .settings-section pre.cmd { margin: 0 0 var(--space-3); padding: var(--space-4);
   border: 1px solid var(--border); border-radius: 10px; background: var(--code-bg); color: var(--text);
@@ -895,7 +980,7 @@ body:has(#update-status.on) #settings-btn .settings-icon::after { content: ""; p
   box-sizing: border-box; padding: var(--space-4) var(--space-5); border: 0; border-radius: 14px;
   background: var(--panel); color: var(--text); font: inherit; font-size: 0.9375rem;
   line-height: 1.35; text-align: left; cursor: pointer; }
-button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, var(--text) 5%, var(--panel)); }
+@media (hover: hover) { button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, var(--text) 5%, var(--panel)); } }
 .settings-row:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .settings-row.danger { color: var(--danger); }
 .settings-row.danger .settings-row-chevron { display: none; }
@@ -975,7 +1060,7 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
 .settings-section .actions > .msg { flex: 1; min-width: 0; margin: 0; }
 .settings-section .item.danger { width: 100%; justify-content: flex-start; border: 0; background-color: transparent;
   color: var(--danger); font: inherit; cursor: pointer; }
-.settings-section .item.danger:hover { background-color: color-mix(in srgb, var(--danger) 8%, transparent); }
+@media (hover: hover) { .settings-section .item.danger:hover { background-color: color-mix(in srgb, var(--danger) 8%, transparent); } }
 .settings-section .update-status { flex: 1; min-width: 0; }
 
 /* On/off settings are switches. */
@@ -1104,6 +1189,15 @@ button.settings-row:hover:not(:disabled) { background-color: color-mix(in srgb, 
 .mcp-state[data-state="connected"]::before { background: var(--running); }
 .mcp-state[data-state="failed"]::before { background: var(--danger); }
 .mcp-detail { margin-top: var(--space-1); color: var(--muted); font-size: 0.78125rem; }
+
+.hooks-settings { display: grid; gap: var(--space-4); }
+.hooks-settings .msg:empty, .hooks-list:empty { display: none; }
+.hooks-settings label.check { min-height: 44px; box-sizing: border-box; }
+.hooks-list .mcp-server { flex-wrap: wrap; }
+.hooks-list .mcp-server > div { min-width: 0; flex: 1; overflow-wrap: anywhere; }
+.hooks-list pre { flex-basis: 100%; white-space: pre-wrap; font-size: 0.78125rem; }
+.hooks-settings form { display: grid; gap: var(--space-2); }
+.hooks-list button.danger { color: var(--danger); }
 
 /* Phones: the category list, then one category's page; 44px targets. */
 @media (max-width: 700px) {

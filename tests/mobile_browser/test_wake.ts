@@ -9,6 +9,7 @@ import {
   waitForLayout,
   rootAgentId,
   type BrowserTest,
+  MERMAID_DIAGRAM,
 } from "./common";
 import { standalonePhone } from "./standalone";
 
@@ -31,7 +32,7 @@ export const tests: BrowserTest[] = [
     page.on("requestfailed", closed);
     try {
       await page.goto(`${base}#agent=${demo}`);
-      await page.locator(".mermaid-host svg").waitFor();
+      await page.locator(MERMAID_DIAGRAM).waitFor();
       await page.locator("#input").fill("Reply only Wake diagram ready.");
       await page.locator("#send").click();
       await page.getByText("Wake diagram ready.", { exact: true }).waitFor();
@@ -47,7 +48,7 @@ export const tests: BrowserTest[] = [
           "matchMedia('(display-mode: standalone)').matches",
         ),
       ).toBe(true);
-      const svg = await page.locator(".mermaid-host svg").elementHandle();
+      const svg = await page.locator(MERMAID_DIAGRAM).elementHandle();
       const reply = await page
         .getByText("Wake diagram ready.", { exact: true })
         .elementHandle();
@@ -370,7 +371,7 @@ export const tests: BrowserTest[] = [
       let heldRoute: import("playwright").Route | undefined;
       try {
         await page.goto(`${base}#agent=${demo}`);
-        await page.locator(".mermaid-host svg").waitFor();
+        await page.locator(MERMAID_DIAGRAM).waitFor();
         await page.locator("#input").fill(`Reply only Before ${mode} wake.`);
         await page.locator("#send").click();
         await page.getByText(`Before ${mode} wake.`, { exact: true }).waitFor();
@@ -378,7 +379,7 @@ export const tests: BrowserTest[] = [
           .locator("#conv-status.running")
           .waitFor({ state: "detached" });
         await waitForLayout(page);
-        const svg = await page.locator(".mermaid-host svg").elementHandle();
+        const svg = await page.locator(MERMAID_DIAGRAM).elementHandle();
         await page.route(
           `**/api/conversations/${demo}/view?**`,
           async (route) => {

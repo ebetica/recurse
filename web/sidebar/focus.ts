@@ -9,6 +9,16 @@ export function configureAgentFocus(render: () => void): void {
   renderAgentList = render;
 }
 
+export let restoringMovedListControl: HTMLElement | null = null;
+export function restoreMovedListControl(control: HTMLElement): void {
+  restoringMovedListControl = control;
+  try {
+    control.focus({ preventScroll: true });
+  } finally {
+    restoringMovedListControl = null;
+  }
+}
+
 export function focusAgentTree(): boolean {
   renderAgentList();
   const row = listEl.querySelector<HTMLElement>(

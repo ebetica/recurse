@@ -242,7 +242,8 @@ async function syntax(text: string, name: string): Promise<SourceToken[]> {
 
 self.onmessage = async (
   event: MessageEvent<
-    { bytes: ArrayBuffer; name: string; text?: string } | { markup: string }
+    | { bytes: ArrayBuffer; name: string; text?: string; id?: number }
+    | { markup: string }
   >,
 ) => {
   try {
@@ -254,6 +255,7 @@ self.onmessage = async (
     }
     if (typeof event.data.text === "string") {
       self.postMessage({
+        id: event.data.id,
         tokens: await syntax(event.data.text, event.data.name),
       });
       return;

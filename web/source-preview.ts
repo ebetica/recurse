@@ -10,7 +10,7 @@ export interface SourceToken {
 interface Preview {
   text: string;
   name: string;
-  worker?: Worker;
+  request?: number;
   tokens?: SourceToken[];
   applied?: boolean;
 }
@@ -24,6 +24,46 @@ function resumePending(): void {
 }
 document.addEventListener("selectionchange", resumePending);
 document.addEventListener("click", resumePending);
+type Reply = (tokens: SourceToken[] | undefined) => void;
+// One shared worker; a crash or 5 s stall replaces it and fails pending work.
+let worker: Worker | undefined;
+let nextRequest = 0;
+const replies = new Map<
+  number,
+  { reply: Reply; timer: ReturnType<typeof setTimeout> }
+>();
+function answer(id: number, tokens: SourceToken[] | undefined): void {
+  const request = replies.get(id);
+  if (!request) return;
+  replies.delete(id);
+  clearTimeout(request.timer);
+  request.reply(tokens);
+}
+function restart(): void {
+  worker?.terminate();
+  worker = undefined;
+  for (const id of replies.keys()) answer(id, undefined);
+}
+function cancel(id: number | undefined): void {
+  if (id === undefined) return;
+  clearTimeout(replies.get(id)?.timer);
+  replies.delete(id);
+}
+function tokenize(text: string, name: string, reply: Reply): number {
+  if (!worker) {
+    worker = new Worker("/static/document-preview.worker.js", {
+      type: "module",
+    });
+    worker.onerror = restart;
+    worker.onmessage = (
+      event: MessageEvent<{ id?: number; tokens?: SourceToken[] }>,
+    ) => answer(event.data.id ?? -1, event.data.tokens);
+  }
+  const id = nextRequest++;
+  replies.set(id, { reply, timer: setTimeout(restart, 5000) });
+  worker.postMessage({ id, text, name });
+  return id;
+}
 const MAX_CHARACTERS = 64 * 1024;
 const MAX_LINES = 2000;
 
@@ -86,7 +126,7 @@ export function highlightSource(element: Element, name: string): void {
     preview.applied = true;
     return;
   }
-  preview?.worker?.terminate();
+  cancel(preview?.request);
   for (const span of element.querySelectorAll(".source-token"))
     span.replaceWith(...span.childNodes);
   preview = { text, name };
@@ -106,27 +146,14 @@ export function highlightSource(element: Element, name: string): void {
     stylesheet.href = "/static/source-preview.css";
     document.head.append(stylesheet);
   }
-  const worker = new Worker("/static/document-preview.worker.js", {
-    type: "module",
-  });
-  preview.worker = worker;
   element.setAttribute("data-source-syntax", "loading");
   const current = preview;
-  const stop = () => {
-    clearTimeout(timer);
-    worker.terminate();
-    current.worker = undefined;
-    if (previews.get(element) === current)
-      element.setAttribute("data-source-syntax", "plain");
-  };
-  const timer = setTimeout(stop, 5000);
-  worker.onerror = stop;
-  worker.onmessage = (event: MessageEvent<{ tokens?: SourceToken[] }>) => {
-    stop();
-    const tokens = event.data.tokens;
+  const finish = (tokens: SourceToken[] | undefined) => {
+    current.request = undefined;
+    if (previews.get(element) !== current) return;
+    element.setAttribute("data-source-syntax", "plain");
     if (
       !element.isConnected ||
-      previews.get(element) !== current ||
       !tokens?.length ||
       tokens.map((token) => token.text).join("") !== text
     )
@@ -134,5 +161,5 @@ export function highlightSource(element: Element, name: string): void {
     current.tokens = tokens;
     highlightSource(element, name);
   };
-  worker.postMessage({ text, name });
+  current.request = tokenize(text, name, finish);
 }

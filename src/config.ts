@@ -87,6 +87,7 @@ export class Config {
         this.paths.MAXIMUM_CONTEXT_WINDOW_FILE,
         join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
         join(this.paths.CONFIG_DIR, "idle-compaction.json"),
+        join(this.paths.CONFIG_DIR, "run-hooks.json"),
         this.safetyReview.settingsPath,
       ].map((path) => this.settingsFiles.refresh(path)),
     );
@@ -143,6 +144,24 @@ export class Config {
       throw valueError("Keep prompt cache warm must be a boolean");
     await this.settingsFiles.writeJson(
       join(this.paths.CONFIG_DIR, "prompt-cache-warming.json"),
+      { enabled: value },
+    );
+    return value;
+  }
+
+  /** The "Run hooks" switch; on unless turned off. */
+  runHooks(): boolean {
+    const data = this.settingsFiles.json(
+      join(this.paths.CONFIG_DIR, "run-hooks.json"),
+    );
+    return !isObject(data) || data.enabled !== false;
+  }
+
+  async setRunHooks(value: unknown): Promise<boolean> {
+    if (typeof value !== "boolean")
+      throw valueError("Run hooks must be a boolean");
+    await this.settingsFiles.writeJson(
+      join(this.paths.CONFIG_DIR, "run-hooks.json"),
       { enabled: value },
     );
     return value;
